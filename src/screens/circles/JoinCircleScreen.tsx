@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { Suspense, lazy, useState } from 'react';
 import {
   View,
   Text,
@@ -7,19 +7,26 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
-  useWindowDimensions,
+  ActivityIndicator,
+  ScrollView,
 } from 'react-native';
 import { supabase } from '../../lib/supabase';
 import { showAlert } from '../../lib/alert';
-import Button from '../../components/Button';
 import { awardXP, getXPForAction } from '../../lib/gamification';
+
+// Reuse the same 3D login background so the auth-adjacent flows feel
+// like a single experience instead of three different screens.
+const LoginBackground3D = lazy(() => import('../../components/LoginBackground3D'));
+
+const ACCENT = '#b8ff61';
+const ACCENT_STRONG = '#9be234';
+const CARD_BG = 'rgba(11, 15, 12, 0.55)';
+const CARD_BORDER = 'rgba(184, 255, 97, 0.18)';
 
 export default function JoinCircleScreen({ navigation }: any) {
   const [code, setCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const { width } = useWindowDimensions();
-  const isWide = width > 500;
 
   const handleJoin = async () => {
     setError('');
@@ -27,7 +34,6 @@ export default function JoinCircleScreen({ navigation }: any) {
       setError('Enter an invite code');
       return;
     }
-
     setLoading(true);
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) {
@@ -35,220 +41,278 @@ export default function JoinCircleScreen({ navigation }: any) {
       setLoading(false);
       return;
     }
-
     const { data: circle, error: findError } = await supabase
       .from('circles')
       .select('*, circle_members(count)')
       .eq('invite_code', code.trim().toLowerCase())
       .single();
-
     if (findError || !circle) {
       setError('No circle found with that code.');
       setLoading(false);
       return;
     }
-
     const memberCount = circle.circle_members?.[0]?.count || 0;
     if (memberCount >= circle.max_members) {
       setError('This circle is full.');
       setLoading(false);
       return;
     }
-
     const { data: existing } = await supabase
       .from('circle_members')
       .select('id')
       .eq('circle_id', circle.id)
       .eq('user_id', user.id)
       .single();
-
     if (existing) {
       setError("You're already in this circle.");
       setLoading(false);
       return;
     }
-
     const { error: joinError } = await supabase.from('circle_members').insert({
       circle_id: circle.id,
       user_id: user.id,
       role: 'member',
     });
-
     setLoading(false);
     if (joinError) {
       setError(joinError.message);
       return;
     }
-
-    // Award XP for joining a circle
     awardXP(user.id, getXPForAction('circle_join'), 'circle_join', { circle_id: circle.id }).catch(console.error);
-
     showAlert("You're in!", `Welcome to ${circle.name}.`);
     navigation.replace('CircleDetail', { circleId: circle.id, circleName: circle.name, tab: 'OFFICE' });
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
-      <View style={styles.inner}>
-        <View style={[styles.card, isWide && styles.cardWide]}>
-          <View style={styles.headerSection}>
-            <View style={styles.logoCircle}>
-              <Text style={styles.logoText}>⟶</Text>
+    <KeyboardAvoidingView style={styles.root} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <View style={styles.root}>
+        {Platform.OS === 'web' && (
+          <Suspense fallback={null}>
+            <LoginBackground3D />
+          </Suspense>
+        )}
+        <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+          <View style={styles.card}>
+            <View style={styles.header}>
+              <View style={styles.logoCircle}>
+                <Text style={styles.logoGlyph}>⟶</Text>
+              </View>
+              <Text style={styles.kicker}>JOIN A</Text>
+              <Text style={styles.title}>CIRCLE</Text>
+              <Text style={styles.subtitle}>Got an invite code? Enter it below to drop into the team.</Text>
             </View>
-            <Text style={styles.title}>JOIN A</Text>
-            <Text style={styles.titleBold}>CIRCLE</Text>
-            <Text style={styles.subtitle}>Got an invite code? Enter it below.</Text>
-          </View>
 
-          {error ? (
-            <View style={styles.errorBox}>
-              <Text style={styles.errorText}>{error}</Text>
+            {error ? (
+              <View style={styles.errorBox}>
+                <Text style={styles.errorText}>{error}</Text>
+              </View>
+            ) : null}
+
+            <View style={styles.field}>
+              <Text style={styles.label}>INVITE CODE</Text>
+              <View style={styles.inputShell}>
+                <TextInput
+                  style={styles.codeInput}
+                  placeholder="a1b2c3d4"
+                  placeholderTextColor="rgba(184, 255, 97, 0.25)"
+                  value={code}
+                  onChangeText={setCode}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  maxLength={32}
+                />
+              </View>
+              <Text style={styles.helper}>Codes are 8 lowercase characters. Ask the circle's owner for one.</Text>
             </View>
-          ) : null}
 
-          <View style={styles.form}>
-            <Text style={styles.inputLabel}>INVITE CODE</Text>
-            <TextInput
-              style={styles.codeInput}
-              placeholder="e.g. a1b2c3d4"
-              placeholderTextColor="#444"
-              value={code}
-              onChangeText={setCode}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-
-            <Button
-              title={loading ? 'JOINING...' : 'JOIN'}
+            <Pressable
               onPress={handleJoin}
-              loading={loading}
               disabled={loading}
-            />
+              style={({ hovered, pressed }: any) => [
+                styles.cta,
+                loading && styles.ctaDisabled,
+                hovered && !loading && { backgroundColor: ACCENT_STRONG, borderColor: ACCENT_STRONG },
+                pressed && { transform: [{ scale: 0.98 }] },
+              ]}
+            >
+              {loading ? (
+                <ActivityIndicator size="small" color="#0b1220" />
+              ) : (
+                <Text style={styles.ctaText}>JOIN CIRCLE</Text>
+              )}
+            </Pressable>
+
+            <Pressable onPress={() => navigation.goBack()} style={styles.cancel}>
+              <Text style={styles.cancelText}>Cancel</Text>
+            </Pressable>
           </View>
-
-          <View style={styles.divider} />
-
-          <Pressable onPress={() => navigation.goBack()} style={styles.cancelButton}>
-            <Text style={styles.cancelText}>Cancel</Text>
-          </Pressable>
-        </View>
+        </ScrollView>
       </View>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  root: {
     flex: 1,
-    backgroundColor: '#000000',
+    backgroundColor: 'transparent',
   },
-  inner: {
-    flex: 1,
+  scrollContent: {
+    flexGrow: 1,
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 20,
+    paddingVertical: 40,
+    position: 'relative',
+    zIndex: 1,
   },
   card: {
     width: '100%',
-    maxWidth: 400,
-    backgroundColor: '#111',
-    borderRadius: 16,
-    padding: 32,
+    maxWidth: 420,
+    borderRadius: 24,
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: CARD_BORDER,
+    backgroundColor: CARD_BG,
+    paddingHorizontal: 28,
+    paddingVertical: 32,
+    gap: 20,
+    ...(Platform.select({
+      web: {
+        backdropFilter: 'blur(10px)',
+        boxShadow: '0 24px 64px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(184, 255, 97, 0.05) inset',
+      },
+      default: {},
+    }) as any),
   },
-  cardWide: {
-    padding: 40,
-  },
-  headerSection: {
+  header: {
     alignItems: 'center',
-    marginBottom: 28,
+    gap: 6,
   },
   logoCircle: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    borderWidth: 2,
-    borderColor: '#fff',
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    borderWidth: 1,
+    borderColor: 'rgba(184, 255, 97, 0.3)',
+    backgroundColor: 'rgba(184, 255, 97, 0.08)',
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 8,
   },
-  logoText: {
-    color: '#fff',
-    fontSize: 20,
+  logoGlyph: {
+    color: ACCENT,
+    fontSize: 22,
     fontWeight: '900',
+  },
+  kicker: {
+    color: 'rgba(184, 255, 97, 0.65)',
+    fontSize: 11,
+    letterSpacing: 4,
+    fontWeight: '800',
   },
   title: {
-    color: '#666',
-    fontSize: 13,
-    letterSpacing: 6,
-    textAlign: 'center',
-  },
-  titleBold: {
-    color: '#fff',
+    color: '#f5f7f2',
     fontSize: 28,
     fontWeight: '900',
-    letterSpacing: 3,
+    letterSpacing: 2,
     textAlign: 'center',
   },
   subtitle: {
-    color: '#555',
+    color: '#9ca89c',
     fontSize: 13,
+    lineHeight: 19,
     textAlign: 'center',
-    marginTop: 10,
-    fontStyle: 'italic',
+    marginTop: 4,
+    maxWidth: 320,
   },
   errorBox: {
-    backgroundColor: '#2a1515',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#4a2020',
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 16,
+    borderColor: 'rgba(255, 102, 102, 0.26)',
+    backgroundColor: 'rgba(122, 24, 24, 0.34)',
   },
   errorText: {
-    color: '#ff6666',
+    color: '#ff9a9a',
     fontSize: 13,
     textAlign: 'center',
   },
-  form: {
-    marginBottom: 24,
+  field: {
+    alignItems: 'center',
+    gap: 8,
   },
-  inputLabel: {
-    color: '#666',
-    fontSize: 11,
-    letterSpacing: 2,
-    fontWeight: '700',
-    marginBottom: 8,
+  label: {
+    color: 'rgba(184, 255, 97, 0.55)',
+    fontSize: 10,
+    letterSpacing: 2.4,
+    fontWeight: '900',
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  inputShell: {
+    width: 240,
+    maxWidth: '100%',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(184, 255, 97, 0.22)',
+    backgroundColor: 'rgba(8, 12, 9, 0.55)',
+    ...(Platform.select({
+      web: { transition: 'border-color 0.18s ease, box-shadow 0.18s ease' },
+      default: {},
+    }) as any),
   },
   codeInput: {
-    backgroundColor: '#000000',
-    borderWidth: 1,
-    borderColor: '#2a2a2a',
-    borderRadius: 10,
-    padding: 16,
-    color: '#fff',
-    fontSize: 20,
-    marginBottom: 20,
-    textAlign: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    color: ACCENT,
+    fontSize: 18,
+    fontWeight: '800',
     letterSpacing: 4,
-    fontWeight: '700',
+    textAlign: 'center',
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+    ...(Platform.select({
+      web: { outlineStyle: 'none' },
+      default: {},
+    }) as any),
   },
-  divider: {
-    height: 1,
-    backgroundColor: '#222',
-    marginBottom: 16,
+  helper: {
+    color: '#7c8c7c',
+    fontSize: 11,
+    textAlign: 'center',
+    maxWidth: 280,
+    lineHeight: 15,
   },
-  cancelButton: {
+  cta: {
+    alignSelf: 'center',
+    width: 240,
+    maxWidth: '100%',
+    paddingVertical: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: ACCENT,
+    backgroundColor: ACCENT,
     alignItems: 'center',
-    padding: 8,
+    justifyContent: 'center',
+    ...(Platform.select({
+      web: { cursor: 'pointer', transition: 'background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease' },
+      default: {},
+    }) as any),
+  },
+  ctaDisabled: {
+    opacity: 0.6,
+  },
+  ctaText: {
+    color: '#0b1220',
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 2,
+  },
+  cancel: {
+    alignSelf: 'center',
+    paddingVertical: 6,
   },
   cancelText: {
-    color: '#555',
-    fontSize: 14,
+    color: '#7c8c7c',
+    fontSize: 12,
   },
 });
