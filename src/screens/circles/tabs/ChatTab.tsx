@@ -4058,14 +4058,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       console.warn('[ChatTab] local SwanBot command failed:', localCmdErr);
     }
 
-    // ─── Web Search toggle (Phase 0) ───────────────────────────────────────
-    // When the composer's globe toggle is on, route through OpenRouter
-    // with the `openrouter:web_search` server tool attached. Bypasses
-    // the SwanBot pipeline for this turn so we can attach the tool
-    // spec. Web search itself is OpenRouter-only (HF inference doesn't
-    // expose a server-side search tool) — so this path stays
-    // OR-direct, with a clean error when no OR key is configured.
-    if (webSearchEnabled) {
+    // ─── Web Search routing (Phase 0 + auto-detect) ────────────────────────
+    // Two paths into web search: (1) the persistent toggle, and (2)
+    // a per-turn auto-detect heuristic that examines the message
+    // text. When the heuristic fires, we attach search for THIS turn
+    // only — the persistent toggle stays at whatever the user set.
+    // The bot reply gets a small "auto-enabled because: <reason>"
+    // footer so the override isn't surprising.
+    const { decideWebSearchForTurn } = await import('../../../lib/webSearchAutoDetect');
+    const webDecision = decideWebSearchForTurn(content, webSearchEnabled);
+    if (webDecision.attach) {
       setBotTyping(true);
       try {
         const { webSearchViaOpenRouter } = await import('../../../lib/llmProviders');
@@ -4080,7 +4082,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           systemPrompt: 'You are a helpful assistant in a chat. Use the web_search tool when the question needs current information. Cite sources inline as markdown links when you do.',
         });
         setBotTyping(false);
-        addBotMessage(result.response || '(No response from OpenRouter web search.)');
+        // Auto-detection footer — only surfaced when the heuristic
+        // (not the manual toggle) triggered the route. Tells the
+        // user why their question got web search even though they
+        // didn't toggle it on.
+        const autoFooter = webDecision.auto && webDecision.reason
+          ? `\n\n_🌐 Auto-enabled web search — ${webDecision.reason}._`
+          : '';
+        addBotMessage((result.response || '(No response from OpenRouter web search.)') + autoFooter);
       } catch (err: any) {
         // Cross-provider fallback for the non-search path is wired in
         // `invokeAnyChat`; web search itself stays OR-only because no
