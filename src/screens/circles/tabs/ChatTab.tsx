@@ -714,6 +714,30 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [showCreateProposal, setShowCreateProposal] = useState(false);
   const [showCreatePoll, setShowCreatePoll] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_CHAT_MODEL);
+  // Web Search toggle — when on, the user's next chat send routes
+  // through OpenRouter with the `openrouter:web_search` server tool
+  // attached so the model can fetch up-to-date facts. Persists per-
+  // circle in `circles.settings.chatWebSearch.enabled`. Phase 0 of
+  // the OpenRouter integration plan.
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const { getChatWebSearchSettings } = await import('../../../lib/chatWebSearchSettings');
+      const cfg = await getChatWebSearchSettings(circleId);
+      if (active) setWebSearchEnabled(cfg.enabled);
+    })();
+    return () => { active = false; };
+  }, [circleId]);
+  const handleToggleWebSearch = useCallback(async () => {
+    const next = !webSearchEnabled;
+    setWebSearchEnabled(next);
+    const { setChatWebSearchEnabled } = await import('../../../lib/chatWebSearchSettings');
+    await setChatWebSearchEnabled(circleId, next).catch(() => {
+      // Persist failed — revert UI so toggle state stays honest.
+      setWebSearchEnabled(!next);
+    });
+  }, [circleId, webSearchEnabled]);
   const [sessionProfile, setSessionProfile] = useState<SessionCodingProfile>('auto');
   const [sessionDelegationMode, setSessionDelegationMode] = useState<SessionDelegationMode>('auto');
   const [codingWorkbenchPrompt, setCodingWorkbenchPrompt] = useState<string | null>(null);
@@ -4033,6 +4057,48 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       console.warn('[ChatTab] local SwanBot command failed:', localCmdErr);
     }
 
+    // ─── Web Search toggle (Phase 0) ───────────────────────────────────────
+    // When the composer's globe toggle is on, route the message through
+    // OpenRouter with the `openrouter:web_search` server tool attached.
+    // Bypasses the SwanBot pipeline for this turn so we can attach the
+    // tool spec; rolls the response back into the chat as a normal bot
+    // message. Caller still keeps history / attachments via the chat
+    // log itself — the side path is just the model invocation.
+    if (webSearchEnabled) {
+      setBotTyping(true);
+      try {
+        const { webSearchViaOpenRouter } = await import('../../../lib/llmProviders');
+        // Build a small recent-conversation slice so the model doesn't
+        // lose context when web-search routes through OpenRouter.
+        // Cap at 6 turns to keep the request cheap — web search adds
+        // its own tokens on top.
+        const recent = messages.slice(-6).map(m => ({
+          role: m.isBot ? ('assistant' as const) : ('user' as const),
+          content: m.content,
+        }));
+        const result = await webSearchViaOpenRouter({
+          query: content,
+          circleId,
+          conversation: recent,
+          systemPrompt: 'You are a helpful assistant in a chat. Use the web_search tool when the question needs current information. Cite sources inline as markdown links when you do.',
+        });
+        setBotTyping(false);
+        addBotMessage(result.response || '(No response from OpenRouter web search.)');
+      } catch (err: any) {
+        setBotTyping(false);
+        const msg = err?.message || 'Web search failed';
+        addBotMessage(
+          `Web search failed: ${msg}\n\n` +
+          (msg.includes('not configured') || msg.includes('OpenRouter') || msg.includes('api_key')
+            ? 'Connect OpenRouter in **Marketplace → AI Models & APIs** to use web search.'
+            : 'Toggle web search off and try again, or switch to a different model.'),
+          undefined,
+          { localOnly: true },
+        );
+      }
+      return;
+    }
+
     // ─── Model capability routing — images, webpages, etc. ──────────────────
     try {
       const { routeByCapability } = await import('../../../lib/modelCapabilities');
@@ -6628,6 +6694,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         input={input}
         onInputChange={handleInputChange}
         onSend={sendMessage}
+        webSearchEnabled={webSearchEnabled}
+        onToggleWebSearch={handleToggleWebSearch}
         onFocusBot={() => {
           if (!input.toLowerCase().includes(`@${agentName.toLowerCase()}`)) setInput(`@${agentName} ` + input);
           inputRef.current?.focus();
@@ -8023,6 +8091,8 @@ function EnhancedInput({
   builderRevisionCount,
   runStatus,
   currentRunStep,
+  webSearchEnabled,
+  onToggleWebSearch,
 }: any) {
   const [focused, setFocused] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
@@ -8309,6 +8379,33 @@ function EnhancedInput({
             </AnimatedPopup>
           )}
         </View>
+
+        {/* Web Search toggle (Phase 0 — OpenRouter) — globe icon flips
+            on a per-circle setting. When on, the next chat message is
+            answered through OpenRouter with the openrouter:web_search
+            server tool so the model can fetch current facts. */}
+        {onToggleWebSearch && (
+          <Pressable
+            onPress={onToggleWebSearch}
+            accessibilityRole="button"
+            accessibilityLabel={`Web search: ${webSearchEnabled ? 'on' : 'off'}`}
+            style={[
+              styles.modelButton,
+              {
+                borderColor: webSearchEnabled ? '#22c55e80' : '#1e293b',
+                backgroundColor: webSearchEnabled ? '#22c55e15' : 'transparent',
+              },
+              ...(Platform.OS === 'web' ? [{ transition: 'all 0.2s ease', cursor: 'pointer' } as any] : []),
+            ]}
+          >
+            <View style={[styles.modelIconBox, { backgroundColor: webSearchEnabled ? '#22c55e20' : '#1e293b' }]}>
+              <Text style={[styles.modelIconText, { color: webSearchEnabled ? '#22c55e' : '#64748b' }]}>🌐</Text>
+            </View>
+            <Text style={[styles.modelButtonLabel, { color: webSearchEnabled ? '#22c55e' : '#64748b' }]}>
+              {webSearchEnabled ? 'Web On' : 'Web'}
+            </Text>
+          </Pressable>
+        )}
 
         {/* Quick Actions Button */}
         <View style={{ position: 'relative' as const }}>

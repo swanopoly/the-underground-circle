@@ -233,6 +233,13 @@ async function callOpenAICompatible(
   temperature: number,
   maxTokens: number,
   provider: Provider,
+  // Phase 0: forward server-tool requests (e.g. OpenRouter web_search)
+  // and plugin specs through to OpenRouter unchanged. Other OpenAI-
+  // compatible providers (OpenAI, Groq, etc.) accept `tools` natively
+  // for function-calling, so passing them through is safe — they just
+  // won't trigger the OpenRouter-specific `openrouter:web_search`
+  // server tool that needs OR's host to handle it.
+  extra?: { tools?: Array<Record<string, unknown>>; plugins?: Array<Record<string, unknown>> },
 ): Promise<LLMProxyResponse> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -245,15 +252,23 @@ async function callOpenAICompatible(
     headers["X-Title"] = "The Underground Circle";
   }
 
+  const requestBody: Record<string, unknown> = {
+    model,
+    messages,
+    temperature,
+    max_tokens: maxTokens,
+  };
+  if (extra?.tools && Array.isArray(extra.tools) && extra.tools.length > 0) {
+    requestBody.tools = extra.tools;
+  }
+  if (extra?.plugins && Array.isArray(extra.plugins) && extra.plugins.length > 0) {
+    requestBody.plugins = extra.plugins;
+  }
+
   const res = await fetch(endpoint, {
     method: "POST",
     headers,
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature,
-      max_tokens: maxTokens,
-    }),
+    body: JSON.stringify(requestBody),
     signal: AbortSignal.timeout(60_000),
   });
 
@@ -430,7 +445,10 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const body: LLMProxyRequest = await req.json();
+    const body: LLMProxyRequest & {
+      tools?: Array<Record<string, unknown>>;
+      plugins?: Array<Record<string, unknown>>;
+    } = await req.json();
     const { provider, model, messages, circleId, thinkingLevel } = body;
 
     // Embedding requests use a completely different request shape — validate
@@ -590,7 +608,16 @@ Deno.serve(async (req: Request) => {
       } else {
         endpoint = PROVIDER_ENDPOINTS[provider];
       }
-      result = await callOpenAICompatible(endpoint, apiKey!, model, finalMessages, temperature, maxTokens, provider);
+      result = await callOpenAICompatible(
+        endpoint,
+        apiKey!,
+        model,
+        finalMessages,
+        temperature,
+        maxTokens,
+        provider,
+        { tools: body.tools, plugins: body.plugins },
+      );
     } else {
       return errResponse(400, "unsupported_provider", `Unsupported provider: ${provider}`);
     }

@@ -64,6 +64,18 @@ export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
     { id: 'claude-opus-4-6',   label: 'Claude Opus 4.6',   provider: 'anthropic', contextWindow: 200000, costTier: 'expensive' },
   ],
   openrouter: [
+    // Phase 0 quick wins: surface OpenRouter's unique routing variants
+    // ahead of the static model list. `openrouter/auto` is a sensible
+    // default for users who haven't picked a model yet — OR routes
+    // each prompt to the best-fit model. `:nitro` and `:floor` are
+    // shortcuts for "fastest provider" and "cheapest provider"
+    // respectively. `:free` variants are zero-cost (rate-limited)
+    // models — perfect for users who haven't connected paid keys yet.
+    { id: 'openrouter/auto',                              label: 'Smart (Auto-route)',  provider: 'openrouter', contextWindow: 128000,  costTier: 'mid' },
+    { id: 'meta-llama/llama-3.3-70b-instruct:nitro',     label: 'Llama 3.3 70B (Fast)', provider: 'openrouter', contextWindow: 131072,  costTier: 'cheap' },
+    { id: 'meta-llama/llama-3.3-70b-instruct:floor',     label: 'Llama 3.3 70B (Cheap)',provider: 'openrouter', contextWindow: 131072,  costTier: 'cheap' },
+    { id: 'meta-llama/llama-3.3-70b-instruct:free',      label: 'Llama 3.3 70B (Free)', provider: 'openrouter', contextWindow: 131072,  costTier: 'free'  },
+    { id: 'mistralai/mistral-small-3.1-24b-instruct:free', label: 'Mistral Small (Free)', provider: 'openrouter', contextWindow: 131072,  costTier: 'free'  },
     { id: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'openrouter', contextWindow: 200000,  costTier: 'mid' },
     { id: 'openai/gpt-4o',              label: 'GPT-4o',             provider: 'openrouter', contextWindow: 128000,  costTier: 'mid' },
     { id: 'google/gemini-2.5-pro',      label: 'Gemini 2.5 Pro',     provider: 'openrouter', contextWindow: 1048576, costTier: 'mid' },
@@ -217,6 +229,13 @@ export async function invokeLLMProxy(params: {
   temperature?: number;
   maxTokens?: number;
   thinkingLevel?: ThinkingLevel;
+  // Phase 0: pass through server-tool / plugin specs so the chat
+  // composer's "Web Search" toggle can attach
+  // `[{type: 'openrouter:web_search'}]` to a turn. Edge function
+  // forwards verbatim to OpenRouter (and to native function-calling
+  // for OpenAI / Groq when present).
+  tools?: Array<Record<string, unknown>>;
+  plugins?: Array<Record<string, unknown>>;
 }): Promise<LLMProxyResponse> {
   if (shouldBlockExternalAiProvider(params.provider)) {
     throw new Error(getStrictLocalAiModeMessage(params.provider));
@@ -230,12 +249,56 @@ export async function invokeLLMProxy(params: {
       temperature: params.temperature,
       max_tokens: params.maxTokens,
       thinkingLevel: params.thinkingLevel,
+      tools: params.tools,
+      plugins: params.plugins,
     },
   });
 
   if (error) throw new Error(error.message);
   if (data?.error) throw new Error(data.error);
   return data as LLMProxyResponse;
+}
+
+/**
+ * Convenience wrapper — answers a question using OpenRouter's server-
+ * side web search. Routes through `invokeLLMProxy` with the
+ * `openrouter:web_search` tool attached. Returns the assistant text.
+ *
+ * Throws if the user has no OpenRouter key configured (caller surfaces
+ * the message — typically pointing at Marketplace → OpenRouter).
+ *
+ * Used by the chat composer's Web Search toggle (Phase 0). Also
+ * available as a primitive that any other surface (automations,
+ * computer-use planner, doc generator) can reach for when it needs
+ * fresh facts.
+ */
+export async function webSearchViaOpenRouter(args: {
+  query: string;
+  /** OpenRouter model id. Defaults to `openrouter/auto` so the
+   *  cheapest viable web-search-capable model is picked. */
+  model?: string;
+  circleId?: string;
+  /** Extra system / user context to set up the search. The query
+   *  itself is appended as the final user message. */
+  systemPrompt?: string;
+  conversation?: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>;
+  maxTokens?: number;
+}): Promise<LLMProxyResponse> {
+  const messages: Array<{ role: string; content: string }> = [];
+  if (args.systemPrompt) messages.push({ role: 'system', content: args.systemPrompt });
+  if (args.conversation && args.conversation.length > 0) {
+    for (const m of args.conversation) messages.push({ role: m.role, content: m.content });
+  }
+  messages.push({ role: 'user', content: args.query });
+
+  return invokeLLMProxy({
+    provider: 'openrouter',
+    model: args.model || 'openrouter/auto',
+    messages,
+    circleId: args.circleId,
+    maxTokens: args.maxTokens || 1024,
+    tools: [{ type: 'openrouter:web_search' }],
+  });
 }
 
 // ─── React Hooks ────────────────────────────────────────────────────────────
