@@ -4036,15 +4036,6 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           );
         }}
         ListEmptyComponent={<Text style={{ color: '#555', fontSize: 12, textAlign: 'center', marginTop: 20, fontStyle: 'italic' }}>No messages yet</Text>}
-        ListFooterComponent={botTyping && !codingWorkbenchPrompt ? (
-          <View style={{
-            paddingHorizontal: 10, paddingVertical: 12, marginTop: 6,
-            borderRadius: 12, borderLeftWidth: 3, borderLeftColor: accentColor,
-            backgroundColor: accentColor + '0a',
-          }}>
-            <AgentThinkingLoader />
-          </View>
-        ) : null}
       />
 
       {pendingNewMessages > 0 ? (
@@ -4930,6 +4921,7 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
   const repliesTo: { author?: string; preview?: string } | null = (msg.metadata as any)?.replies_to
     ? { author: (msg.metadata as any)?.replies_to_author, preview: (msg.metadata as any)?.replies_to_preview }
     : null;
+  const isGenerating = (msg.metadata as any)?.generating === true;
   const rawReactions = (msg.metadata as any)?.reactions || {};
   const reactionEntries: Array<{ kind: 'ack' | 'important' | 'question'; glyph: string; color: string; ids: string[] }> = [
     { kind: 'ack', glyph: '✓', color: '#22c55e', ids: Array.isArray(rawReactions.ack) ? rawReactions.ack : [] },
@@ -5055,6 +5047,10 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
         ) : null}
         {isTask ? (
           <Text style={{color:'#ccc',fontSize:12,lineHeight:18}}>{msg.metadata?.prompt || msg.content}</Text>
+        ) : isGenerating && !msg.content ? (
+          <View style={{ paddingVertical: 4 }}>
+            <AgentThinkingLoader />
+          </View>
         ) : (
           parseChatSegments(visibleContent || msg.content).map((seg, idx) => (
             seg.type === 'code'

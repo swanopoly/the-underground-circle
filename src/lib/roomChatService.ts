@@ -123,6 +123,30 @@ export async function sendRoomStructuredChatMessage({
   };
   await sendMessage(roomId, userId, content, 'chat', attachedMetadata);
 
+  // Insert a placeholder agent_output message immediately so the team
+  // sees the AI bubble appear as soon as they hit send. We update the
+  // same row when the run completes (Realtime UPDATE — see Phase 3A).
+  // If the insert fails (RLS, network) we fall back to the post-run
+  // sendAgentMessage path that the rest of the app has always used.
+  const { supabase: supa } = await import('./supabase');
+  let placeholderId: string | null = null;
+  try {
+    const { data } = await supa.from('room_messages').insert({
+      room_id: roomId,
+      user_id: null,
+      agent_name: 'Agent',
+      content: '',
+      message_type: 'agent_output',
+      metadata: {
+        bot: true,
+        bot_name: 'Agent',
+        generating: true,
+        started_at: new Date().toISOString(),
+      },
+    }).select('id').single();
+    placeholderId = (data as any)?.id || null;
+  } catch {}
+
   const cleanContent = content.replace(/@(agent|blackswan|swanbot|swan)\s*/gi, '').trim() || content;
   const callerPrefix = promptPrefix ? `${promptPrefix.trim()}\n\n` : '';
   const recentContext = recentMessages
@@ -134,7 +158,9 @@ export async function sendRoomStructuredChatMessage({
     ? `\n\nCurrently viewing file: ${activeFile.name} (${activeFile.file_type || 'text'})\nFile content (first 2000 chars):\n${(activeFile.content || '').slice(0, 2000)}`
     : '';
   const specialContext = await buildSpecialContext(roomId, cleanContent, availableFiles);
-  const structured = await runOpenSwanSessionTurn({
+  let structured: import('./openswanSessionRuntime').OpenSwanTurnResult;
+  try {
+    structured = await runOpenSwanSessionTurn({
     message: `${callerPrefix}${buildPromptPrefix(cleanContent)}${cleanContent}`,
     context: {
       userId,
@@ -152,12 +178,42 @@ export async function sendRoomStructuredChatMessage({
       availableFileCount: availableFiles.length,
       activeFileName: activeFile?.name || null,
     },
-    onStageChange,
-    onToolApproval,
-  });
+      onStageChange,
+      onToolApproval,
+    });
+  } catch (err: any) {
+    if (placeholderId) {
+      try {
+        await supa.from('room_messages').update({
+          content: `Run failed: ${err?.message || 'unknown error'}. Try again or simplify the request.`,
+          metadata: { bot: true, bot_name: 'Agent', error: true, generating: false },
+        }).eq('id', placeholderId);
+      } catch {}
+    }
+    throw err;
+  }
 
   const artifacts = structured.artifacts || [];
-  await sendAgentMessage(roomId, 'Agent', structured.response, buildRoomAgentMessageMetadata(structured, artifacts));
+  const finalMetadata = buildRoomAgentMessageMetadata(structured, artifacts);
+  if (placeholderId) {
+    // Update the placeholder row in place so the realtime UPDATE hook
+    // swaps the bubble's content for every connected teammate at once.
+    try {
+      const { error } = await supa.from('room_messages').update({
+        content: structured.response,
+        metadata: finalMetadata,
+      }).eq('id', placeholderId);
+      if (error) {
+        // Row vanished or RLS shifted — write a fresh agent message
+        // through the canonical path so the response isn't lost.
+        await sendAgentMessage(roomId, 'Agent', structured.response, finalMetadata);
+      }
+    } catch {
+      await sendAgentMessage(roomId, 'Agent', structured.response, finalMetadata);
+    }
+  } else {
+    await sendAgentMessage(roomId, 'Agent', structured.response, finalMetadata);
+  }
 
   return {
     response: structured.response,
