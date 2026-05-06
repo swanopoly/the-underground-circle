@@ -4058,20 +4058,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
 
     // ─── Web Search toggle (Phase 0) ───────────────────────────────────────
-    // When the composer's globe toggle is on, route the message through
-    // OpenRouter with the `openrouter:web_search` server tool attached.
-    // Bypasses the SwanBot pipeline for this turn so we can attach the
-    // tool spec; rolls the response back into the chat as a normal bot
-    // message. Caller still keeps history / attachments via the chat
-    // log itself — the side path is just the model invocation.
+    // When the composer's globe toggle is on, route through OpenRouter
+    // with the `openrouter:web_search` server tool attached. Bypasses
+    // the SwanBot pipeline for this turn so we can attach the tool
+    // spec. Web search itself is OpenRouter-only (HF inference doesn't
+    // expose a server-side search tool) — so this path stays
+    // OR-direct, with a clean error when no OR key is configured.
     if (webSearchEnabled) {
       setBotTyping(true);
       try {
         const { webSearchViaOpenRouter } = await import('../../../lib/llmProviders');
-        // Build a small recent-conversation slice so the model doesn't
-        // lose context when web-search routes through OpenRouter.
-        // Cap at 6 turns to keep the request cheap — web search adds
-        // its own tokens on top.
         const recent = messages.slice(-6).map(m => ({
           role: m.isBot ? ('assistant' as const) : ('user' as const),
           content: m.content,
@@ -4085,16 +4081,48 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         setBotTyping(false);
         addBotMessage(result.response || '(No response from OpenRouter web search.)');
       } catch (err: any) {
-        setBotTyping(false);
-        const msg = err?.message || 'Web search failed';
-        addBotMessage(
-          `Web search failed: ${msg}\n\n` +
-          (msg.includes('not configured') || msg.includes('OpenRouter') || msg.includes('api_key')
-            ? 'Connect OpenRouter in **Marketplace → AI Models & APIs** to use web search.'
-            : 'Toggle web search off and try again, or switch to a different model.'),
-          undefined,
-          { localOnly: true },
-        );
+        // Cross-provider fallback for the non-search path is wired in
+        // `invokeAnyChat`; web search itself stays OR-only because no
+        // other provider exposes a server-side search tool today.
+        // When OR is missing or rate-limited, fall back to the
+        // unified router WITHOUT the search tool — at least the user
+        // gets an answer (possibly from HF or Anthropic direct), with
+        // a note that web search wasn't applied.
+        try {
+          const { invokeAnyChat } = await import('../../../lib/universalInvoke');
+          const { listApiKeys } = await import('../../../lib/llmProviders');
+          const userKeys = await listApiKeys();
+          const recent = messages.slice(-6).map(m => ({
+            role: m.isBot ? ('assistant' as const) : ('user' as const),
+            content: m.content,
+          }));
+          const fallback = await invokeAnyChat({
+            modelId: selectedModel || 'claude-sonnet-4-6',
+            messages: [
+              { role: 'system', content: 'Web search is unavailable for this turn. Answer from training knowledge and clearly note when information may be out of date.' },
+              ...recent,
+              { role: 'user', content },
+            ],
+            circleId,
+            userKeys,
+            maxTokens: 1024,
+          });
+          setBotTyping(false);
+          addBotMessage(
+            `${fallback.response}\n\n_Web search unavailable (${err?.message || 'OpenRouter error'}); answered from ${fallback.servedBy.label}._`,
+            undefined,
+            { localOnly: true },
+          );
+        } catch (fallbackErr: any) {
+          setBotTyping(false);
+          const msg = err?.message || fallbackErr?.message || 'Web search failed';
+          addBotMessage(
+            `Web search failed: ${msg}\n\n` +
+            'Connect OpenRouter in **Marketplace → AI Models & APIs** for web search, or any other provider for plain chat.',
+            undefined,
+            { localOnly: true },
+          );
+        }
       }
       return;
     }
