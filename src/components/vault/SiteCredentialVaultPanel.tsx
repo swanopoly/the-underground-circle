@@ -1327,10 +1327,12 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   const playUnlockFailure = () => {
     lockShake.setValue(0);
     Animated.sequence([
-      Animated.timing(lockShake, { toValue: 10, duration: 42, useNativeDriver: true }),
-      Animated.timing(lockShake, { toValue: -10, duration: 42, useNativeDriver: true }),
-      Animated.timing(lockShake, { toValue: 7, duration: 42, useNativeDriver: true }),
-      Animated.timing(lockShake, { toValue: -7, duration: 42, useNativeDriver: true }),
+      // Softer than ±10 — the old shake felt cartoonish. ±4 reads as
+      // "denied" without making the card look broken.
+      Animated.timing(lockShake, { toValue: 4, duration: 42, useNativeDriver: true }),
+      Animated.timing(lockShake, { toValue: -4, duration: 42, useNativeDriver: true }),
+      Animated.timing(lockShake, { toValue: 3, duration: 42, useNativeDriver: true }),
+      Animated.timing(lockShake, { toValue: -3, duration: 42, useNativeDriver: true }),
       Animated.timing(lockShake, { toValue: 0, duration: 58, useNativeDriver: true }),
     ]).start();
   };
@@ -2631,6 +2633,46 @@ function VaultLockScreen({
   const tunnelRotate = doorProgress.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '18deg'] });
   const serial = (circleId || '').replace(/-/g, '').slice(0, 8).toUpperCase() || '00000000';
 
+  // ── Idle ambient animation ──────────────────────────────────────────
+  // Continuously loops while the vault is locked, driving subtle rotations,
+  // breathing, and a scanline drift. All pure transform/opacity work so
+  // it stays cheap on web.
+  const idleProgress = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(idleProgress, { toValue: 1, duration: 16000, easing: Easing.linear, useNativeDriver: true }),
+        Animated.timing(idleProgress, { toValue: 0, duration: 0, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [idleProgress]);
+
+  // Slow counter-rotating halo ring around the dial (full lap every 16s).
+  const haloRotate = idleProgress.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '-360deg'] });
+  // Bezel tick ring rotates the OTHER way at half the angular speed.
+  const bezelRotate = idleProgress.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '180deg'] });
+  // Status pip ring rotates in the same direction as bezel but faster.
+  const pipRotate = idleProgress.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
+  // Lock-shell border breathing — opacity 0.55 ↔ 0.95 over the loop.
+  const breathOpacity = idleProgress.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [0.55, 0.95, 0.55],
+  });
+  // Scanline drift — sweeps top to bottom across the vault stage.
+  const scanY = idleProgress.interpolate({ inputRange: [0, 1], outputRange: [-12, 312] });
+  // Hot core pulse — small scale on the dial center dot.
+  const corePulse = idleProgress.interpolate({
+    inputRange: [0, 0.5, 1],
+    outputRange: [1.0, 1.18, 1.0],
+  });
+
+  // Hide ambient layers once the unlock is in flight so they don't fight
+  // the door-open animation. We tie this directly to doorProgress so it
+  // fades out as the doors begin to part.
+  const idleVisibility = doorProgress.interpolate({ inputRange: [0, 0.18, 1], outputRange: [1, 0.6, 0] });
+
   return (
     <View
       style={[
@@ -2640,6 +2682,16 @@ function VaultLockScreen({
       nativeID="section-site-credential-vault-lock"
     >
       <Animated.View style={[styles.lockShell, { transform: [{ translateX: shake }] }]}>
+        {/* Ambient breathing accent border — sits absolutely behind the
+            shell content and pulses opacity 0.55↔0.95 so the surface feels
+            alive while idle. */}
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.lockBreathBorder,
+            { borderColor: accentColor + '88', opacity: breathOpacity },
+          ]}
+        />
         <View style={styles.lockCopy}>
           <Text style={styles.lockEyebrow}>UNDERGROUND CIRCLE SECURE VAULT</Text>
           <Text style={styles.lockTitle}>Credentials are sealed.</Text>
@@ -2688,6 +2740,97 @@ function VaultLockScreen({
             ]}
           />
           <Animated.View style={[styles.vaultInteriorGlow, { opacity: innerGlowOpacity, backgroundColor: accentColor }]} />
+
+          {/* ── Ambient detail layers (idle while locked, fade as doors open) ── */}
+
+          {/* Bezel ring — 16 tick marks evenly distributed around a wide
+              circle. Slowly counter-rotates to feel like an instrument
+              face that's always tracking. */}
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.vaultBezelRing,
+              { borderColor: accentColor + '22', opacity: idleVisibility, transform: [{ rotate: bezelRotate }] },
+            ]}
+          >
+            {Array.from({ length: 16 }).map((_, i) => {
+              const angle = (i / 16) * 360;
+              const long = i % 4 === 0; // every 4th tick is longer (cardinal points)
+              return (
+                <View
+                  key={i}
+                  pointerEvents="none"
+                  style={[
+                    styles.vaultBezelTick,
+                    long && styles.vaultBezelTickLong,
+                    {
+                      backgroundColor: long ? accentColor + 'aa' : accentColor + '55',
+                      transform: [{ rotate: `${angle}deg` }, { translateY: -125 }],
+                    },
+                  ]}
+                />
+              );
+            })}
+          </Animated.View>
+
+          {/* Halo ring — bordered circle around the dial that counter-
+              rotates relative to the dial. The pip ring sits inside it
+              and rotates the same way as bezel for a layered parallax. */}
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.vaultHaloRing,
+              { borderColor: accentColor + '44', opacity: idleVisibility, transform: [{ rotate: haloRotate }] },
+            ]}
+          />
+
+          {/* Status pip ring — 6 small dots orbit the dial. Two cardinal
+              dots are accent-bright, the rest dimmed, alternating around
+              the ring like an instrument readout. */}
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.vaultPipRing,
+              { opacity: idleVisibility, transform: [{ rotate: pipRotate }] },
+            ]}
+          >
+            {Array.from({ length: 6 }).map((_, i) => {
+              const angle = (i / 6) * 360;
+              const bright = i % 3 === 0;
+              return (
+                <View
+                  key={i}
+                  pointerEvents="none"
+                  style={[
+                    styles.vaultPip,
+                    {
+                      backgroundColor: bright ? accentColor : accentColor + '55',
+                      transform: [{ rotate: `${angle}deg` }, { translateY: -82 }, { rotate: `${-angle}deg` }],
+                      ...(bright && Platform.OS === 'web'
+                        ? { boxShadow: `0 0 8px ${accentColor}aa` } as any
+                        : {}),
+                    },
+                  ]}
+                />
+              );
+            })}
+          </Animated.View>
+
+          {/* Scanline drift — single 1px accent gradient sweeping top-to-
+              bottom while locked. Adds the "instrument scanning" feel
+              without being a green-text-cascade cliché. */}
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.vaultScanline,
+              {
+                opacity: idleVisibility,
+                backgroundColor: accentColor + '33',
+                transform: [{ translateY: scanY }],
+              },
+            ]}
+          />
+
           {VAULT_SPARKS.map((spark, index) => {
             const start = spark.delay;
             const opacity = doorProgress.interpolate({
@@ -2754,9 +2897,35 @@ function VaultLockScreen({
           </Animated.View>
           <View pointerEvents="none" style={[styles.vaultCenterSeam, { backgroundColor: accentColor + '55' }]} />
           <Animated.View pointerEvents="none" style={[styles.vaultDial, { borderColor: accentColor + '77', opacity: dialOpacity, transform: [{ rotate: dialRotate }] }]}>
-            <View style={[styles.vaultDialCore, { backgroundColor: accentColor }]} />
+            <Animated.View
+              style={[
+                styles.vaultDialCore,
+                {
+                  backgroundColor: accentColor,
+                  transform: [{ scale: corePulse }],
+                  ...(Platform.OS === 'web'
+                    ? { boxShadow: `0 0 14px ${accentColor}88, 0 0 28px ${accentColor}44` } as any
+                    : {}),
+                },
+              ]}
+            />
             <View style={styles.vaultDialSpoke} />
             <View style={[styles.vaultDialSpoke, styles.vaultDialSpokeVertical]} />
+            {/* Cross-hair tick at each spoke end — small accent squares
+                that read as alignment marks on the dial face. */}
+            {[0, 90, 180, 270].map((deg) => (
+              <View
+                key={deg}
+                pointerEvents="none"
+                style={[
+                  styles.vaultDialTick,
+                  {
+                    backgroundColor: accentColor + 'cc',
+                    transform: [{ rotate: `${deg}deg` }, { translateY: -48 }],
+                  },
+                ]}
+              />
+            ))}
           </Animated.View>
           <View pointerEvents="none" style={styles.vaultSerialPlate}>
             <Text style={styles.vaultSerialPlateText}>VAULT-{serial}</Text>
@@ -3093,6 +3262,86 @@ const styles = StyleSheet.create({
   },
   vaultDialSpokeVertical: {
     transform: [{ rotate: '90deg' }],
+  },
+  vaultDialTick: {
+    position: 'absolute' as any,
+    width: 4,
+    height: 8,
+    borderRadius: 1,
+  },
+  // ── Ambient detail layers ───────────────────────────────────────────
+  vaultBezelRing: {
+    position: 'absolute' as any,
+    width: 280,
+    height: 280,
+    borderRadius: 999,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 3,
+  },
+  vaultBezelTick: {
+    position: 'absolute' as any,
+    width: 2,
+    height: 8,
+    borderRadius: 1,
+  },
+  vaultBezelTickLong: {
+    height: 14,
+    width: 3,
+  },
+  vaultHaloRing: {
+    position: 'absolute' as any,
+    width: 196,
+    height: 196,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    zIndex: 5,
+  },
+  vaultPipRing: {
+    position: 'absolute' as any,
+    width: 178,
+    height: 178,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 5,
+  },
+  vaultPip: {
+    position: 'absolute' as any,
+    width: 6,
+    height: 6,
+    borderRadius: 999,
+  },
+  vaultScanline: {
+    position: 'absolute' as any,
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 1,
+    zIndex: 6,
+    ...Platform.select({
+      web: {
+        boxShadow: '0 0 8px rgba(255,255,255,0.18)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  lockBreathBorder: {
+    position: 'absolute' as any,
+    top: -1,
+    left: -1,
+    right: -1,
+    bottom: -1,
+    borderRadius: 28,
+    borderWidth: 1,
+    pointerEvents: 'none' as any,
+    ...Platform.select({
+      web: {
+        boxShadow: '0 0 32px rgba(255,255,255,0.05) inset',
+      } as any,
+      default: {},
+    }) as any,
   },
   vaultSerialPlate: {
     position: 'absolute' as any,
