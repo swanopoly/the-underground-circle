@@ -2270,12 +2270,24 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         event: 'INSERT', schema: 'public', table: 'room_messages',
         filter: `room_id=eq.${roomId}`,
       }, payload => {
-        setMessages(prev => [...prev, payload.new as RoomMessage]);
+        const incoming = payload.new as RoomMessage;
+        setMessages(prev => [...prev, incoming]);
         if (pinnedToBottomRef.current) {
           setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
         } else {
           setPendingNewMessages((n) => n + 1);
         }
+        // @-mention notification
+        notifyOnMentionRef.current?.(incoming);
+      })
+      // Reactions / pin / branch / replies update existing rows via metadata,
+      // so we also subscribe to UPDATE so realtime team state stays in sync.
+      .on('postgres_changes', {
+        event: 'UPDATE', schema: 'public', table: 'room_messages',
+        filter: `room_id=eq.${roomId}`,
+      }, payload => {
+        const updated = payload.new as RoomMessage;
+        setMessages(prev => prev.map((m) => (m.id === updated.id ? updated : m)));
       })
       .subscribe();
     return () => { supabase.removeChannel(ch); };
@@ -2394,10 +2406,36 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // Circle members surfaced in the @-palette so teammates can be tagged
   // by autocomplete instead of remembering exact handles.
   const [circleMembers, setCircleMembers] = useState<Array<{ user_id: string; name: string; username: string }>>([]);
-  // Current user id — needed by MsgBubble to highlight "my reaction".
+  // Current user id + username — needed by MsgBubble to highlight "my
+  // reaction" and by the @-mention notification path to detect when an
+  // incoming message tags the current user.
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [currentUserHandles, setCurrentUserHandles] = useState<string[]>([]);
+  const [unreadMentions, setUnreadMentions] = useState(0);
+  // Ref to the latest mention notifier so the realtime channel (which
+  // is bound once on subscribe) always invokes the freshest closure.
+  const notifyOnMentionRef = useRef<((msg: RoomMessage) => void) | null>(null);
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => setCurrentUserId(data?.user?.id || null)).catch(() => {});
+    let cancelled = false;
+    supabase.auth.getUser().then(async ({ data }) => {
+      const id = data?.user?.id || null;
+      if (cancelled) return;
+      setCurrentUserId(id);
+      if (!id) return;
+      const { data: profile } = await supabase.from('profiles')
+        .select('username, display_name')
+        .eq('id', id)
+        .maybeSingle();
+      if (cancelled || !profile) return;
+      const handles = new Set<string>();
+      if ((profile as any).username) handles.add(String((profile as any).username).toLowerCase());
+      if ((profile as any).display_name) {
+        const slug = String((profile as any).display_name).toLowerCase().replace(/\s+/g, '').replace(/[^a-z0-9._-]/g, '');
+        if (slug) handles.add(slug);
+      }
+      setCurrentUserHandles(Array.from(handles));
+    }).catch(() => {});
+    return () => { cancelled = true; };
   }, []);
   // Voice input via Web Speech API. Toggles by tapping the mic button
   // in the input row. Web only; native gets nothing.
@@ -2814,6 +2852,68 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     try {
       await navigator.clipboard?.writeText(text);
     } catch {}
+  }, []);
+
+  // Bind / refresh the @-mention notifier whenever the inputs that
+  // determine "is this for me?" change. Stored in a ref so the realtime
+  // INSERT closure (bound once at subscribe time) sees the latest logic.
+  useEffect(() => {
+    notifyOnMentionRef.current = (msg) => {
+      if (!msg || !msg.content) return;
+      // Skip own messages.
+      if (msg.user_id && currentUserId && msg.user_id === currentUserId) return;
+      if (currentUserHandles.length === 0) return;
+      const lower = String(msg.content).toLowerCase();
+      const hit = currentUserHandles.some((h) => lower.includes(`@${h}`));
+      if (!hit) return;
+      setUnreadMentions((n) => n + 1);
+      // Browser notification — only fire when the page is hidden so we
+      // don't pop a toast for a window the user is already looking at.
+      if (Platform.OS === 'web' && typeof window !== 'undefined' && typeof document !== 'undefined') {
+        try {
+          const visible = document.visibilityState === 'visible';
+          if (!visible && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            const author = msg.agent_name || 'Teammate';
+            const body = (msg.content || '').slice(0, 160);
+            const notif = new Notification(`${author} mentioned you`, { body, tag: `room-${roomId}-${msg.id}` });
+            notif.onclick = () => {
+              try { window.focus(); } catch {}
+              try { notif.close(); } catch {}
+            };
+          }
+          // Tab-title badge while the page is hidden.
+          if (!visible) {
+            const baseTitle = (document.title || 'Room').replace(/^\(\d+\)\s*/, '');
+            document.title = `(${unreadMentions + 1}) ${baseTitle}`;
+          }
+        } catch {}
+      }
+    };
+  }, [currentUserHandles, currentUserId, roomId, unreadMentions]);
+
+  // Clear the unread badge + restore tab title when the user returns to
+  // the tab. Fires once per visibility transition.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+    const onVis = () => {
+      if (document.visibilityState === 'visible') {
+        setUnreadMentions(0);
+        try { document.title = (document.title || 'Room').replace(/^\(\d+\)\s*/, ''); } catch {}
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, []);
+
+  // Lazy-request notification permission the first time the user looks
+  // at a chat — before any mention fires.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof Notification === 'undefined') return;
+    if (Notification.permission === 'default') {
+      // Defer to avoid the prompt on initial render; trigger on first focus.
+      const t = setTimeout(() => { try { Notification.requestPermission(); } catch {} }, 1500);
+      return () => clearTimeout(t);
+    }
   }, []);
 
   const handleToggleReaction = useCallback(async (msgId: string, kind: 'ack' | 'important' | 'question') => {
