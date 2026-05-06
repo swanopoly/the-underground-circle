@@ -640,6 +640,11 @@ export default function MarketplaceTab({
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeGroupFilter, setActiveGroupFilter] = useState<CircleIntegrationGroupKey | 'all' | 'models'>('all');
+  // Sort: 'popular' uses curated `popularityRank` (set on the catalog
+  // entries — anthropic / openai first, replicate pinned to bottom).
+  // 'alphabetical' is straightforward label sort. 'recent' surfaces
+  // the `recentlyAdded` set first.
+  const [sortMode, setSortMode] = useState<'popular' | 'alphabetical' | 'recent'>('popular');
   const [activeMarketplaceFilter, setActiveMarketplaceFilter] = useState<MarketplaceFilter>('all');
   const [activeSourceFilter, setActiveSourceFilter] = useState<MarketplaceSourceFilter>('all');
   const [wordpressCredential, setWordpressCredential] = useState<SiteCredential | null>(null);
@@ -826,7 +831,7 @@ export default function MarketplaceTab({
 
   const filteredCatalogItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return CIRCLE_INTEGRATION_CATALOG.filter(item => {
+    const filtered = CIRCLE_INTEGRATION_CATALOG.filter(item => {
       if (activeGroupFilter === 'models') {
         if (!item.platformKey || !MODEL_PROVIDER_KEYS.has(item.platformKey)) return false;
       } else if (activeGroupFilter !== 'all' && item.group !== activeGroupFilter) return false;
@@ -853,7 +858,30 @@ export default function MarketplaceTab({
       ].join(' ').toLowerCase();
       return haystack.includes(q);
     });
-  }, [MODEL_PROVIDER_KEYS, activeGroupFilter, activeMarketplaceFilter, activeSourceFilter, installedPlatformKeys, searchQuery]);
+
+    // Sort applied last so it operates on the visible subset.
+    if (sortMode === 'alphabetical') {
+      return [...filtered].sort((a, b) => a.label.localeCompare(b.label));
+    }
+    if (sortMode === 'recent') {
+      // recentlyAdded first, then everything else in catalog order.
+      return [...filtered].sort((a, b) => {
+        const ar = a.recentlyAdded ? 0 : 1;
+        const br = b.recentlyAdded ? 0 : 1;
+        return ar - br;
+      });
+    }
+    // popular: lower popularityRank first; missing ranks fall to bottom
+    // and break ties alphabetically so the long tail still has stable
+    // ordering instead of catalog-array drift.
+    const POP_FALLBACK = 9_000;
+    return [...filtered].sort((a, b) => {
+      const ar = a.popularityRank ?? POP_FALLBACK;
+      const br = b.popularityRank ?? POP_FALLBACK;
+      if (ar !== br) return ar - br;
+      return a.label.localeCompare(b.label);
+    });
+  }, [MODEL_PROVIDER_KEYS, activeGroupFilter, activeMarketplaceFilter, activeSourceFilter, installedPlatformKeys, searchQuery, sortMode]);
   const visibleItemsCount = useMemo(() => {
     return filteredCatalogItems.length;
   }, [filteredCatalogItems]);
@@ -1069,6 +1097,29 @@ export default function MarketplaceTab({
               );
             })}
           </ScrollView>
+          {/* Sort row — applies to whatever the filters above produced.
+              Default is `popular` (curated rank) so anthropic / openai
+              / openrouter sit up front and replicate falls to the
+              bottom. */}
+          <View style={[styles.filterRow, { paddingHorizontal: 0, paddingTop: 4, alignItems: 'center', gap: 8 }]}>
+            <Text style={{ color: '#475569', fontSize: 9, fontWeight: '900', letterSpacing: 1.2 }}>SORT</Text>
+            {([
+              { key: 'popular', label: 'Popular' },
+              { key: 'alphabetical', label: 'A–Z' },
+              { key: 'recent', label: 'Newest' },
+            ] as const).map((opt) => {
+              const active = sortMode === opt.key;
+              return (
+                <Pressable
+                  key={opt.key}
+                  onPress={() => setSortMode(opt.key)}
+                  style={[styles.filterChip, active && styles.filterChipActive]}
+                >
+                  <Text style={[styles.filterChipText, active && styles.filterChipTextActive]}>{opt.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
         </View>
 
         {!loading && (

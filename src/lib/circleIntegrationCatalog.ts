@@ -117,6 +117,13 @@ export interface CircleIntegrationCatalogItem {
   availability: 'available' | 'planned';
   platformKey?: CircleIntegrationPlatformKey;
   recentlyAdded?: boolean;
+  /**
+   * Lower number = surfaces earlier when sort=popularity. Curated rather
+   * than data-driven: until we have real install telemetry to back a
+   * "most installed" ranking, we hand-rank the providers most chat
+   * users reach for first. Items without a rank sort to the bottom.
+   */
+  popularityRank?: number;
 }
 
 export const CIRCLE_INTEGRATION_GROUPS: CircleIntegrationGroup[] = [
@@ -388,6 +395,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     scopeLabel: 'Circle-wide',
     availability: 'available',
     platformKey: 'github',
+    popularityRank: 3,
   },
   {
     id: 'vercel',
@@ -401,6 +409,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     scopeLabel: 'Circle-wide',
     availability: 'available',
     platformKey: 'vercel',
+    popularityRank: 8,
   },
   {
     id: 'netlify',
@@ -467,6 +476,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     scopeLabel: 'Circle-wide',
     availability: 'available',
     platformKey: 'slack',
+    popularityRank: 5,
   },
   {
     id: 'teams',
@@ -493,6 +503,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     scopeLabel: 'Circle-wide',
     availability: 'available',
     platformKey: 'discord',
+    popularityRank: 15,
   },
   {
     id: 'helius',
@@ -766,6 +777,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     scopeLabel: 'Circle-wide',
     availability: 'available',
     platformKey: 'stripe',
+    popularityRank: 10,
   },
   {
     id: 'figma',
@@ -779,6 +791,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     scopeLabel: 'Circle-wide',
     availability: 'available',
     platformKey: 'figma',
+    popularityRank: 14,
   },
   {
     id: 'mux',
@@ -832,6 +845,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     scopeLabel: 'Circle-wide',
     availability: 'available',
     platformKey: 'notion',
+    popularityRank: 9,
   },
   // ── Wave 1 expansion ────────────────────────────────────────────────
   {
@@ -987,6 +1001,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'hugging_face',
     recentlyAdded: true,
+    popularityRank: 13,
   },
   {
     id: 'replicate',
@@ -1001,6 +1016,10 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'replicate',
     recentlyAdded: true,
+    // Pinned to the bottom of the popularity sort by request — Replicate
+    // is more useful for image/video generation than chat, so it shouldn't
+    // dominate the chat-LLM picker even though it lives in the same group.
+    popularityRank: 999,
   },
   {
     id: 'modal',
@@ -1015,6 +1034,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'modal',
     recentlyAdded: true,
+    popularityRank: 24,
   },
   {
     id: 'openrouter',
@@ -1029,6 +1049,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'openrouter',
     recentlyAdded: true,
+    popularityRank: 4,
   },
   {
     id: 'anthropic',
@@ -1043,6 +1064,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'anthropic',
     recentlyAdded: true,
+    popularityRank: 1,
   },
   {
     id: 'openai',
@@ -1057,6 +1079,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'openai',
     recentlyAdded: true,
+    popularityRank: 2,
   },
   {
     id: 'google-ai',
@@ -1071,6 +1094,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'google_ai',
     recentlyAdded: true,
+    popularityRank: 6,
   },
   {
     id: 'groq',
@@ -1085,6 +1109,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'groq',
     recentlyAdded: true,
+    popularityRank: 7,
   },
   {
     id: 'mistral-ai',
@@ -1099,6 +1124,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'mistral_ai',
     recentlyAdded: true,
+    popularityRank: 16,
   },
   {
     id: 'cohere',
@@ -1113,6 +1139,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'cohere',
     recentlyAdded: true,
+    popularityRank: 19,
   },
   {
     id: 'perplexity',
@@ -1127,6 +1154,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'perplexity',
     recentlyAdded: true,
+    popularityRank: 17,
   },
   {
     id: 'together-ai',
@@ -1141,6 +1169,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'together_ai',
     recentlyAdded: true,
+    popularityRank: 18,
   },
   {
     id: 'fireworks-ai',
@@ -1155,6 +1184,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'fireworks_ai',
     recentlyAdded: true,
+    popularityRank: 21,
   },
   {
     id: 'deepseek',
@@ -1169,6 +1199,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'deepseek',
     recentlyAdded: true,
+    popularityRank: 12,
   },
   {
     id: 'z-ai',
@@ -1183,6 +1214,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'z_ai',
     recentlyAdded: true,
+    popularityRank: 22,
   },
   {
     id: 'minimax',
@@ -1197,6 +1229,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'minimax',
     recentlyAdded: true,
+    popularityRank: 23,
   },
   {
     id: 'ollama',
@@ -1211,6 +1244,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'ollama',
     recentlyAdded: true,
+    popularityRank: 20,
   },
   {
     id: 'linear',
@@ -1225,6 +1259,7 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'linear',
     recentlyAdded: true,
+    popularityRank: 11,
   },
   {
     id: 'jira',
