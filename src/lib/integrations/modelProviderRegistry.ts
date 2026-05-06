@@ -162,11 +162,23 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
   if (!circleId) return groups;
 
   const integrations = await listCircleIntegrations(circleId);
+  // Three states matter for the picker: connected (ready to use),
+  // degraded (connected but the key probe failed — re-validate in the
+  // Marketplace), and not-connected (group greyed out with a connect
+  // hint). Hiding degraded looks like the user never connected, which
+  // is the wrong story.
   const connectedSet = new Set(
     integrations
       .filter((i) => i.is_active !== false && i.status === 'connected')
       .map((i) => i.provider),
   );
+  const degradedMessages = new Map<string, string>();
+  for (const i of integrations) {
+    if (i.is_active !== false && i.status === 'degraded') {
+      const reason = (i.metadata as any)?.last_validation_error || 'connection check failed';
+      degradedMessages.set(i.provider, reason);
+    }
+  }
 
   // Pull the live OpenRouter catalog when the integration is connected so
   // the picker reflects the real ~200-model lineup (and current prices)
@@ -209,12 +221,17 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
 
   for (const entry of providerHydrators) {
     const isConnected = connectedSet.has(entry.provider);
-    if (!isConnected && !opts.includeDisconnected) continue;
+    const degradedReason = degradedMessages.get(entry.provider);
+    const isDegraded = !isConnected && !!degradedReason;
+    if (!isConnected && !isDegraded && !opts.includeDisconnected) continue;
+    const hint = isDegraded
+      ? `Key invalid (${degradedReason}). Re-enter in Marketplace.`
+      : entry.hint;
     groups.push({
       provider: entry.provider,
-      label: entry.label,
+      label: isDegraded ? `${entry.label} — DEGRADED` : entry.label,
       connected: isConnected,
-      hint: entry.hint,
+      hint,
       models: entry.models.map((m) => ({ ...m, ready: isConnected })),
     });
   }
