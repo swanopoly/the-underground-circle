@@ -28,10 +28,28 @@ import {
 } from '../../lib/gamification';
 import { getUserIntegrations, platformConnections, getFriends } from '../../lib/integrations';
 import { getUserAgents } from '../../lib/agents';
+import { useUserApiKeys, type LLMProvider } from '../../lib/llmProviders';
 import MentionsInbox from '../../components/MentionsInbox';
 import { getLastProfileCircle, navigateToUnifiedProfile } from '../../lib/profileNavigation';
 
 const fmt = (n: number) => n.toLocaleString();
+
+// Display metadata for connected LLM providers — kept here so the
+// profile chips don't depend on the marketplace component layout. If
+// you add a provider to LLMProvider in lib/llmProviders.ts, add it here
+// too so the chip shows a proper label/glyph instead of the raw id.
+const LLM_PROVIDER_META: Partial<Record<LLMProvider, { label: string; glyph: string; accent: string }>> = {
+  anthropic:       { label: 'Anthropic',     glyph: 'A', accent: '#d97706' },
+  openai:          { label: 'OpenAI',        glyph: 'O', accent: '#10a37f' },
+  openrouter:      { label: 'OpenRouter',    glyph: 'R', accent: '#7c3aed' },
+  groq:            { label: 'Groq',          glyph: 'Q', accent: '#f97316' },
+  huggingface:     { label: 'Hugging Face',  glyph: 'H', accent: '#ffbd45' },
+  replicate:       { label: 'Replicate',     glyph: 'P', accent: '#475569' },
+  ollama:          { label: 'Ollama',        glyph: 'L', accent: '#5b21b6' },
+  zai:             { label: 'Z.AI / GLM',    glyph: 'Z', accent: '#0ea5e9' },
+  minimax:         { label: 'MiniMax',       glyph: 'M', accent: '#ec4899' },
+  'github-models': { label: 'GitHub Models', glyph: 'G', accent: '#6e7681' },
+};
 
 // ── Hero aura: rotating conic-gradient border + layered 3D shadows ──────────
 // Injected once into <head> on web. Uses @property to animate the gradient's
@@ -168,6 +186,10 @@ export default function ProfileScreen({ navigation, route }: any) {
   // New state for customizable features
   const [integrations, setIntegrations] = useState<Integration[]>([]);
   const [agents, setAgents] = useState<AgentBot[]>([]);
+  // Connected LLM provider keys — surfaced as a "AI MODELS" strip
+  // alongside connected accounts so users can see at a glance which
+  // models their agents will route to.
+  const { keys: apiKeys, isLoading: apiKeysLoading } = useUserApiKeys();
   const [friends, setFriends] = useState<Friend[]>([]);
   const [showThemeSelector, setShowThemeSelector] = useState(false);
   
@@ -677,6 +699,66 @@ export default function ProfileScreen({ navigation, route }: any) {
               </Text>
             </Card>
           )}
+
+          {/* AI Models — connected LLM provider keys. Same visual
+              language as CONNECTED ACCOUNTS so the section reads as a
+              parallel "what AI does the user have wired up" view.
+              Tapping any chip jumps into the Marketplace where the
+              full connect / disconnect / replace-key flow lives. */}
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>AI MODELS</Text>
+            <Pressable onPress={() => navigation.navigate('Integrations')}>
+              <Text style={[styles.editLink, { color: themeColor }]}>MANAGE</Text>
+            </Pressable>
+          </View>
+          {(() => {
+            const activeKeys = apiKeys.filter(k => k.isActive);
+            if (apiKeysLoading) {
+              return (
+                <Card style={styles.emptyPlatformsCard}>
+                  <Text style={styles.emptyPlatformsDesc}>Loading…</Text>
+                </Card>
+              );
+            }
+            if (activeKeys.length === 0) {
+              return (
+                <Card style={styles.emptyPlatformsCard} onPress={() => navigation.navigate('Integrations')}>
+                  <Text style={styles.emptyPlatformsText}>No AI models connected</Text>
+                  <Text style={styles.emptyPlatformsDesc}>
+                    Connect OpenAI, Anthropic, OpenRouter, Hugging Face, and more
+                  </Text>
+                </Card>
+              );
+            }
+            return (
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.platformsScroll}>
+                {activeKeys.map(k => {
+                  const meta = LLM_PROVIDER_META[k.provider] ?? { label: k.provider, glyph: 'A', accent: '#6366f1' };
+                  return (
+                    <Pressable
+                      key={k.id}
+                      onPress={() => navigation.navigate('Integrations')}
+                    >
+                      <Card style={styles.platformCard}>
+                        <View style={[styles.aiModelGlyph, { backgroundColor: meta.accent + '22', borderColor: meta.accent + '66' }]}>
+                          <Text style={[styles.aiModelGlyphText, { color: meta.accent }]}>{meta.glyph}</Text>
+                        </View>
+                        <Text style={styles.platformName}>{meta.label}</Text>
+                        <Text style={styles.platformUsername}>{k.label || 'connected'}</Text>
+                      </Card>
+                    </Pressable>
+                  );
+                })}
+                <Pressable
+                  style={styles.addPlatformCard}
+                  onPress={() => navigation.navigate('Integrations')}
+                >
+                  <Text style={styles.addPlatformIcon}>+</Text>
+                  <Text style={styles.addPlatformText}>ADD MODEL</Text>
+                </Pressable>
+              </ScrollView>
+            );
+          })()}
 
           {/* My Agents */}
           <View style={styles.sectionHeader}>
@@ -1236,6 +1318,16 @@ const styles = StyleSheet.create({
   platformIcon: { fontSize: 20, marginBottom: 6 },
   platformName: { color: C.text, fontSize: 12, fontWeight: '600', marginBottom: 2, fontFamily: FONT },
   platformUsername: { color: C.textMuted, fontSize: 11, fontFamily: FONT, fontWeight: '400' },
+  aiModelGlyph: {
+    width: 28,
+    height: 28,
+    borderRadius: 6,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+  },
+  aiModelGlyphText: { fontSize: 13, fontWeight: '900', fontFamily: FONT },
   addPlatformCard: {
     alignItems: 'center',
     justifyContent: 'center',
