@@ -5145,6 +5145,16 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
     const verificationResults = Array.isArray(msg.metadata?.verification_results) ? msg.metadata.verification_results : [];
     const runMetadataSummary = buildRunMetadataSummaryProps(msg.metadata);
     const browserPlanEvents = readRunBrowserPlanEvents(msg.metadata);
+    // Marketplace routing breadcrumb — when the run hit a connected
+    // OpenRouter / HF / Replicate integration, surface which model
+    // actually answered. When it tried but couldn't (no key, provider
+    // error), surface the fallback notice so the team isn't confused
+    // about why their pick didn't get used.
+    const routingMeta: any = (msg.metadata as any)?.routing;
+    const routingFallback = routingMeta?.routing_fallback;
+    const routedProviderRaw: string | undefined = routingMeta?.provider_routed;
+    const routedProvider = routedProviderRaw === 'hugging_face' ? 'huggingface' : routedProviderRaw;
+    const routedModel = routingMeta?.provider_model;
     return (
       <View style={[{
         borderLeftWidth:3,
@@ -5208,6 +5218,33 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
             </Text>
             <Text style={{ color: '#cbd5e1', fontSize: 11, fontStyle: 'italic' }} numberOfLines={2}>
               {repliesTo.preview}
+            </Text>
+          </View>
+        ) : null}
+        {routingFallback ? (
+          <View style={{
+            paddingHorizontal: 8, paddingVertical: 4, marginBottom: 6,
+            borderRadius: 6, borderWidth: 1, borderColor: '#f59e0b44',
+            backgroundColor: '#f59e0b10',
+            flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap',
+          }}>
+            <Text style={{ color: '#f59e0b', fontSize: 9, fontFamily: MONO, fontWeight: '900', letterSpacing: 0.6 }}>
+              ⚠ ROUTING FALLBACK
+            </Text>
+            <Text style={{ color: '#fcd34d', fontSize: 10 }} numberOfLines={2}>
+              {routingFallback.provider === 'hugging_face' ? 'Hugging Face' : routingFallback.provider} unavailable ({routingFallback.reason}) — answered with platform Sonnet
+            </Text>
+          </View>
+        ) : routedProvider && routedModel ? (
+          <View style={{
+            paddingHorizontal: 6, paddingVertical: 2, marginBottom: 4,
+            flexDirection: 'row', alignItems: 'center', gap: 6,
+          }}>
+            <Text style={{ color: accentColor, fontSize: 9, fontFamily: MONO, fontWeight: '900', letterSpacing: 0.6, opacity: 0.7 }}>
+              via {routedProvider}
+            </Text>
+            <Text style={{ color: '#94a3b8', fontSize: 10, fontFamily: MONO, opacity: 0.7 }} numberOfLines={1}>
+              {routedModel}
             </Text>
           </View>
         ) : null}

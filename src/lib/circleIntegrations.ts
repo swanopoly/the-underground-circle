@@ -1547,6 +1547,63 @@ export function getSpiritIntegrationRequirements(spiritId?: string | null): {
   }
 }
 
+/**
+ * Probe the provider's auth endpoint to confirm the API key is live before
+ * we mark the integration as connected. Returns `{ ok, message? }` so the
+ * caller can surface "key invalid" inline. Probes only cover providers
+ * that expose a cheap auth-introspection endpoint.
+ */
+export async function validateProviderApiKey(
+  provider: CircleIntegrationProvider,
+  apiKey: string,
+): Promise<{ ok: boolean; message?: string }> {
+  if (!apiKey || apiKey.trim().length === 0) {
+    return { ok: false, message: 'Empty API key' };
+  }
+  try {
+    if (provider === 'openrouter') {
+      // GET /api/v1/auth/key returns the current key's metadata.
+      const resp = await fetch('https://openrouter.ai/api/v1/auth/key', {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${apiKey.trim()}` },
+      });
+      if (resp.status === 401 || resp.status === 403) {
+        return { ok: false, message: 'OpenRouter rejected the key (401/403)' };
+      }
+      if (!resp.ok) return { ok: false, message: `OpenRouter probe ${resp.status}` };
+      return { ok: true };
+    }
+    if (provider === 'hugging_face') {
+      // GET /api/whoami-v2 (the v1 redirects but v2 is stable)
+      const resp = await fetch('https://huggingface.co/api/whoami-v2', {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${apiKey.trim()}` },
+      });
+      if (resp.status === 401 || resp.status === 403) {
+        return { ok: false, message: 'Hugging Face rejected the token' };
+      }
+      if (!resp.ok) return { ok: false, message: `Hugging Face probe ${resp.status}` };
+      return { ok: true };
+    }
+    if (provider === 'replicate') {
+      // GET /v1/account returns the authed account.
+      const resp = await fetch('https://api.replicate.com/v1/account', {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${apiKey.trim()}` },
+      });
+      if (resp.status === 401 || resp.status === 403) {
+        return { ok: false, message: 'Replicate rejected the token' };
+      }
+      if (!resp.ok) return { ok: false, message: `Replicate probe ${resp.status}` };
+      return { ok: true };
+    }
+    // No probe wired for this provider — accept optimistically.
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, message: err?.message || 'probe network error' };
+  }
+}
+
 export async function connectGenericCircleIntegration(opts: {
   circleId: string;
   provider: CircleIntegrationProvider;
@@ -1556,14 +1613,32 @@ export async function connectGenericCircleIntegration(opts: {
   secrets?: Record<string, string>;
 }): Promise<CircleIntegrationRecord | null> {
   const definition = INTEGRATION_DEFINITIONS[opts.provider];
+
+  // For LLM marketplace providers, probe the API key before storing it so
+  // the team learns about invalid keys at save time rather than the first
+  // time chat tries to use the model and silently falls back.
+  let initialStatus: 'connected' | 'degraded' = 'connected';
+  let validationMessage: string | undefined;
+  const probableKey = opts.secrets?.api_key || opts.secrets?.api_token;
+  if (probableKey && (opts.provider === 'openrouter' || opts.provider === 'hugging_face' || opts.provider === 'replicate')) {
+    const probe = await validateProviderApiKey(opts.provider, probableKey);
+    if (!probe.ok) {
+      initialStatus = 'degraded';
+      validationMessage = probe.message;
+    }
+  }
+
   const integration = await upsertCircleIntegration({
     circleId: opts.circleId,
     provider: opts.provider,
     displayName: opts.displayName || definition?.label,
     description: opts.description || definition?.description || null || undefined,
-    metadata: opts.metadata,
+    metadata: {
+      ...(opts.metadata || {}),
+      ...(validationMessage ? { last_validation_error: validationMessage } : {}),
+    },
     capabilityFlags: definition?.capabilityFlags || [],
-    status: 'connected',
+    status: initialStatus,
   });
 
   if (!integration) return null;

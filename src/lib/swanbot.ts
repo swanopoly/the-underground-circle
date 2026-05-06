@@ -160,6 +160,19 @@ export interface SwanBotStructuredResponse {
   };
   tool_actions?: SwanBotStructuredToolAction[];
   artifacts?: SwanBotStructuredArtifact[];
+  /**
+   * Set when the chat call routed through a connected marketplace
+   * integration (OpenRouter / Hugging Face / Replicate). Either both
+   * `provider_routed` + `provider_model` are present (routing succeeded),
+   * or `routing_fallback` is set (the user picked a marketplace model but
+   * the call landed on Anthropic — typically because the integration
+   * isn't connected or the provider returned an error).
+   */
+  routing?: {
+    provider_routed?: string;
+    provider_model?: string;
+    routing_fallback?: { provider: string; reason: string };
+  };
 }
 
 type ConversationMessage = { role: 'user' | 'model'; text: string };
@@ -1271,11 +1284,16 @@ async function callSwanBotAIStructured(
     });
     if (error || data?.error) return null;
     if (data?.response) {
+      const routing: SwanBotStructuredResponse['routing'] = {};
+      if (data.provider_routed) routing.provider_routed = data.provider_routed;
+      if (data.provider_model) routing.provider_model = data.provider_model;
+      if (data.routing_fallback) routing.routing_fallback = data.routing_fallback;
       return {
         response: data.response,
         usage: data.usage,
         tool_actions: data.tool_actions || [],
         artifacts: data.artifacts || [],
+        ...(Object.keys(routing).length > 0 ? { routing } : {}),
       };
     }
     return null;
@@ -2344,7 +2362,11 @@ export async function executeToolUseLoop(opts: {
    * Used by the room chat's per-step review mode (Plan → Approve flow).
    */
   toolApprovalGate?: (call: { name: string; input: any }) => Promise<'approve' | 'reject'>;
-}): Promise<{ response: string; toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }> }> {
+}): Promise<{
+  response: string;
+  toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }>;
+  routing?: SwanBotStructuredResponse['routing'];
+}> {
   if (shouldBlockExternalAiProvider('anthropic')) {
     return { response: getStrictLocalAiModeMessage('anthropic'), toolEvents: [] };
   }
@@ -2375,6 +2397,11 @@ export async function executeToolUseLoop(opts: {
   ];
 
   const toolEvents: Array<{ tool: string; input: unknown; result: string; status: OpenSwanExecutionStatus; metadata?: Record<string, unknown> }> = [];
+  // The edge function sets `provider_routed` / `routing_fallback` on every
+  // round, but they only need to be captured once: the model id is fixed
+  // for a turn, so the routing outcome is also fixed. We grab whatever
+  // the first round reports and ignore later rounds.
+  let routingInfo: SwanBotStructuredResponse['routing'] | undefined;
 
   const maxRounds = Math.max(1, Math.min(MAX_TOOL_ROUNDS, opts.maxToolRounds ?? MAX_TOOL_ROUNDS));
 
@@ -2396,7 +2423,14 @@ export async function executeToolUseLoop(opts: {
     });
 
     if (error || !data) {
-      return { response: data?.response || 'Tool-use call failed.', toolEvents };
+      return { response: data?.response || 'Tool-use call failed.', toolEvents, routing: routingInfo };
+    }
+
+    if (!routingInfo && (data.provider_routed || data.routing_fallback)) {
+      routingInfo = {};
+      if (data.provider_routed) routingInfo.provider_routed = data.provider_routed;
+      if (data.provider_model) routingInfo.provider_model = data.provider_model;
+      if (data.routing_fallback) routingInfo.routing_fallback = data.routing_fallback;
     }
 
     // Check if the response contains tool_use blocks
@@ -2413,6 +2447,7 @@ export async function executeToolUseLoop(opts: {
       return {
         response: textParts.join('') || data.response || '',
         toolEvents,
+        routing: routingInfo,
       };
     }
 
@@ -2465,7 +2500,7 @@ export async function executeToolUseLoop(opts: {
   const lastText = Array.isArray(lastAssistant?.content)
     ? lastAssistant.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('')
     : '';
-  return { response: lastText || 'Tool-use limit reached.', toolEvents };
+  return { response: lastText || 'Tool-use limit reached.', toolEvents, routing: routingInfo };
 }
 
 /**

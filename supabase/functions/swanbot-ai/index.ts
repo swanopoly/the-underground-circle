@@ -1784,8 +1784,99 @@ async function loadCircleProviderApiKey(
 
 type MarketplaceProviderKey = "openrouter" | "hugging_face" | "replicate";
 
+// Replicate is async — start a prediction, then poll the get URL until it
+// reaches a terminal state. Most chat-trained models on Replicate accept
+// `{ prompt, system_prompt, max_tokens }` as input and stream tokens as a
+// string array which we join. Tool calling isn't standardised across
+// Replicate models, so the relay path doesn't expose tools to it.
+async function callReplicateProvider(opts: {
+  modelId: string;          // owner/name (we use the model-based predictions endpoint so no version hash needed)
+  systemPrompt: string;
+  userMessage: string;
+  apiKey: string;
+  maxTokens: number;
+}): Promise<{ text: string | null; usage: any; error?: string }> {
+  const { modelId, systemPrompt, userMessage, apiKey, maxTokens } = opts;
+  const startUrl = `https://api.replicate.com/v1/models/${modelId}/predictions`;
+  let startData: any;
+  try {
+    const startResp = await fetch(startUrl, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "Prefer": "wait=10",
+      },
+      body: JSON.stringify({
+        input: {
+          prompt: userMessage,
+          system_prompt: systemPrompt,
+          max_tokens: maxTokens,
+          max_new_tokens: maxTokens,
+        },
+      }),
+    });
+    if (!startResp.ok) {
+      const errBody = await startResp.text();
+      return { text: null, usage: {}, error: `replicate start ${startResp.status}: ${errBody.slice(0, 300)}` };
+    }
+    startData = await startResp.json();
+  } catch (e: any) {
+    return { text: null, usage: {}, error: e?.message || "replicate start failed" };
+  }
+
+  const pollUrl: string | undefined = startData?.urls?.get;
+  if (!pollUrl) return { text: null, usage: {}, error: "replicate: missing poll url" };
+
+  let status: string = startData.status;
+  let output: any = startData.output;
+  const startedAt = Date.now();
+  while (status !== "succeeded" && status !== "failed" && status !== "canceled") {
+    if (Date.now() - startedAt > 90_000) {
+      return { text: null, usage: {}, error: "replicate: poll timeout" };
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+    try {
+      const pollResp = await fetch(pollUrl, {
+        headers: { "Authorization": `Bearer ${apiKey}` },
+      });
+      if (!pollResp.ok) continue;
+      const pollData = await pollResp.json();
+      status = pollData?.status || status;
+      output = pollData?.output ?? output;
+    } catch {
+      // Network blip — keep polling until timeout.
+    }
+  }
+
+  if (status !== "succeeded") {
+    return { text: null, usage: {}, error: `replicate ${status}` };
+  }
+
+  const text = Array.isArray(output)
+    ? output.join("")
+    : typeof output === "string"
+      ? output
+      : output != null
+        ? JSON.stringify(output)
+        : null;
+
+  return {
+    text,
+    usage: {
+      model: modelId,
+      input_tokens: Math.ceil((systemPrompt.length + userMessage.length) / 4),
+      output_tokens: Math.ceil((text?.length || 0) / 4),
+      cache_creation_tokens: 0,
+      cache_read_tokens: 0,
+      total_tokens: 0,
+    },
+  };
+}
+
 // Most marketplace LLM providers expose an OpenAI-compatible chat endpoint,
-// so we use a single dispatcher and only swap URL + auth headers.
+// so we use a single dispatcher and only swap URL + auth headers. Replicate
+// uses a separate async prediction lifecycle.
 async function callMarketplaceProvider(opts: {
   provider: MarketplaceProviderKey;
   modelId: string;          // already stripped of provider prefix
@@ -1815,10 +1906,7 @@ async function callMarketplaceProvider(opts: {
       endpoint = `https://api-inference.huggingface.co/models/${modelId}/v1/chat/completions`;
       break;
     case "replicate":
-      // Replicate is prediction-based (POST /predictions then poll).
-      // The OpenAI-compatible adapter only covers a subset of models, so
-      // we surface a friendly fallback instead of pretending it works.
-      return { text: null, usage: {}, error: "replicate routing pending — use OpenRouter for now" };
+      return await callReplicateProvider({ modelId, systemPrompt, userMessage, apiKey, maxTokens });
   }
 
   try {
@@ -1853,6 +1941,212 @@ async function callMarketplaceProvider(opts: {
     };
   } catch (e: any) {
     return { text: null, usage: {}, error: e?.message || `${provider} call failed` };
+  }
+}
+
+// ── Tool-shape translators (Anthropic ↔ OpenAI function calling) ──────────
+// The chat runtime uses Anthropic's tool_use schema everywhere. To run the
+// same agent loop against OpenRouter / HF chat completions endpoints, we
+// translate tool definitions, tool_use / tool_result content blocks, and
+// the response shape — so the client-side executeToolUseLoop is unchanged
+// and treats every provider as if it were native Anthropic.
+
+function anthropicToolsToOpenAI(tools: any[] | undefined): any[] {
+  if (!Array.isArray(tools)) return [];
+  return tools.map((t) => ({
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description || "",
+      parameters: t.input_schema || { type: "object", properties: {} },
+    },
+  }));
+}
+
+function anthropicMessagesToOpenAI(messages: any[]): any[] {
+  const out: any[] = [];
+  for (const m of messages || []) {
+    const content = m.content;
+    if (typeof content === "string") {
+      out.push({ role: m.role, content });
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+
+    if (m.role === "assistant") {
+      const textParts: string[] = [];
+      const toolCalls: any[] = [];
+      for (const block of content) {
+        if (block.type === "text") textParts.push(block.text || "");
+        else if (block.type === "tool_use") {
+          toolCalls.push({
+            id: block.id,
+            type: "function",
+            function: {
+              name: block.name,
+              arguments: JSON.stringify(block.input || {}),
+            },
+          });
+        }
+      }
+      const msg: any = { role: "assistant", content: textParts.join("") || null };
+      if (toolCalls.length > 0) msg.tool_calls = toolCalls;
+      out.push(msg);
+      continue;
+    }
+
+    if (m.role === "user") {
+      // OpenAI requires every prior tool_use to be answered by a separate
+      // role:'tool' message keyed off tool_call_id. We split the user
+      // content into ordered tool replies + any free-text remainder.
+      const textParts: string[] = [];
+      const toolReplies: any[] = [];
+      for (const block of content) {
+        if (block.type === "text") textParts.push(block.text || "");
+        else if (block.type === "tool_result") {
+          let resultContent = "";
+          if (typeof block.content === "string") {
+            resultContent = block.content;
+          } else if (Array.isArray(block.content)) {
+            resultContent = block.content
+              .map((b: any) => (b?.type === "text" ? b.text : JSON.stringify(b)))
+              .join("\n");
+          } else if (block.content !== undefined) {
+            resultContent = JSON.stringify(block.content);
+          }
+          toolReplies.push({
+            role: "tool",
+            tool_call_id: block.tool_use_id,
+            content: resultContent,
+          });
+        }
+      }
+      for (const tr of toolReplies) out.push(tr);
+      if (textParts.length > 0) out.push({ role: "user", content: textParts.join("") });
+      continue;
+    }
+
+    out.push({ role: m.role, content: typeof content === "string" ? content : JSON.stringify(content) });
+  }
+  return out;
+}
+
+function openAIResponseToAnthropic(data: any): {
+  content: any[];
+  stop_reason: string;
+  usage: { input_tokens: number; output_tokens: number };
+} {
+  const choice = data?.choices?.[0];
+  const msg = choice?.message || {};
+  const content: any[] = [];
+
+  if (typeof msg.content === "string" && msg.content.length > 0) {
+    content.push({ type: "text", text: msg.content });
+  }
+  if (Array.isArray(msg.tool_calls)) {
+    for (const tc of msg.tool_calls) {
+      let parsedInput: any = {};
+      const raw = tc.function?.arguments;
+      if (typeof raw === "string") {
+        try { parsedInput = JSON.parse(raw); } catch { parsedInput = { _raw: raw }; }
+      } else if (raw && typeof raw === "object") {
+        parsedInput = raw;
+      }
+      content.push({
+        type: "tool_use",
+        id: tc.id,
+        name: tc.function?.name,
+        input: parsedInput,
+      });
+    }
+  }
+
+  let stopReason = "end_turn";
+  const fr = choice?.finish_reason;
+  if (fr === "tool_calls") stopReason = "tool_use";
+  else if (fr === "length") stopReason = "max_tokens";
+  else if (fr === "stop") stopReason = "end_turn";
+  else if (fr === "content_filter") stopReason = "stop_sequence";
+
+  const u = data?.usage || {};
+  return {
+    content: content.length > 0 ? content : [{ type: "text", text: "" }],
+    stop_reason: stopReason,
+    usage: {
+      input_tokens: u.prompt_tokens || 0,
+      output_tokens: u.completion_tokens || 0,
+    },
+  };
+}
+
+// Tool-aware dispatcher used by relay mode. Takes already-translated OpenAI
+// shape inputs and returns the raw provider response so the caller can
+// translate back to Anthropic shape.
+async function callMarketplaceProviderWithTools(opts: {
+  provider: MarketplaceProviderKey;
+  modelId: string;
+  systemPrompt: string;
+  messages: any[];      // OpenAI shape
+  tools?: any[];        // OpenAI shape
+  apiKey: string;
+  maxTokens?: number;
+}): Promise<{ data: any | null; error?: string }> {
+  const { provider, modelId, systemPrompt, messages, tools, apiKey } = opts;
+  const maxTokens = opts.maxTokens ?? 4096;
+
+  let endpoint: string;
+  let extraHeaders: Record<string, string> = {};
+  switch (provider) {
+    case "openrouter":
+      endpoint = "https://openrouter.ai/api/v1/chat/completions";
+      extraHeaders = {
+        "HTTP-Referer": "https://app.chrisswanson.xyz",
+        "X-Title": "Underground Circle",
+      };
+      break;
+    case "hugging_face":
+      endpoint = `https://api-inference.huggingface.co/models/${modelId}/v1/chat/completions`;
+      break;
+    case "replicate":
+      // Replicate's chat endpoints are model-specific and prediction-based.
+      // Tool calling is largely OSS-model dependent and not consistently
+      // exposed, so for the relay path we skip Replicate and let the
+      // caller fall back to Anthropic.
+      return { data: null, error: "replicate relay not yet wired" };
+  }
+
+  const body: any = {
+    model: modelId,
+    max_tokens: maxTokens,
+    messages: [
+      { role: "system", content: systemPrompt },
+      ...messages,
+    ],
+  };
+  if (tools && tools.length > 0) {
+    body.tools = tools;
+    body.tool_choice = "auto";
+  }
+
+  try {
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        ...extraHeaders,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(90_000),
+    });
+    if (!resp.ok) {
+      const errBody = await resp.text();
+      return { data: null, error: `${provider} ${resp.status}: ${errBody.slice(0, 400)}` };
+    }
+    const data = await resp.json();
+    return { data };
+  } catch (e: any) {
+    return { data: null, error: e?.message || `${provider} call failed` };
   }
 }
 
@@ -2089,11 +2383,64 @@ const CLAUDE_USAGE_PRICES: Record<string, [number, number]> = {
 function costForModel(model: string): [number, number] {
   const direct = CLAUDE_USAGE_PRICES[model];
   if (direct) return direct;
+
+  // Marketplace-prefixed ids: stripped slug match against rough provider
+  // pricing. These are estimates — exact OpenRouter rates vary per model
+  // and per upstream tier; close enough for cost dashboards without
+  // pinning an exhaustive catalog.
+  if (model.startsWith("openrouter/")) {
+    const slug = model.slice("openrouter/".length).toLowerCase();
+    if (slug.includes("opus"))                                return [15.00, 75.00];
+    if (slug.includes("sonnet"))                              return [3.00, 15.00];
+    if (slug.includes("gpt-5-mini") || slug.includes("gpt-4o-mini")) return [0.50, 2.00];
+    if (slug.includes("gpt-5") || slug.includes("gpt-4o"))    return [5.00, 20.00];
+    if (slug.includes("gemini-2.5-pro"))                      return [1.25, 5.00];
+    if (slug.includes("flash") || slug.includes("gemini"))    return [0.10, 0.40];
+    if (slug.includes("llama-3.3-70b") || slug.includes("llama-3-70b")) return [0.50, 0.80];
+    if (slug.includes("qwen") && slug.includes("72"))         return [0.40, 0.40];
+    if (slug.includes("deepseek-r1"))                         return [0.55, 2.20];
+    if (slug.includes("grok"))                                return [3.00, 15.00];
+    return [1.00, 3.00]; // generic OSS-tier fallback
+  }
+  if (model.startsWith("huggingface/") || model.startsWith("replicate/")) {
+    return [1.00, 3.00];
+  }
+
   for (const key of Object.keys(CLAUDE_USAGE_PRICES)) {
     if (model.startsWith(key)) return CLAUDE_USAGE_PRICES[key];
   }
   // Fallback assumes Haiku-class pricing when we can't identify the model.
   return [1.00, 5.00];
+}
+
+// Best-effort marketplace usage logger — wraps logClaudeUsage with the
+// provider-prefixed model id so the cost dashboard groups spend correctly.
+function logMarketplaceUsage(supabase: any, opts: {
+  circleId: string | null;
+  userId: string | null;
+  provider: MarketplaceProviderKey;
+  modelId: string; // tail, no provider prefix
+  inputTokens: number;
+  outputTokens: number;
+  metadata?: Record<string, unknown>;
+}): void {
+  if (!supabase) return;
+  const prefix = opts.provider === "hugging_face" ? "huggingface" : opts.provider;
+  Promise.resolve(
+    logClaudeUsage(supabase, {
+      circleId: opts.circleId,
+      userId: opts.userId,
+      source: `swanbot-ai:${opts.provider}`,
+      model: `${prefix}/${opts.modelId}`,
+      inputTokens: opts.inputTokens,
+      outputTokens: opts.outputTokens,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      metadata: { ...(opts.metadata || {}), provider: opts.provider },
+    }),
+  ).catch((err) => {
+    console.warn(`[marketplace-usage:${opts.provider}] log failed:`, (err as any)?.message || err);
+  });
 }
 
 interface UsageLogEntry {
@@ -2389,11 +2736,86 @@ Deno.serve(async (req: Request) => {
     }
 
     // ─── Relay mode: client controls tools + system prompt ────────────
-    // When the client sends a `tools` array, we act as a transparent relay
-    // to the Anthropic API. The client builds the full system prompt and
-    // dispatches tool results locally. We just forward and return raw content.
+    // When the client sends a `tools` array, we act as a transparent relay.
+    // Two routes share this branch:
+    //   1. Marketplace-routed model (`openrouter/...`, `huggingface/...`):
+    //      we translate Anthropic tool shape → OpenAI function calling,
+    //      call the provider with the circle's stored API key, and
+    //      translate the response back so the client-side tool loop is
+    //      unchanged.
+    //   2. Native Anthropic model: forward to api.anthropic.com unchanged.
     if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
-      const relayModel = (model && CLAUDE_MODEL_MAP[model]) || model || "claude-sonnet-4-6";
+      const isMarketplaceRelay = !!model && /^(openrouter|huggingface|replicate)\//.test(model);
+      let routingFallback: { provider: string; reason: string } | null = null;
+
+      if (isMarketplaceRelay && circleId) {
+        const slashIdx = model!.indexOf("/");
+        const providerKey: MarketplaceProviderKey | null =
+          model!.startsWith("openrouter/") ? "openrouter"
+          : model!.startsWith("huggingface/") ? "hugging_face"
+          : model!.startsWith("replicate/") ? "replicate"
+          : null;
+        const tail = model!.slice(slashIdx + 1);
+        if (providerKey) {
+          const providerApiKey = await loadCircleProviderApiKey(supabase, circleId, providerKey);
+          if (providerApiKey) {
+            const oaiTools = anthropicToolsToOpenAI(body.tools);
+            const oaiMessages = anthropicMessagesToOpenAI(
+              body.tool_messages && body.tool_messages.length > 0
+                ? body.tool_messages
+                : [{ role: "user", content: message }],
+            );
+            const relayResult = await callMarketplaceProviderWithTools({
+              provider: providerKey,
+              modelId: tail,
+              systemPrompt: body.system_override || "You are OpenSwan, a helpful AI assistant.",
+              messages: oaiMessages,
+              tools: oaiTools,
+              apiKey: providerApiKey,
+              maxTokens: maxTokens || 4096,
+            });
+            if (relayResult.data) {
+              const anthropicShape = openAIResponseToAnthropic(relayResult.data);
+              const responseText = anthropicShape.content
+                .filter((b: any) => b.type === "text")
+                .map((b: any) => b.text)
+                .join("");
+              logMarketplaceUsage(supabase, {
+                circleId: circleId ?? null,
+                userId: userId ?? null,
+                provider: providerKey,
+                modelId: tail,
+                inputTokens: anthropicShape.usage.input_tokens,
+                outputTokens: anthropicShape.usage.output_tokens,
+                metadata: { surface: "relay", tool_count: (body.tools as any[]).length },
+              });
+              return new Response(
+                JSON.stringify({
+                  content: anthropicShape.content,
+                  stop_reason: anthropicShape.stop_reason,
+                  response: responseText,
+                  usage: anthropicShape.usage,
+                  provider_routed: providerKey,
+                  provider_model: tail,
+                }),
+                { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+              );
+            }
+            routingFallback = { provider: providerKey, reason: relayResult.error || "provider_call_failed" };
+            console.warn(`[swanbot-ai relay] ${providerKey} call failed:`, relayResult.error);
+          } else {
+            routingFallback = { provider: providerKey, reason: "integration_not_connected" };
+            console.warn(`[swanbot-ai relay] no ${providerKey} api_key for circle ${circleId}; falling back to Anthropic`);
+          }
+        }
+      }
+
+      // Marketplace ids that failed to route default to Sonnet 4.6 so we
+      // don't 400 on the unknown slug at the Anthropic edge. Native Claude
+      // ids continue to map through CLAUDE_MODEL_MAP unchanged.
+      const relayModel = isMarketplaceRelay
+        ? "claude-sonnet-4-6"
+        : ((model && CLAUDE_MODEL_MAP[model]) || model || "claude-sonnet-4-6");
       const relayMessages = body.tool_messages && body.tool_messages.length > 0
         ? body.tool_messages
         : [{ role: "user", content: message }];
@@ -2450,6 +2872,7 @@ Deno.serve(async (req: Request) => {
           stop_reason: data.stop_reason,
           response: responseText,
           usage: data.usage || {},
+          ...(routingFallback ? { routing_fallback: routingFallback, provider_routed: "anthropic", provider_model: relayModel } : {}),
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
@@ -2959,7 +3382,13 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
     // integration's provider key. We strip the prefix, look up the
     // circle's stored API key, and call the provider directly so the user
     // gets the model they actually picked. If the circle hasn't connected
-    // the integration we fall through to the Claude fallback below.
+    // the integration we fall through to the Claude fallback below and
+    // signal the fallback in the response so the UI can show a notice.
+    let nonRelayRouting: {
+      provider_routed?: string;
+      provider_model?: string;
+      routing_fallback?: { provider: string; reason: string };
+    } = {};
     if (!aiResponse && isMarketplacePrefix && circleId && effectiveModel) {
       const slashIdx = effectiveModel.indexOf("/");
       const head = effectiveModel.slice(0, slashIdx);
@@ -2983,10 +3412,23 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
           if (provResult.text) {
             aiResponse = provResult.text;
             tokenBreakdown = provResult.usage;
+            nonRelayRouting.provider_routed = providerKey;
+            nonRelayRouting.provider_model = tail;
+            logMarketplaceUsage(supabase, {
+              circleId: circleId ?? null,
+              userId: userId ?? null,
+              provider: providerKey,
+              modelId: tail,
+              inputTokens: provResult.usage?.input_tokens || 0,
+              outputTokens: provResult.usage?.output_tokens || 0,
+              metadata: { surface: "non_relay" },
+            });
           } else if (provResult.error) {
+            nonRelayRouting.routing_fallback = { provider: providerKey, reason: provResult.error };
             console.warn(`[swanbot-ai] marketplace ${providerKey} call failed:`, provResult.error);
           }
         } else {
+          nonRelayRouting.routing_fallback = { provider: providerKey, reason: "integration_not_connected" };
           console.warn(`[swanbot-ai] no ${providerKey} api_key found for circle ${circleId}; falling through to Claude`);
         }
       }
@@ -3109,6 +3551,8 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         usage: tokenBreakdown,
         tool_actions: structuredToolActions.map(mapToolActionToStructuredToolAction),
         artifacts: mapToolActionsToArtifacts(structuredToolActions),
+        ...(nonRelayRouting.provider_routed ? { provider_routed: nonRelayRouting.provider_routed, provider_model: nonRelayRouting.provider_model } : {}),
+        ...(nonRelayRouting.routing_fallback ? { routing_fallback: nonRelayRouting.routing_fallback } : {}),
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );

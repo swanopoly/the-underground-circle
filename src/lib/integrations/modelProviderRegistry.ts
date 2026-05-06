@@ -40,9 +40,9 @@ const ANTHROPIC_MODELS: ModelOption[] = [
   { id: 'claude-opus-4-7', label: 'Opus 4.7', provider: 'anthropic', description: 'Deep reasoning', contextWindow: 1_000_000, ready: true },
 ];
 
-// Curated OpenRouter shortlist — full catalog is 200+ but a chat picker
-// shouldn't be a search box on first hit. The user can paste a custom
-// OpenRouter slug into the chat composer if they want a niche model.
+// Curated OpenRouter shortlist — used as a fallback if the live catalog
+// fetch fails. When the integration is connected we replace this with the
+// real catalog (200+ models) fetched from openrouter.ai.
 const OPENROUTER_MODELS: Omit<ModelOption, 'ready'>[] = [
   { id: 'openrouter/anthropic/claude-sonnet-4', label: 'Sonnet 4 · OpenRouter', provider: 'openrouter', description: 'Anthropic via OR', contextWindow: 200_000 },
   { id: 'openrouter/anthropic/claude-opus-4', label: 'Opus 4 · OpenRouter', provider: 'openrouter', description: 'Anthropic via OR', contextWindow: 200_000 },
@@ -55,6 +55,80 @@ const OPENROUTER_MODELS: Omit<ModelOption, 'ready'>[] = [
   { id: 'openrouter/x-ai/grok-2', label: 'Grok 2', provider: 'openrouter', description: 'xAI' },
   { id: 'openrouter/deepseek/deepseek-r1', label: 'DeepSeek R1', provider: 'openrouter', description: 'Reasoning OSS' },
 ];
+
+// 5-minute module-level cache so flipping circles doesn't refetch on every
+// open. The catalog is public (no auth required), but it's still ~200KB so
+// caching matters for picker latency.
+let _openRouterCatalogCache: { fetchedAt: number; models: Omit<ModelOption, 'ready'>[] } | null = null;
+const OPENROUTER_CATALOG_TTL_MS = 5 * 60_000;
+
+const OR_PRIMARY_FAMILIES = ['anthropic', 'openai', 'google', 'meta-llama', 'qwen', 'mistralai', 'deepseek', 'x-ai'];
+
+async function loadLiveOpenRouterCatalog(): Promise<Omit<ModelOption, 'ready'>[] | null> {
+  const now = Date.now();
+  if (_openRouterCatalogCache && now - _openRouterCatalogCache.fetchedAt < OPENROUTER_CATALOG_TTL_MS) {
+    return _openRouterCatalogCache.models;
+  }
+  try {
+    const resp = await fetch('https://openrouter.ai/api/v1/models', {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
+    });
+    if (!resp.ok) return null;
+    const json = await resp.json() as { data?: Array<{
+      id: string;
+      name?: string;
+      description?: string;
+      context_length?: number;
+      pricing?: { prompt?: string; completion?: string };
+    }> };
+    if (!Array.isArray(json.data)) return null;
+
+    // 200+ models in one flat list overwhelms a chat picker. We rank by
+    // family to surface household-name providers first, then alphabetise
+    // within each family. Niche/community models still appear — they
+    // just sort to the bottom of their family.
+    const familyRank = (id: string): number => {
+      const family = id.split('/')[0];
+      const idx = OR_PRIMARY_FAMILIES.indexOf(family);
+      return idx >= 0 ? idx : 999;
+    };
+
+    const sorted = [...json.data].sort((a, b) => {
+      const ra = familyRank(a.id);
+      const rb = familyRank(b.id);
+      if (ra !== rb) return ra - rb;
+      return a.id.localeCompare(b.id);
+    });
+
+    const fmtPrice = (s?: string): string | null => {
+      if (!s) return null;
+      const n = Number.parseFloat(s);
+      if (!Number.isFinite(n) || n === 0) return null;
+      const perM = n * 1_000_000;
+      return perM >= 1 ? `$${perM.toFixed(2)}/M` : `$${perM.toFixed(3)}/M`;
+    };
+
+    const models: Omit<ModelOption, 'ready'>[] = sorted.map((m) => {
+      const family = m.id.split('/')[0];
+      const inP = fmtPrice(m.pricing?.prompt);
+      const outP = fmtPrice(m.pricing?.completion);
+      const priceTag = inP && outP ? `${inP}→${outP}` : inP || outP || '';
+      return {
+        id: `openrouter/${m.id}`,
+        label: m.name || m.id,
+        provider: 'openrouter' as const,
+        description: priceTag ? `${family} · ${priceTag}` : family,
+        contextWindow: m.context_length,
+      };
+    });
+
+    _openRouterCatalogCache = { fetchedAt: now, models };
+    return models;
+  } catch {
+    return null;
+  }
+}
 
 const HUGGING_FACE_MODELS: Omit<ModelOption, 'ready'>[] = [
   { id: 'huggingface/Qwen/Qwen2.5-72B-Instruct', label: 'Qwen 2.5 72B', provider: 'hugging_face', description: 'Inference Endpoints' },
@@ -94,6 +168,19 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
       .map((i) => i.provider),
   );
 
+  // Pull the live OpenRouter catalog when the integration is connected so
+  // the picker reflects the real ~200-model lineup (and current prices)
+  // rather than a stale 10-item shortlist. Catalog is public, so no auth
+  // is needed — we only fetch when the team has actually connected the
+  // integration to keep the request budget tight.
+  const openRouterConnected = connectedSet.has('openrouter');
+  const openRouterModels = openRouterConnected
+    ? (await loadLiveOpenRouterCatalog()) || OPENROUTER_MODELS
+    : OPENROUTER_MODELS;
+  const openRouterLabel = openRouterConnected
+    ? `OpenRouter (${openRouterModels.length} models)`
+    : 'OpenRouter (100+ models)';
+
   const providerHydrators: Array<{
     provider: CircleIntegrationProvider;
     label: string;
@@ -102,8 +189,8 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
   }> = [
     {
       provider: 'openrouter',
-      label: 'OpenRouter (100+ models)',
-      models: OPENROUTER_MODELS,
+      label: openRouterLabel,
+      models: openRouterModels,
       hint: 'Connect OpenRouter in Marketplace to route across Anthropic / OpenAI / Google / OSS via one key.',
     },
     {
