@@ -2306,6 +2306,22 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       .then(({ data }) => setRoomFiles(data || []));
   }, [roomId]);
 
+  // Circle members for @-mention autocomplete
+  useEffect(() => {
+    if (!circleId) return;
+    supabase.from('circle_members')
+      .select('user_id, profiles!user_id(display_name, username)')
+      .eq('circle_id', circleId)
+      .then(({ data }) => {
+        if (!Array.isArray(data)) return;
+        setCircleMembers(data.map((row: any) => ({
+          user_id: row.user_id,
+          name: row.profiles?.display_name || row.profiles?.username || 'Member',
+          username: row.profiles?.username || '',
+        })));
+      });
+  }, [circleId]);
+
   // Token + cost rollup, realtime
   useEffect(() => {
     const load = async () => {
@@ -2375,6 +2391,9 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // reference to the chosen message and metadata.replies_to so the
   // thread can be visualized across teammates.
   const [replyingTo, setReplyingTo] = useState<{ messageId: string; preview: string; author: string } | null>(null);
+  // Circle members surfaced in the @-palette so teammates can be tagged
+  // by autocomplete instead of remembering exact handles.
+  const [circleMembers, setCircleMembers] = useState<Array<{ user_id: string; name: string; username: string }>>([]);
   // Voice input via Web Speech API. Toggles by tapping the mic button
   // in the input row. Web only; native gets nothing.
   const [isListening, setIsListening] = useState(false);
@@ -2516,21 +2535,35 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     setTimeout(() => inputRef.current?.focus(), 50);
   }, []);
 
-  const filteredMentionFiles = useMemo<Array<{ id: string; name: string; meta?: boolean; description?: string }>>(() => {
+  const filteredMentionFiles = useMemo<Array<{ id: string; name: string; meta?: boolean; description?: string; kind?: 'file' | 'member' | 'meta' }>>(() => {
     if (!mentionPaletteOpen) return [];
     const q = mentionQuery;
-    const items: Array<{ id: string; name: string; meta?: boolean; description?: string }> = [];
-    // Meta-mention: @codebase injects the full room file list into the
-    // prompt as context (see send()). Show it first when the query is
-    // empty or matches "codebase" / "all" / "files".
+    const items: Array<{ id: string; name: string; meta?: boolean; description?: string; kind?: 'file' | 'member' | 'meta' }> = [];
+    // Meta-mention: @codebase
     const wantsCodebase = !q || 'codebase'.startsWith(q) || 'all'.startsWith(q) || 'files'.startsWith(q);
     if (wantsCodebase) {
-      items.push({ id: '__codebase__', name: 'codebase', meta: true, description: `Inject all ${roomFiles.length} room file${roomFiles.length === 1 ? '' : 's'} as context` });
+      items.push({ id: '__codebase__', name: 'codebase', meta: true, kind: 'meta', description: `Inject all ${roomFiles.length} room file${roomFiles.length === 1 ? '' : 's'} as context` });
+    }
+    // Members — match against display name or username, prefer the cleaner
+    // tagged form (no spaces, lowercase) when emitting the @ token.
+    const memberMatches = circleMembers
+      .filter((m) => {
+        if (!q) return true;
+        return m.name.toLowerCase().includes(q) || (m.username && m.username.toLowerCase().includes(q));
+      })
+      .slice(0, 4);
+    for (const m of memberMatches) {
+      const handle = (m.username || m.name).replace(/\s+/g, '').replace(/[^a-zA-Z0-9._-]/g, '');
+      if (!handle) continue;
+      // Skip the agent aliases that the send pipeline handles specially.
+      if (/^(agent|blackswan|swanbot|swan)$/i.test(handle)) continue;
+      items.push({ id: `member:${m.user_id}`, name: handle, kind: 'member', description: m.name });
     }
     const fileMatches = roomFiles.filter((f) => !q || f.name.toLowerCase().includes(q));
-    for (const f of fileMatches.slice(0, wantsCodebase ? 7 : 8)) items.push(f);
+    const remainingSlots = Math.max(0, 8 - items.length);
+    for (const f of fileMatches.slice(0, remainingSlots)) items.push({ ...f, kind: 'file' });
     return items;
-  }, [mentionPaletteOpen, mentionQuery, roomFiles]);
+  }, [mentionPaletteOpen, mentionQuery, roomFiles, circleMembers]);
 
   const filteredSlashCommands = useMemo<ChatSlashCommand[]>(() => {
     if (!slashPaletteOpen) return [];
@@ -3922,6 +3955,8 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             </View>
             {filteredMentionFiles.map((f, idx) => {
               const active = idx === paletteIndex;
+              const tagColor = f.kind === 'member' ? '#22d3ee' : f.kind === 'meta' ? accentColor : accentColor;
+              const tagLabel = f.kind === 'member' ? 'MEMBER' : f.kind === 'meta' ? 'META' : 'FILE';
               return (
                 <Pressable
                   key={f.id}
@@ -3933,8 +3968,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
                   ]}
                 >
                   <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-                    <Text style={[s.chatPaletteTitle, { color: accentColor }]}>@{f.name}</Text>
-                    {f.meta && f.description ? (
+                    <Text style={{ fontSize: 8, fontFamily: MONO, fontWeight: '900', letterSpacing: 0.6, color: tagColor + '99', minWidth: 40 }}>
+                      {tagLabel}
+                    </Text>
+                    <Text style={[s.chatPaletteTitle, { color: tagColor }]}>@{f.name}</Text>
+                    {f.description ? (
                       <Text style={s.chatPaletteDesc} numberOfLines={1}>{f.description}</Text>
                     ) : null}
                   </View>
