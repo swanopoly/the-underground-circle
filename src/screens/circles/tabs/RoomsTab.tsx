@@ -3878,11 +3878,37 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
 
       {/* Active file chip */}
       {activeFile && (
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 4, backgroundColor: '#0a0a10', borderTopWidth: 1, borderTopColor: '#1a1a28' }}>
-          <View style={{ width: 16, height: 16, borderRadius: 4, backgroundColor: accentColor + '20', justifyContent: 'center', alignItems: 'center' }}>
-            <Text style={{ color: accentColor, fontSize: 8, fontWeight: '800' }}>F</Text>
+        <View style={{ paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#0a0a10', borderTopWidth: 1, borderTopColor: '#1a1a28', gap: 6 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <View style={{ width: 16, height: 16, borderRadius: 4, backgroundColor: accentColor + '20', justifyContent: 'center', alignItems: 'center' }}>
+              <Text style={{ color: accentColor, fontSize: 8, fontWeight: '800' }}>F</Text>
+            </View>
+            <Text style={{ color: '#a0a0b0', fontSize: 10 }} numberOfLines={1}>Attached: {activeFile.name}</Text>
           </View>
-          <Text style={{ color: '#a0a0b0', fontSize: 10 }} numberOfLines={1}>Attached: {activeFile.name}</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+            {[
+              { label: 'Explain', prompt: `Explain what @${activeFile.name} does, how it's structured, and any non-obvious behavior.` },
+              { label: 'Review', prompt: `Review @${activeFile.name} for bugs, security issues, performance concerns, and code smells.` },
+              { label: 'Tests', prompt: `Generate unit tests for @${activeFile.name}. Cover edge cases.` },
+              { label: 'Refactor', prompt: `Suggest a refactor for @${activeFile.name} that improves clarity and reduces complexity. Output any changes as edit:${activeFile.name} blocks.` },
+              { label: 'Docs', prompt: `Write or update documentation comments for @${activeFile.name}. Output as edit:${activeFile.name}.` },
+              { label: 'Types', prompt: `Tighten the types in @${activeFile.name}. Replace any/unknown where safe, add explicit return types, surface any TS errors.` },
+            ].map((action) => (
+              <Pressable
+                key={action.label}
+                onPress={() => setInput(action.prompt)}
+                style={{
+                  paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999,
+                  borderWidth: 1, borderColor: accentColor + '40',
+                  backgroundColor: accentColor + '10',
+                  ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+                }}>
+                <Text style={{ color: accentColor, fontSize: 10, fontWeight: '800', letterSpacing: 0.4 }}>
+                  {action.label}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
         </View>
       )}
 
