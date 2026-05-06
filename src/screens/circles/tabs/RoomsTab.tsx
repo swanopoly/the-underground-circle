@@ -2473,6 +2473,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     input: any;
     resolve: (decision: 'approve' | 'reject') => void;
   } | null>(null);
+  // Settings / actions dropdown — consolidates Spawn, Runs, Export, Plan,
+  // Review, Model out of the panel header so it doesn't sprawl into 8
+  // separate buttons.
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
 
   const handleSessionProfileSelect = useCallback(async (nextProfile: SessionCodingProfile) => {
     setSessionProfile(nextProfile);
@@ -3672,18 +3676,23 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             </Text>
           </View>
         )}
-        <Pressable onPress={() => { setShowSpawnAgent(p => !p); if (showAssign) setShowAssign(false); }}
-          style={[chatSt.assignToggle, showSpawnAgent && { backgroundColor: '#22c55e15', borderColor: '#22c55e50' }]}>
-          <Text style={[chatSt.assignToggleText, showSpawnAgent && { color: '#22c55e' }]}>+ Spawn</Text>
-        </Pressable>
-        <Pressable onPress={() => setShowRunHistory(true)}
-          style={[s.panelBtn, { backgroundColor: '#0f172a', borderColor: '#1f2937' }]}>
-          <Text style={{ color: '#94a3b8', fontSize: 11, fontWeight: '700' }}>RUNS</Text>
-        </Pressable>
-        {Platform.OS === 'web' && messages.length > 0 ? (
-          <Pressable onPress={handleExportChat}
-            style={[s.panelBtn, { backgroundColor: '#0f172a', borderColor: '#1f2937' }]}>
-            <Text style={{ color: '#94a3b8', fontSize: 11, fontWeight: '700' }}>EXPORT .md</Text>
+        {/* Active-mode chips — only render when off-default so the header
+            stays clean. Each chip is tappable to flip the mode off. */}
+        {planMode ? (
+          <Pressable onPress={() => setPlanMode(false)} style={s.modeChip}>
+            <Text style={[s.modeChipText, { color: '#f59e0b' }]}>◷ PLAN</Text>
+          </Pressable>
+        ) : null}
+        {toolApprovalMode === 'review' ? (
+          <Pressable onPress={() => setToolApprovalMode('yolo')} style={s.modeChip}>
+            <Text style={[s.modeChipText, { color: '#22c55e' }]}>⏸ REVIEW</Text>
+          </Pressable>
+        ) : null}
+        {modelOverride !== 'auto' ? (
+          <Pressable onPress={() => setModelOverride('auto')} style={s.modeChip}>
+            <Text style={[s.modeChipText, { color: accentColor }]}>
+              {modelOverride === 'claude-haiku-4-5' ? 'HAIKU' : modelOverride === 'claude-sonnet-4-6' ? 'SONNET' : 'OPUS'}
+            </Text>
           </Pressable>
         ) : null}
         <Pressable onPress={() => setShowFilterBar((v) => !v)}
@@ -3695,61 +3704,91 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             FIND{pinnedOnly || searchQuery ? ' ●' : ''}
           </Text>
         </Pressable>
-        <Pressable onPress={() => setPlanMode((v) => !v)}
-          style={[
-            s.panelBtn,
-            planMode
-              ? { backgroundColor: '#f59e0b15', borderColor: '#f59e0b66' }
-              : { backgroundColor: '#0f172a', borderColor: '#1f2937' },
-          ]}>
-          <Text style={{ color: planMode ? '#f59e0b' : '#94a3b8', fontSize: 11, fontWeight: '700' }}>
-            {planMode ? '◷ PLAN' : 'PLAN'}
-          </Text>
-        </Pressable>
-        <Pressable onPress={() => setToolApprovalMode((m) => m === 'yolo' ? 'review' : 'yolo')}
-          style={[
-            s.panelBtn,
-            toolApprovalMode === 'review'
-              ? { backgroundColor: '#22c55e15', borderColor: '#22c55e66' }
-              : { backgroundColor: '#0f172a', borderColor: '#1f2937' },
-          ]}>
-          <Text style={{
-            color: toolApprovalMode === 'review' ? '#22c55e' : '#94a3b8',
-            fontSize: 11, fontWeight: '700', fontFamily: MONO, letterSpacing: 0.4,
-          }}>
-            {toolApprovalMode === 'review' ? '⏸ REVIEW' : '⚡ YOLO'}
-          </Text>
-        </Pressable>
-        <Pressable onPress={() => {
-          // Cycle: auto → haiku → sonnet → opus → auto
-          setModelOverride((m) => {
-            if (m === 'auto') return 'claude-haiku-4-5';
-            if (m === 'claude-haiku-4-5') return 'claude-sonnet-4-6';
-            if (m === 'claude-sonnet-4-6') return 'claude-opus-4-7';
-            return 'auto';
-          });
-        }}
-          style={[
-            s.panelBtn,
-            modelOverride !== 'auto'
-              ? { backgroundColor: accentColor + '15', borderColor: accentColor + '40' }
-              : { backgroundColor: '#0f172a', borderColor: '#1f2937' },
-          ]}>
-          <Text style={{
-            color: modelOverride !== 'auto' ? accentColor : '#94a3b8',
-            fontSize: 11, fontWeight: '700', fontFamily: MONO, letterSpacing: 0.4,
-          }}>
-            {modelOverride === 'auto' ? 'MODEL: AUTO'
-              : modelOverride === 'claude-haiku-4-5' ? 'HAIKU 4.5'
-              : modelOverride === 'claude-sonnet-4-6' ? 'SONNET 4.6'
-              : 'OPUS 4.7'}
-          </Text>
-        </Pressable>
         <Pressable onPress={() => { setShowAssign(p => !p); if (showSpawnAgent) setShowSpawnAgent(false); }}
           style={[s.panelBtn, { backgroundColor: accentColor + '15', borderColor: accentColor + '40' }]}>
           <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }}>Assign</Text>
         </Pressable>
+        <Pressable onPress={() => setShowMoreMenu((v) => !v)}
+          style={[
+            s.panelBtn,
+            { backgroundColor: showMoreMenu ? '#1f2937' : '#0f172a', borderColor: '#1f2937' },
+          ]}>
+          <Text style={{ color: '#94a3b8', fontSize: 14, fontWeight: '900', lineHeight: 14 }}>⋯</Text>
+        </Pressable>
       </View>
+      {showMoreMenu ? (
+        <>
+          <Pressable
+            onPress={() => setShowMoreMenu(false)}
+            style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 99 }}
+          />
+          <View style={s.moreMenu}>
+            <View style={s.moreMenuSection}>
+              <Text style={s.moreMenuLabel}>MODE</Text>
+              <Pressable
+                onPress={() => { setPlanMode((v) => !v); }}
+                style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                <Text style={[s.moreMenuItemText, planMode && { color: '#f59e0b', fontWeight: '900' }]}>
+                  ◷ Plan-only mode
+                </Text>
+                <Text style={s.moreMenuItemHint}>{planMode ? 'ON' : 'OFF'}</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => { setToolApprovalMode((m) => m === 'yolo' ? 'review' : 'yolo'); }}
+                style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                <Text style={[s.moreMenuItemText, toolApprovalMode === 'review' && { color: '#22c55e', fontWeight: '900' }]}>
+                  {toolApprovalMode === 'review' ? '⏸' : '⚡'} {toolApprovalMode === 'review' ? 'Review each tool' : 'YOLO (auto-approve)'}
+                </Text>
+                <Text style={s.moreMenuItemHint}>{toolApprovalMode === 'review' ? 'REVIEW' : 'YOLO'}</Text>
+              </Pressable>
+            </View>
+
+            <View style={s.moreMenuDivider} />
+
+            <View style={s.moreMenuSection}>
+              <Text style={s.moreMenuLabel}>MODEL</Text>
+              {([
+                { id: 'auto', label: 'Auto (smart route)' },
+                { id: 'claude-haiku-4-5', label: 'Haiku 4.5 — fast' },
+                { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6 — balanced' },
+                { id: 'claude-opus-4-7', label: 'Opus 4.7 — deep reasoning' },
+              ] as Array<{ id: typeof modelOverride; label: string }>).map((opt) => (
+                <Pressable
+                  key={opt.id}
+                  onPress={() => setModelOverride(opt.id)}
+                  style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                  <View style={{ width: 12, height: 12, borderRadius: 999, borderWidth: 1, borderColor: modelOverride === opt.id ? accentColor : '#1f2937', backgroundColor: modelOverride === opt.id ? accentColor : 'transparent' }} />
+                  <Text style={[s.moreMenuItemText, modelOverride === opt.id && { color: accentColor, fontWeight: '900' }]}>{opt.label}</Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <View style={s.moreMenuDivider} />
+
+            <View style={s.moreMenuSection}>
+              <Text style={s.moreMenuLabel}>ACTIONS</Text>
+              <Pressable
+                onPress={() => { setShowMoreMenu(false); setShowSpawnAgent(true); if (showAssign) setShowAssign(false); }}
+                style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                <Text style={s.moreMenuItemText}>+ Spawn agent</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => { setShowMoreMenu(false); setShowRunHistory(true); }}
+                style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                <Text style={s.moreMenuItemText}>↻ Run history</Text>
+              </Pressable>
+              {Platform.OS === 'web' && messages.length > 0 ? (
+                <Pressable
+                  onPress={() => { setShowMoreMenu(false); handleExportChat(); }}
+                  style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                  <Text style={s.moreMenuItemText}>⤓ Export chat (.md)</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          </View>
+        </>
+      ) : null}
+
       <RunHistoryDrawer
         visible={showRunHistory}
         circleId={circleId || ''}
@@ -7552,6 +7591,75 @@ const s = StyleSheet.create({
   inputHintKey: {
     color: '#94a3b8',
     fontWeight: '900',
+  },
+  modeChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#1f2937',
+    backgroundColor: '#0d1320',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  modeChipText: {
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+    fontFamily: MONO,
+  },
+  moreMenu: {
+    position: 'absolute',
+    top: 44,
+    right: 12,
+    minWidth: 220,
+    backgroundColor: '#0a0e1a',
+    borderWidth: 1,
+    borderColor: '#1f2937',
+    borderRadius: 12,
+    paddingVertical: 6,
+    zIndex: 100,
+    ...(Platform.OS === 'web'
+      ? { boxShadow: '0 16px 36px rgba(0,0,0,0.7)' } as any
+      : { elevation: 10 }),
+  },
+  moreMenuSection: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  moreMenuLabel: {
+    color: '#475569',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 1.2,
+    fontFamily: MONO,
+    paddingHorizontal: 6,
+    paddingVertical: 4,
+  },
+  moreMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    borderRadius: 8,
+    gap: 8,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  moreMenuItemText: {
+    color: '#cbd5e1',
+    fontSize: 12,
+    fontWeight: '700',
+    flex: 1,
+  },
+  moreMenuItemHint: {
+    color: '#475569',
+    fontSize: 10,
+    fontFamily: MONO,
+  },
+  moreMenuDivider: {
+    height: 1,
+    backgroundColor: '#1f2937',
+    marginVertical: 4,
+    marginHorizontal: 8,
   },
 
   // APIs
