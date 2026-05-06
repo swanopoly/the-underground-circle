@@ -113,6 +113,7 @@ import { pickThinkingVerb } from '../../../lib/thinkingVerbs';
 import ComputerUseConsole from '../../../components/computer-use/ComputerUseConsole';
 import ChatCostFooter from '../../../components/ChatCostFooter';
 import DesktopBridgeStatusChip from '../../../components/DesktopBridgeStatusChip';
+import WebSearchStatusChip from '../../../components/WebSearchStatusChip';
 import RunApprovalBanner from '../../../components/RunApprovalBanner';
 import RecordingBadge from '../../../components/RecordingBadge';
 import { useComputerUseTask } from '../../../lib/useComputerUseTask';
@@ -8408,32 +8409,10 @@ function EnhancedInput({
           )}
         </View>
 
-        {/* Web Search toggle (Phase 0 — OpenRouter) — globe icon flips
-            on a per-circle setting. When on, the next chat message is
-            answered through OpenRouter with the openrouter:web_search
-            server tool so the model can fetch current facts. */}
-        {onToggleWebSearch && (
-          <Pressable
-            onPress={onToggleWebSearch}
-            accessibilityRole="button"
-            accessibilityLabel={`Web search: ${webSearchEnabled ? 'on' : 'off'}`}
-            style={[
-              styles.modelButton,
-              {
-                borderColor: webSearchEnabled ? '#22c55e80' : '#1e293b',
-                backgroundColor: webSearchEnabled ? '#22c55e15' : 'transparent',
-              },
-              ...(Platform.OS === 'web' ? [{ transition: 'all 0.2s ease', cursor: 'pointer' } as any] : []),
-            ]}
-          >
-            <View style={[styles.modelIconBox, { backgroundColor: webSearchEnabled ? '#22c55e20' : '#1e293b' }]}>
-              <Text style={[styles.modelIconText, { color: webSearchEnabled ? '#22c55e' : '#64748b' }]}>🌐</Text>
-            </View>
-            <Text style={[styles.modelButtonLabel, { color: webSearchEnabled ? '#22c55e' : '#64748b' }]}>
-              {webSearchEnabled ? 'Web On' : 'Web'}
-            </Text>
-          </Pressable>
-        )}
+        {/* Web Search toggle moved to the small status-chip row next
+            to the DESKTOP chip — keeps the composer toolbar focused on
+            the model picker / quick actions and groups capability
+            indicators where the cost footer already lives. */}
 
         {/* Quick Actions Button */}
         <View style={{ position: 'relative' as const }}>
@@ -8840,8 +8819,16 @@ function EnhancedInput({
           )}
         </View>
 
-        {/* Cost footer + Desktop bridge status — right-aligned. */}
+        {/* Cost footer + capability chips — right-aligned. WEB and
+            DESKTOP share the same chip shape so the row reads as a
+            single density of capability indicators. */}
         <View style={{ flex: 1 }} />
+        {onToggleWebSearch && (
+          <WebSearchStatusChip
+            enabled={!!webSearchEnabled}
+            onToggle={onToggleWebSearch}
+          />
+        )}
         <DesktopBridgeStatusChip
           accentColor={accentColor}
           onMessage={(md) => onLocalBotMessage?.(md)}
