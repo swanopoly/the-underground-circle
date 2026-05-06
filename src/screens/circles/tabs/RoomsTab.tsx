@@ -2371,6 +2371,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // File-peek overlay — when user taps an @filename in a past message,
   // we lazy-fetch its content and render in an inline overlay.
   const [peekFile, setPeekFile] = useState<{ name: string; content: string | null; loading: boolean } | null>(null);
+  // Reply target — when set, the next outgoing message gets a quoted
+  // reference to the chosen message and metadata.replies_to so the
+  // thread can be visualized across teammates.
+  const [replyingTo, setReplyingTo] = useState<{ messageId: string; preview: string; author: string } | null>(null);
   // Voice input via Web Speech API. Toggles by tapping the mic button
   // in the input row. Web only; native gets nothing.
   const [isListening, setIsListening] = useState(false);
@@ -2774,6 +2778,13 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     } catch {}
   }, []);
 
+  const handleReplyToMessage = useCallback((msg: RoomMessage) => {
+    const author = msg.message_type === 'agent_output' ? (msg.agent_name || 'Agent') : (msg.agent_name || 'Member');
+    const preview = (msg.content || '').slice(0, 140).trim();
+    setReplyingTo({ messageId: msg.id, preview, author });
+    try { inputRef.current?.focus(); } catch {}
+  }, []);
+
   // Apply an AI-proposed file change. Looks up the room_files row by
   // name; if missing, creates a new file. Posts an edit_event so the
   // team sees what was applied even if they were scrolled up.
@@ -3052,6 +3063,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
     const isAtMentioningSomeoneElse = /^@(?!agent|blackswan|swanbot|swan\b)\w/i.test(content.trim());
     const imagesPayload = pastedImages.length > 0 ? pastedImages.slice() : null;
     if (imagesPayload) setPastedImages([]);
+    const replySnapshot = replyingTo ? { ...replyingTo } : null;
+    if (replySnapshot) setReplyingTo(null);
+    const replyMetadata = replySnapshot
+      ? { replies_to: replySnapshot.messageId, replies_to_author: replySnapshot.author, replies_to_preview: replySnapshot.preview }
+      : null;
 
     if (isAtMentioningSomeoneElse) {
       await supabase.from('room_messages').insert({
@@ -3062,6 +3078,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
         metadata: {
           ...(activeFile ? { attached_file: activeFile.name } : {}),
           ...(imagesPayload ? { images: imagesPayload } : {}),
+          ...(replyMetadata || {}),
         },
       });
       return;
@@ -3091,7 +3108,10 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
           recentMessages: recentForAI,
           availableFiles: roomFiles,
           profile: sessionProfile,
-          extraMetadata: imagesPayload ? { images: imagesPayload } : undefined,
+          extraMetadata: {
+            ...(imagesPayload ? { images: imagesPayload } : {}),
+            ...(replyMetadata || {}),
+          },
           promptPrefix: planPromptPrefix,
           modelOverride,
           onStageChange: (_stage, label) => setCurrentRunStep(label),
@@ -3811,6 +3831,7 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
               getFileContentForDiff={getFileContentForDiff}
               onPeekFile={handlePeekFile}
               knownFileNames={roomFileNameSet}
+              onReply={handleReplyToMessage}
               busy={botTyping}
               dimmed={dimmed}
               isCutoff={isCutoff}
@@ -3924,6 +3945,29 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             })}
           </View>
         )}
+
+        {replyingTo ? (
+          <View style={{
+            flexDirection: 'row', alignItems: 'center', gap: 10,
+            paddingHorizontal: 12, paddingVertical: 8,
+            backgroundColor: accentColor + '10',
+            borderTopWidth: 1, borderTopColor: accentColor + '33',
+          }}>
+            <View style={{ width: 3, alignSelf: 'stretch', backgroundColor: accentColor, borderRadius: 2 }} />
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={{ color: accentColor, fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: MONO }}>
+                ↩ REPLYING TO {replyingTo.author.toUpperCase()}
+              </Text>
+              <Text style={{ color: '#cbd5e1', fontSize: 11, fontStyle: 'italic' }} numberOfLines={2}>
+                {replyingTo.preview || '(empty message)'}
+              </Text>
+            </View>
+            <Pressable onPress={() => setReplyingTo(null)} hitSlop={6}
+              style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, backgroundColor: '#1f2937' }}>
+              <Text style={{ color: '#cbd5e1', fontSize: 10, fontWeight: '800' }}>Cancel</Text>
+            </Pressable>
+          </View>
+        ) : null}
 
         {pastedImages.length > 0 && (
           <View style={s.pastedImageRow}>
@@ -4553,7 +4597,7 @@ function FileProposalCard({ proposal, lineCount, accentColor, applied, rejected,
   );
 }
 
-const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, onContinue, onRerun, onApplyProposal, onRejectProposal, getFileContentForDiff, onPeekFile, knownFileNames, busy, dimmed, isCutoff }: {
+const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, onContinue, onRerun, onApplyProposal, onRejectProposal, getFileContentForDiff, onPeekFile, knownFileNames, onReply, busy, dimmed, isCutoff }: {
   msg: RoomMessage;
   accentColor: string;
   circleId: string;
@@ -4573,6 +4617,7 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
   getFileContentForDiff?: (fileName: string) => Promise<string | null>;
   onPeekFile?: (fileName: string) => void;
   knownFileNames?: Set<string>;
+  onReply?: (msg: RoomMessage) => void;
   busy?: boolean;
   dimmed?: boolean;
   isCutoff?: boolean;
@@ -4584,6 +4629,9 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
     : [];
   const pinned = !!(msg.metadata as any)?.pinned;
   const dimStyle = dimmed ? { opacity: 0.45 } : null;
+  const repliesTo: { author?: string; preview?: string } | null = (msg.metadata as any)?.replies_to
+    ? { author: (msg.metadata as any)?.replies_to_author, preview: (msg.metadata as any)?.replies_to_preview }
+    : null;
   // Parse any ```edit:filename``` proposals out of agent responses so we can
   // surface Apply / Reject cards. Strip them from the visible text below
   // (the cards carry the path + content already).
@@ -4649,8 +4697,28 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
               <Text style={{color: isCutoff ? accentColor : '#94a3b8', fontSize: 11, fontWeight: '900'}}>↻</Text>
             </Pressable>
           )}
+          {onReply && (
+            <Pressable onPress={() => onReply(msg)} hitSlop={6}
+              style={{ opacity: 0.5, paddingHorizontal: 4 } as any}>
+              <Text style={{color: '#94a3b8', fontSize: 11, fontWeight: '900'}}>↩</Text>
+            </Pressable>
+          )}
           {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
         </View>
+        {repliesTo ? (
+          <View style={{
+            borderLeftWidth: 2, borderLeftColor: accentColor + '88',
+            paddingLeft: 8, paddingVertical: 3, marginBottom: 6,
+            backgroundColor: accentColor + '0a', borderRadius: 6,
+          }}>
+            <Text style={{ color: accentColor, fontSize: 9, letterSpacing: 0.6, fontFamily: MONO, fontWeight: '900' }}>
+              ↩ REPLYING TO {(repliesTo.author || 'MESSAGE').toUpperCase()}
+            </Text>
+            <Text style={{ color: '#cbd5e1', fontSize: 11, fontStyle: 'italic' }} numberOfLines={2}>
+              {repliesTo.preview}
+            </Text>
+          </View>
+        ) : null}
         {isTask ? (
           <Text style={{color:'#ccc',fontSize:12,lineHeight:18}}>{msg.metadata?.prompt || msg.content}</Text>
         ) : (
@@ -4795,8 +4863,29 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
             <Text style={{color: isCutoff ? accentColor : '#94a3b8', fontSize: 11, fontWeight: '900'}}>↻</Text>
           </Pressable>
         )}
+        {onReply && (
+          <Pressable onPress={() => onReply(msg)} hitSlop={6}
+            style={{ opacity: 0.5, paddingHorizontal: 4 } as any}>
+            <Text style={{color: '#94a3b8', fontSize: 11, fontWeight: '900'}}>↩</Text>
+          </Pressable>
+        )}
         {onDelete && <Pressable onPress={() => onDelete(msg.id)} hitSlop={6} style={{ opacity: 0.5, paddingHorizontal: 4 } as any}><Text style={{color:'#f85149',fontSize:12,fontWeight:'700'}}>×</Text></Pressable>}
       </View>
+      {repliesTo ? (
+        <View style={{
+          marginLeft: 28, marginBottom: 4,
+          borderLeftWidth: 2, borderLeftColor: accentColor + '88',
+          paddingLeft: 8, paddingVertical: 3,
+          backgroundColor: accentColor + '0a', borderRadius: 6,
+        }}>
+          <Text style={{ color: accentColor, fontSize: 9, letterSpacing: 0.6, fontFamily: MONO, fontWeight: '900' }}>
+            ↩ REPLYING TO {(repliesTo.author || 'MESSAGE').toUpperCase()}
+          </Text>
+          <Text style={{ color: '#cbd5e1', fontSize: 11, fontStyle: 'italic' }} numberOfLines={2}>
+            {repliesTo.preview}
+          </Text>
+        </View>
+      ) : null}
       <View style={{ marginLeft: 28 }}>
         {parseChatSegments(msg.content || '').map((seg, idx) => (
           seg.type === 'code'
