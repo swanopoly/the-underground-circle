@@ -12,7 +12,6 @@ import {
 import WordPressConnector from '../../../components/integrations/WordPressConnector';
 import WordPressPostForm from '../../../components/integrations/WordPressPostForm';
 import LoadingWave from '../../../components/LoadingWave';
-import LlmProviderMarketplace from '../../../components/marketplace/LlmProviderMarketplace';
 import {
   CIRCLE_INTEGRATION_CATALOG,
   CIRCLE_INTEGRATION_GROUPS,
@@ -976,12 +975,13 @@ export default function MarketplaceTab({
             </View>
           </View>
 
-          {/* AI Models & APIs — connect once, every chat / agent /
-              automation surface that goes through llm-proxy uses these
-              keys. Sits prominently above the rest of the marketplace
-              because routing the right model is upstream of every
-              other connector decision. */}
-          <LlmProviderMarketplace circleId={circleId} />
+          {/* LLM providers (OpenRouter, Hugging Face, Replicate, Modal)
+              live in the generic marketplace card grid below — there
+              used to be a separate LlmProviderMarketplace panel here
+              that wrote per-user keys to a different table; that
+              created two places to enter the same credential. Removed
+              so the chat picker has a single source of truth via
+              circle_integration_secrets. */}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
             {([
               { key: 'all', label: 'All' },

@@ -1749,11 +1749,17 @@ async function logHfActivity(
 // provider using the API key the team stored in `circle_integration_secrets`.
 // Secrets are written client-side as base64(utf-8) — see
 // `encodeSecret` in src/lib/circleIntegrations.ts. Service role bypasses RLS.
+//
+// Each provider stores its credential under a different `key` in
+// circle_integration_secrets (matches `requiredSecretKeys` in
+// INTEGRATION_DEFINITIONS — OpenRouter uses `api_key`, HF and Replicate
+// use `api_token`). We try the canonical key first, then fall back to
+// the alternate so legacy keys aren't lost.
 async function loadCircleProviderApiKey(
   supabase: any,
   circleId: string,
   provider: string,
-  key = "api_key",
+  preferredKey?: string,
 ): Promise<string | null> {
   try {
     const { data: integ } = await supabase
@@ -1767,13 +1773,30 @@ async function loadCircleProviderApiKey(
       .limit(1)
       .maybeSingle();
     if (!integ?.id) return null;
-    const { data: secret } = await supabase
+
+    const candidateKeys: string[] = preferredKey
+      ? [preferredKey]
+      : provider === "openrouter"
+        ? ["api_key", "api_token"]
+        : provider === "hugging_face" || provider === "replicate"
+          ? ["api_token", "api_key"]
+          : ["api_key", "api_token"];
+
+    const { data: rows } = await supabase
       .from("circle_integration_secrets")
-      .select("value_encrypted")
+      .select("key, value_encrypted")
       .eq("integration_id", integ.id)
-      .eq("key", key)
-      .maybeSingle();
-    const enc = secret?.value_encrypted;
+      .in("key", candidateKeys);
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+
+    // Pick the row matching the highest-priority key from the candidate
+    // list (preserves preferredKey > canonical > legacy ordering).
+    let chosen: { key: string; value_encrypted: string } | undefined;
+    for (const k of candidateKeys) {
+      chosen = rows.find((r: any) => r.key === k);
+      if (chosen) break;
+    }
+    const enc = chosen?.value_encrypted;
     if (!enc || typeof enc !== "string") return null;
     const bytes = Uint8Array.from(atob(enc), (c) => c.charCodeAt(0));
     return new TextDecoder("utf-8").decode(bytes);

@@ -43,7 +43,7 @@ export async function getChatWebSearchSettings(circleId: string): Promise<ChatWe
     const { data, error } = await supabase
       .from('circles')
       .select('settings')
-      .eq('circle_id', circleId)
+      .eq('id', circleId)
       .maybeSingle();
     if (error || !data) return { ...DEFAULTS };
     return coerce((data.settings as any)?.chatWebSearch);
@@ -60,11 +60,11 @@ export async function setChatWebSearchEnabled(
   const { data: existing } = await supabase
     .from('circles')
     .select('settings')
-    .eq('circle_id', circleId)
+    .eq('id', circleId)
     .maybeSingle();
   const current = coerce((existing?.settings as any)?.chatWebSearch);
   const next: ChatWebSearchSettings = { ...current, enabled };
   const merged = { ...(existing?.settings || {}), chatWebSearch: next };
-  await supabase.from('circles').update({ settings: merged }).eq('circle_id', circleId);
+  await supabase.from('circles').update({ settings: merged }).eq('id', circleId);
   return next;
 }
