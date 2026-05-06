@@ -69,7 +69,8 @@ import RunCostDrawer from './chat/RunCostDrawer';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
 import { createStagedFile, revokeStagedPreviews, uploadAttachment, type StagedFile } from '../../../lib/chatAttachments';
-import { soulKeyForProfile } from '../../../lib/serviceProfileSouls';
+import { soulKeyForProfile, resolveModelForProfile } from '../../../lib/serviceProfileSouls';
+import { analyzeMessageRouting } from '../../../lib/messageRouting';
 import { dispatchBridgeTask, wakeAndAssignTask } from '../../../lib/bridgeTaskDispatcher';
 import SpawnAgentPanel from '../../../components/SpawnAgentPanel';
 import { storage } from '../../../lib/storage';
@@ -251,7 +252,12 @@ const BLACKSWAN_ID = 'blackswan';
 const LOGIN_NEON = '#b8ff61';
 const CHAT_SURFACE_MAX_WIDTH = 1680;
 const SESSION_FALLBACK_TITLE = 'OpenSwan Session';
-const DEFAULT_CHAT_MODEL = 'claude-sonnet-4-6';
+// Auto is the default — the runtime resolver in serviceProfileSouls
+// picks Haiku for casual / status / clarifying turns, Sonnet for
+// general code + design, and Opus for research / architecture / deep
+// debugging. Pinning a static Sonnet default meant Auto was almost
+// never engaged and users paid Sonnet rates for "hi" and "thanks".
+const DEFAULT_CHAT_MODEL = 'auto';
 function shortenAddress(address: string | null | undefined): string {
   const value = String(address || '');
   if (value.length <= 12) return value;
@@ -7815,7 +7821,14 @@ const CHAT_MODE_CONFIG = getSelectableChatModes().map((policy) => ({
 
 const CHAT_MODELS = [
   // ── Smart Pick ──
-  { id: 'auto', label: 'Auto', desc: 'Auto-routes to best model for your task', color: '#22c55e', icon: 'A', group: 'smart', tags: ['text', 'code', 'images', 'web'] },
+  // Default. Routes by detected intent + complexity:
+  //   casual / status     → Haiku 4.5 (cheap + fast)
+  //   question / debug    → Sonnet 4.6 (or Haiku if simple)
+  //   research / architect → Opus 4.7 (deep reasoning)
+  //   build / review      → Sonnet 4.6, Opus when complex
+  // Picks the cheapest model that meets the bar so the per-turn cost
+  // stays sane while one-off heavy turns still get the headroom.
+  { id: 'auto', label: 'Auto', desc: 'Smart route by intent — Haiku for chat, Sonnet for code, Opus for research', color: '#22c55e', icon: 'A', group: 'smart', tags: ['text', 'code', 'reason'] },
 
   // ── Coding & Engineering ──
   { id: 'claude-opus-4-6', label: 'Opus 4.6', desc: 'Best coder alive. Complex architecture.', color: '#a855f7', icon: 'O', group: 'code', tags: ['code', 'text', 'web'] },
@@ -8256,6 +8269,37 @@ function EnhancedInput({
 
   const allModels = [...CHAT_MODELS, ...customModels];
   const currentModel = allModels.find(m => m.id === selectedModel) || CHAT_MODELS[0];
+
+  // Live Auto preview — when selectedModel is 'auto', resolve what the
+  // runtime would actually pick for the current input, given the active
+  // SOUL profile. Updates as the user types so they can see the routing
+  // shift between Haiku / Sonnet / Opus before they hit send. Empty
+  // input falls back to the SOUL default (usually Sonnet).
+  const autoResolvedModel = useMemo(() => {
+    if (selectedModel !== 'auto') return null;
+    try {
+      const draft = (input || '').trim();
+      const intent = draft.length > 0
+        ? analyzeMessageRouting(draft, 'main_chat').route.intent
+        : undefined;
+      const resolved = resolveModelForProfile(
+        (sessionProfile as any) || 'senior',
+        null,
+        intent,
+      );
+      return resolved;
+    } catch {
+      return null;
+    }
+  }, [selectedModel, input, sessionProfile]);
+
+  const autoResolvedShortLabel = useMemo(() => {
+    if (!autoResolvedModel) return null;
+    if (autoResolvedModel.includes('opus')) return 'Opus';
+    if (autoResolvedModel.includes('sonnet')) return 'Sonnet';
+    if (autoResolvedModel.includes('haiku')) return 'Haiku';
+    return autoResolvedModel.replace(/^claude-/, '').split('-').slice(0, 2).join(' ');
+  }, [autoResolvedModel]);
   const soulActions = getMainChatSessionActions(sessionProfile || 'senior');
   const controlStatusLabel = currentRunStep?.trim()
     || (runStatus === 'running' ? 'thinking'
@@ -8300,13 +8344,18 @@ function EnhancedInput({
             <View style={[styles.modelIconBox, { backgroundColor: currentModel.color + '20' }]}>
               <Text style={[styles.modelIconText, { color: currentModel.color }]}>{currentModel.icon}</Text>
             </View>
-            <Text style={[styles.modelButtonLabel, { color: currentModel.color }]}>{currentModel.label}</Text>
+            <Text style={[styles.modelButtonLabel, { color: currentModel.color }]}>
+              {currentModel.label}
+              {selectedModel === 'auto' && autoResolvedShortLabel ? (
+                <Text style={{ color: '#94a3b8', fontWeight: '500' }}>{` → ${autoResolvedShortLabel}`}</Text>
+              ) : null}
+            </Text>
             <Text style={styles.modelChevron}>{showModelPicker ? '▲' : '▼'}</Text>
           </Pressable>
 
           {/* Model Dropdown */}
           {showModelPicker && !showAddModel && (
-            <AnimatedPopup style={[styles.dropdownPanel, { maxHeight: 480, width: 300, left: 0, right: 'auto' }, ...(Platform.OS === 'web' ? [{ boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)', overflowY: 'auto' } as any] : [])]}>
+            <AnimatedPopup style={[styles.dropdownPanel, { maxHeight: 480, width: 320, left: 0, right: 'auto' }, ...(Platform.OS === 'web' ? [{ boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)', overflowY: 'auto' } as any] : [])]}>
               {MODEL_GROUPS.map(group => {
                 const groupModels = CHAT_MODELS.filter((m: any) => m.group === group.key);
                 if (groupModels.length === 0) return null;
@@ -8316,6 +8365,14 @@ function EnhancedInput({
                     {groupModels.map((model: any) => {
                       const isActive = model.id === selectedModel;
                       const isHovered = hoveredModel === model.id;
+                      // Auto entry gets the live resolution preview
+                      // appended to the description so users see what
+                      // it WOULD route to right now without having to
+                      // expand a tooltip.
+                      const isAuto = model.id === 'auto';
+                      const autoExtra = isAuto && autoResolvedShortLabel
+                        ? ` · resolves to ${autoResolvedShortLabel}${input.trim() ? ' for this prompt' : ' by default'}`
+                        : '';
                       return (
                         <Pressable
                           key={model.id}
@@ -8327,6 +8384,10 @@ function EnhancedInput({
                             styles.dropdownItem,
                             isActive && { backgroundColor: model.color + '18', borderColor: model.color + '40' },
                             isHovered && !isActive && { backgroundColor: '#1a1a28' },
+                            // Auto gets a permanent accent border so it
+                            // reads as "the recommended default" even
+                            // when another model is currently picked.
+                            isAuto && !isActive && { borderColor: model.color + '40' },
                             ...(Platform.OS === 'web' ? [{ transition: 'all 0.15s ease', cursor: 'pointer' } as any] : []),
                           ]}
                         >
@@ -8334,8 +8395,13 @@ function EnhancedInput({
                             <Text style={[styles.dropdownItemIconText, { color: model.color }]}>{model.icon}</Text>
                           </View>
                           <View style={styles.dropdownItemText}>
-                            <Text style={[styles.dropdownItemLabel, isActive && { color: model.color }]}>{model.label}</Text>
-                            <Text style={styles.dropdownItemDesc}>{model.desc}</Text>
+                            <Text style={[styles.dropdownItemLabel, isActive && { color: model.color }]}>
+                              {model.label}
+                              {isAuto && autoResolvedShortLabel ? (
+                                <Text style={{ color: model.color, fontWeight: '600', fontSize: 11 }}>{`  →  ${autoResolvedShortLabel}`}</Text>
+                              ) : null}
+                            </Text>
+                            <Text style={styles.dropdownItemDesc}>{model.desc}{autoExtra}</Text>
                             {(model as any).tags && (
                               <View style={{ flexDirection: 'row', gap: 3, marginTop: 2, flexWrap: 'wrap' }}>
                                 {((model as any).tags as string[]).map((tag: string) => {
