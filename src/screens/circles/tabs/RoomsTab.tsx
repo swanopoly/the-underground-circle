@@ -2394,6 +2394,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // Circle members surfaced in the @-palette so teammates can be tagged
   // by autocomplete instead of remembering exact handles.
   const [circleMembers, setCircleMembers] = useState<Array<{ user_id: string; name: string; username: string }>>([]);
+  // Current user id — needed by MsgBubble to highlight "my reaction".
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setCurrentUserId(data?.user?.id || null)).catch(() => {});
+  }, []);
   // Voice input via Web Speech API. Toggles by tapping the mic button
   // in the input row. Web only; native gets nothing.
   const [isListening, setIsListening] = useState(false);
@@ -2810,6 +2815,28 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
       await navigator.clipboard?.writeText(text);
     } catch {}
   }, []);
+
+  const handleToggleReaction = useCallback(async (msgId: string, kind: 'ack' | 'important' | 'question') => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    const target = messages.find((m) => m.id === msgId);
+    if (!target) return;
+    const meta = (target.metadata as any) || {};
+    const reactions = (meta.reactions || {}) as Record<string, string[]>;
+    const current = Array.isArray(reactions[kind]) ? reactions[kind].slice() : [];
+    const idx = current.indexOf(user.id);
+    if (idx >= 0) current.splice(idx, 1);
+    else current.push(user.id);
+    const nextReactions = { ...reactions, [kind]: current };
+    if (current.length === 0) delete nextReactions[kind];
+    const nextMeta = { ...meta, reactions: nextReactions };
+    setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, metadata: nextMeta } : m)));
+    const { error } = await supabase.from('room_messages').update({ metadata: nextMeta }).eq('id', msgId);
+    if (error) {
+      // Revert on RLS error
+      setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, metadata: target.metadata } : m)));
+    }
+  }, [messages]);
 
   const handleReplyToMessage = useCallback((msg: RoomMessage) => {
     const author = msg.message_type === 'agent_output' ? (msg.agent_name || 'Agent') : (msg.agent_name || 'Member');
@@ -3865,6 +3892,8 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
               onPeekFile={handlePeekFile}
               knownFileNames={roomFileNameSet}
               onReply={handleReplyToMessage}
+              onReact={handleToggleReaction}
+              currentUserId={currentUserId}
               busy={botTyping}
               dimmed={dimmed}
               isCutoff={isCutoff}
@@ -4680,7 +4709,7 @@ function FileProposalCard({ proposal, lineCount, accentColor, applied, rejected,
   );
 }
 
-const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, onContinue, onRerun, onApplyProposal, onRejectProposal, getFileContentForDiff, onPeekFile, knownFileNames, onReply, busy, dimmed, isCutoff }: {
+const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, roomId, sessionProfile, onRunLedgerUpdate, onRetryCheck, retryingCheckId, onDelete, onTogglePin, onBranch, onCopy, onContinue, onRerun, onApplyProposal, onRejectProposal, getFileContentForDiff, onPeekFile, knownFileNames, onReply, onReact, currentUserId, busy, dimmed, isCutoff }: {
   msg: RoomMessage;
   accentColor: string;
   circleId: string;
@@ -4701,6 +4730,8 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
   onPeekFile?: (fileName: string) => void;
   knownFileNames?: Set<string>;
   onReply?: (msg: RoomMessage) => void;
+  onReact?: (msgId: string, kind: 'ack' | 'important' | 'question') => void;
+  currentUserId?: string | null;
   busy?: boolean;
   dimmed?: boolean;
   isCutoff?: boolean;
@@ -4715,6 +4746,42 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
   const repliesTo: { author?: string; preview?: string } | null = (msg.metadata as any)?.replies_to
     ? { author: (msg.metadata as any)?.replies_to_author, preview: (msg.metadata as any)?.replies_to_preview }
     : null;
+  const rawReactions = (msg.metadata as any)?.reactions || {};
+  const reactionEntries: Array<{ kind: 'ack' | 'important' | 'question'; glyph: string; color: string; ids: string[] }> = [
+    { kind: 'ack', glyph: '✓', color: '#22c55e', ids: Array.isArray(rawReactions.ack) ? rawReactions.ack : [] },
+    { kind: 'important', glyph: '!', color: '#f59e0b', ids: Array.isArray(rawReactions.important) ? rawReactions.important : [] },
+    { kind: 'question', glyph: '?', color: '#22d3ee', ids: Array.isArray(rawReactions.question) ? rawReactions.question : [] },
+  ];
+  const hasAnyReaction = reactionEntries.some((r) => r.ids.length > 0);
+  const renderReactionRow = (marginLeft = 0) => onReact ? (
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 6, marginLeft }}>
+      {reactionEntries.map((r) => {
+        const mine = !!(currentUserId && r.ids.includes(currentUserId));
+        const showWhenZero = !hasAnyReaction;
+        if (r.ids.length === 0 && !showWhenZero) return null;
+        return (
+          <Pressable
+            key={r.kind}
+            onPress={() => onReact(msg.id, r.kind)}
+            hitSlop={4}
+            style={{
+              flexDirection: 'row', alignItems: 'center', gap: 4,
+              paddingHorizontal: 7, paddingVertical: 2, borderRadius: 999,
+              borderWidth: 1,
+              borderColor: mine ? r.color + '88' : '#1f2937',
+              backgroundColor: mine ? r.color + '18' : '#0d1320',
+              opacity: r.ids.length === 0 ? 0.4 : 1,
+              ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+            }}>
+            <Text style={{ color: mine ? r.color : '#94a3b8', fontSize: 10, fontWeight: '900' }}>{r.glyph}</Text>
+            {r.ids.length > 0 ? (
+              <Text style={{ color: mine ? r.color : '#94a3b8', fontSize: 10, fontWeight: '700', fontFamily: MONO }}>{r.ids.length}</Text>
+            ) : null}
+          </Pressable>
+        );
+      })}
+    </View>
+  ) : null;
   // Parse any ```edit:filename``` proposals out of agent responses so we can
   // surface Apply / Reject cards. Strip them from the visible text below
   // (the cards carry the path + content already).
@@ -4877,6 +4944,7 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
             → Failed. Check your agent connection in the Office tab.
           </Text>
         )}
+        {renderReactionRow(0)}
         {(onContinue || onRerun) && !isTask && (
           <View style={{ flexDirection: 'row', gap: 6, marginTop: 8 }}>
             {onContinue && (
@@ -4990,6 +5058,7 @@ const MsgBubble = React.memo(function MsgBubble({ msg, accentColor, circleId, ro
           ))}
         </View>
       )}
+      {renderReactionRow(28)}
     </View>
   );
 });
