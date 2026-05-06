@@ -639,7 +639,7 @@ export default function MarketplaceTab({
   const [activePlatform, setActivePlatform] = useState<PlatformKey>('none');
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeGroupFilter, setActiveGroupFilter] = useState<CircleIntegrationGroupKey | 'all'>('all');
+  const [activeGroupFilter, setActiveGroupFilter] = useState<CircleIntegrationGroupKey | 'all' | 'models'>('all');
   const [activeMarketplaceFilter, setActiveMarketplaceFilter] = useState<MarketplaceFilter>('all');
   const [activeSourceFilter, setActiveSourceFilter] = useState<MarketplaceSourceFilter>('all');
   const [wordpressCredential, setWordpressCredential] = useState<SiteCredential | null>(null);
@@ -807,10 +807,21 @@ export default function MarketplaceTab({
     ),
     [statuses],
   );
+  // Provider keys that show up under the "Models" quick filter — LLM
+  // marketplaces the chat picker actually routes through. Kept narrow on
+  // purpose: the broader 'ai_agents_services' group also includes
+  // browser/automation tools and observability shims that aren't models.
+  const MODEL_PROVIDER_KEYS: ReadonlySet<string> = useMemo(
+    () => new Set(['openrouter', 'hugging_face', 'replicate', 'modal']),
+    [],
+  );
+
   const filteredCatalogItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return CIRCLE_INTEGRATION_CATALOG.filter(item => {
-      if (activeGroupFilter !== 'all' && item.group !== activeGroupFilter) return false;
+      if (activeGroupFilter === 'models') {
+        if (!item.platformKey || !MODEL_PROVIDER_KEYS.has(item.platformKey)) return false;
+      } else if (activeGroupFilter !== 'all' && item.group !== activeGroupFilter) return false;
 
       if (activeMarketplaceFilter === 'installed') {
         if (!item.platformKey || !installedPlatformKeys.has(item.platformKey)) return false;
@@ -834,7 +845,7 @@ export default function MarketplaceTab({
       ].join(' ').toLowerCase();
       return haystack.includes(q);
     });
-  }, [activeGroupFilter, activeMarketplaceFilter, activeSourceFilter, installedPlatformKeys, searchQuery]);
+  }, [MODEL_PROVIDER_KEYS, activeGroupFilter, activeMarketplaceFilter, activeSourceFilter, installedPlatformKeys, searchQuery]);
   const visibleItemsCount = useMemo(() => {
     return filteredCatalogItems.length;
   }, [filteredCatalogItems]);
@@ -1026,6 +1037,16 @@ export default function MarketplaceTab({
               style={[styles.filterChip, activeGroupFilter === 'all' && styles.filterChipActive]}
             >
               <Text style={[styles.filterChipText, activeGroupFilter === 'all' && styles.filterChipTextActive]}>All Categories</Text>
+            </Pressable>
+            {/* Models — narrow shortcut to the LLM marketplaces the chat
+                picker actually routes through (OpenRouter / Hugging Face
+                / Replicate / Modal). Sits up front so users wiring up
+                model keys don't have to scan past every group. */}
+            <Pressable
+              onPress={() => setActiveGroupFilter('models')}
+              style={[styles.filterChip, activeGroupFilter === 'models' && styles.filterChipActive]}
+            >
+              <Text style={[styles.filterChipText, activeGroupFilter === 'models' && styles.filterChipTextActive]}>Models</Text>
             </Pressable>
             {CIRCLE_INTEGRATION_GROUPS.map(group => {
               const active = activeGroupFilter === group.key;
