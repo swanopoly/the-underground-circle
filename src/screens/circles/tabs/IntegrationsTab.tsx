@@ -65,6 +65,17 @@ interface PlatformStatus {
 
 const GENERIC_MARKETPLACE_PROVIDERS: GenericMarketplaceProvider[] = [
   'browserbase',
+  'stagehand',
+  'playwright_mcp',
+  'browserless',
+  'browserstack',
+  'firecrawl',
+  'apify',
+  'steel',
+  'hyperbrowser',
+  'airtop',
+  'skyvern',
+  'browser_use',
   'braintrust',
   'vercel',
   'netlify',
@@ -104,6 +115,17 @@ function createEmptyStatuses(): Record<CircleIntegrationPlatformKey, PlatformSta
     discord: { connected: false },
     helius: { connected: false },
     browserbase: { connected: false },
+    stagehand: { connected: false },
+    playwright_mcp: { connected: false },
+    browserless: { connected: false },
+    browserstack: { connected: false },
+    firecrawl: { connected: false },
+    apify: { connected: false },
+    steel: { connected: false },
+    hyperbrowser: { connected: false },
+    airtop: { connected: false },
+    skyvern: { connected: false },
+    browser_use: { connected: false },
     braintrust: { connected: false },
     vercel: { connected: false },
     netlify: { connected: false },
@@ -394,6 +416,17 @@ function GenericIntegrationManager({
       : definition?.provider === 'vercel' ? '#ffffff'
       : definition?.provider === 'descope' ? '#60a5fa'
       : definition?.provider === 'browserbase' ? '#14b8a6'
+      : definition?.provider === 'stagehand' ? '#06b6d4'
+      : definition?.provider === 'playwright_mcp' ? '#2dd4bf'
+      : definition?.provider === 'browserless' ? '#f97316'
+      : definition?.provider === 'browserstack' ? '#f59e0b'
+      : definition?.provider === 'firecrawl' ? '#ef4444'
+      : definition?.provider === 'apify' ? '#22c55e'
+      : definition?.provider === 'steel' ? '#94a3b8'
+      : definition?.provider === 'hyperbrowser' ? '#38bdf8'
+      : definition?.provider === 'airtop' ? '#60a5fa'
+      : definition?.provider === 'skyvern' ? '#a78bfa'
+      : definition?.provider === 'browser_use' ? '#34d399'
       : definition?.provider === 'braintrust' ? '#8b5cf6'
       : definition?.provider === 'algolia' ? '#0ea5e9'
       : definition?.provider === 'pinecone' ? '#a855f7'
@@ -802,8 +835,8 @@ export default function MarketplaceTab({
   if (activePlatform !== 'none') {
     const activeItem = CIRCLE_INTEGRATION_CATALOG.find(item => item.platformKey === activePlatform) || null;
     return (
-      <View style={styles.container}>
-      <View style={styles.inner}>
+      <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator>
+        <View style={styles.inner}>
           <Pressable onPress={handleBack} style={styles.backRow}>
             <Text style={styles.backText}>← All Marketplace Apps</Text>
           </Pressable>
@@ -839,7 +872,7 @@ export default function MarketplaceTab({
             )}
           </View>
         </View>
-      </View>
+      </ScrollView>
     );
   }
 
