@@ -270,25 +270,70 @@ function PlatformCard({
   );
 }
 
+// Reusable accordion section for marketplace detail pages. Title bar
+// uses the per-platform accent at low opacity when open; tap to toggle.
+function MarketplaceAccordion({
+  title,
+  defaultOpen = false,
+  accentColor,
+  children,
+}: {
+  title: string;
+  defaultOpen?: boolean;
+  accentColor: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <View style={[styles.mpAccordionCard, open && { borderColor: accentColor + '55' }]}>
+      <Pressable
+        onPress={() => setOpen(v => !v)}
+        style={({ hovered }: any) => [
+          styles.mpAccordionHeader,
+          open && { backgroundColor: accentColor + '0e' },
+          hovered && !open && { backgroundColor: '#11141d' },
+        ]}
+      >
+        <Text style={[styles.mpAccordionTitle, open && { color: accentColor }]}>{title}</Text>
+        <View style={[
+          styles.mpAccordionChevron,
+          ...(RNPlatform.OS === 'web' ? [{ transition: 'transform 0.18s ease' } as any] : []),
+          { transform: [{ rotate: open ? '90deg' : '0deg' }] },
+        ]}>
+          <Text style={[styles.mpAccordionChevronText, { color: open ? accentColor : '#94a3b8' }]}>›</Text>
+        </View>
+      </Pressable>
+      {open ? <View style={styles.mpAccordionBody}>{children}</View> : null}
+    </View>
+  );
+}
+
 function MarketplaceAppOverview({
   item,
   onOpenRelated,
+  accentColor,
 }: {
   item: CircleIntegrationCatalogItem;
   onOpenRelated?: (itemId: string) => void;
+  accentColor: string;
 }) {
   const detail = getMarketplaceAppDetail(item.id);
   if (!detail) return null;
 
-  return (
-    <View style={styles.marketplaceOverviewCard}>
-      <Text style={styles.marketplaceOverviewTitle}>What This Unlocks</Text>
-      <Text style={styles.marketplaceOverviewText}>
-        This app expands what the circle can own end-to-end across Souls, tasks, and operational workflows.
-      </Text>
+  const hasRelated = !!(detail.relatedItemIds && detail.relatedItemIds.length > 0 && onOpenRelated);
 
-      <View style={styles.marketplaceOverviewSection}>
-        <Text style={styles.marketplaceOverviewLabel}>Used By Souls</Text>
+  return (
+    <View style={styles.mpAccordionGroup}>
+      <MarketplaceAccordion title="What this unlocks" accentColor={accentColor} defaultOpen>
+        <Text style={styles.marketplaceOverviewText}>
+          This app expands what the circle can own end-to-end across Souls, tasks, and operational workflows.
+        </Text>
+        {detail.unlocks.map(value => (
+          <Text key={value} style={styles.marketplaceOverviewBullet}>- {value}</Text>
+        ))}
+      </MarketplaceAccordion>
+
+      <MarketplaceAccordion title={`Used by Souls (${detail.usedBySouls.length})`} accentColor={accentColor}>
         <View style={styles.detailChipRow}>
           {detail.usedBySouls.map(value => (
             <View key={value} style={styles.detailChip}>
@@ -296,33 +341,24 @@ function MarketplaceAppOverview({
             </View>
           ))}
         </View>
-      </View>
+      </MarketplaceAccordion>
 
-      <View style={styles.marketplaceOverviewSection}>
-        <Text style={styles.marketplaceOverviewLabel}>Unlocks</Text>
-        {detail.unlocks.map(value => (
-          <Text key={value} style={styles.marketplaceOverviewBullet}>- {value}</Text>
-        ))}
-      </View>
-
-      <View style={styles.marketplaceOverviewSection}>
-        <Text style={styles.marketplaceOverviewLabel}>Example Tasks</Text>
+      <MarketplaceAccordion title={`Example tasks (${detail.exampleTasks.length})`} accentColor={accentColor}>
         {detail.exampleTasks.map(value => (
           <Text key={value} style={styles.marketplaceOverviewBullet}>- {value}</Text>
         ))}
-      </View>
+      </MarketplaceAccordion>
 
-      {detail.relatedItemIds && detail.relatedItemIds.length > 0 && onOpenRelated ? (
-        <View style={styles.marketplaceOverviewSection}>
-          <Text style={styles.marketplaceOverviewLabel}>Related Apps</Text>
+      {hasRelated ? (
+        <MarketplaceAccordion title={`Related apps (${detail.relatedItemIds!.length})`} accentColor={accentColor}>
           <View style={styles.detailChipRow}>
-            {detail.relatedItemIds.map(itemId => {
+            {detail.relatedItemIds!.map(itemId => {
               const related = CIRCLE_INTEGRATION_CATALOG.find(entry => entry.id === itemId);
               if (!related) return null;
               return (
                 <Pressable
                   key={itemId}
-                  onPress={() => onOpenRelated(itemId)}
+                  onPress={() => onOpenRelated!(itemId)}
                   style={[styles.detailChip, styles.detailChipInteractive]}
                 >
                   <Text style={[styles.detailChipText, { color: related.color }]}>{related.label}</Text>
@@ -330,7 +366,7 @@ function MarketplaceAppOverview({
               );
             })}
           </View>
-        </View>
+        </MarketplaceAccordion>
       ) : null}
     </View>
   );
@@ -834,43 +870,75 @@ export default function MarketplaceTab({
 
   if (activePlatform !== 'none') {
     const activeItem = CIRCLE_INTEGRATION_CATALOG.find(item => item.platformKey === activePlatform) || null;
+    const activeStatus = statuses[activePlatform as CircleIntegrationPlatformKey];
+    const heroAccent = activeItem?.color || '#6366f1';
     return (
       <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator>
         <View style={styles.inner}>
           <Pressable onPress={handleBack} style={styles.backRow}>
             <Text style={styles.backText}>← All Marketplace Apps</Text>
           </Pressable>
+
+          {activeItem ? (
+            <View style={[styles.mpHeroCard, { borderColor: heroAccent + '44' }]}>
+              <View style={styles.mpHeroTop}>
+                <View style={[styles.mpHeroIcon, { backgroundColor: heroAccent + '22', borderColor: heroAccent + '55' }]} />
+                <View style={{ flex: 1, gap: 2 }}>
+                  <Text style={[styles.mpHeroLabel, { color: heroAccent }]}>{activeItem.label}</Text>
+                  <Text style={styles.mpHeroDesc} numberOfLines={3}>{activeItem.description}</Text>
+                </View>
+                <View style={[
+                  styles.mpHeroStatus,
+                  activeStatus?.connected
+                    ? { backgroundColor: '#22c55e22', borderColor: '#22c55e88' }
+                    : { backgroundColor: '#1f2937', borderColor: '#334155' },
+                ]}>
+                  <Text style={{
+                    color: activeStatus?.connected ? '#22c55e' : '#94a3b8',
+                    fontSize: 10, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace',
+                  }}>
+                    {activeStatus?.connected ? '● ACTIVE' : '○ NOT CONNECTED'}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          ) : null}
+
+          <MarketplaceAccordion title="Setup & connect" accentColor={heroAccent} defaultOpen>
+            <View style={styles.platformContent}>
+              {activePlatform === 'github' && <GitHubTab circleId={circleId} />}
+              {activePlatform === 'wordpress' && (
+                <WordPressManager
+                  circleId={circleId}
+                  credential={wordpressCredential}
+                  onRefresh={() => { void loadStatuses(); }}
+                />
+              )}
+              {activePlatform === 'slack' && <SlackTab circleId={circleId} />}
+              {activePlatform === 'teams' && <TeamsTab circleId={circleId} />}
+              {activePlatform === 'discord' && <DiscordTab circleId={circleId} />}
+              {activePlatform === 'helius' && <HeliusTab circleId={circleId} />}
+              {GENERIC_MARKETPLACE_PROVIDERS.includes(activePlatform as GenericMarketplaceProvider) && (
+                <GenericIntegrationManager
+                  circleId={circleId}
+                  provider={activePlatform as GenericMarketplaceProvider}
+                  status={statuses[activePlatform as CircleIntegrationPlatformKey]}
+                  onRefresh={() => { void loadStatuses(); }}
+                />
+              )}
+            </View>
+          </MarketplaceAccordion>
+
           {activeItem ? (
             <MarketplaceAppOverview
               item={activeItem}
+              accentColor={heroAccent}
               onOpenRelated={(itemId) => {
                 const related = CIRCLE_INTEGRATION_CATALOG.find(entry => entry.id === itemId);
                 if (related?.platformKey) setActivePlatform(related.platformKey);
               }}
             />
           ) : null}
-          <View style={styles.platformContent}>
-            {activePlatform === 'github' && <GitHubTab circleId={circleId} />}
-            {activePlatform === 'wordpress' && (
-              <WordPressManager
-                circleId={circleId}
-                credential={wordpressCredential}
-                onRefresh={() => { void loadStatuses(); }}
-              />
-            )}
-            {activePlatform === 'slack' && <SlackTab circleId={circleId} />}
-            {activePlatform === 'teams' && <TeamsTab circleId={circleId} />}
-            {activePlatform === 'discord' && <DiscordTab circleId={circleId} />}
-            {activePlatform === 'helius' && <HeliusTab circleId={circleId} />}
-            {GENERIC_MARKETPLACE_PROVIDERS.includes(activePlatform as GenericMarketplaceProvider) && (
-              <GenericIntegrationManager
-                circleId={circleId}
-                provider={activePlatform as GenericMarketplaceProvider}
-                status={statuses[activePlatform as CircleIntegrationPlatformKey]}
-                onRefresh={() => { void loadStatuses(); }}
-              />
-            )}
-          </View>
         </View>
       </ScrollView>
     );
@@ -1473,6 +1541,92 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
   },
   platformContent: { flex: 1 },
+  // ── Marketplace detail page accordions ─────────────────────────────────
+  mpHeroCard: {
+    marginTop: 8,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderRadius: 14,
+    backgroundColor: '#0a0e1a',
+    padding: 14,
+    gap: 10,
+  },
+  mpHeroTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  mpHeroIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  mpHeroLabel: {
+    fontSize: 16,
+    fontWeight: '900',
+    letterSpacing: 0.2,
+  },
+  mpHeroDesc: {
+    color: '#94a3b8',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  mpHeroStatus: {
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  mpAccordionGroup: {
+    gap: 10,
+  },
+  mpAccordionCard: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#1f2937',
+    backgroundColor: '#0a0e1a',
+    borderRadius: 12,
+    overflow: 'hidden',
+    ...(RNPlatform.OS === 'web'
+      ? { transition: 'border-color 0.18s ease' } as any
+      : {}),
+  },
+  mpAccordionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    ...(RNPlatform.OS === 'web'
+      ? { cursor: 'pointer', transition: 'background-color 0.18s ease' } as any
+      : {}),
+  },
+  mpAccordionTitle: {
+    color: '#e2e8f0',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+  },
+  mpAccordionChevron: {
+    width: 22,
+    height: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mpAccordionChevronText: {
+    fontSize: 18,
+    fontWeight: '900',
+    lineHeight: 18,
+  },
+  mpAccordionBody: {
+    paddingHorizontal: 14,
+    paddingBottom: 14,
+    paddingTop: 4,
+    gap: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#ffffff10',
+  },
   marketplaceOverviewCard: {
     backgroundColor: '#0b1018',
     borderWidth: 1,
