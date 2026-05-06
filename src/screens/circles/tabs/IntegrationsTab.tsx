@@ -42,7 +42,6 @@ import TeamsTab from './TeamsTab';
 
 type PlatformKey = 'none' | CircleIntegrationPlatformKey;
 type MarketplaceFilter = 'all' | 'installed' | 'ready' | 'native';
-type MarketplaceSourceFilter = 'all' | 'native' | 'external' | 'recent';
 type GenericMarketplaceProvider = Exclude<
   CircleIntegrationPlatformKey,
   'github' | 'wordpress' | 'slack' | 'teams' | 'discord' | 'helius'
@@ -646,7 +645,6 @@ export default function MarketplaceTab({
   // the `recentlyAdded` set first.
   const [sortMode, setSortMode] = useState<'popular' | 'alphabetical' | 'recent'>('popular');
   const [activeMarketplaceFilter, setActiveMarketplaceFilter] = useState<MarketplaceFilter>('all');
-  const [activeSourceFilter, setActiveSourceFilter] = useState<MarketplaceSourceFilter>('all');
   const [wordpressCredential, setWordpressCredential] = useState<SiteCredential | null>(null);
   const [statuses, setStatuses] = useState<Record<CircleIntegrationPlatformKey, PlatformStatus>>(createEmptyStatuses());
   useEffect(() => {
@@ -800,10 +798,6 @@ export default function MarketplaceTab({
     () => CIRCLE_INTEGRATION_CATALOG.filter(item => item.platformKey).length,
     [],
   );
-  const recentCount = useMemo(
-    () => CIRCLE_INTEGRATION_CATALOG.filter(item => item.recentlyAdded).length,
-    [],
-  );
   const installedPlatformKeys = useMemo(
     () => new Set(
       Object.entries(statuses)
@@ -844,10 +838,6 @@ export default function MarketplaceTab({
         if (!(item.availability === 'available' && !item.platformKey)) return false;
       }
 
-      if (activeSourceFilter === 'native' && item.platformKey) return false;
-      if (activeSourceFilter === 'external' && !item.platformKey) return false;
-      if (activeSourceFilter === 'recent' && !item.recentlyAdded) return false;
-
       if (!q) return true;
       const haystack = [
         item.label,
@@ -881,7 +871,7 @@ export default function MarketplaceTab({
       if (ar !== br) return ar - br;
       return a.label.localeCompare(b.label);
     });
-  }, [MODEL_PROVIDER_KEYS, activeGroupFilter, activeMarketplaceFilter, activeSourceFilter, installedPlatformKeys, searchQuery, sortMode]);
+  }, [MODEL_PROVIDER_KEYS, activeGroupFilter, activeMarketplaceFilter, installedPlatformKeys, searchQuery, sortMode]);
   const visibleItemsCount = useMemo(() => {
     return filteredCatalogItems.length;
   }, [filteredCatalogItems]);
@@ -1048,25 +1038,10 @@ export default function MarketplaceTab({
               );
             })}
           </ScrollView>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
-            {([
-              { key: 'all', label: 'All Sources' },
-              { key: 'native', label: `Native ${nativeCount}` },
-              { key: 'external', label: `External ${externalCount}` },
-              { key: 'recent', label: `Recent ${recentCount}` },
-            ] as const).map(filter => {
-              const active = activeSourceFilter === filter.key;
-              return (
-                <Pressable
-                  key={filter.key}
-                  onPress={() => setActiveSourceFilter(filter.key)}
-                  style={[styles.filterChip, active && styles.filterChipActive]}
-                >
-                  <Text style={[styles.filterChipText, active && styles.filterChipTextActive]}>{filter.label}</Text>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
+          {/* Source filter row (All Sources / Native / External / Recent)
+              removed — duplicates the Sort=Newest option and the
+              Installed/Ready/Native chips above, and the count chips
+              were noisy at this density. */}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
             <Pressable
               onPress={() => setActiveGroupFilter('all')}
