@@ -19,9 +19,14 @@
  * inside the UC profile forever.
  */
 import type { DesktopResult } from './desktopBridgeProtocol';
+import { getBridgeUrl } from './bridgeEnvironment';
 
-const BRIDGE_URL = 'http://localhost:7778';
+const BRIDGE_PORT = 7778;
 const TOKEN_KEY = 'uc_desktop_bridge_token_v1';
+
+function getBrowserBridgeBaseUrl(): string | null {
+  return getBridgeUrl(BRIDGE_PORT);
+}
 
 function readToken(): string | null {
   if (typeof localStorage === 'undefined') return null;
@@ -70,12 +75,16 @@ export interface DomSnapshotResult {
 // ─── Calls ──────────────────────────────────────────────────────────────
 
 async function callBrowser<T = unknown>(method: 'GET' | 'POST', pathname: string, body?: unknown): Promise<DesktopResult<T>> {
+  const base = getBrowserBridgeBaseUrl();
+  if (!base) {
+    return { ok: false, error: 'Browser bridge unavailable in this environment.', errorCode: 'bridge_offline' };
+  }
   const token = readToken();
   if (!token) {
     return { ok: false, error: 'Desktop bridge not paired. Pair first via `/desktop diag`.', errorCode: 'not_paired' };
   }
   try {
-    const res = await fetch(`${BRIDGE_URL}${pathname}`, {
+    const res = await fetch(`${base}${pathname}`, {
       method,
       headers: {
         'Content-Type': 'application/json',
@@ -100,8 +109,10 @@ async function callBrowser<T = unknown>(method: 'GET' | 'POST', pathname: string
 }
 
 export async function isBrowserBridgeAvailable(): Promise<boolean> {
+  const base = getBrowserBridgeBaseUrl();
+  if (!base) return false;
   try {
-    const res = await fetch(`${BRIDGE_URL}/browser/health`, { cache: 'no-store' });
+    const res = await fetch(`${base}/browser/health`, { cache: 'no-store' });
     if (!res.ok) return false;
     const json = (await res.json()) as { ok?: boolean };
     return !!json?.ok;
@@ -109,8 +120,10 @@ export async function isBrowserBridgeAvailable(): Promise<boolean> {
 }
 
 export async function getBrowserHealth(): Promise<BrowserHealth | null> {
+  const base = getBrowserBridgeBaseUrl();
+  if (!base) return null;
   try {
-    const res = await fetch(`${BRIDGE_URL}/browser/health`, { cache: 'no-store' });
+    const res = await fetch(`${base}/browser/health`, { cache: 'no-store' });
     if (!res.ok) return null;
     return (await res.json()) as BrowserHealth;
   } catch { return null; }

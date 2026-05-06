@@ -58,6 +58,11 @@ function fmtUptime(score: number | null | undefined): string {
   return `${Math.round(score * 100)}%`;
 }
 
+function readNumericMetric(value: unknown, fallback = 0): number {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 // ─── Stat Card ────────────────────────────────────────────────────────────────
 
 interface StatCardProps {
@@ -199,8 +204,8 @@ export default function OfficeAnalyticsPanel({ circleId, userId, agents: propAge
                 input_tokens_total:  (r.input_tokens_total  as number) ?? a.input_tokens_total,
                 output_tokens_total: (r.output_tokens_total as number) ?? a.output_tokens_total,
                 cached_tokens_total: (r.cached_tokens_total as number) ?? a.cached_tokens_total,
-                estimated_cost_today: parseFloat(r.estimated_cost_today as string) || a.estimated_cost_today,
-                estimated_cost_total: parseFloat(r.estimated_cost_total as string) || a.estimated_cost_total,
+                estimated_cost_today: readNumericMetric(r.estimated_cost_today, a.estimated_cost_today ?? 0),
+                estimated_cost_total: readNumericMetric(r.estimated_cost_total, a.estimated_cost_total ?? 0),
                 model_name:           (r.model_name as string) ?? a.model_name,
               }
             : a

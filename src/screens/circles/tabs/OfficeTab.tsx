@@ -1797,8 +1797,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     const dbMatch = dbDataByKey.get(key) || dbDataByProvider.get(agent.providerType);
     if (dbMatch) {
       if (!agent.spirit && dbMatch.spirit) agent.spirit = dbMatch.spirit;
-      // Accumulate: costTotal = DB total + current session's cost
-      agent.costTotal = (dbMatch.estimated_cost_total || 0) + (agent.costToday || 0);
+      // DB aggregates are durable; live bridge snapshots can reset on restart.
+      agent.costToday = Math.max(agent.costToday || 0, dbMatch.estimated_cost_today || 0);
+      agent.costTotal = Math.max(agent.costTotal || 0, dbMatch.estimated_cost_total || 0, agent.costToday || 0);
     }
   }
 
@@ -2199,7 +2200,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           await syncAgentTokenSnapshot(
             circleId, agent.name, agent.inputTokens, agent.outputTokens,
             agent.cachedTokens, agent.turns || agent.messagesProcessed,
-            agent.costToday, agent.model,
+            agent.sessionCostToday ?? agent.costToday, agent.model, agent.sessionKey || agent.id,
           );
         }
       } catch {}
@@ -3967,6 +3968,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                         circleId={circleId}
                         connectedCount={connections.filter(c => c.status === 'connected').length}
                         totalConnections={connections.length}
+                        connections={connections}
+                        pendingApprovals={pendingApprovals}
+                        budgetAlerts={budgetAlerts}
+                        periodCosts={periodCosts}
                       />
                     ) : (
                       <View style={styles.desktopWidgetPlaceholder}>

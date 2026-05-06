@@ -16,10 +16,11 @@
 //   { "brief": "…required…", "model": "claude-haiku-4-5-20251001", "system_extra": "…optional…" }
 //
 // Deploy: npx supabase functions deploy build-stream
-// Secrets: ANTHROPIC_API_KEY required
+// Users must save their own Anthropic key. Platform key fallback is owner-only.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 import { logClaudeUsage, type UsageBreakdown } from "../_claude/anthropic.ts";
+import { byokMissingMessage, getAuthenticatedUser, resolveUserModelApiKey } from "../_shared/edge.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -90,10 +91,26 @@ Deno.serve(async (req) => {
     });
   }
 
-  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+  const user = await getAuthenticatedUser(req);
+  if (!user) {
+    return new Response(JSON.stringify({ error: "Valid JWT required", code: "unauthenticated" }), {
+      status: 401,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  );
+  const apiKey = await resolveUserModelApiKey({
+    supabase,
+    userId: user.id,
+    provider: "anthropic",
+    envVarName: "ANTHROPIC_API_KEY",
+  });
   if (!apiKey) {
-    return new Response(JSON.stringify({ error: "ANTHROPIC_API_KEY not set in Supabase secrets" }), {
-      status: 500,
+    return new Response(JSON.stringify({ error: byokMissingMessage("anthropic"), code: "key_missing" }), {
+      status: 400,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
@@ -110,7 +127,7 @@ Deno.serve(async (req) => {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": apiKey,
+      "x-api-key": apiKey.apiKey,
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
@@ -222,21 +239,14 @@ Deno.serve(async (req) => {
         emit("done", { text: fullText, tokens_out: tokensOut });
         controller.close();
 
-        // Fire-and-forget usage log. build-stream has no circle/user in the
-        // request body (BYO-page-builder) so we log model + usage only so
-        // the aggregate cost dashboard reflects real build spend.
-        const svcUrl = Deno.env.get("SUPABASE_URL");
-        const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-        if (svcUrl && svcKey) {
-          logClaudeUsage(createClient(svcUrl, svcKey), {
-            circleId: null,
-            userId: null,
-            source: "build-stream",
-            model,
-            usage,
-            metadata: { brief_length: body.brief.length },
-          });
-        }
+        logClaudeUsage(supabase, {
+          circleId: null,
+          userId: user.id,
+          source: "build-stream",
+          model,
+          usage,
+          metadata: { brief_length: body.brief.length },
+        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         emit("error", { error: msg });

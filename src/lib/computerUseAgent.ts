@@ -84,6 +84,7 @@ export interface ComputerUseAgentOpts {
       notes?: string;
       thumbnail?: string;
     }> | null;
+    extractedData?: unknown | null;
   }) => void;
   onError: (message: string) => void;
 }
@@ -127,7 +128,12 @@ export function startComputerUseAgent(opts: ComputerUseAgentOpts): AgentHandle {
 
       if (!res.ok) {
         const errText = await res.text().catch(() => `HTTP ${res.status}`);
-        opts.onError(errText.slice(0, 400));
+        try {
+          const parsed = JSON.parse(errText);
+          opts.onError(String(parsed.error || parsed.message || errText).slice(0, 400));
+        } catch {
+          opts.onError(errText.slice(0, 400));
+        }
         return;
       }
       if (!res.body) {

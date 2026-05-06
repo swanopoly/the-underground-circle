@@ -15,6 +15,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 import { computeCostUsd, checkCircleClaudeBudget, type UsageBreakdown } from "../_claude/anthropic.ts";
+import { byokMissingMessage, resolveUserModelApiKey } from "../_shared/edge.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -36,12 +37,7 @@ Deno.serve(async (req: Request) => {
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
-  if (!anthropicKey) {
-    return new Response(JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }), {
-      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  }
+  const svc = createClient(supabaseUrl, serviceKey);
 
   // Auth: resolve user from JWT
   const authHeader = req.headers.get("Authorization") || "";
@@ -78,12 +74,27 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  const anthropicKey = await resolveUserModelApiKey({
+    supabase: svc,
+    userId,
+    provider: "anthropic",
+    envVarName: "ANTHROPIC_API_KEY",
+  });
+  if (!anthropicKey) {
+    return new Response(JSON.stringify({
+      error: byokMissingMessage("anthropic"),
+      code: "key_missing",
+    }), {
+      status: 400,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
   // Umbrella circle cap — chat-stream is the highest-volume streaming
   // surface so the 24h total-spend ceiling matters here. Skip when
   // caller didn't pass a circleId (e.g. prompt playground previews).
   if (circleId) {
     try {
-      const svc = createClient(supabaseUrl, serviceKey);
       const cap = await checkCircleClaudeBudget(svc, circleId);
       if (!cap.allowed) {
         return new Response(JSON.stringify({
@@ -145,7 +156,7 @@ Deno.serve(async (req: Request) => {
         const res = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
           headers: {
-            "x-api-key": anthropicKey!,
+            "x-api-key": anthropicKey.apiKey,
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
           },

@@ -77,8 +77,12 @@ async function callClaude(
   model = "claude-haiku-4-5",
   ctx?: { circleId?: string; source?: string; metadata?: Record<string, unknown>; supabase?: any },
 ): Promise<string> {
-  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
+  const apiKey = Deno.env.get("ALLOW_SERVICE_ROLE_PLATFORM_MODEL_KEYS") === "true"
+    ? Deno.env.get("ANTHROPIC_API_KEY")
+    : null;
+  if (!apiKey) {
+    throw new Error("Service-role platform model usage is disabled. Trigger this from a user-owned BYOK path or set ALLOW_SERVICE_ROLE_PLATFORM_MODEL_KEYS=true for owner-funded automation.");
+  }
   // Umbrella circle cap — every agent shares the same 24h spend ceiling.
   // Throws (rejects the call) when the circle is over budget so the
   // caller can surface a clean error to the user / log the denial.

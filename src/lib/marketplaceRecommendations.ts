@@ -31,6 +31,21 @@ const CONNECTOR_TO_CATALOG_ID: Record<string, string> = {
   vercel: 'vercel',
   netlify: 'netlify',
   browserbase: 'browserbase',
+  stagehand: 'stagehand',
+  playwright: 'playwright-mcp',
+  playwright_mcp: 'playwright-mcp',
+  'playwright-mcp': 'playwright-mcp',
+  browserless: 'browserless',
+  browserstack: 'browserstack',
+  firecrawl: 'firecrawl',
+  apify: 'apify',
+  steel: 'steel',
+  hyperbrowser: 'hyperbrowser',
+  airtop: 'airtop',
+  skyvern: 'skyvern',
+  browser_use: 'browser-use',
+  'browser-use': 'browser-use',
+  browseruse: 'browser-use',
   braintrust: 'braintrust',
   descope: 'descope',
   launchdarkly: 'launchdarkly',
@@ -63,6 +78,22 @@ const CONNECTOR_TO_PLATFORM_KEY: Partial<Record<string, CircleIntegrationPlatfor
   'google-analytics': 'google_analytics',
   search_console: 'google_search_console',
   'google-search-console': 'google_search_console',
+  browserbase: 'browserbase',
+  stagehand: 'stagehand',
+  playwright: 'playwright_mcp',
+  playwright_mcp: 'playwright_mcp',
+  'playwright-mcp': 'playwright_mcp',
+  browserless: 'browserless',
+  browserstack: 'browserstack',
+  firecrawl: 'firecrawl',
+  apify: 'apify',
+  steel: 'steel',
+  hyperbrowser: 'hyperbrowser',
+  airtop: 'airtop',
+  skyvern: 'skyvern',
+  browser_use: 'browser_use',
+  'browser-use': 'browser_use',
+  browseruse: 'browser_use',
 };
 
 function getCatalogItem(id: string): CircleIntegrationCatalogItem | undefined {
@@ -163,6 +194,28 @@ export function recommendMarketplaceItemsForWork(opts: {
   if (/(agent|coding agent|automation|delegate|browser session|browser automation|qa flow|ui test)/i.test(text)) {
     addRecommendation(bucket, 'openswan-runtime', 'native_runtime', 'Useful for agent execution, delegation, and runtime control.', installedProviders);
     addRecommendation(bucket, 'browserbase', 'workflow_match', 'Useful for browser-driven tasks, QA, and remote web sessions.', installedProviders);
+    addRecommendation(bucket, 'stagehand', 'workflow_match', 'Useful for natural-language browser actions and self-healing web workflows.', installedProviders);
+    addRecommendation(bucket, 'playwright-mcp', 'workflow_match', 'Useful for deterministic browser control, DOM snapshots, screenshots, and test generation.', installedProviders);
+  }
+  if (/(cloud browser|browser fleet|browser-as-a-service|browser as a service|scale browser|parallel browser|managed browser session)/i.test(text)) {
+    addRecommendation(bucket, 'hyperbrowser', 'workflow_match', 'Useful for scalable cloud browser sessions and Browser Use execution.', installedProviders);
+    addRecommendation(bucket, 'steel', 'workflow_match', 'Useful for open browser-fleet infrastructure and controllable browser sessions.', installedProviders);
+    addRecommendation(bucket, 'airtop', 'workflow_match', 'Useful for managed cloud browsers and AI-controlled web sessions.', installedProviders);
+  }
+  if (/(login|authenticated|credential|form fill|dashboard|portal|back office|website task|web ops|workflow automation)/i.test(text)) {
+    addRecommendation(bucket, 'skyvern', 'workflow_match', 'Useful for authenticated dashboard and form workflows with vision-guided browser automation.', installedProviders);
+    addRecommendation(bucket, 'airtop', 'workflow_match', 'Useful for managed browser profiles and natural-language task execution.', installedProviders);
+    addRecommendation(bucket, 'browser-use', 'workflow_match', 'Useful for self-hosted browser-agent workflows when cost and control matter.', installedProviders);
+  }
+  if (/(screenshot|pdf|page capture|headless browser|puppeteer|html render|browserless)/i.test(text)) {
+    addRecommendation(bucket, 'browserless', 'workflow_match', 'Useful for lower-cost screenshots, PDFs, scraping, and scripted headless-browser jobs.', installedProviders);
+  }
+  if (/(cross-browser|cross browser|real device|mobile browser|safari ios|browser matrix|release qa|visual regression)/i.test(text)) {
+    addRecommendation(bucket, 'browserstack', 'workflow_match', 'Useful for release checks across real browsers, mobile devices, and session recordings.', installedProviders);
+  }
+  if (/(scrape|crawl|web data|extract data|markdown|rag ingestion|research corpus|competitive research|lead scrape)/i.test(text)) {
+    addRecommendation(bucket, 'firecrawl', 'workflow_match', 'Useful for clean markdown, crawl, search, and structured extraction before agents spend browser tokens.', installedProviders);
+    addRecommendation(bucket, 'apify', 'workflow_match', 'Useful for repeatable Actors, scheduled crawls, structured datasets, and production web-data jobs.', installedProviders);
   }
   if (/(eval|evaluation|prompt regression|quality|benchmark|research ops)/i.test(text)) {
     addRecommendation(bucket, 'braintrust', 'workflow_match', 'Useful for evals, prompt monitoring, and agent quality checks.', installedProviders);

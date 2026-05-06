@@ -165,6 +165,24 @@ check(
   { source: 'plain_chat', kind: 'run_openswan' },
 );
 
+check(
+  'browserbase data retrieval → computer task',
+  buildChatAutomationPlan({ message: 'Extract product names, prices, and availability from https://example.com/catalog as JSON' }),
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', minConfidence: 0.7 },
+);
+
+check(
+  'stagehand browser workflow → computer task',
+  buildChatAutomationPlan({ message: 'Use Stagehand to open https://example.com and click the docs link' }),
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', minConfidence: 0.7 },
+);
+
+check(
+  'browserbase form submission → computer task with review risk',
+  buildChatAutomationPlan({ message: 'Complete the application form at https://example.com/apply and submit it after I approve' }),
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', minConfidence: 0.7 },
+);
+
 // ─── Summary ───────────────────────────────────────────────────────────────
 
 if (failures > 0) {

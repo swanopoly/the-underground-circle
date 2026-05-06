@@ -83,7 +83,12 @@ export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
 
       if (!res.ok) {
         const errText = await res.text().catch(() => `HTTP ${res.status}`);
-        opts.onError(errText.slice(0, 300));
+        try {
+          const parsed = JSON.parse(errText);
+          opts.onError(String(parsed.error || parsed.message || errText).slice(0, 300));
+        } catch {
+          opts.onError(errText.slice(0, 300));
+        }
         return;
       }
 

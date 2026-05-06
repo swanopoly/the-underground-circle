@@ -1093,7 +1093,6 @@ export async function checkHaveIBeenPwned(secret: string): Promise<HaveIBeenPwne
       if (Number.isFinite(count) && count > 0) {
         return { breached: true, count };
       }
-      return { breached: false, count: 0 };
     }
     return { breached: false, count: 0 };
   } catch (err: any) {

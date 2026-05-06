@@ -23,7 +23,7 @@ export function buildAppActions(navigate: (screen: string, params?: any) => void
       { id: 'circle-feed',         name: 'Feed',         shortcut: ['g', 'f'], section: 'Circle Dashboard', perform: goTab('FEED'),         keywords: 'feed kanban tasks board todo work items' },
       { id: 'circle-wallet',       name: 'Wallet',       shortcut: ['g', 'w'], section: 'Circle Dashboard', perform: goTab('WALLET'),       keywords: 'wallet crypto ethereum solana tokens send receive' },
       { id: 'circle-integrations', name: 'Marketplace', shortcut: ['g', 'i'], section: 'Circle Dashboard', perform: goTab('INTEGRATIONS'), keywords: 'marketplace integrations github slack wordpress connect api webhook apps' },
-      { id: 'circle-challenges',   name: 'Challenges',                         section: 'Circle Dashboard', perform: goTab('CHALLENGES'),   keywords: 'challenges goals compete leaderboard xp badges' },
+      { id: 'circle-vault',        name: 'Vault',        shortcut: ['g', 'v'], section: 'Circle Dashboard', perform: goTab('VAULT'),        keywords: 'vault passwords credentials logins secrets wordpress websites automation' },
       { id: 'circle-members',      name: 'Members',      shortcut: ['g', 'm'], section: 'Circle Dashboard', perform: goTab('MEMBERS'),      keywords: 'members team people circle invite online' },
       { id: 'circle-analytics',    name: 'Analytics',    shortcut: ['g', 'a'], section: 'Circle Dashboard', perform: goTab('ANALYTICS'),    keywords: 'analytics stats metrics usage tokens cost charts' },
       { id: 'circle-profile',      name: 'Profile',                            section: 'Circle Dashboard', perform: goTab('PROFILE'),      keywords: 'profile settings account badge rank xp level' },

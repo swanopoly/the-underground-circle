@@ -13,10 +13,12 @@
 |-----|-----------------|
 | `EXPO_PUBLIC_SUPABASE_URL` | Supabase Dashboard → Settings → API → Project URL |
 | `EXPO_PUBLIC_SUPABASE_ANON_KEY` | Supabase Dashboard → Settings → API → anon/public key |
-| `EXPO_PUBLIC_GEMINI_API_KEY` | Google AI Studio → API Keys |
+| `EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS` | Set to `false` for live/test-user builds |
 
 **Never commit actual key values to this file or any source code.**
-Copy them directly from the provider dashboards into Netlify's UI.
+Do not put OpenAI, Anthropic, Gemini, Hugging Face, z.ai, or MiniMax model keys
+in `EXPO_PUBLIC_*` variables for shared/live builds. Test users should add
+their own model provider keys in the app.
 
 ### After Adding Variables
 
@@ -27,7 +29,7 @@ Copy them directly from the provider dashboards into Netlify's UI.
 ## Security Notes
 
 - **Supabase Anon Key**: Client-side key, protected by Row Level Security (RLS)
-- **Gemini API Key**: Limited-scope key for AI features
+- **Model provider keys**: Do not expose these as public Netlify variables unless you intentionally want every visitor to use that account.
 - All sensitive operations are protected by RLS policies server-side
 - The `.env` file is in `.gitignore` — Netlify needs vars set in its dashboard
 

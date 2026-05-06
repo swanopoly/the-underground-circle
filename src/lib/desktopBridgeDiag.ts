@@ -10,8 +10,8 @@
  */
 import { matchKnownApp, resolveMacLaunchName } from './knownAppShortcuts';
 import {
-  BRIDGE_HEALTH_URL,
   ensureDesktopBridgePaired,
+  getDesktopBridgeHealthUrl,
   getDesktopBridgeHealth,
   isDesktopBridgeAvailable,
   launchApp,
@@ -38,12 +38,12 @@ export async function runDesktopBridgeDiag(sampleAppTask?: string): Promise<{
 
   steps.push(
     reachable
-      ? { name: 'Bridge reachable', status: 'pass', detail: `localhost:7778 responding at ${BRIDGE_HEALTH_URL}` }
+      ? { name: 'Bridge reachable', status: 'pass', detail: `desktop bridge responding at ${getDesktopBridgeHealthUrl() || 'configured bridge URL'}` }
       : {
           name: 'Bridge reachable',
           status: 'fail',
-          detail: 'No response on localhost:7778/desktop/health.',
-          hint: 'Run `node scripts/claude-bridge.js` in a terminal (or `npm run bridge`).',
+          detail: 'No response from the configured desktop bridge.',
+          hint: 'Run `node scripts/claude-bridge.js` locally, or configure EXPO_PUBLIC_CLAUDE_BRIDGE_URL for a tunnel.',
         },
   );
 

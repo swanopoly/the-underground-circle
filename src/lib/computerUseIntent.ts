@@ -31,6 +31,16 @@ interface Pattern {
 
 // Anchored patterns — start with an imperative verb + web target.
 const PATTERNS: Pattern[] = [
+  // Browserbase workflows — direct requests for extraction, Stagehand,
+  // and form automation should enter Computer Use even when phrased
+  // without "open/browse".
+  { re: /^\s*(extract|scrape|collect|gather|capture|export|pull)\b.*\b(data|records?|rows?|items?|products?|prices?|catalog|table|listings?|results?|fields?|schema|structured|json|csv)\b/i, category: 'find', reason: 'browserbase-data-retrieval' },
+  { re: /^\s*(extract|scrape|collect|gather|capture|export|pull)\b.*\bfrom\b.*\b(https?:\/\/|www\.|[a-z0-9.-]+\.[a-z]{2,})\b/i, category: 'find', reason: 'browserbase-extract-url' },
+  { re: /\b(web\s*data\s*retrieval|data\s*retrieval)\b.*\b(https?:\/\/|www\.|site|website|page|browserbase)\b/i, category: 'find', reason: 'browserbase-web-data-retrieval' },
+  { re: /\b(use\s+)?(browserbase\s+)?stagehand\b.*\b(open|go|click|fill|extract|act|submit|navigate|website|page|form)\b/i, category: 'browse', reason: 'browserbase-stagehand' },
+  { re: /^\s*(fill|complete|submit|send|populate)\b.*\b(form|survey|application|registration|checkout|data\s*entry|lead\s*capture|intake)\b/i, category: 'transactional', reason: 'browserbase-form-submission' },
+  { re: /\b(automate|complete)\b.*\b(form submissions?|forms?|surveys?|applications?|data\s*entry)\b/i, category: 'transactional', reason: 'browserbase-form-automation' },
+
   // Research — "research X", "look up X and tell me", "find info on X"
   { re: /^\s*(research|look\s*up|investigate|find\s+(?:me\s+)?(?:info|information|details|stuff)\s+(?:on|about))\b/i, category: 'research', reason: 'research-verb' },
   { re: /^\s*(compare|contrast)\b.*\b(reviews?|prices?|options|products|tools|services)\b/i, category: 'research', reason: 'compare-commerce' },

@@ -14,6 +14,7 @@ const EXTERNAL_AI_PROVIDERS = new Set([
   'github-models',
   'gemini',
   'google',
+  'zai',
   'minimax',
   'glm',
   'moonshot',

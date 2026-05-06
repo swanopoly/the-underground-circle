@@ -1,5 +1,5 @@
 /**
- * hermes-runtime-smoketest — locks in the pure runtime pieces we built
+ * agent-runtime-smoketest — locks in the pure runtime pieces we built
  * on top of the planner:
  *
  *   1. `dispatchChatAutomationPlan` — executor envelope (pass / defer /
@@ -11,7 +11,7 @@
  * synthesises plans + decision rows and checks the output matches the
  * documented contract.
  *
- * Run: `npm run smoke:hermes-runtime`
+ * Run: `npm run smoke:agent-runtime`
  */
 
 import {
@@ -292,5 +292,5 @@ runDispatchCases()
       console.error(`\n${failures} runtime smoke failure(s)`);
       process.exit(1);
     }
-    console.log('\nAll Hermes-runtime smoke cases passed.');
+    console.log('\nAll agent-runtime smoke cases passed.');
   });

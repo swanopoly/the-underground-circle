@@ -10,6 +10,20 @@ import {
   listSiteCredentialVault,
   type SiteCredentialVaultEntry,
 } from './siteAutomation';
+import {
+  buildVaultSecurityReport,
+  buildVaultAgentRunbook,
+  findVaultAutomationEntries,
+  formatVaultSecurityReport,
+  formatVaultGrantList,
+  grantVaultAutomationAccess,
+  hardenVaultCredential,
+  pruneExpiredVaultAccessGrants,
+  resolveVaultCredentialForTask,
+  revokeVaultAutomationAccess,
+  selectVaultAutomationEntry,
+  type VaultGranteeType,
+} from './vaultAgentAccess';
 
 interface VaultCommandContext {
   circleId: string;
@@ -26,7 +40,15 @@ const HELP_TEXT = [
   '`/vault` — show readiness summary',
   '`/vault list` — list every credential',
   '`/vault find <query>` — search by platform / label / username / URL',
+  '`/vault grants [query]` — show which agents can use matching credentials',
+  '`/vault grant <credential> to <agent|openswan|chat|member:name> actions=login,post [until=YYYY-MM-DD]` — give automation access',
+  '`/vault revoke <credential> from <agent|openswan|chat|member:name>` — remove automation access',
+  '`/vault runbook <query>` — safe instructions agents can use without seeing the secret',
+  '`/vault resolve <task>` — find the best saved login for a website task',
   '`/vault status` — readiness counts (ready / needs test / rotation due)',
+  '`/vault security` — security posture, risky grants, approval gaps, and top fixes',
+  '`/vault harden <query>` — apply safer defaults to one credential',
+  '`/vault cleanup expired-grants` — remove expired automation grants',
   '`/vault rotation` — credentials with overdue rotation',
   '`/vault help` — show this help',
 ].join('\n');
@@ -197,6 +219,173 @@ async function vaultRotation(ctx: VaultCommandContext): Promise<VaultCommandResu
   return { message: lines.join('\n'), success: true };
 }
 
+async function vaultSecurity(ctx: VaultCommandContext): Promise<VaultCommandResult> {
+  const { entries, error } = await loadEntries(ctx.circleId);
+  if (error) return { message: error, success: false };
+  if (entries.length === 0) {
+    return { message: 'Vault is empty. Add credentials before running a security posture review.', success: true };
+  }
+  return { message: formatVaultSecurityReport(entries), success: true };
+}
+
+async function vaultHarden(query: string, ctx: VaultCommandContext): Promise<VaultCommandResult> {
+  const trimmed = query.trim();
+  if (!trimmed) return { message: 'Usage: `/vault harden <credential query>`', success: false };
+  const selection = await selectVaultAutomationEntry(ctx.circleId, { query: trimmed });
+  if (!selection.ok) return { message: selection.error, success: false };
+  const result = await hardenVaultCredential(ctx.circleId, selection.entry, ctx.userId);
+  return { message: result.resultsText, success: result.ok };
+}
+
+async function vaultCleanupExpiredGrants(ctx: VaultCommandContext): Promise<VaultCommandResult> {
+  const { entries, error } = await loadEntries(ctx.circleId);
+  if (error) return { message: error, success: false };
+  const report = buildVaultSecurityReport(entries);
+  if (report.expiredGrantCount === 0) {
+    return { message: 'No expired vault grants to clean up.', success: true };
+  }
+  let removed = 0;
+  const failures: string[] = [];
+  for (const entry of entries) {
+    const result = await pruneExpiredVaultAccessGrants(ctx.circleId, entry, ctx.userId);
+    if (result.ok) removed += result.removed;
+    else failures.push(result.resultsText);
+  }
+  const suffix = failures.length > 0
+    ? ` ${failures.length} credential${failures.length === 1 ? '' : 's'} failed: ${failures.slice(0, 3).join('; ')}`
+    : '';
+  return {
+    message: `Removed ${removed} expired vault grant${removed === 1 ? '' : 's'}.${suffix}`,
+    success: failures.length === 0,
+  };
+}
+
+function parseOptionTail(value: string): {
+  text: string;
+  actions?: string[];
+  until?: string;
+  granteeType?: VaultGranteeType;
+  note?: string;
+} {
+  let text = value;
+  const actionsMatch = text.match(/\bactions=([a-z0-9_,:-]+)/i);
+  const untilMatch = text.match(/\b(?:until|expires)=([0-9T:Z+_.-]+)/i);
+  const typeMatch = text.match(/\btype=(agent|runtime|chat|member|openswan)\b/i);
+  const noteMatch = text.match(/\bnote=(?:"([^"]+)"|'([^']+)'|([^\s]+))/i);
+  text = text
+    .replace(/\bactions=([a-z0-9_,:-]+)/ig, '')
+    .replace(/\b(?:until|expires)=([0-9T:Z+_.-]+)/ig, '')
+    .replace(/\btype=(agent|runtime|chat|member|openswan)\b/ig, '')
+    .replace(/\bnote=(?:"([^"]+)"|'([^']+)'|([^\s]+))/ig, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return {
+    text,
+    actions: actionsMatch ? actionsMatch[1].split(',').map((item) => item.trim()).filter(Boolean) : undefined,
+    until: untilMatch ? untilMatch[1].replace(/_/g, ':') : undefined,
+    granteeType: typeMatch ? typeMatch[1].toLowerCase() as VaultGranteeType : undefined,
+    note: noteMatch ? (noteMatch[1] || noteMatch[2] || noteMatch[3] || '').trim() : undefined,
+  };
+}
+
+function parseGrantee(value: string, fallbackType?: VaultGranteeType): { grantee: string; granteeType: VaultGranteeType } {
+  const trimmed = value.trim();
+  const prefixed = trimmed.match(/^(agent|runtime|chat|member|openswan):(.+)$/i);
+  if (prefixed) {
+    return {
+      granteeType: prefixed[1].toLowerCase() as VaultGranteeType,
+      grantee: prefixed[2].trim(),
+    };
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower === 'openswan' || lower === 'open swan') return { granteeType: 'openswan', grantee: 'OpenSwan' };
+  if (lower === 'chat') return { granteeType: 'chat', grantee: 'chat' };
+  return { granteeType: fallbackType || 'agent', grantee: trimmed };
+}
+
+async function vaultGrants(query: string, ctx: VaultCommandContext): Promise<VaultCommandResult> {
+  const trimmed = query.trim();
+  if (trimmed) {
+    const selection = await selectVaultAutomationEntry(ctx.circleId, { query: trimmed });
+    if (!selection.ok) return { message: selection.error, success: false };
+    return { message: formatVaultGrantList(selection.entry), success: true };
+  }
+
+  const result = await findVaultAutomationEntries(ctx.circleId);
+  if (result.error) {
+    return {
+      message: result.vaultMissing ? 'Vault is not deployed yet.' : result.error,
+      success: false,
+    };
+  }
+  const withGrants = result.entries.filter((entry) => formatVaultGrantList(entry).includes('->'));
+  if (withGrants.length === 0) {
+    return { message: 'No automation grants yet. Use `/vault grant <credential> to openswan actions=login` to grant access.', success: true };
+  }
+  return {
+    message: ['**Vault grants**', '', ...withGrants.slice(0, 20).map(formatVaultGrantList)].join('\n\n'),
+    success: true,
+  };
+}
+
+async function vaultGrant(command: string, ctx: VaultCommandContext): Promise<VaultCommandResult> {
+  const parsed = parseOptionTail(command);
+  const match = parsed.text.match(/^(.+?)\s+to\s+(.+)$/i);
+  if (!match) {
+    return {
+      message: 'Usage: `/vault grant <credential query> to <agent|openswan|chat|member:name> actions=login,post [until=YYYY-MM-DD]`',
+      success: false,
+    };
+  }
+  const grantee = parseGrantee(match[2], parsed.granteeType);
+  const result = await grantVaultAutomationAccess(ctx.circleId, {
+    query: match[1].trim(),
+    grantee: grantee.grantee,
+    granteeType: grantee.granteeType,
+    actions: parsed.actions || ['login'],
+    expiresAt: parsed.until,
+    note: parsed.note,
+    createdBy: ctx.userId,
+  });
+  return { message: result.resultsText, success: result.ok };
+}
+
+async function vaultRevoke(command: string, ctx: VaultCommandContext): Promise<VaultCommandResult> {
+  const parsed = parseOptionTail(command);
+  const match = parsed.text.match(/^(.+?)\s+from\s+(.+)$/i);
+  if (!match) {
+    return {
+      message: 'Usage: `/vault revoke <credential query> from <agent|openswan|chat|member:name>`',
+      success: false,
+    };
+  }
+  const grantee = parseGrantee(match[2], parsed.granteeType);
+  const result = await revokeVaultAutomationAccess(ctx.circleId, {
+    query: match[1].trim(),
+    grantee: grantee.grantee,
+    granteeType: grantee.granteeType,
+  });
+  return { message: result.resultsText, success: result.ok };
+}
+
+async function vaultRunbook(query: string, ctx: VaultCommandContext): Promise<VaultCommandResult> {
+  const trimmed = query.trim();
+  if (!trimmed) return { message: 'Usage: `/vault runbook <credential query>`', success: false };
+  const selection = await selectVaultAutomationEntry(ctx.circleId, { query: trimmed });
+  if (!selection.ok) return { message: selection.error, success: false };
+  return {
+    message: buildVaultAgentRunbook(selection.entry, { task: `Use saved login for ${trimmed}`, grantee: 'OpenSwan', granteeType: 'openswan' }),
+    success: true,
+  };
+}
+
+async function vaultResolve(task: string, ctx: VaultCommandContext): Promise<VaultCommandResult> {
+  const trimmed = task.trim();
+  if (!trimmed) return { message: 'Usage: `/vault resolve <website task>`', success: false };
+  const result = await resolveVaultCredentialForTask(ctx.circleId, { task: trimmed });
+  return { message: result.resultsText, success: result.ok };
+}
+
 export async function executeVaultCommand(
   raw: string,
   ctx: VaultCommandContext,
@@ -207,7 +396,21 @@ export async function executeVaultCommand(
   if (!args || cmd === 'status' || cmd === 'summary') return vaultStatus(ctx);
   if (cmd === 'list' || cmd === 'ls' || cmd === 'all') return vaultList(ctx);
   if (cmd === 'rotation' || cmd === 'rotations' || cmd === 'due') return vaultRotation(ctx);
+  if (cmd === 'security' || cmd === 'audit security' || cmd === 'posture') return vaultSecurity(ctx);
+  if (cmd === 'cleanup expired-grants' || cmd === 'cleanup expired grants' || cmd === 'prune expired-grants' || cmd === 'prune expired grants') {
+    return vaultCleanupExpiredGrants(ctx);
+  }
   if (cmd === 'help') return { message: HELP_TEXT, success: true };
+  if (cmd === 'grants' || cmd === 'access') return vaultGrants('', ctx);
+  if (cmd.startsWith('grants ') || cmd.startsWith('access ')) {
+    const query = cmd.startsWith('grants ') ? args.slice(7) : args.slice(7);
+    return vaultGrants(query, ctx);
+  }
+  if (cmd.startsWith('grant ')) return vaultGrant(args.slice(6), ctx);
+  if (cmd.startsWith('harden ')) return vaultHarden(args.slice(7), ctx);
+  if (cmd.startsWith('revoke ')) return vaultRevoke(args.slice(7), ctx);
+  if (cmd.startsWith('runbook ')) return vaultRunbook(args.slice(8), ctx);
+  if (cmd.startsWith('resolve ')) return vaultResolve(args.slice(8), ctx);
   if (cmd.startsWith('find ') || cmd.startsWith('search ')) {
     const query = cmd.startsWith('find ') ? args.slice(5) : args.slice(7);
     return vaultFind(query, ctx);

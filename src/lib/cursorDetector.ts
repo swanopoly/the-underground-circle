@@ -15,8 +15,13 @@ import { supabase } from './supabase';
 import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
 
 import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+import { getBridgeUrl } from './bridgeEnvironment';
 
-const BRIDGE_URL = 'http://localhost:7781';
+const BRIDGE_PORT = 7781;
+
+function getCursorBridgeUrl(): string | null {
+  return getBridgeUrl(BRIDGE_PORT);
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,11 +51,13 @@ const CURSOR_COLORS = [
 // ── Detection ────────────────────────────────────────────────────────────────
 
 export async function detectCursorBridge(): Promise<boolean> {
+  const bridgeUrl = getCursorBridgeUrl();
+  if (!bridgeUrl) return false;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
     const token = await ensureBridgeToken();
-    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
     clearTimeout(timeout);
     if (!res.ok) return false;
     const data = await res.json();
@@ -62,11 +69,13 @@ export async function detectCursorBridge(): Promise<boolean> {
 }
 
 export async function fetchCursorSessions(): Promise<CursorSession[]> {
+  const bridgeUrl = getCursorBridgeUrl();
+  if (!bridgeUrl) return [];
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     const token = await ensureBridgeToken();
-    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
     clearTimeout(timeout);
     if (!res.ok) return [];
     const data = await res.json();
@@ -168,7 +177,7 @@ export async function publishCursorAgent(
     name: CURSOR_AGENT_NAME,
     color: display.color || '#8b5cf6',
     toolIcon: display.icon || '🎯',
-    gatewayUrl: BRIDGE_URL,
+    gatewayUrl: getCursorBridgeUrl() || 'http://localhost:7781',
     isPublic: false,
   });
 

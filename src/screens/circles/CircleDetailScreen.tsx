@@ -14,19 +14,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../../lib/supabase';
-import ChatTab from './tabs/ChatTab';
-import OfficeTab from './tabs/OfficeTab';
-import FeedTab from './tabs/FeedTab';
-import MembersTab from './tabs/MembersTab';
-import ChallengesTab from './tabs/ChallengesTab';
-import WalletTab from './tabs/WalletTab';
-import ProfileTab from './tabs/ProfileTab';
-import RoomsTab from './tabs/RoomsTab';
-import AnalyticsTab from './tabs/AnalyticsTab';
-import MarketplaceTab from './tabs/IntegrationsTab';
 import type { CircleIntegrationGroupKey } from '../../lib/circleIntegrationCatalog';
-import BackpackTab from './tabs/BackpackTab';
-import MissionsTab from './tabs/MissionsTab';
 import FloatingChat from '../../components/FloatingChat';
 import TutorialController from '../../components/onboarding/TutorialController';
 import SearchModal from '../../components/SearchModal';
@@ -52,7 +40,19 @@ if (Platform.OS === 'web' && typeof document !== 'undefined' && !document.getEle
   document.head.appendChild(style);
 }
 
-// Core tabs (Chat, Office, Rooms) always mounted; secondary tabs lazy-mount on first visit
+const ChatTab = React.lazy(() => import('./tabs/ChatTab'));
+const OfficeTab = React.lazy(() => import('./tabs/OfficeTab'));
+const FeedTab = React.lazy(() => import('./tabs/FeedTab'));
+const MembersTab = React.lazy(() => import('./tabs/MembersTab'));
+const WalletTab = React.lazy(() => import('./tabs/WalletTab'));
+const ProfileTab = React.lazy(() => import('./tabs/ProfileTab'));
+const RoomsTab = React.lazy(() => import('./tabs/RoomsTab'));
+const AnalyticsTab = React.lazy(() => import('./tabs/AnalyticsTab'));
+const MarketplaceTab = React.lazy(() => import('./tabs/IntegrationsTab'));
+const BackpackTab = React.lazy(() => import('./tabs/BackpackTab'));
+const SiteCredentialVaultPanel = React.lazy(() => import('../../components/vault/SiteCredentialVaultPanel'));
+
+// Tabs lazy-mount on first visit and now lazy-load their code chunks too.
 
 // Gated tabs — hidden from nav until the feature is complete (see docs/NEXT_LEVEL_PLAN.md Phase 0.3)
 const GATED_TABS = new Set(['WALLET']);
@@ -64,7 +64,7 @@ const TAB_META_ALL: { key: string; label: string; icon: string; flatIcon?: strin
   { key: 'FEED', label: 'Feed', icon: '🎯', flatIcon: 'feed', color: '#f59e0b' },
   { key: 'BACKPACK', label: 'Backpack', icon: '🎒', flatIcon: 'backpack', color: '#ec4899' },
   { key: 'INTEGRATIONS', label: 'Marketplace', icon: '🛍️', flatIcon: 'integrations', color: '#3b82f6' },
-  { key: 'CHALLENGES', label: 'Challenges', icon: '🏆', flatIcon: 'challenges', color: '#ef4444' },
+  { key: 'VAULT', label: 'Vault', icon: '🔐', flatIcon: 'vault', color: '#14b8a6' },
   { key: 'MEMBERS', label: 'Members', icon: '👥', flatIcon: 'members', color: '#14b8a6' },
   { key: 'ANALYTICS', label: 'Analytics', icon: '📊', flatIcon: 'analytics', color: '#22d3ee' },
   { key: 'WALLET', label: 'Wallet', icon: '💰', flatIcon: 'wallet', color: '#f97316' },
@@ -75,6 +75,13 @@ const TAB_META = TAB_META_ALL.filter(t => !GATED_TABS.has(t.key));
 
 const TABS = TAB_META.map(t => t.key) as readonly string[];
 type Tab = string;
+function normalizeTabKey(value?: string | null): Tab | null {
+  const upper = value?.toUpperCase();
+  if (!upper) return null;
+  // Preserve old shared links / stored route params after Challenges became Vault.
+  if (upper === 'CHALLENGES') return 'VAULT';
+  return TABS.includes(upper) ? upper : null;
+}
 type MarketplaceFocus = {
   itemId?: string | null;
   groupKey?: CircleIntegrationGroupKey | null;
@@ -100,14 +107,14 @@ function loadSavedTab(circleId: string): Tab {
       try {
         const parts = window.location.pathname.split('/');
         if (parts.length >= 4 && parts[1] === 'circle') {
-          const urlTab = parts[3]?.toUpperCase();
-          if (urlTab && TABS.includes(urlTab)) return urlTab;
+          const urlTab = normalizeTabKey(parts[3]);
+          if (urlTab) return urlTab;
         }
       } catch {}
       // 2. Legacy: ?tab= query param (older shared links).
       try {
-        const urlTab = new URLSearchParams(window.location.search).get('tab')?.toUpperCase();
-        if (urlTab && TABS.includes(urlTab)) return urlTab;
+        const urlTab = normalizeTabKey(new URLSearchParams(window.location.search).get('tab'));
+        if (urlTab) return urlTab;
       } catch {}
       // Bare URL → fresh entry. Default to CHAT. Ignore localStorage here
       // so a stale previous-session tab can't override the "just entered"
@@ -163,7 +170,8 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   }, [circleId, circleName]);
   const [activeTab, setActiveTabRaw] = useState<Tab>(() => {
     // Route param takes priority (from CMD+K, deep links, programmatic navigation)
-    if (routeTab && TABS.includes(routeTab.toUpperCase())) return routeTab.toUpperCase();
+    const normalizedRouteTab = normalizeTabKey(routeTab);
+    if (normalizedRouteTab) return normalizedRouteTab;
     return loadSavedTab(circleId);
   });
   // Circle-scoped global search modal state. Effect hooks that depend on
@@ -218,8 +226,8 @@ export default function CircleDetailScreen({ route, navigation }: any) {
     // Chat commands (e.g. `/mission create`) dispatch uc:switch-tab so the
     // correct tab is active before the target modal tries to render.
     const onSwitchTab = (e: any) => {
-      const target = (e?.detail?.tab || '').toString().toUpperCase();
-      if (target && TABS.includes(target)) setActiveTab(target);
+      const target = normalizeTabKey((e?.detail?.tab || '').toString());
+      if (target) setActiveTab(target);
     };
     window.addEventListener('keydown', onKey);
     window.addEventListener('uc:toggle-search', onToggle as any);
@@ -235,8 +243,8 @@ export default function CircleDetailScreen({ route, navigation }: any) {
   const tabTs = route.params?._tabTs;
   useEffect(() => {
     if (routeTab) {
-      const upper = routeTab.toUpperCase();
-      if (TABS.includes(upper)) setActiveTab(upper);
+      const target = normalizeTabKey(routeTab);
+      if (target) setActiveTab(target);
     }
   }, [routeTab, tabTs, setActiveTab]);
   const cached = loadCachedCircle(circleId);
@@ -421,8 +429,8 @@ export default function CircleDetailScreen({ route, navigation }: any) {
       <LazyTab tabKey="FEED" activeTab={activeTab}>
         <FeedTab circleId={circleId} accentColor={accentColor} onOpenMarketplace={openMarketplace} />
       </LazyTab>
-      <LazyTab tabKey="CHALLENGES" activeTab={activeTab}>
-        <ChallengesTab circleId={circleId} />
+      <LazyTab tabKey="VAULT" activeTab={activeTab}>
+        <SiteCredentialVaultPanel circleId={circleId} accentColor={accentColor} fullHeight />
       </LazyTab>
       <LazyTab tabKey="MEMBERS" activeTab={activeTab}>
         <MembersTab circleId={circleId} />
@@ -486,7 +494,9 @@ function LazyTab({ tabKey, activeTab, children }: { tabKey: string; activeTab: s
 
   return (
     <View style={[styles.tabContent, !isActive && styles.hiddenTab]}>
-      <ErrorBoundary scope={`${tabKey} tab`}>{children}</ErrorBoundary>
+      <ErrorBoundary scope={`${tabKey} tab`}>
+        <React.Suspense fallback={<LoadingScreen />}>{children}</React.Suspense>
+      </ErrorBoundary>
     </View>
   );
 }

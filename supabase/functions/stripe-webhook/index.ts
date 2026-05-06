@@ -58,12 +58,15 @@ Deno.serve(async (req: Request) => {
     );
 
     // Log the event
-    await supabase.from("billing_events").insert({
+    const { error: billingEventError } = await supabase.from("billing_events").insert({
       org_id: null, // will be set below if we can identify the org
       stripe_event_id: event.id,
       event_type: event.type,
       data: event.data.object as any,
-    }).catch(() => {}); // Don't fail on logging errors
+    });
+    if (billingEventError) {
+      console.warn("Billing event log failed:", billingEventError.message);
+    }
 
     switch (event.type) {
       case "checkout.session.completed": {

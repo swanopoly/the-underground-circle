@@ -179,13 +179,15 @@ export interface ProbeOptions {
   timeoutMs?: number;
   /** Injectable fetch so smoke tests can mock without a real network. */
   fetchImpl?: typeof fetch;
+  /** Optional runtime URL resolver. Defaults to the catalog's localhost URLs. */
+  urlForPort?: (port: number, entry: BridgeCatalogEntry) => string | null | undefined;
 }
 
 export async function probeBridges(opts: ProbeOptions = {}): Promise<BridgeProbeResult[]> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const timeoutMs = opts.timeoutMs ?? 3000;
   return Promise.all(
-    BRIDGE_CATALOG.map((entry) => probeOne(entry, fetchImpl, timeoutMs)),
+    BRIDGE_CATALOG.map((entry) => probeOne(entry, fetchImpl, timeoutMs, opts.urlForPort)),
   );
 }
 
@@ -193,11 +195,14 @@ async function probeOne(
   entry: BridgeCatalogEntry,
   fetchImpl: typeof fetch,
   timeoutMs: number,
+  urlForPort?: ProbeOptions['urlForPort'],
 ): Promise<BridgeProbeResult> {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
+  const baseUrl = urlForPort?.(entry.port, entry)?.replace(/\/$/, '');
+  const healthUrl = baseUrl ? `${baseUrl}/health` : entry.healthUrl;
   try {
-    const res = await fetchImpl(entry.healthUrl, { signal: ac.signal });
+    const res = await fetchImpl(healthUrl, { signal: ac.signal });
     if (!res.ok) {
       return {
         name: entry.name,

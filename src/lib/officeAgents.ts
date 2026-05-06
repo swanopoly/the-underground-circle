@@ -19,6 +19,7 @@ export interface OfficeAgent {
   recentActions: string[];
   recentMessages: Array<{ role: string; content: string; timestamp?: string }>;
   costToday: number;
+  sessionCostToday?: number;
   costTotal: number;
   costWeek: number;
   tokensUsed: number;
@@ -240,41 +241,44 @@ export function sessionsToAgents(
   connectionName: string,
   providerType: ProviderType,
 ): OfficeAgent[] {
-  return sessions.map((s, i) => ({
-    id: `${connectionId}::${s.sessionKey}`,
-    name: s.agentId || s.sessionKey.slice(0, 12),
-    role: s.kind === 'main' ? 'Main Agent' : s.kind === 'subagent' ? 'Sub-Agent' : s.kind || 'Session',
-    status: inferStatus(s),
-    color: AGENT_COLORS[i % AGENT_COLORS.length],
-    deskIndex: i,
-    activity: inferActivity(s),
-    messagesProcessed: s.turns || s.messageCount || 0,
-    uptimeHours: 0,
-    uptime: s.uptime || '',
-    lastActive: s.lastActivity || '',
-    recentActions: extractRecentActions(s),
-    recentMessages: s.lastMessages || [],
-    // Use explicit cost if provided, else cache-aware calculation, else simple estimate
-    costToday: s.totalCost
+  return sessions.map((s, i) => {
+    const sessionCostToday = s.totalCost
       ?? (s.cachedTokens != null || s.newTokens != null
           ? estimateCostWithCache(s.model, s.cachedTokens ?? 0, s.newTokens ?? 0, s.totalOutputTokens ?? 0)
-          : estimateCost(s.model, s.totalInputTokens ?? 0, s.totalOutputTokens ?? 0)),
-    costTotal: 0, // enriched from DB
-    costWeek: 0,
-    tokensUsed: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
-    inputTokens: s.totalInputTokens || 0,
-    outputTokens: s.totalOutputTokens || 0,
-    cachedTokens: s.cachedTokens || 0,
-    newTokens: s.newTokens || 0,
-    turns: s.turns || s.messageCount || 0,
-    sessionKey: s.sessionKey,
-    model: s.model || 'unknown',
-    connectionId,
-    connectionName,
-    providerType,
-    runtimeKind: s.kind || (s.isSubagent ? 'subagent' : 'session'),
-    parentSessionKey: s.parentSessionKey,
-  }));
+          : estimateCost(s.model, s.totalInputTokens ?? 0, s.totalOutputTokens ?? 0));
+    return {
+      id: `${connectionId}::${s.sessionKey}`,
+      name: s.agentId || s.sessionKey.slice(0, 12),
+      role: s.kind === 'main' ? 'Main Agent' : s.kind === 'subagent' ? 'Sub-Agent' : s.kind || 'Session',
+      status: inferStatus(s),
+      color: AGENT_COLORS[i % AGENT_COLORS.length],
+      deskIndex: i,
+      activity: inferActivity(s),
+      messagesProcessed: s.turns || s.messageCount || 0,
+      uptimeHours: 0,
+      uptime: s.uptime || '',
+      lastActive: s.lastActivity || '',
+      recentActions: extractRecentActions(s),
+      recentMessages: s.lastMessages || [],
+      costToday: sessionCostToday,
+      sessionCostToday,
+      costTotal: 0, // enriched from DB
+      costWeek: 0,
+      tokensUsed: (s.totalInputTokens || 0) + (s.totalOutputTokens || 0),
+      inputTokens: s.totalInputTokens || 0,
+      outputTokens: s.totalOutputTokens || 0,
+      cachedTokens: s.cachedTokens || 0,
+      newTokens: s.newTokens || 0,
+      turns: s.turns || s.messageCount || 0,
+      sessionKey: s.sessionKey,
+      model: s.model || 'unknown',
+      connectionId,
+      connectionName,
+      providerType,
+      runtimeKind: s.kind || (s.isSubagent ? 'subagent' : 'session'),
+      parentSessionKey: s.parentSessionKey,
+    };
+  });
 }
 
 function inferStatus(s: OpenSwanSession): AgentStatus {

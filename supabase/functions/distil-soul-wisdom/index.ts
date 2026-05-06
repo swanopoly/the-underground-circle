@@ -15,6 +15,7 @@
 // Deploy: npx supabase functions deploy distil-soul-wisdom
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
+import { byokMissingMessage, resolveUserModelApiKey } from "../_shared/edge.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -99,7 +100,7 @@ async function loadSoulMemories(
     }))
     // Secondary in-JS sort because the Postgres ORDER BY above was on the
     // join table only — we want primary first, THEN importance within role.
-    .sort((a, b) => {
+    .sort((a: MemoryRow, b: MemoryRow) => {
       const roleRank = (r: string) => (r === "primary" ? 0 : r === "shared" ? 1 : 2);
       const roleDiff = roleRank(a.role) - roleRank(b.role);
       if (roleDiff !== 0) return roleDiff;
@@ -243,9 +244,6 @@ Deno.serve(async (req: Request) => {
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, serviceKey);
 
-    const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
-    if (!anthropicKey) return errResponse(500, "ANTHROPIC_API_KEY not set in Supabase secrets");
-
     // Auth gate — either the caller presents a user JWT (we verify they are
     // in the target circle) OR they present the service role key.
     const authHeader = req.headers.get("Authorization") || "";
@@ -264,6 +262,27 @@ Deno.serve(async (req: Request) => {
     }
     if (!isServiceRole && !callerUserId) {
       return errResponse(401, "Authentication required (JWT or service role)");
+    }
+
+    let anthropicKey: string | null = null;
+    if (callerUserId) {
+      const resolved = await resolveUserModelApiKey({
+        supabase,
+        userId: callerUserId,
+        provider: "anthropic",
+        envVarName: "ANTHROPIC_API_KEY",
+      });
+      anthropicKey = resolved?.apiKey || null;
+    } else if (isServiceRole && Deno.env.get("ALLOW_SERVICE_ROLE_PLATFORM_MODEL_KEYS") === "true") {
+      anthropicKey = Deno.env.get("ANTHROPIC_API_KEY") || null;
+    }
+    if (!anthropicKey) {
+      return errResponse(
+        400,
+        isServiceRole
+          ? "Service-role model usage is disabled unless ALLOW_SERVICE_ROLE_PLATFORM_MODEL_KEYS=true. Run distillation from a user account with a stored Anthropic key."
+          : byokMissingMessage("anthropic"),
+      );
     }
 
     // Build the target list

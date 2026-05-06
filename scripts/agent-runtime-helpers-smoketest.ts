@@ -1,10 +1,10 @@
 /**
- * hermes-helpers-smoketest — locks in pure helpers from Phase 2/4 that
+ * agent-runtime-helpers-smoketest — locks in pure helpers from Phase 2/4 that
  * don't need Supabase (frontmatter parser, URL normalizer, default
  * summarizer, telemetry serializer). Catches regressions before
  * production flows pick the wrong behavior.
  *
- * Usage: `npm run smoke:hermes-helpers`
+ * Usage: `npm run smoke:agent-runtime-helpers`
  */
 
 import { parseSkillFrontmatter } from '../src/lib/skillFrontmatter';
@@ -132,7 +132,7 @@ assert(
 // ─── summary ────────────────────────────────────────────────────────────────
 
 if (failures > 0) {
-  console.error(`\n${failures} Hermes-helpers failure(s)`);
+  console.error(`\n${failures} agent-runtime-helpers failure(s)`);
   process.exit(1);
 }
-console.log('\nAll Hermes-helpers smoke cases passed.');
+console.log('\nAll agent-runtime-helpers smoke cases passed.');

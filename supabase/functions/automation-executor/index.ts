@@ -8,10 +8,12 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 import {
+  byokMissingMessage,
   errResponse,
   getAuthenticatedUser,
   isServiceRoleRequest,
   jsonResponse,
+  resolveUserModelApiKey,
 } from "../_shared/edge.ts";
 import {
   computeCostUsd,
@@ -71,10 +73,7 @@ interface AIResult {
 // aggressive retry than user-triggered calls, but the cost math itself goes
 // through the shared `computeCostUsd()`.
 
-async function callClaude(frozenPrompt: string, volatilePrompt: string, userMessage: string, modelKey: string): Promise<AIResult> {
-  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
-
+async function callClaude(frozenPrompt: string, volatilePrompt: string, userMessage: string, modelKey: string, apiKey: string): Promise<AIResult> {
   const modelId = CLAUDE_MODEL_MAP[modelKey] || DEFAULT_MODEL_ID;
 
   // System prompt is split into two blocks: the frozen header gets a
@@ -1679,7 +1678,20 @@ ${contextString}`;
       }
 
       await logStep(`⏳ Calling ${modelId}...`);
-      const aiResult = await callClaude(frozenSystem, volatileSystem, resolvedPrompt, modelKey);
+      const keyOwnerId = automation.created_by || authedUser?.id || null;
+      if (!keyOwnerId) {
+        throw new Error(byokMissingMessage("anthropic"));
+      }
+      const resolvedAnthropicKey = await resolveUserModelApiKey({
+        supabase,
+        userId: keyOwnerId,
+        provider: "anthropic",
+        envVarName: "ANTHROPIC_API_KEY",
+      });
+      if (!resolvedAnthropicKey) {
+        throw new Error(byokMissingMessage("anthropic"));
+      }
+      const aiResult = await callClaude(frozenSystem, volatileSystem, resolvedPrompt, modelKey, resolvedAnthropicKey.apiKey);
       await logStep(`✓ AI responded — ${aiResult.totalTokens} tokens (${aiResult.inputTokens} in / ${aiResult.outputTokens} out · cache ${aiResult.cacheReadTokens}r/${aiResult.cacheCreationTokens}w) · $${aiResult.estimatedCost.toFixed(4)}`);
 
       // Fire-and-forget usage log for cost / cache-hit visibility

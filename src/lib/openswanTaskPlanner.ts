@@ -1,4 +1,5 @@
 import type { AgenticCodingProfile } from './agenticCodingProfile';
+import { classifyBrowserbaseWorkflow } from './browserbaseWorkflowIntent';
 
 export type OpenSwanTaskKind = 'build' | 'review' | 'debug' | 'architect' | 'research' | 'automation' | 'general';
 export type OpenSwanVerificationKind = 'typecheck' | 'tests' | 'lint' | 'preview' | 'manual_review' | 'security_review' | 'performance_review' | 'integration_review';
@@ -53,7 +54,25 @@ export type OpenSwanToolName =
   | 'office.list_agents'
   | 'approvals.list'
   | 'approvals.request'
-  | 'approvals.resolve';
+  | 'approvals.resolve'
+  | 'vault.list'
+  | 'vault.find'
+  | 'vault.grants'
+  | 'vault.grant'
+  | 'vault.revoke'
+  | 'vault.runbook'
+  | 'vault.resolve_for_task'
+  | 'desktop.launch_app'
+  | 'desktop.focus_app'
+  | 'desktop.type_text'
+  | 'desktop.press_keys'
+  | 'desktop.list_running_apps'
+  | 'desktop.wait_for_app'
+  | 'desktop.screenshot'
+  | 'desktop.open_url'
+  | 'desktop.open_path'
+  | 'desktop.click_at'
+  | 'desktop.screen_size';
 
 export type OpenSwanVerificationCheck = {
   id: string;
@@ -84,7 +103,9 @@ const ARCH_RE = /\b(architect|architecture|structure|boundary|pattern|dependency
 const RESEARCH_RE = /\b(research|compare|investigate|deep dive|tradeoff|best practice|options|approach)\b/i;
 const AUTOMATION_RE = /\b(automate|workflow|task|pipeline|schedule|agent|orchestrate|runbook)\b/i;
 const PREVIEW_RE = /\b(html|css|landing page|webpage|preview|ui|screen|room|sandbox)\b/i;
-const BROWSER_RE = /\b(browser|website|web site|webpage|site|login|dashboard|click|fill|form|navigate|open url|browserbase|stagehand|computer[- ]use)\b/i;
+const BROWSER_RE = /\b(browser|website|web site|webpage|site|login|dashboard|click|fill|form|submit|data entry|scrape|extract data|web data retrieval|structured data|navigate|open url|browserbase|stagehand|computer[- ]use)\b/i;
+const DESKTOP_RE = /\b(desktop|computer|native app|window|finder|terminal|chrome|safari|slack|figma|notion|excel|word|zoom|cursor|visual studio code|vscode|launch app|open app|focus app|keystroke|keyboard|screen shot|screenshot|click at)\b/i;
+const VAULT_RE = /\b(vault|credential|credentials|password|passwords|saved login|login information|username|secret|secrets|access to|grant access|revoke access)\b/i;
 const TEST_RE = /\b(tests?|specs?|coverage|assert|jest|vitest|playwright|cypress)\b/i;
 const LINT_RE = /\b(lint|eslint|format|prettier)\b/i;
 const SECURITY_RE = /\b(security|vulnerab|secret|auth|xss|injection|owasp)\b/i;
@@ -183,6 +204,7 @@ function buildVerification(
 }
 
 function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities?: import('./messageEntityExtractor').MessageEntities): OpenSwanToolPlanItem[] {
+  const browserbaseWorkflow = classifyBrowserbaseWorkflow(message);
   const tools: OpenSwanToolPlanItem[] = [
     { tool: 'code.inspect', reason: 'Inspect surrounding code and current context before acting.', priority: 'high' },
   ];
@@ -207,7 +229,57 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities
     );
   }
   if (BROWSER_RE.test(message)) {
-    tools.push({ tool: 'browser.plan_task', reason: 'Plan browser actions and pick the right execution backend before touching a live site.', priority: 'high' });
+    tools.push({
+      tool: 'browser.plan_task',
+      reason: browserbaseWorkflow.kind === 'general_browser'
+        ? 'Plan browser actions and pick the right execution backend before touching a live site.'
+        : `Plan ${browserbaseWorkflow.label.toLowerCase()} with Browserbase readiness, output shape, and approval gates before touching a live site.`,
+      priority: 'high',
+    });
+  }
+  if (DESKTOP_RE.test(message)) {
+    tools.push(
+      { tool: 'desktop.list_running_apps', reason: 'Check which native apps are already open before controlling the desktop.', priority: 'high' },
+      { tool: 'desktop.screenshot', reason: 'Capture the current screen so OpenSwan can verify desktop state before or after action.', priority: 'medium' },
+    );
+    if (/\b(launch|open|start)\b/i.test(message)) {
+      tools.push({ tool: 'desktop.launch_app', reason: 'Launch the requested native app through the desktop bridge.', priority: 'high' });
+      tools.push({ tool: 'desktop.wait_for_app', reason: 'Wait for the launched app before typing or sending keys.', priority: 'medium' });
+    }
+    if (/\b(focus|switch to|bring .* front)\b/i.test(message)) {
+      tools.push({ tool: 'desktop.focus_app', reason: 'Focus the requested app before sending keyboard or text actions.', priority: 'high' });
+    }
+    if (/\b(type|enter|write|paste|fill)\b/i.test(message)) {
+      tools.push({ tool: 'desktop.type_text', reason: 'Type requested text into the focused desktop app after focus is confirmed.', priority: 'high' });
+    }
+    if (/\b(keys?|keystroke|shortcut|press|return|enter|tab|escape|cmd|command)\b/i.test(message)) {
+      tools.push({ tool: 'desktop.press_keys', reason: 'Send explicit keyboard shortcuts through the desktop bridge.', priority: 'high' });
+    }
+    if (entities?.urls.length || /\bhttps?:\/\//i.test(message)) {
+      tools.push({ tool: 'desktop.open_url', reason: 'Open the requested URL directly in the default browser from the desktop bridge.', priority: 'high' });
+    }
+    if (/\b(file|folder|path|downloads|desktop|documents)\b/i.test(message) && /[~/][^\s]+/.test(message)) {
+      tools.push({ tool: 'desktop.open_path', reason: 'Open a requested local file or folder through the desktop bridge.', priority: 'medium' });
+    }
+    if (/\b(click|coordinate|coords?)\b/i.test(message)) {
+      tools.push(
+        { tool: 'desktop.screen_size', reason: 'Read screen dimensions before coordinate-based clicking.', priority: 'medium' },
+        { tool: 'desktop.click_at', reason: 'Click at explicit user-provided screen coordinates when keyboard/semantic actions are not enough.', priority: 'medium' },
+      );
+    }
+  }
+  if (VAULT_RE.test(message) || /\blog\s*in|sign\s*in|wordpress|shopify|cms|admin panel\b/i.test(message)) {
+    tools.push(
+      { tool: 'vault.resolve_for_task', reason: 'Resolve the safest saved credential for login-dependent website automation without exposing secrets.', priority: 'high' },
+      { tool: 'vault.runbook', reason: 'Give agents a credential ID, allowed actions, allowed origins, and safe login instructions.', priority: 'high' },
+      { tool: 'vault.grants', reason: 'Inspect which agents or runtimes already have scoped credential access.', priority: 'medium' },
+    );
+  }
+  if (/\bgrant|give .*access|allow .*access|can use\b/i.test(message) && VAULT_RE.test(message)) {
+    tools.push({ tool: 'vault.grant', reason: 'Create a scoped vault access grant when the user explicitly gives an agent credential access.', priority: 'medium' });
+  }
+  if (/\brevoke|remove .*access|block .*access|disable .*access\b/i.test(message) && VAULT_RE.test(message)) {
+    tools.push({ tool: 'vault.revoke', reason: 'Remove a scoped vault access grant when the user asks to take access away.', priority: 'medium' });
   }
   if (kind === 'build' || kind === 'debug') {
     tools.push(

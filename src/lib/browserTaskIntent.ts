@@ -1,3 +1,8 @@
+import {
+  classifyBrowserbaseWorkflow,
+  type BrowserbaseWorkflowIntent,
+} from './browserbaseWorkflowIntent';
+
 const URL_PATTERN = /\bhttps?:\/\/[^\s)]+/gi;
 const DOMAIN_PATTERN = /\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b/gi;
 
@@ -17,6 +22,7 @@ export interface BrowserTaskIntent {
   completionCriteria: string[];
   safetyNotes: string[];
   entitySummary: string;
+  browserbaseWorkflow: BrowserbaseWorkflowIntent;
 }
 
 function normalizeDomain(value: string): string | null {
@@ -45,6 +51,7 @@ function summarizeEntities(startUrls: string[], domains: string[], requiresLogin
 export function analyzeBrowserTask(task: string): BrowserTaskIntent {
   const normalizedTask = task.trim();
   const lower = normalizedTask.toLowerCase();
+  const browserbaseWorkflow = classifyBrowserbaseWorkflow(normalizedTask);
   const startUrls = unique((normalizedTask.match(URL_PATTERN) || []).map((value) => value.trim()));
   const domainMentions = unique((normalizedTask.match(DOMAIN_PATTERN) || []).map(normalizeDomain));
   const allowedDomains = unique([
@@ -57,11 +64,12 @@ export function analyzeBrowserTask(task: string): BrowserTaskIntent {
   const extractPattern = /\b(extract|scrape|collect|capture|save|export|copy|summari[sz]e|list|report|find all|gather)\b/i;
   const readOnlyPattern = /\b(open|visit|check|look up|search|browse|show|read|inspect|compare|research)\b/i;
 
-  const requiresLogin = loginPattern.test(lower);
-  const hasSideEffects = transactionalPattern.test(lower);
+  const requiresLogin = loginPattern.test(lower) || browserbaseWorkflow.requiresPersistentContext;
+  const hasSideEffects = transactionalPattern.test(lower) || browserbaseWorkflow.kind === 'form_submission';
 
   let mode: BrowserTaskMode = 'workflow';
   if (hasSideEffects) mode = 'transactional';
+  else if (browserbaseWorkflow.kind === 'web_data_retrieval') mode = 'extract';
   else if (extractPattern.test(lower)) mode = 'extract';
   else if (readOnlyPattern.test(lower)) mode = 'read_only';
 
@@ -99,6 +107,8 @@ export function analyzeBrowserTask(task: string): BrowserTaskIntent {
   if (requiresLogin) {
     safetyNotes.push('This task may require authentication or access to sensitive account data.');
   }
+  completionCriteria.push(...browserbaseWorkflow.completionCriteria);
+  safetyNotes.push(...browserbaseWorkflow.safetyNotes);
   if (allowedDomains.length > 0) {
     safetyNotes.push(`Keep browser execution scoped to ${allowedDomains.join(', ')} unless the user expands it.`);
   } else {
@@ -125,5 +135,6 @@ export function analyzeBrowserTask(task: string): BrowserTaskIntent {
     completionCriteria,
     safetyNotes,
     entitySummary: summarizeEntities(startUrls, allowedDomains, requiresLogin, hasSideEffects),
+    browserbaseWorkflow,
   };
 }

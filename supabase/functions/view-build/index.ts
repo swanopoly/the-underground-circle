@@ -102,8 +102,10 @@ Deno.serve(async (req) => {
     return errorPage("Link expired", "This shared build has passed its 30-day lifespan.", 410);
   }
 
-  // Fire-and-forget view-count bump so it doesn't block page load
-  supabase.rpc("increment_builder_publication_views", { p_id: id }).catch(() => {});
+  const { error: viewCountError } = await supabase.rpc("increment_builder_publication_views", { p_id: id });
+  if (viewCountError) {
+    console.warn("[view-build] view count increment failed:", viewCountError.message);
+  }
 
   const plain = url.searchParams.get("plain") === "1";
   const html = plain ? data.html : injectAttribution(data.html, data.title || "Shared build", data.id);

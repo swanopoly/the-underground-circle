@@ -23,6 +23,7 @@ interface Props {
   delegationMode: SessionDelegationMode;
   onSessionProfileChange: (profile: SessionCodingProfile) => void;
   onDelegationModeChange: (mode: SessionDelegationMode) => void;
+  onOpenControlPanel?: () => void;
   onOpenSkills?: () => void;
   onClose: () => void;
 }
@@ -33,6 +34,7 @@ export default function OpenSwanServiceMenu({
   delegationMode,
   onSessionProfileChange,
   onDelegationModeChange,
+  onOpenControlPanel,
   onOpenSkills,
   onClose,
 }: Props) {
@@ -114,6 +116,19 @@ export default function OpenSwanServiceMenu({
           </View>
 
           <View style={styles.footerRow}>
+            {onOpenControlPanel && (
+              <Pressable
+                onPress={() => { onClose(); onOpenControlPanel(); }}
+                style={({ hovered, pressed }: any) => [
+                  styles.controlBtn,
+                  Platform.OS === 'web' && { transition: 'all 0.15s ease' },
+                  hovered && { borderColor: '#38bdf8', backgroundColor: '#38bdf820', transform: [{ translateY: -1 }] },
+                  pressed && { transform: [{ scale: 0.95 }] },
+                ]}
+              >
+                <Text style={styles.controlBtnText}>CONTROL PANEL</Text>
+              </Pressable>
+            )}
             {onOpenSkills && (
               <Pressable
                 onPress={() => { onClose(); onOpenSkills(); }}
@@ -177,6 +192,11 @@ const styles = StyleSheet.create({
     borderLeftWidth: 2, paddingLeft: 8, paddingVertical: 2,
   },
   footerRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  controlBtn: {
+    paddingHorizontal: 10, paddingVertical: 7, borderRadius: 8,
+    borderWidth: 1, borderColor: '#38bdf840', backgroundColor: '#0b1220',
+  },
+  controlBtnText: { color: '#38bdf8', fontSize: 10, fontWeight: '900', letterSpacing: 1, fontFamily: 'monospace' },
   skillsBtn: {
     paddingHorizontal: 12, paddingVertical: 8,
     borderRadius: 8, borderWidth: 1, borderColor: '#f59e0b40',

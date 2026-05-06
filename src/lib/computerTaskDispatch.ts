@@ -1,6 +1,7 @@
 import type { ComputerCapabilityAudit } from './computerCapabilityRegistry';
 import type { ComputerTaskGrantPlan } from './computerTaskGrants';
 import type { ComputerTaskPlanPreview } from './computerTaskPlanner';
+import { buildBrowserbaseWorkflowPromptBlock } from './browserbaseWorkflowIntent';
 
 export function buildComputerTaskDispatchPrefix(args: {
   task: string;
@@ -44,10 +45,16 @@ export function buildComputerTaskDispatchPrefix(args: {
     }
   }
 
+  if (args.preview.browserbaseWorkflow && args.preview.browserbaseWorkflow.kind !== 'general_browser') {
+    lines.push(buildBrowserbaseWorkflowPromptBlock(args.preview.browserbaseWorkflow));
+  }
+
   if (args.preview.kind === 'file_task') {
     lines.push('Execution guidance: prioritize file location, file reading, folder scoping, and access clarification. Do not default to browser work unless the task clearly requires a website.');
   } else if (args.preview.kind === 'app_task') {
     lines.push('Execution guidance: prioritize connected apps, MCP tools, integrations, and bridges. Be explicit about missing access or missing connectors.');
+  } else if (args.preview.kind === 'browser_task') {
+    lines.push('Execution guidance: prioritize Browserbase/remote browser execution, visible checkpoints, domain scope, vault-safe login use, and explicit approvals for form submission or external state changes.');
   } else if (args.preview.kind === 'hybrid_task') {
     lines.push('Execution guidance: break the task into ordered surfaces such as files, apps, and browser. State what you can do now, what access is missing, and the recommended next step.');
   } else {

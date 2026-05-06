@@ -21,6 +21,8 @@ export type OpenSwanRuntimeToolLoopOptions = {
   preferredToolNames?: OpenSwanToolName[];
   /** Chat mode — filters the tool set the model sees to mode-appropriate tools. */
   mode?: string | null;
+  /** Cost guard for follow-up tool loops. */
+  maxToolRounds?: number;
 };
 
 export type OpenSwanRuntimeToolLoopResult = {
@@ -137,6 +139,7 @@ export async function runOpenSwanRuntimeToolLoop(
     allowedToolNames: requestedTools,
     surface: opts.surface || 'main_chat',
     mode: opts.mode || null,
+    maxToolRounds: opts.maxToolRounds,
   });
 
   const toolActions = toToolActions(toolResult.toolEvents);

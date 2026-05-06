@@ -21,6 +21,7 @@ export function OfficeWorkspaceSection({
   showMcpHub,
   showGitHubFeed,
   showSoundMixer,
+  showVault,
   onSwitchFloor,
   onDeleteFloor,
   onAddFloor,
@@ -33,6 +34,7 @@ export function OfficeWorkspaceSection({
   onToggleMcpHub,
   onToggleGitHubFeed,
   onToggleSoundMixer,
+  onToggleVault,
   onCancelPlacing,
   onClearFloorFurniture,
   setPlacingType,
@@ -284,6 +286,13 @@ export function OfficeWorkspaceSection({
                   active: showGitHubFeed,
                   onPress: () => { setShowToolsMenu(false); onToggleGitHubFeed(); },
                 })}
+                {renderMenuButton({
+                  icon: 'Vault',
+                  title: 'Vault',
+                  description: 'Store website credentials for approved agent login and posting workflows.',
+                  active: showVault,
+                  onPress: () => { setShowToolsMenu(false); onToggleVault(); },
+                })}
                 {Platform.OS === 'web' && (
                   renderMenuButton({
                     icon: soundMuted ? 'X' : ')))',
@@ -416,13 +425,15 @@ export function OfficeIntelligenceSection({
   viewMode,
   showGitHubFeed,
   showSoundMixer,
+  showVault,
   circleId,
   accentColor,
   styles,
   GitHubWallFeed,
   SoundMixer,
+  SiteCredentialVaultPanel,
 }: any) {
-  if (viewMode !== 'office' || (!showGitHubFeed && !showSoundMixer)) return null;
+  if (viewMode !== 'office' || (!showGitHubFeed && !showSoundMixer && !showVault)) return null;
   return (
     <View style={styles.officeDashboardPanels}>
       {showGitHubFeed && (
@@ -433,6 +444,11 @@ export function OfficeIntelligenceSection({
       {showSoundMixer && Platform.OS === 'web' && (
         <View style={[styles.officeDashboardPanel, styles.soundPanelWrap]}>
           <SoundMixer accentColor={accentColor} />
+        </View>
+      )}
+      {showVault && (
+        <View style={styles.officeDashboardPanel}>
+          <SiteCredentialVaultPanel circleId={circleId} accentColor={accentColor} fullHeight />
         </View>
       )}
     </View>

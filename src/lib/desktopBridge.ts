@@ -25,18 +25,30 @@ import {
   type DesktopResult,
   type DesktopHealth,
 } from './desktopBridgeProtocol';
+import { getBridgeUrl } from './bridgeEnvironment';
 
 export type { DesktopBridgeError, DesktopResult, DesktopHealth } from './desktopBridgeProtocol';
 
-const BRIDGE_URL = 'http://localhost:7778';
-export const BRIDGE_HEALTH_URL = `${BRIDGE_URL}/desktop/health`;
+const BRIDGE_PORT = 7778;
+export const BRIDGE_HEALTH_URL = 'http://localhost:7778/desktop/health';
 const TOKEN_KEY = 'uc_desktop_bridge_token_v1';
+
+export function getDesktopBridgeBaseUrl(): string | null {
+  return getBridgeUrl(BRIDGE_PORT);
+}
+
+export function getDesktopBridgeHealthUrl(): string | null {
+  const base = getDesktopBridgeBaseUrl();
+  return base ? `${base}/desktop/health` : null;
+}
 
 // ─── Availability probe ────────────────────────────────────────────────────
 
 export async function isDesktopBridgeAvailable(): Promise<boolean> {
+  const base = getDesktopBridgeBaseUrl();
+  if (!base) return false;
   try {
-    const res = await fetch(`${BRIDGE_URL}/desktop/health`, { cache: 'no-store' });
+    const res = await fetch(`${base}/desktop/health`, { cache: 'no-store' });
     if (!res.ok) return false;
     const json = (await res.json()) as DesktopHealth;
     return !!json?.supported;
@@ -46,8 +58,10 @@ export async function isDesktopBridgeAvailable(): Promise<boolean> {
 }
 
 export async function getDesktopBridgeHealth(): Promise<DesktopHealth | null> {
+  const base = getDesktopBridgeBaseUrl();
+  if (!base) return null;
   try {
-    const res = await fetch(`${BRIDGE_URL}/desktop/health`, { cache: 'no-store' });
+    const res = await fetch(`${base}/desktop/health`, { cache: 'no-store' });
     if (!res.ok) return null;
     return (await res.json()) as DesktopHealth;
   } catch {
@@ -129,8 +143,12 @@ export async function ensureDesktopBridgePaired(): Promise<DesktopResult<{ token
  * caches it in `localStorage`. Call once per device.
  */
 export async function pairDesktopBridge(): Promise<DesktopResult<{ token: string }>> {
+  const base = getDesktopBridgeBaseUrl();
+  if (!base) {
+    return { ok: false, error: 'bridge unavailable in this environment', errorCode: 'bridge_offline' };
+  }
   try {
-    const res = await fetch(`${BRIDGE_URL}/desktop/pair`, {
+    const res = await fetch(`${base}/desktop/pair`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{}',
@@ -416,7 +434,11 @@ async function callBridge(
     token = ensured.data!.token;
   }
   try {
-    const res = await fetch(`${BRIDGE_URL}${pathname}`, {
+    const base = getDesktopBridgeBaseUrl();
+    if (!base) {
+      return { ok: false, error: 'bridge unavailable in this environment', errorCode: 'bridge_offline' };
+    }
+    const res = await fetch(`${base}${pathname}`, {
       method,
       headers: {
         'Content-Type': 'application/json',

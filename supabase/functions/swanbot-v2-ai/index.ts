@@ -30,7 +30,15 @@
 // To rollback: just stop routing client traffic here; swanbot-ai is untouched.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
-import { corsHeaders, errResponse, getRequiredEnv, jsonResponse } from "../_shared/edge.ts";
+import {
+  byokMissingMessage,
+  corsHeaders,
+  errResponse,
+  getAuthenticatedUser,
+  getRequiredEnv,
+  jsonResponse,
+  resolveUserModelApiKey,
+} from "../_shared/edge.ts";
 // Canonical edge-side Anthropic client — routes pricing + cache accounting +
 // claude_api_usage logging through one module so the dashboard shows real
 // numbers. See docs/AGENTS_ROADMAP.md §6 Rule #3.
@@ -46,6 +54,7 @@ type ContentBlock =
 type AgentMessage = { role: "user" | "assistant"; content: string | ContentBlock[] };
 
 type ToolResult = { ok: true; data: unknown } | { ok: false; error: string };
+type SupabaseEdgeClient = any;
 
 type ToolDef = {
   name: string;
@@ -68,7 +77,7 @@ type ToolDef = {
 };
 
 type ToolContext = {
-  supabase: ReturnType<typeof createClient>;
+  supabase: SupabaseEdgeClient;
   circleId: string;
   userId: string;
   /** The current agent_runs.id — set whenever runLoop is running under a
@@ -1401,7 +1410,7 @@ const TOOLS: ToolDef[] = [
 // ─── Prompt building ────────────────────────────────────────────────────────
 
 async function buildFrozenBlock(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseEdgeClient,
   circleId: string,
   targetAgentName: string,
 ): Promise<string> {
@@ -1446,7 +1455,7 @@ async function buildFrozenBlock(
  * that, keeping this message under ~800 tokens even on a populated library.
  */
 async function loadSkillsContextMessage(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseEdgeClient,
   circleId: string,
 ): Promise<string> {
   try {
@@ -1565,7 +1574,7 @@ async function runLoop(args: {
   userMessage: string;
   mode: Mode;
   targetAgentName: string;
-  supabase: ReturnType<typeof createClient>;
+  supabase: SupabaseEdgeClient;
   circleId: string;
   userId: string;
   runId: string | null;
@@ -1778,14 +1787,28 @@ Deno.serve(async (req: Request) => {
     return errResponse(400, "missing_fields", "message required (or use continuationRunId + toolResults)");
   }
 
-  let apiKey: string;
-  try { apiKey = getRequiredEnv("ANTHROPIC_API_KEY"); }
-  catch (e) { return errResponse(500, "no_api_key", (e as Error).message); }
+  const authUser = await getAuthenticatedUser(req);
+  if (!authUser) {
+    return errResponse(401, "unauthenticated", "Valid JWT required");
+  }
+  if (authUser.id !== userId) {
+    return errResponse(403, "forbidden", "userId must match the authenticated user");
+  }
 
   const supabase = createClient(
     getRequiredEnv("SUPABASE_URL"),
     getRequiredEnv("SUPABASE_SERVICE_ROLE_KEY"),
   );
+  const resolvedApiKey = await resolveUserModelApiKey({
+    supabase,
+    userId,
+    provider: "anthropic",
+    envVarName: "ANTHROPIC_API_KEY",
+  });
+  if (!resolvedApiKey) {
+    return errResponse(400, "key_missing", byokMissingMessage("anthropic"));
+  }
+  const apiKey = resolvedApiKey.apiKey;
 
   // Resolve mode / model / continuation state depending on branch.
   let mode: Mode;
@@ -2002,7 +2025,7 @@ type FeedActivityInput = {
 };
 
 async function logFeedActivity(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseEdgeClient,
   input: FeedActivityInput,
 ): Promise<void> {
   if (!input.circleId) return;

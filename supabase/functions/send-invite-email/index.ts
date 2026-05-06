@@ -11,8 +11,26 @@ const corsHeaders = {
 interface RequestBody {
   email: string;
   inviteCode: string;
-  circleName: string;
-  inviterName: string;
+}
+
+function json(body: Record<string, unknown>, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function normalizeEmail(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase();
 }
 
 Deno.serve(async (req: Request) => {
@@ -21,17 +39,61 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const { email, inviteCode, circleName, inviterName }: RequestBody = await req.json();
+    const { email, inviteCode }: RequestBody = await req.json();
+    const normalizedEmail = normalizeEmail(email);
 
-    if (!email || !inviteCode) {
-      return new Response(
-        JSON.stringify({ error: "Missing email or inviteCode" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    if (!normalizedEmail || !inviteCode) {
+      return json({ error: "Missing email or inviteCode" }, 400);
+    }
+
+    const authHeader = req.headers.get("Authorization") || "";
+    const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
+    const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
+
+    if (!authHeader || !supabaseUrl || !supabaseAnonKey) {
+      return json({ error: "Not authenticated" }, 401);
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { headers: { Authorization: authHeader } },
+      auth: { persistSession: false },
+    });
+
+    const { data: userData, error: userError } = await supabase.auth.getUser();
+    const user = userData?.user;
+    if (userError || !user) {
+      return json({ error: "Not authenticated" }, 401);
+    }
+
+    const { data: invite, error: inviteError } = await supabase
+      .from("circle_invites")
+      .select("invite_code, email, circle_id, invited_by, status, expires_at")
+      .eq("invite_code", inviteCode)
+      .eq("invited_by", user.id)
+      .eq("email", normalizedEmail)
+      .eq("status", "pending")
+      .single();
+
+    if (inviteError || !invite) {
+      return json({ error: "Invite not found or not owned by caller" }, 403);
+    }
+
+    if (invite.expires_at && new Date(invite.expires_at).getTime() <= Date.now()) {
+      return json({ error: "Invite has expired" }, 410);
     }
 
     const appUrl = Deno.env.get("APP_URL") || "https://app.chrisswanson.xyz";
-    const joinUrl = `${appUrl}/join/${inviteCode}`;
+    const joinUrl = `${appUrl}/join/${encodeURIComponent(invite.invite_code)}`;
+
+    const [{ data: circle }, { data: profile }] = await Promise.all([
+      supabase.from("circles").select("name").eq("id", invite.circle_id).single(),
+      supabase.from("profiles").select("display_name, username").eq("id", user.id).single(),
+    ]);
+
+    const safeCircleName = escapeHtml(circle?.name || "a circle");
+    const safeInviterName = escapeHtml(profile?.display_name || profile?.username || "Someone");
+    const safeInviteCode = escapeHtml(invite.invite_code);
+    const safeJoinUrl = escapeHtml(joinUrl);
 
     // Use Supabase's built-in email via the Auth admin API
     // Or use a third-party service like Resend if configured
@@ -47,28 +109,28 @@ Deno.serve(async (req: Request) => {
         },
         body: JSON.stringify({
           from: "The Underground Circle <noreply@chrisswanson.xyz>",
-          to: [email],
-          subject: `${inviterName} invited you to ${circleName}`,
+          to: [normalizedEmail],
+          subject: `${safeInviterName} invited you to ${safeCircleName}`,
           html: `
             <div style="font-family: monospace; background: #0a0a0a; color: #fff; padding: 40px; max-width: 500px; margin: 0 auto;">
               <h1 style="color: #6366f1; font-size: 24px;">You're Invited</h1>
               <p style="color: #ccc; font-size: 14px; line-height: 1.6;">
-                <strong>${inviterName}</strong> has invited you to join <strong>${circleName}</strong> on The Underground Circle.
+                <strong>${safeInviterName}</strong> has invited you to join <strong>${safeCircleName}</strong> on The Underground Circle.
               </p>
               <p style="color: #888; font-size: 13px;">
                 The Underground Circle is an accountability and productivity platform where teams track goals, check in daily, and stay accountable together.
               </p>
               <div style="margin: 30px 0;">
-                <a href="${joinUrl}" style="background: #6366f1; color: #fff; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 15px;">
-                  Join ${circleName}
+                <a href="${safeJoinUrl}" style="background: #6366f1; color: #fff; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 700; font-size: 15px;">
+                  Join ${safeCircleName}
                 </a>
               </div>
               <p style="color: #555; font-size: 11px;">
-                Or use invite code: <code style="color: #6366f1;">${inviteCode}</code>
+                Or use invite code: <code style="color: #6366f1;">${safeInviteCode}</code>
               </p>
               <hr style="border-color: #1a1a2e; margin: 30px 0;" />
               <p style="color: #444; font-size: 11px;">
-                The Underground Circle &mdash; Accountability. Productivity. Growth.
+                The Underground Circle - Accountability. Productivity. Growth.
               </p>
             </div>
           `,
@@ -78,30 +140,18 @@ Deno.serve(async (req: Request) => {
       if (!response.ok) {
         const err = await response.text();
         console.error("Resend error:", err);
-        return new Response(
-          JSON.stringify({ error: "Failed to send email" }),
-          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
+        return json({ error: "Failed to send email" }, 500);
       }
 
-      return new Response(
-        JSON.stringify({ success: true }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return json({ success: true });
     }
 
     // Fallback: log the invite (no email service configured)
-    console.log(`[INVITE] Would email ${email}: join ${circleName} via ${joinUrl}`);
+    console.log(`[INVITE] Would email ${normalizedEmail}: join ${safeCircleName} via ${joinUrl}`);
 
-    return new Response(
-      JSON.stringify({ success: true, note: "Email service not configured, invite created but email not sent" }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return json({ success: true, note: "Email service not configured, invite created but email not sent" });
   } catch (error: any) {
     console.error("Send invite email error:", error);
-    return new Response(
-      JSON.stringify({ error: error.message || "Internal server error" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return json({ error: error.message || "Internal server error" }, 500);
   }
 });

@@ -295,8 +295,12 @@ async function gatherHeartbeatContext(supabase: any, circleId: string) {
 // ─── Call Claude with Heartbeat Context ─────────────────────────────────────
 
 async function runHeartbeat(supabase: any, circleId: string) {
-  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
+  const apiKey = Deno.env.get("ALLOW_SERVICE_ROLE_PLATFORM_MODEL_KEYS") === "true"
+    ? Deno.env.get("ANTHROPIC_API_KEY")
+    : null;
+  if (!apiKey) {
+    throw new Error("Service-role platform model usage is disabled. Trigger this from a user-owned BYOK path or set ALLOW_SERVICE_ROLE_PLATFORM_MODEL_KEYS=true for owner-funded automation.");
+  }
 
   const ctx = await gatherHeartbeatContext(supabase, circleId);
   if (!ctx.circle) return { skipped: true, reason: "Circle not found" };

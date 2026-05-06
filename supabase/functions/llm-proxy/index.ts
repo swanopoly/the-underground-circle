@@ -8,6 +8,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 import { computeCostUsd, type UsageBreakdown } from "../_claude/anthropic.ts";
+import { byokMissingMessage, resolveUserModelApiKey } from "../_shared/edge.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -53,7 +54,7 @@ interface LLMProxyRequest {
   circleId?: string;
   userId?: string;
   thinkingLevel?: "fast" | "balanced" | "deep";
-  // Direct key (for testing — bypasses DB lookup)
+  // Optional caller-supplied key for one-off testing before saving.
   api_key?: string;
   // Embedding-mode input (only used when provider === 'openai-embed').
   // Accepts either a single string or a batch; batches are more efficient.
@@ -169,23 +170,6 @@ const THINKING_LEVELS: Record<string, ThinkingConfig> = {
   balanced: { temperature: 0.7, max_tokens: 1024 },
   deep: { temperature: 0.9, max_tokens: 4096 },
 };
-
-// ─── Get user API key from encrypted storage ────────────────────────────────
-
-async function getUserApiKey(
-  supabase: any,
-  userId: string,
-  provider: string,
-): Promise<{ apiKey: string; endpoint?: string } | null> {
-  const { data, error } = await supabase.rpc("get_user_api_key", {
-    p_user_id: userId,
-    p_provider: provider,
-    p_label: "default",
-  });
-
-  if (error || !data || data.length === 0) return null;
-  return { apiKey: data[0].api_key, endpoint: data[0].endpoint };
-}
 
 // ─── Load agent personality ─────────────────────────────────────────────────
 
@@ -497,25 +481,24 @@ Deno.serve(async (req: Request) => {
         return errResponse(400, "validation", "openai-embed input is empty.");
       }
 
-      // API key: prefer user's stored OpenAI key, fall back to platform
-      // secret so embeddings work out-of-the-box without each user setting up
-      // their own key.
-      let embedKey: string | null = body.api_key || null;
-      if (!embedKey) {
-        const keyData = await getUserApiKey(supabase, userId, "openai");
-        embedKey = keyData?.apiKey || Deno.env.get("OPENAI_API_KEY") || null;
-      }
+      const embedKey = await resolveUserModelApiKey({
+        supabase,
+        userId,
+        provider: "openai",
+        requestApiKey: body.api_key,
+        envVarName: "OPENAI_API_KEY",
+      });
       if (!embedKey) {
         return errResponse(
           400,
           "key_missing",
-          "No OpenAI key available for embeddings. Add one in Settings → API Keys or set OPENAI_API_KEY.",
+          byokMissingMessage("openai"),
         );
       }
 
       const embedModel = model || "text-embedding-3-small";
       try {
-        const result = await callOpenAIEmbed(embedKey, embedModel, bounded);
+        const result = await callOpenAIEmbed(embedKey.apiKey, embedModel, bounded);
 
         // Light usage tracking — reuse the existing table
         try {
@@ -540,33 +523,26 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // Get API key — from request body (testing) or from encrypted DB
-    let apiKey = body.api_key;
+    let apiKey: string | null | undefined;
     let customEndpoint: string | undefined;
 
-    if (!apiKey) {
-      const keyData = await getUserApiKey(supabase, userId, provider);
-      if (!keyData) {
-        // Fallback: try platform secrets for providers we host a default key for
-        if (provider === "anthropic") {
-          apiKey = Deno.env.get("ANTHROPIC_API_KEY") || null;
-        } else if (provider === "zai") {
-          apiKey = Deno.env.get("ZAI_API_KEY") || null;
-        } else if (provider === "minimax") {
-          apiKey = Deno.env.get("MINIMAX_API_KEY") || null;
-        }
-        if (!apiKey) {
-          return errResponse(
-            400,
-            "key_missing",
-            `No API key stored for provider: ${provider}. Add your key in Settings → API Keys.`,
-          );
-        }
-      } else {
-        apiKey = keyData.apiKey;
-        customEndpoint = keyData.endpoint || undefined;
-      }
+    const envVarName =
+      provider === "anthropic" ? "ANTHROPIC_API_KEY" :
+      provider === "zai" ? "ZAI_API_KEY" :
+      provider === "minimax" ? "MINIMAX_API_KEY" :
+      undefined;
+    const keyData = await resolveUserModelApiKey({
+      supabase,
+      userId,
+      provider,
+      requestApiKey: body.api_key,
+      envVarName,
+    });
+    if (!keyData) {
+      return errResponse(400, "key_missing", byokMissingMessage(provider));
     }
+    apiKey = keyData.apiKey;
+    customEndpoint = keyData.endpoint || undefined;
 
     // Apply thinking level config
     const thinkConfig = THINKING_LEVELS[thinkingLevel || "balanced"];

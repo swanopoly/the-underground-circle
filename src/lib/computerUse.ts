@@ -10,6 +10,8 @@
 import { getCircleIntegration, getCircleIntegrationSecretValues } from './circleIntegrations';
 import { getSwanBotResponse as getAIResponse } from './swanbot';
 import { analyzeBrowserTask, type BrowserTaskIntent } from './browserTaskIntent';
+import { buildBrowserbaseWorkflowPromptBlock } from './browserbaseWorkflowIntent';
+import { getBridgeUrl } from './bridgeEnvironment';
 
 export type ComputerUsePermission = 'none' | 'ask_every_time' | 'ask_for_new_sites' | 'trusted';
 export type ComputerUseBackend = 'playwright_bridge' | 'browserbase_stagehand';
@@ -166,7 +168,7 @@ type BrowserActionSafetyAssessment = {
   blockedReason?: string;
 };
 
-const BRIDGE_URL = 'http://localhost:7778';
+const BRIDGE_PORT = 7778;
 const BRIDGE_TIMEOUT = 15000;
 const STAGEHAND_TIMEOUT = 120000;
 const STAGEHAND_RUNNER = 'node scripts/stagehand-runner.mjs';
@@ -258,10 +260,12 @@ function parseJsonFromExecOutput(raw: string): any {
 }
 
 async function probeBridge(): Promise<boolean> {
+  const bridgeUrl = getBridgeUrl(BRIDGE_PORT);
+  if (!bridgeUrl) return false;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(`${BRIDGE_URL}/health`, { signal: controller.signal });
+    const res = await fetch(`${bridgeUrl}/health`, { signal: controller.signal });
     clearTimeout(timeout);
     return res.ok;
   } catch {
@@ -270,13 +274,17 @@ async function probeBridge(): Promise<boolean> {
 }
 
 async function callBridgeExec(command: string, timeoutMs: number = BRIDGE_TIMEOUT): Promise<any> {
+  const bridgeUrl = getBridgeUrl(BRIDGE_PORT);
+  if (!bridgeUrl) {
+    throw new Error('Bridge unavailable in this environment');
+  }
   const online = await probeBridge();
   if (!online) {
-    throw new Error('Bridge not reachable at localhost:7778');
+    throw new Error(`Bridge not reachable at ${bridgeUrl}`);
   }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const res = await fetch(`${BRIDGE_URL}/exec`, {
+  const res = await fetch(`${bridgeUrl}/exec`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ command }),
@@ -410,7 +418,16 @@ ${JSON.stringify({
   allowedDomains: analyzedIntent.allowedDomains,
   startUrls: analyzedIntent.startUrls,
   completionCriteria: analyzedIntent.completionCriteria,
+  browserbaseWorkflow: {
+    kind: analyzedIntent.browserbaseWorkflow.kind,
+    label: analyzedIntent.browserbaseWorkflow.label,
+    recommendedBackend: analyzedIntent.browserbaseWorkflow.recommendedBackend,
+    expectsStructuredOutput: analyzedIntent.browserbaseWorkflow.expectsStructuredOutput,
+    requiresSubmissionVerification: analyzedIntent.browserbaseWorkflow.requiresSubmissionVerification,
+  },
 }, null, 2)}
+
+${buildBrowserbaseWorkflowPromptBlock(analyzedIntent.browserbaseWorkflow)}
 
 Break this into specific browser actions. Return ONLY a JSON array (no markdown, no explanation).
 Each action has: type, target, value (optional), description.
@@ -420,6 +437,9 @@ Valid types: navigate, click, fill, screenshot, select, press_key, wait, scroll
 Rules:
 - Prefer the explicit start URL when one is present.
 - Keep actions inside the allowed domains unless the task clearly requires otherwise.
+- For web data retrieval, keep the action plan narrow: navigate, wait for rendered content when needed, capture/check the source page, and return structured data in the final agent summary.
+- For Stagehand-style tasks, write action descriptions as semantic browser instructions that can be passed to Stagehand's act/extract flow.
+- For form submission, include field-filling steps, a review screenshot before submit, and a post-submit verification step.
 - If the task appears transactional or login-related, stop before final submission and add a screenshot step near the end.
 - If the task is read-only or extract-focused, end with a screenshot after reaching the requested result.
 
@@ -520,15 +540,19 @@ export async function callPlaywrightMCP(
   toolName: string,
   params: Record<string, any>
 ): Promise<any> {
+  const bridgeUrl = getBridgeUrl(BRIDGE_PORT);
+  if (!bridgeUrl) {
+    throw new Error('Bridge unavailable in this environment');
+  }
   const online = await probeBridge();
   if (!online) {
-    throw new Error('Bridge not reachable at localhost:7778');
+    throw new Error(`Bridge not reachable at ${bridgeUrl}`);
   }
 
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), BRIDGE_TIMEOUT);
-    const res = await fetch(`${BRIDGE_URL}/mcp`, {
+    const res = await fetch(`${bridgeUrl}/mcp`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -563,7 +587,7 @@ export async function callPlaywrightMCP(
   }
 
   throw new Error(
-    `Playwright MCP not available at ${BRIDGE_URL}/mcp. Install @playwright/mcp and wire it into the bridge, or enable Browserbase Stagehand for this circle.`,
+    `Playwright MCP not available at ${bridgeUrl}/mcp. Install @playwright/mcp and wire it into the bridge, or enable Browserbase Stagehand for this circle.`,
   );
 }
 
@@ -888,6 +912,9 @@ export async function describeComputerUsePlan(opts: {
     intent.allowedDomains.length > 0 ? `Domains: ${intent.allowedDomains.join(', ')}` : 'Domains: not specified',
     intent.requiresLogin ? 'Requires login or account access' : 'No login signals detected',
     intent.hasSideEffects ? 'This plan may change external state' : 'This plan is read-oriented',
+    `Browserbase workflow: ${intent.browserbaseWorkflow.label} — ${intent.browserbaseWorkflow.summary}`,
+    intent.browserbaseWorkflow.expectsStructuredOutput ? 'Structured output expected from the final browser result' : '',
+    intent.browserbaseWorkflow.requiresSubmissionVerification ? 'Final submission must be verified with visible proof or validation errors' : '',
     `Planned actions: ${actions.length}`,
     ...actions.slice(0, 8).map((action, index) =>
       `${index + 1}. ${action.type.toUpperCase()}${action.target ? ` ${action.target}` : ''} — ${action.description}`),

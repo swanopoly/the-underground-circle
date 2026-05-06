@@ -14,8 +14,9 @@
  * The app now:
  *   1. Skips bridge probing in prod unless the user opts in (so we don't
  *      hammer localhost and log warning noise).
- *   2. Lets a deployer point at a tunneled/public bridge via
- *      `EXPO_PUBLIC_BRIDGE_HOST` (e.g. "https://bridge.mydomain.tld").
+ *   2. Lets a deployer point at tunneled/public bridges via explicit
+ *      per-port URLs (recommended for Cloudflare/ngrok single-port tunnels)
+ *      or a port template host (for a reverse proxy).
  *   3. Exposes helpers so the UI can explain *why* the Office is empty.
  */
 
@@ -32,15 +33,29 @@ type BridgeEnv = {
 
 const DEFAULT_LOCAL_HOST = 'http://localhost';
 
-const ENV_HOST = (() => {
+function readPublicEnv(name: string): string | undefined {
   const raw =
     typeof process !== 'undefined' &&
     process.env &&
-    (process.env.EXPO_PUBLIC_BRIDGE_HOST as string | undefined);
+    (process.env[name] as string | undefined);
   if (!raw) return undefined;
   const trimmed = raw.trim().replace(/\/$/, '');
   return trimmed.length > 0 ? trimmed : undefined;
-})();
+}
+
+const ENV_HOST = readPublicEnv('EXPO_PUBLIC_BRIDGE_HOST');
+
+const ENV_PORT_URLS: Readonly<Record<number, string | undefined>> = {
+  7778: readPublicEnv('EXPO_PUBLIC_CLAUDE_BRIDGE_URL') || readPublicEnv('EXPO_PUBLIC_BRIDGE_URL_7778'),
+  7779: readPublicEnv('EXPO_PUBLIC_CODEX_BRIDGE_URL') || readPublicEnv('EXPO_PUBLIC_BRIDGE_URL_7779'),
+  7780: readPublicEnv('EXPO_PUBLIC_GEMINI_BRIDGE_URL') || readPublicEnv('EXPO_PUBLIC_BRIDGE_URL_7780'),
+  7781: readPublicEnv('EXPO_PUBLIC_CURSOR_BRIDGE_URL') || readPublicEnv('EXPO_PUBLIC_BRIDGE_URL_7781'),
+  18789: readPublicEnv('EXPO_PUBLIC_OPENSWAN_GATEWAY_URL') || readPublicEnv('EXPO_PUBLIC_BRIDGE_URL_18789'),
+  18790: readPublicEnv('EXPO_PUBLIC_OPENSWAN_PROXY_URL') || readPublicEnv('EXPO_PUBLIC_BRIDGE_URL_18790'),
+};
+
+const FIRST_EXPLICIT_PORT_URL = Object.values(ENV_PORT_URLS).find(Boolean);
+const HAS_EXPLICIT_PORT_URL = !!FIRST_EXPLICIT_PORT_URL;
 
 function isWebProduction(): boolean {
   if (Platform.OS !== 'web') return false;
@@ -77,8 +92,8 @@ export function getBridgeEnvironment(): BridgeEnv {
     return cached;
   }
 
-  if (ENV_HOST) {
-    cached = { available: true, reason: 'env-override', host: ENV_HOST };
+  if (ENV_HOST || HAS_EXPLICIT_PORT_URL) {
+    cached = { available: true, reason: 'env-override', host: ENV_HOST || FIRST_EXPLICIT_PORT_URL || DEFAULT_LOCAL_HOST };
     return cached;
   }
 
@@ -96,13 +111,23 @@ export function getBridgeEnvironment(): BridgeEnv {
   return cached;
 }
 
-/** Returns a `http://host:port` URL if bridges are available, else null. */
+/** Returns a bridge base URL if bridges are available, else null. */
 export function getBridgeUrl(port: number): string | null {
   const env = getBridgeEnvironment();
   if (!env.available) return null;
+
+  const explicit = ENV_PORT_URLS[port];
+  if (explicit) return explicit;
+
+  // Reverse-proxy deployments can use a template such as:
+  // EXPO_PUBLIC_BRIDGE_HOST=https://bridge.example.com/{port}
+  if (env.host.includes('{port}')) {
+    return env.host.replace(/\{port\}/g, String(port));
+  }
+
   // If host already embeds a port (env override pointed at a specific URL),
   // don't slap another one on.
-  if (/:\d+$/.test(env.host)) return env.host;
+  if (/:\d+(?:\/|$)/.test(env.host)) return env.host;
   return `${env.host}:${port}`;
 }
 

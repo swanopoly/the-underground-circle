@@ -14,8 +14,13 @@ import { promoteExternalAgentSessionKnowledge } from './memoryService';
 import { deriveSessionStatus, clampToDbStatus, type AgentStatus } from './officeAgents';
 
 import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+import { getBridgeUrl } from './bridgeEnvironment';
 
-const BRIDGE_URL = 'http://localhost:7778';
+const BRIDGE_PORT = 7778;
+
+function getClaudeBridgeUrl(): string | null {
+  return getBridgeUrl(BRIDGE_PORT);
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -96,10 +101,12 @@ const CC_COLORS = [
 // ── Detection ────────────────────────────────────────────────────────────────
 
 export async function detectClaudeCodeBridge(): Promise<boolean> {
+  const bridgeUrl = getClaudeBridgeUrl();
+  if (!bridgeUrl) return false;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(`${BRIDGE_URL}/health`, { signal: controller.signal });
+    const res = await fetch(`${bridgeUrl}/health`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return false;
     const data = await res.json();
@@ -110,11 +117,13 @@ export async function detectClaudeCodeBridge(): Promise<boolean> {
 }
 
 export async function fetchClaudeCodeSessions(): Promise<ClaudeCodeSession[]> {
+  const bridgeUrl = getClaudeBridgeUrl();
+  if (!bridgeUrl) return [];
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     const token = await ensureBridgeToken();
-    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
     clearTimeout(timeout);
     if (!res.ok) return [];
     const data = await res.json();
@@ -157,11 +166,13 @@ export class ClaudeCodePoller {
 export async function execBridgeCommand(
   command: string,
 ): Promise<{ ok: boolean; stdout?: string; stderr?: string; code?: number; error?: string }> {
+  const bridgeUrl = getClaudeBridgeUrl();
+  if (!bridgeUrl) return { ok: false, error: 'Bridge unavailable in this environment' };
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 35000);
     const token = await ensureBridgeToken();
-    const res = await fetch(`${BRIDGE_URL}/exec`, {
+    const res = await fetch(`${bridgeUrl}/exec`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
       body: JSON.stringify({ command }),
@@ -267,7 +278,6 @@ export function bridgeSessionsToAgents(sessions: ClaudeCodeSession[]): OfficeAge
 // ── DB publishing: Auto-publish Claude Code agent to circle_office_agents ────
 
 export const CLAUDE_CODE_AGENT_NAME = 'Claude Code';
-const CLAUDE_CODE_BRIDGE_URL = 'http://localhost:7778';
 
 /**
  * Publish pixel agents for all active Claude Code sessions.
@@ -301,7 +311,7 @@ export async function publishClaudeCodeAgent(
         name,
         color: CC_COLORS[i % CC_COLORS.length],
         toolIcon: display?.icon || '💻',
-        gatewayUrl: CLAUDE_CODE_BRIDGE_URL,
+        gatewayUrl: getClaudeBridgeUrl() || 'http://localhost:7778',
         isPublic: false,
       });
 
@@ -326,7 +336,7 @@ export async function publishClaudeCodeAgent(
     name: CLAUDE_CODE_AGENT_NAME,
     color: display?.color || '#6366f1',
     toolIcon: display?.icon || '💻',
-    gatewayUrl: CLAUDE_CODE_BRIDGE_URL,
+    gatewayUrl: getClaudeBridgeUrl() || 'http://localhost:7778',
     isPublic: false,
   });
 
@@ -489,11 +499,13 @@ export interface CrossSessionContext {
  * Fetch aggregated context from ALL Claude Code sessions via the bridge /context endpoint.
  */
 export async function fetchCrossSessionContext(): Promise<CrossSessionContext | null> {
+  const bridgeUrl = getClaudeBridgeUrl();
+  if (!bridgeUrl) return null;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     const token = await ensureBridgeToken();
-    const res = await fetch(`${BRIDGE_URL}/context`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetch(`${bridgeUrl}/context`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
     clearTimeout(timeout);
     if (!res.ok) return null;
     return await res.json();

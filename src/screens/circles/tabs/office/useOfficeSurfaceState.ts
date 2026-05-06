@@ -8,6 +8,7 @@ export function useOfficeSurfaceState() {
   const [showConnectAgent, setShowConnectAgent] = useState(false);
   const [showGitHubFeed, setShowGitHubFeed] = useState(false);
   const [showSoundMixer, setShowSoundMixer] = useState(false);
+  const [showVault, setShowVault] = useState(false);
   const [showPublishModal, setShowPublishModal] = useState(false);
 
   const [editMode, setEditMode] = useState(false);
@@ -40,6 +41,7 @@ export function useOfficeSurfaceState() {
     showConnectAgent, setShowConnectAgent,
     showGitHubFeed, setShowGitHubFeed,
     showSoundMixer, setShowSoundMixer,
+    showVault, setShowVault,
     showPublishModal, setShowPublishModal,
     editMode, setEditMode,
     placingType, setPlacingType,

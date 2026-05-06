@@ -8,9 +8,11 @@
 import {
   corsHeaders,
   createServiceRoleClient,
+  byokMissingMessage,
   errResponse,
   getAuthenticatedUser,
   jsonResponse,
+  resolveUserModelApiKey,
 } from "../_shared/edge.ts";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -56,22 +58,6 @@ const IMAGE_COSTS: Record<string, number> = {
   "flux-schnell": 0.003,
   "flux-dev": 0.055,
 };
-
-// ─── Get user API key ───────────────────────────────────────────────────────
-
-async function getUserApiKey(
-  supabase: any,
-  userId: string,
-  provider: string,
-): Promise<string | null> {
-  const { data, error } = await supabase.rpc("get_user_api_key", {
-    p_user_id: userId,
-    p_provider: provider,
-    p_label: "default",
-  });
-  if (error || !data) return null;
-  return data;
-}
 
 // ─── OpenAI DALL-E ──────────────────────────────────────────────────────────
 
@@ -202,32 +188,24 @@ Deno.serve(async (req: Request) => {
       return errResponse(401, "unauthenticated", "Not authenticated — valid JWT required");
     }
 
-    // Get API key — user's own key from DB, or request body for testing, or platform fallback
-    let apiKey = api_key;
+    const resolvedProvider = provider === "replicate" ? "replicate" : "openai";
+    const apiKey = await resolveUserModelApiKey({
+      supabase,
+      userId,
+      provider: resolvedProvider,
+      requestApiKey: api_key,
+      envVarName: resolvedProvider === "openai" ? "OPENAI_API_KEY" : undefined,
+    });
     if (!apiKey) {
-      const resolvedProvider = provider === "replicate" ? "replicate" : "openai";
-      apiKey = await getUserApiKey(supabase, userId, resolvedProvider);
-    }
-    if (!apiKey) {
-      // Fallback to platform key for OpenAI
-      if (provider !== "replicate") {
-        apiKey = Deno.env.get("OPENAI_API_KEY") || "";
-      }
-      if (!apiKey) {
-        return errResponse(
-          400,
-          "key_missing",
-          `No API key found for ${provider}. Add one in Settings > API Keys.`,
-        );
-      }
+      return errResponse(400, "key_missing", byokMissingMessage(resolvedProvider));
     }
 
     let result: ImageResponse;
 
     if (provider === "replicate") {
-      result = await generateReplicate(apiKey, prompt, model || "flux-schnell");
+      result = await generateReplicate(apiKey.apiKey, prompt, model || "flux-schnell");
     } else {
-      result = await generateOpenAI(apiKey, prompt, model || "dall-e-3", size || "1024x1024", quality || "standard", style || "vivid");
+      result = await generateOpenAI(apiKey.apiKey, prompt, model || "dall-e-3", size || "1024x1024", quality || "standard", style || "vivid");
     }
 
     // Track usage (non-critical)

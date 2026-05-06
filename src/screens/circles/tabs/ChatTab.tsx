@@ -30,11 +30,7 @@ import {
   type SwanBotStructuredArtifact,
   tryHandleLocalSwanBotCommand,
 } from '../../../lib/swanbot';
-import {
-  getConnectedWallet, connectWallet, sendETH, sendSOL, disconnectWallet,
-  shortenAddress, getExplorerUrl, WalletInfo, getMemberByUsername,
-  getAllWalletStates, CryptoChain,
-} from '../../../lib/crypto';
+import type { WalletInfo, CryptoChain } from '../../../lib/crypto';
 import {
   getCircleDiscordConfig, getCachedChannels, getChannelMessages,
   buildDiscordContext, isTextChannel, CircleDiscordConfig,
@@ -66,6 +62,7 @@ import CommandsHelpCard from './chat/CommandsHelpCard';
 import AssignPickerCard, { type AssignPickerAgent } from './chat/AssignPickerCard';
 import BridgeDiagCard from './chat/BridgeDiagCard';
 import { probeBridges, type BridgeProbeResult } from '../../../lib/bridgeHealthDiag';
+import { getBridgeUrl } from '../../../lib/bridgeEnvironment';
 import { ensureBridgeToken, bridgeAuthHeaders } from '../../../lib/bridgeAuth';
 import RunTraceCard from './chat/RunTraceCard';
 import RunCostDrawer from './chat/RunCostDrawer';
@@ -109,7 +106,6 @@ import ComputerUsePanel from '../../../components/computer-use/ComputerUsePanel'
 import BrowserSessionDrawer from '../../../components/computer-use/BrowserSessionDrawer';
 import ComputerUsePermissionDialog from '../../../components/computer-use/ComputerUsePermissionDialog';
 import ComputerUseButton from '../../../components/computer-use/ComputerUseButton';
-import ComputerUseLiveCard from '../../../components/ComputerUseLiveCard';
 import AnimatedPopup from '../../../components/chat-animations/AnimatedPopup';
 import ThinkingDots from '../../../components/chat-animations/ThinkingDots';
 import ThinkingLabel from '../../../components/chat-animations/ThinkingLabel';
@@ -119,7 +115,6 @@ import ChatCostFooter from '../../../components/ChatCostFooter';
 import DesktopBridgeStatusChip from '../../../components/DesktopBridgeStatusChip';
 import RunApprovalBanner from '../../../components/RunApprovalBanner';
 import RecordingBadge from '../../../components/RecordingBadge';
-import OpenSwanConsole from '../../../components/openswan/OpenSwanConsole';
 import { useComputerUseTask } from '../../../lib/useComputerUseTask';
 import { resolveComputerUseConfirmation } from '../../../lib/computerUseConfirmations';
 import {
@@ -247,12 +242,20 @@ import {
 } from '../../../lib/chatSessionArchive';
 import { clearPendingBotMessages } from '../../../lib/pendingBotMessages';
 
+const OpenSwanConsole = React.lazy(() => import('../../../components/openswan/OpenSwanConsole'));
+const ComputerUseLiveCard = React.lazy(() => import('../../../components/ComputerUseLiveCard'));
+
 const REACTIONS_LIST = ['🔥', '💪', '👊', '💯', '⚡', '🎯'];
 const BLACKSWAN_ID = 'blackswan';
 const LOGIN_NEON = '#b8ff61';
 const CHAT_SURFACE_MAX_WIDTH = 1680;
 const SESSION_FALLBACK_TITLE = 'OpenSwan Session';
 const DEFAULT_CHAT_MODEL = 'claude-sonnet-4-6';
+function shortenAddress(address: string | null | undefined): string {
+  const value = String(address || '');
+  if (value.length <= 12) return value;
+  return `${value.slice(0, 6)}...${value.slice(-4)}`;
+}
 type AssignableAgent = {
   id: string;
   name: string;
@@ -828,6 +831,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // OpenSwan console — launches an OpenSwan turn with a chosen mode.
   // Surface triggered by the Quick Actions "OS OpenSwan" chip.
   const [showOpenSwanConsole, setShowOpenSwanConsole] = useState(false);
+  const [openSwanInitialTask, setOpenSwanInitialTask] = useState('');
+
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    const openFromSiteReadiness = (event: Event) => {
+      const detail = (event as CustomEvent<{ task?: string | null }>).detail;
+      setOpenSwanInitialTask(String(detail?.task || input || '').trim());
+      setShowOpenSwanConsole(true);
+    };
+    window.addEventListener('uc:open-openswan-control-panel', openFromSiteReadiness as EventListener);
+    return () => {
+      window.removeEventListener('uc:open-openswan-control-panel', openFromSiteReadiness as EventListener);
+    };
+  }, [input]);
 
   const persistComputerTaskState = useCallback(async (args: {
     task: string;
@@ -1968,28 +1985,31 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }));
 
         try {
-          const bridgeToken = await ensureBridgeToken();
-          const res = await fetch('http://localhost:7778/sessions', {
-            signal: AbortSignal.timeout(3000),
-            headers: bridgeAuthHeaders(bridgeToken),
-          });
-          if (res.ok) {
-            const { sessions } = await res.json();
-            for (const s of sessions || []) {
-              const name = s.slug || s.sessionId?.slice(0, 12) || 'Claude Code';
-              pushAgent({
-                id: `bridge::${s.sessionId}`,
-                name,
-                status: s.status === 'active' ? 'building' : 'idle',
-                provider: 'claude-code',
-                color: '#22d3ee',
-                owner_display_name: 'Bridge',
-                current_task: s.cwd || null,
-                circle_id: circleId,
-                model: s.model || null,
-                sessionKey: s.sessionId || null,
-                source: 'bridge-session',
-              });
+          const claudeBridgeUrl = getBridgeUrl(7778);
+          if (claudeBridgeUrl) {
+            const bridgeToken = await ensureBridgeToken();
+            const res = await fetch(`${claudeBridgeUrl}/sessions`, {
+              signal: AbortSignal.timeout(3000),
+              headers: bridgeAuthHeaders(bridgeToken),
+            });
+            if (res.ok) {
+              const { sessions } = await res.json();
+              for (const s of sessions || []) {
+                const name = s.slug || s.sessionId?.slice(0, 12) || 'Claude Code';
+                pushAgent({
+                  id: `bridge::${s.sessionId}`,
+                  name,
+                  status: s.status === 'active' ? 'building' : 'idle',
+                  provider: 'claude-code',
+                  color: '#22d3ee',
+                  owner_display_name: 'Bridge',
+                  current_task: s.cwd || null,
+                  circle_id: circleId,
+                  model: s.model || null,
+                  sessionKey: s.sessionId || null,
+                  source: 'bridge-session',
+                });
+              }
             }
           }
         } catch {}
@@ -2184,6 +2204,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // Non-critical enrichments — load after the chat shell is ready
     void (async () => {
       try {
+        const { getConnectedWallet } = await import('../../../lib/crypto');
         const w = await getConnectedWallet();
         if (w) setWallet(w);
       } catch {}
@@ -2720,7 +2741,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             return extra ? `${line}\n${extra}` : line;
           }).join('\n')
         : '';
-      addBotMessage(`${header}\n\n${result.summary}${findings}`, undefined, { runId });
+      const extractedData = result.extractedData
+        ? `\n\n**Extracted Data**\n\`\`\`json\n${JSON.stringify(result.extractedData, null, 2).slice(0, 4000)}\n\`\`\``
+        : '';
+      addBotMessage(`${header}\n\n${result.summary}${findings}${extractedData}`, undefined, { runId });
     } else if (status === 'error' && errorMessage) {
       const key = `err::${task}::${errorMessage.slice(0, 80)}`;
       if (computerUsePostedKeyRef.current === key) return;
@@ -3130,6 +3154,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
 
     setSendingCrypto(true);
+    const {
+      connectWallet,
+      getExplorerUrl,
+      getMemberByUsername,
+      sendETH,
+      sendSOL,
+    } = await import('../../../lib/crypto');
 
     // Check if wallet is connected
     let activeWallet = wallet;
@@ -3560,7 +3591,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // Brings `npm run bridges:doctor` into chat.
     if (lowerContent === '/diag' || lowerContent === '/bridges') {
       addBotMessage('Probing bridges…', undefined, { localOnly: true });
-      probeBridges()
+      probeBridges({ urlForPort: (port) => getBridgeUrl(port) })
         .then((results) => {
           addBotMessage(`${results.filter(r => r.status === 'healthy').length}/${results.length} bridges healthy`, undefined, {
             localOnly: true,
@@ -4447,6 +4478,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
       void (async () => {
         try {
+          const { getAllWalletStates, getConnectedWallet } = await import('../../../lib/crypto');
           const [connectedWallet, walletStates] = await Promise.all([
             getConnectedWallet(),
             getAllWalletStates(),
@@ -4483,6 +4515,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       // Opens the OpenSwan console — user picks a mode + writes a task,
       // onSubmit routes through the planner with `run_openswan` + selected
       // mode so the dispatcher + response contract apply.
+      setOpenSwanInitialTask(input.trim());
       setShowOpenSwanConsole(true);
       return;
     }
@@ -5301,7 +5334,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 results={item.bridgeDiagResults}
                 accentColor={accentColor}
                 onRefresh={async () => {
-                  const fresh = await probeBridges();
+                  const fresh = await probeBridges({ urlForPort: (port) => getBridgeUrl(port) });
                   setMessages(prev => prev.map(m => m.id === item.id ? { ...m, bridgeDiagResults: fresh } : m));
                 }}
               />
@@ -5512,6 +5545,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         delegationMode={sessionDelegationMode}
         onSessionProfileChange={handleSessionProfileChange}
         onDelegationModeChange={handleDelegationModeChange}
+        onOpenControlPanel={() => {
+          setOpenSwanInitialTask(input.trim());
+          setShowOpenSwanConsole(true);
+        }}
         onOpenRunHistory={() => setShowRunHistory(true)}
       />
       {showReopenBuilderPill ? (
@@ -5819,6 +5856,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           onSendAmountChange={setSendAmount}
           onSend={handleSendCrypto}
           onDisconnect={async (chain: string) => {
+            const { disconnectWallet } = await import('../../../lib/crypto');
             await disconnectWallet(chain as CryptoChain);
             setWallet(null);
             addBotMessage('Wallet disconnected.');
@@ -6457,38 +6495,45 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       )}
 
       {Platform.OS === 'web' && (
-        <OpenSwanConsole
-          visible={showOpenSwanConsole}
-          accentColor={accentColor}
-          currentMode={chatMode}
-          currentModel={selectedModel === 'auto' ? null : selectedModel}
-          circleId={circleId}
-          userId={currentUserId}
-          surface="main_chat"
-          onClose={() => setShowOpenSwanConsole(false)}
-          onSubmit={({ task, mode, model: modelOverride }) => {
-            setShowOpenSwanConsole(false);
-            // Sync the mode into the chat state so the rest of the turn
-            // renders with the right accent + response contract. The
-            // sendMessage path will see `chatMode === mode` and pass it
-            // into `buildChatAutomationPlan({ selectedMode })`.
-            setChatMode(mode);
-            if (modelOverride && modelOverride !== selectedModel) {
-              handleSessionModelChange(modelOverride);
-            }
-            // Fire the task through the normal send path so it goes
-            // through the planner + dispatcher + HITL gate.
-            setInput(task);
-            sendMessage(task);
+        <React.Suspense fallback={null}>
+          <OpenSwanConsole
+            visible={showOpenSwanConsole}
+            accentColor={accentColor}
+            currentMode={chatMode}
+            currentModel={selectedModel === 'auto' ? null : selectedModel}
+            initialTask={openSwanInitialTask}
+            circleId={circleId}
+            userId={currentUserId}
+            surface="main_chat"
+            onClose={() => {
+              setShowOpenSwanConsole(false);
+              setOpenSwanInitialTask('');
+            }}
+            onSubmit={({ task, mode, model: modelOverride }) => {
+              setShowOpenSwanConsole(false);
+              setOpenSwanInitialTask('');
+              // Sync the mode into the chat state so the rest of the turn
+              // renders with the right accent + response contract. The
+              // sendMessage path will see `chatMode === mode` and pass it
+              // into `buildChatAutomationPlan({ selectedMode })`.
+              setChatMode(mode);
+              if (modelOverride && modelOverride !== selectedModel) {
+                handleSessionModelChange(modelOverride);
+              }
+              // Fire the task through the normal send path so it goes
+              // through the planner + dispatcher + HITL gate.
+              setInput(task);
+              sendMessage(task);
 
-            // Auto-attach a live trace card to chat. Modes that bypass
-            // the run pipeline (talk / none) skip this since they
-            // never create an agent_runs row.
-            if (mode !== 'talk' && mode !== 'none' && currentUserId) {
-              attachRunTraceWhenAvailable(task);
-            }
-          }}
-        />
+              // Auto-attach a live trace card to chat. Modes that bypass
+              // the run pipeline (talk / none) skip this since they
+              // never create an agent_runs row.
+              if (mode !== 'talk' && mode !== 'none' && currentUserId) {
+                attachRunTraceWhenAvailable(task);
+              }
+            }}
+          />
+        </React.Suspense>
       )}
 
       {Platform.OS === 'web' && computerUseTask.state.status !== 'idle' && (
@@ -6505,27 +6550,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             zIndex: 950,
           }}
         >
-          <ComputerUseLiveCard
-            task={computerUseTask.state.task}
-            status={computerUseTask.state.status === 'starting' ? 'starting' : computerUseTask.state.status}
-            sessionId={computerUseTask.state.sessionId}
-            liveUrl={computerUseTask.state.liveUrl}
-            reasoning={computerUseTask.state.reasoning}
-            actions={computerUseTask.state.actions}
-            screenshots={computerUseTask.state.screenshots}
-            result={computerUseTask.state.result}
-            errorMessage={computerUseTask.state.errorMessage}
-            accentColor={accentColor}
-            usage={computerUseTask.state.usage}
-            pendingConfirmation={computerUseTask.state.pendingConfirmation}
-            onConfirmationPick={(id, choice) => {
-              if (!id) return;
-              resolveComputerUseConfirmation(id, choice).catch((err) => {
-                addBotMessage(`Confirmation could not be recorded: ${err?.message || 'unknown error'}`);
-              });
-            }}
-            onCancel={() => computerUseTask.cancel()}
-          />
+          <React.Suspense fallback={null}>
+            <ComputerUseLiveCard
+              task={computerUseTask.state.task}
+              status={computerUseTask.state.status === 'starting' ? 'starting' : computerUseTask.state.status}
+              sessionId={computerUseTask.state.sessionId}
+              liveUrl={computerUseTask.state.liveUrl}
+              reasoning={computerUseTask.state.reasoning}
+              actions={computerUseTask.state.actions}
+              screenshots={computerUseTask.state.screenshots}
+              result={computerUseTask.state.result}
+              errorMessage={computerUseTask.state.errorMessage}
+              accentColor={accentColor}
+              usage={computerUseTask.state.usage}
+              pendingConfirmation={computerUseTask.state.pendingConfirmation}
+              onConfirmationPick={(id, choice) => {
+                if (!id) return;
+                resolveComputerUseConfirmation(id, choice).catch((err) => {
+                  addBotMessage(`Confirmation could not be recorded: ${err?.message || 'unknown error'}`);
+                });
+              }}
+              onCancel={() => computerUseTask.cancel()}
+            />
+          </React.Suspense>
         </View>
       )}
 
@@ -6607,7 +6654,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         hasBuilderWork={canOpenBuilder}
         showWorkbenchSidecar={showWorkbenchSidecar}
         onToggleBuilder={openBuilderStudio}
-        onOpenControlPanel={() => setShowOpenSwanConsole(true)}
+        onOpenControlPanel={(seedTask?: string) => {
+          setOpenSwanInitialTask(String(seedTask || input || '').trim());
+          setShowOpenSwanConsole(true);
+        }}
         onResetMind={async () => {
           const { resetAgentMind } = await import('../../../lib/swanbot');
           const { cleared } = await resetAgentMind(circleId);
@@ -7361,6 +7411,7 @@ function EnhancedCryptoPanel({ wallet, sendTo, sendAmount, sendingCrypto, member
           accentColor={accentColor}
           onPress={async () => {
             try {
+              const { connectWallet } = await import('../../../lib/crypto');
               const w = await connectWallet('metamask');
               onWalletConnect(w);
             } catch (e: any) {
@@ -7377,6 +7428,7 @@ function EnhancedCryptoPanel({ wallet, sendTo, sendAmount, sendingCrypto, member
           accentColor={accentColor}
           onPress={async () => {
             try {
+              const { connectWallet } = await import('../../../lib/crypto');
               const w = await connectWallet('phantom');
               onWalletConnect(w);
             } catch (e: any) {
@@ -7911,6 +7963,33 @@ function QuickActionsHeader({ expanded, isHovered, onPress, onHoverIn, onHoverOu
   );
 }
 
+const CONTROL_PANEL_LAUNCHERS = [
+  {
+    label: 'Browser',
+    desc: 'Websites, forms, admin pages',
+    seed: 'Use the browser to ',
+    color: '#22d3ee',
+  },
+  {
+    label: 'Computer',
+    desc: 'Desktop apps and windows',
+    seed: 'Use my computer to ',
+    color: '#a78bfa',
+  },
+  {
+    label: 'Login',
+    desc: 'Saved credentials and vault',
+    seed: 'Use the saved login for this website and ',
+    color: '#22c55e',
+  },
+  {
+    label: 'Repeat',
+    desc: 'Save as automation flow',
+    seed: 'Turn this into a repeatable automation: ',
+    color: '#f59e0b',
+  },
+];
+
 function EnhancedInput({
   circleId: composerCircleId,
   input,
@@ -7949,6 +8028,7 @@ function EnhancedInput({
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showQuickActions, setShowQuickActions] = useState(false);
   const [showModePicker, setShowModePicker] = useState(false);
+  const [showControlAdvanced, setShowControlAdvanced] = useState(false);
   const [showAddModel, setShowAddModel] = useState(false);
   const [customModels, setCustomModels] = useState<any[]>([]);
   const [hoveredModel, setHoveredModel] = useState<string | null>(null);
@@ -7998,10 +8078,22 @@ function EnhancedInput({
   const slashCommands = useMemo(() => getMatchingChatSlashCommands(input), [input]);
   const slashToken = input.trimStart().split(/\s+/, 1)[0] || '';
   const showSlashCommands = focused && /^\/[^\s]*$/.test(slashToken) && slashCommands.length > 0;
+  const openControlPanelWith = useCallback((seed = '') => {
+    const draft = String(input || '').trim();
+    const task = seed
+      ? `${seed}${draft}`.trim()
+      : draft;
+    onOpenControlPanel?.(task);
+    setShowModePicker(false);
+  }, [input, onOpenControlPanel]);
 
   useEffect(() => {
     setHighlightedSlashIndex(0);
   }, [slashToken, slashCommands.length]);
+
+  useEffect(() => {
+    if (!showModePicker) setShowControlAdvanced(false);
+  }, [showModePicker]);
 
   const applySlashCommand = useCallback((command: ChatSlashCommand) => {
     if (blurTimeoutRef.current) {
@@ -8401,7 +8493,7 @@ function EnhancedInput({
 
           {showModePicker && (
             <AnimatedPopup style={[styles.dropdownPanel, styles.dropdownPanelControlCenter, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)' } as any] : [])]}>
-              <Text style={styles.dropdownTitle}>OpenSwan Control Center</Text>
+              <Text style={styles.dropdownTitle}>OpenSwan Control Panel</Text>
               <View style={styles.controlCenterStatusBand}>
                 <View style={styles.controlCenterStatusHeader}>
                   <View style={[styles.liveMiniDot, { backgroundColor: runStatus === 'idle' ? '#22c55e' : runStatus === 'waiting_approval' ? '#f59e0b' : '#6366f1' }]} />
@@ -8409,6 +8501,66 @@ function EnhancedInput({
                 </View>
                 <Text style={styles.controlCenterStatusValue} numberOfLines={2}>{controlStatusLabel}</Text>
               </View>
+              <Pressable
+                onPress={() => openControlPanelWith('')}
+                accessibilityRole="button"
+                accessibilityLabel="Open OpenSwan Control Panel"
+                style={({ hovered, pressed }: any) => [
+                  styles.controlPanelPrimaryAction,
+                  { borderColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '70' },
+                  hovered && {
+                    borderColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor),
+                    backgroundColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '18',
+                  },
+                  pressed && { transform: [{ scale: 0.99 }] },
+                ]}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.controlPanelPrimaryTitle}>
+                    {input.trim() ? 'Open draft in Control Panel' : 'Open Control Panel'}
+                  </Text>
+                  <Text style={styles.controlPanelPrimaryDesc}>
+                    Intent routing, access readiness, cost preview, tools, memory, and live runs.
+                  </Text>
+                </View>
+                <Text style={styles.controlPanelPrimaryArrow}>›</Text>
+              </Pressable>
+              <View style={styles.controlRouteGrid}>
+                {CONTROL_PANEL_LAUNCHERS.map((route) => (
+                  <Pressable
+                    key={route.label}
+                    onPress={() => openControlPanelWith(route.seed)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Open Control Panel for ${route.label}`}
+                    style={({ hovered, pressed }: any) => [
+                      styles.controlRouteCard,
+                      { borderColor: `${route.color}42`, backgroundColor: `${route.color}0f` },
+                      hovered && { borderColor: `${route.color}88`, backgroundColor: `${route.color}18` },
+                      pressed && { transform: [{ scale: 0.985 }] },
+                    ]}
+                  >
+                    <Text style={[styles.controlRouteLabel, { color: route.color }]}>{route.label}</Text>
+                    <Text style={styles.controlRouteDesc} numberOfLines={2}>{route.desc}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <Pressable
+                onPress={() => setShowControlAdvanced((v) => !v)}
+                style={({ hovered, pressed }: any) => [
+                  styles.controlAdvancedToggle,
+                  hovered && { borderColor: '#334155', backgroundColor: '#111827' },
+                  pressed && { transform: [{ scale: 0.99 }] },
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel={showControlAdvanced ? 'Hide OpenSwan advanced controls' : 'Show OpenSwan advanced controls'}
+              >
+                <Text style={styles.controlAdvancedToggleText}>
+                  {showControlAdvanced ? 'Hide advanced controls' : 'Show advanced controls'}
+                </Text>
+                <Text style={styles.modelChevron}>{showControlAdvanced ? '▾' : '▸'}</Text>
+              </Pressable>
+              {showControlAdvanced ? (
+                <>
               <View style={styles.controlCenterStatsRow}>
                 <View style={styles.controlCenterStatPill}>
                   <Text style={styles.controlCenterStatValue}>{openswanSessionCount || 0}</Text>
@@ -8427,54 +8579,6 @@ function EnhancedInput({
                   <Text style={styles.controlCenterStatLabel}>builds</Text>
                 </View>
               </View>
-              {/* Full Control Panel — top-level action. Shows the posture
-                  (tools / memory / subagents) the current mode will use
-                  before launching a turn, plus the prune-biasing-memories
-                  maintenance action. Distinct from the 2×2 grid below
-                  because it's the primary "show me what's going to
-                  happen" surface, not a single feature. */}
-              {onOpenControlPanel ? (
-                <Pressable
-                  onPress={() => { onOpenControlPanel(); setShowModePicker(false); }}
-                  accessibilityRole="button"
-                  accessibilityLabel="Open OpenSwan Control Panel"
-                  style={({ hovered, pressed }: any) => [
-                    {
-                      marginBottom: 8,
-                      paddingVertical: 10,
-                      paddingHorizontal: 12,
-                      borderRadius: 10,
-                      borderWidth: 1,
-                      borderColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '60',
-                      backgroundColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '14',
-                      flexDirection: 'row',
-                      alignItems: 'center',
-                      gap: 10,
-                    },
-                    hovered && {
-                      borderColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor),
-                      backgroundColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '22',
-                    },
-                    pressed && { transform: [{ scale: 0.985 }] },
-                    Platform.OS === 'web' && { cursor: 'pointer', transition: 'all 0.15s ease' } as any,
-                  ]}
-                >
-                  <View style={[styles.dropdownItemIcon, { backgroundColor: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) + '30' }]}>
-                    <Text style={[styles.dropdownItemIconText, { color: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) }]}>
-                      ⌘
-                    </Text>
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.dropdownItemLabel, { color: (CHAT_MODE_CONFIG.find(m => m.key === (chatMode || 'talk'))?.color || accentColor) }]}>
-                      Control Panel
-                    </Text>
-                    <Text style={styles.dropdownItemDesc}>
-                      Inspect tools, memory, subagents — prune biasing memories
-                    </Text>
-                  </View>
-                  <Text style={[styles.modelChevron, { marginLeft: 'auto' }]}>›</Text>
-                </Pressable>
-              ) : null}
               {/* Quick action shortcuts — same RUN/ASSIGN/MISSION/REMEMBER/
                   MEMORIES/DIAG/SEARCH pills as the dock above the composer,
                   surfaced here so the OpenSwan menu is the one place users
@@ -8601,10 +8705,12 @@ function EnhancedInput({
                       <Text style={[styles.controlCenterModeLabel, isActive && { color: m.color }]}>{m.label}</Text>
                       <Text style={styles.controlCenterModeDesc}>{m.desc}</Text>
                     </View>
-                    {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: m.color }]} />}
-                  </Pressable>
-                );
-              })}
+	                    {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: m.color }]} />}
+	                  </Pressable>
+	                );
+	              })}
+                </>
+              ) : null}
             </AnimatedPopup>
           )}
         </View>
@@ -9982,6 +10088,88 @@ const styles = StyleSheet.create({
     backgroundColor: '#10131c',
     alignItems: 'center',
     gap: 2,
+  },
+  controlPanelPrimaryAction: {
+    marginHorizontal: 10,
+    marginBottom: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    backgroundColor: '#10131c',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
+  },
+  controlPanelPrimaryTitle: {
+    color: '#f8fafc',
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 0.2,
+  },
+  controlPanelPrimaryDesc: {
+    color: '#7c8aa5',
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: 2,
+  },
+  controlPanelPrimaryArrow: {
+    color: '#e2e8f0',
+    fontSize: 20,
+    fontWeight: '900',
+  },
+  controlRouteGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingHorizontal: 10,
+    marginBottom: 10,
+  },
+  controlRouteCard: {
+    width: '47.5%',
+    minHeight: 58,
+    borderRadius: 10,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    justifyContent: 'center',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
+  },
+  controlRouteLabel: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    fontFamily: 'monospace',
+  },
+  controlRouteDesc: {
+    color: '#94a3b8',
+    fontSize: 10,
+    lineHeight: 13,
+    marginTop: 3,
+  },
+  controlAdvancedToggle: {
+    marginHorizontal: 10,
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#232336',
+    backgroundColor: '#0b1220',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
+  },
+  controlAdvancedToggleText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.7,
+    textTransform: 'uppercase',
+    fontFamily: 'monospace',
   },
   controlCenterStatValue: {
     color: '#f8fafc',

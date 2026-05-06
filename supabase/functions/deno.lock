@@ -1,0 +1,8 @@
+{
+  "version": "5",
+  "remote": {
+    "https://esm.sh/@solana/web3.js@1.98.4?target=deno": "f438b019ee243af4ce755c76e10b25a91c976c670b16badc882d82244785b17a",
+    "https://esm.sh/@supabase/supabase-js@2.95.3": "1f2684e4be12043f36ea7decd22a2ba0c3367cf6c474b99a051f1e7148e88176",
+    "https://esm.sh/stripe@14.14.0?target=deno": "648b1148e2dfc476d6e5b9144785e9e8c14fafe077f85e4f4e45744b01e63a77"
+  }
+}

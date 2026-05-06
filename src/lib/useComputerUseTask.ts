@@ -66,6 +66,7 @@ export interface ComputerUseTaskState {
       notes?: string;
       thumbnail?: string;
     }> | null;
+    extractedData?: unknown | null;
   } | null;
   errorMessage: string | null;
 }
@@ -137,12 +138,12 @@ export function useComputerUseTask(circleId: string, userId?: string) {
       onUsage: (info) => {
         setState((prev) => ({ ...prev, usage: info }));
       },
-      onResult: ({ summary, iterations, tokens, findings, runId }) => {
+      onResult: ({ summary, iterations, tokens, findings, extractedData, runId }) => {
         setState((prev) => ({
           ...prev,
           status: 'done',
           runId: runId || prev.runId,
-          result: { summary, iterations, tokens, findings: findings ?? null },
+          result: { summary, iterations, tokens, findings: findings ?? null, extractedData: extractedData ?? null },
         }));
         handleRef.current = null;
       },

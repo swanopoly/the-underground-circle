@@ -18,13 +18,10 @@
  * dedupe via a singleton promise so we don't fan out N pair requests
  * on app boot.
  */
+import { getBridgeUrl } from './bridgeEnvironment';
+
 const TOKEN_KEY = 'uc_desktop_bridge_token_v1';
-const PAIR_URLS = [
-  'http://localhost:7778/desktop/pair',  // Claude Code
-  'http://localhost:7779/pair',          // Codex
-  'http://localhost:7780/pair',          // Gemini CLI
-  'http://localhost:7781/pair',          // Cursor
-];
+const PAIR_PORTS = [7778, 7779, 7780, 7781] as const;
 
 let inflightPair: Promise<string | null> | null = null;
 
@@ -52,7 +49,14 @@ function writeToken(value: string) {
  * URL keeps app boot fast when bridges are offline.
  */
 async function pairWithAnyBridge(): Promise<string | null> {
-  for (const url of PAIR_URLS) {
+  const pairUrls = PAIR_PORTS
+    .map((port) => {
+      const base = getBridgeUrl(port);
+      if (!base) return null;
+      return port === 7778 ? `${base}/desktop/pair` : `${base}/pair`;
+    })
+    .filter((url): url is string => !!url);
+  for (const url of pairUrls) {
     try {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), 1500);

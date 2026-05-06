@@ -37,6 +37,7 @@ export interface ComputerUseLiveCardProps {
       notes?: string;
       thumbnail?: string;
     }> | null;
+    extractedData?: unknown | null;
   } | null;
   /** Set when status is `error`. */
   errorMessage?: string | null;
@@ -114,6 +115,15 @@ function formatTokenShort(n: number): string {
 // "Budget cap reached" or "Daily cap reached" from the edge function.
 function isBudgetError(msg: string): boolean {
   return /\b(budget|daily)\s+cap\b/i.test(msg) || /raise the cap/i.test(msg);
+}
+
+function formatExtractedDataPreview(value: unknown): string {
+  try {
+    const json = JSON.stringify(value, null, 2);
+    return json.length > 2500 ? `${json.slice(0, 2500)}\n...truncated` : json;
+  } catch {
+    return String(value ?? '');
+  }
 }
 
 /** 2-letter action-verb badge for the timeline strip. Keeps the
@@ -546,6 +556,15 @@ export default function ComputerUseLiveCard(props: ComputerUseLiveCardProps) {
             </View>
           ) : null}
 
+          {props.result.extractedData ? (
+            <View style={s.extractedDataBox}>
+              <Text style={s.extractedDataHeader}>EXTRACTED DATA</Text>
+              <ScrollView style={s.extractedDataScroll}>
+                <Text style={s.extractedDataText}>{formatExtractedDataPreview(props.result.extractedData)}</Text>
+              </ScrollView>
+            </View>
+          ) : null}
+
           <Text style={s.resultMeta}>
             {props.result.iterations} iteration{props.result.iterations === 1 ? '' : 's'} · {props.result.tokens.input + props.result.tokens.output} tokens
           </Text>
@@ -821,6 +840,31 @@ const s = StyleSheet.create({
     paddingVertical: 2,
     borderRadius: 999,
     borderWidth: 1,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  extractedDataBox: {
+    marginTop: 8,
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#38bdf855',
+    backgroundColor: '#020617',
+  },
+  extractedDataHeader: {
+    color: '#7dd3fc',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.7,
+    marginBottom: 6,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  extractedDataScroll: {
+    maxHeight: 180,
+  },
+  extractedDataText: {
+    color: '#cbd5e1',
+    fontSize: 10,
+    lineHeight: 14,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   followupRow: {

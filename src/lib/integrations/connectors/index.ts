@@ -14,11 +14,14 @@
 
 import type { ConnectorAdapter } from '../types';
 import { awsConnector } from './aws';
+import { linearConnector } from './linear';
+import { shopifyConnector } from './shopify';
 
 const ADAPTERS: ConnectorAdapter[] = [
   awsConnector,
+  linearConnector,
+  shopifyConnector,
   // Add more here as connectors are written:
-  //   linearConnector,
   //   sentryConnector,
   //   notionConnector,
   //   ...
@@ -35,3 +38,5 @@ export function listConnectors(): ConnectorAdapter[] {
 }
 
 export { awsConnector };
+export { linearConnector };
+export { shopifyConnector };

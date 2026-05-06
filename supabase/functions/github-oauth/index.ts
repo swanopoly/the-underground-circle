@@ -10,6 +10,7 @@
 // Deploy: npx supabase functions deploy github-oauth
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
+import { listGitHubReposGraphql } from "../_shared/github-graphql.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -222,7 +223,25 @@ async function handleListRepos(url: URL): Promise<Response> {
     return jsonResponse({ error: "No GitHub token found. Please connect GitHub first." }, 404);
   }
 
-  // Fetch repos from GitHub
+  // Prefer GitHub GraphQL for richer repo dashboard data in one shaped call.
+  // Fall back to REST on schema/rate/auth edge cases so existing UI keeps
+  // working while we roll GraphQL out incrementally.
+  const graphqlRepos = await listGitHubReposGraphql(tokenRecord.access_token, { first: 100 });
+  if (graphqlRepos.data) {
+    return jsonResponse({
+      github_username: graphqlRepos.data.github_username || tokenRecord.github_username,
+      repos: graphqlRepos.data.repos,
+      source: "github_graphql",
+      graphql: {
+        rateLimit: graphqlRepos.data.rateLimit,
+        pageInfo: graphqlRepos.data.pageInfo,
+      },
+    });
+  }
+
+  console.warn("GitHub GraphQL repo listing failed, falling back to REST:", graphqlRepos.error);
+
+  // Fetch repos from GitHub REST
   const reposRes = await fetch(
     "https://api.github.com/user/repos?per_page=100&sort=updated",
     {
@@ -247,6 +266,8 @@ async function handleListRepos(url: URL): Promise<Response> {
   return jsonResponse({
     github_username: tokenRecord.github_username,
     repos,
+    source: "github_rest_fallback",
+    graphql_error: graphqlRepos.error,
   });
 }
 

@@ -45,6 +45,7 @@ interface Props {
   delegationMode?: SessionDelegationMode;
   onSessionProfileChange?: (profile: SessionCodingProfile) => void;
   onDelegationModeChange?: (mode: SessionDelegationMode) => void;
+  onOpenControlPanel?: () => void;
   onOpenRunHistory?: () => void;
 }
 
@@ -68,6 +69,7 @@ export default function ChatThreadHeader({
   delegationMode = 'auto',
   onSessionProfileChange,
   onDelegationModeChange,
+  onOpenControlPanel,
   onOpenRunHistory,
 }: Props) {
   const [thread, setThread] = useState<CircleChatThread | null>(null);
@@ -252,6 +254,7 @@ export default function ChatThreadHeader({
         delegationMode={delegationMode}
         onSessionProfileChange={(p) => onSessionProfileChange?.(p)}
         onDelegationModeChange={(m) => onDelegationModeChange?.(m)}
+        onOpenControlPanel={onOpenControlPanel}
         onOpenSkills={() => setShowSkills(true)}
         onClose={() => setShowServiceMenu(false)}
       />

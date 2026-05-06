@@ -1,4 +1,8 @@
 import type { ComputerCapabilityId, ComputerCapabilityAudit } from './computerCapabilityRegistry';
+import {
+  classifyBrowserbaseWorkflow,
+  type BrowserbaseWorkflowIntent,
+} from './browserbaseWorkflowIntent';
 
 export type ComputerTaskKind =
   | 'browser_task'
@@ -12,6 +16,7 @@ export interface ComputerTaskPlanPreview {
   label: string;
   detail: string;
   requiredCapabilities: ComputerCapabilityId[];
+  browserbaseWorkflow?: BrowserbaseWorkflowIntent;
 }
 
 function includesAny(haystack: string, needles: string[]): boolean {
@@ -24,6 +29,7 @@ function matchesAny(haystack: string, patterns: RegExp[]): boolean {
 
 export function planComputerTaskPreview(task: string): ComputerTaskPlanPreview {
   const text = String(task || '').trim().toLowerCase();
+  const browserbaseWorkflow = classifyBrowserbaseWorkflow(task);
   if (!text) {
     return {
       kind: 'unknown',
@@ -41,9 +47,14 @@ export function planComputerTaskPreview(task: string): ComputerTaskPlanPreview {
   const browser = includesAny(text, [
     'website', 'site', 'browser', 'tab', 'visit ', 'navigate', 'search the web',
     'log in', 'login', 'sign in', 'fill out', 'form', 'checkout', 'page', 'url', 'docs',
+    'browserbase', 'stagehand', 'scrape', 'extract data', 'data retrieval', 'structured data',
+    'form submission', 'submit form', 'data entry',
   ]) || matchesAny(text, [
     /\b(open|go to|visit|browse|check)\b.*\b(website|site|page|tab|url|link)\b/i,
     /\b(find|search|look up|research|compare|review|summarize|show me|list)\b.*\b(website|site|page|web|online|docs|documentation|pricing|reviews?)\b/i,
+    /\b(extract|scrape|collect|gather|capture|export|pull)\b.*\b(from|on)\b.*\b(https?:\/\/|www\.|[a-z0-9.-]+\.[a-z]{2,})\b/i,
+    /\b(fill|complete|submit|populate)\b.*\b(form|survey|application|registration|checkout)\b/i,
+    /\bstagehand\b.*\b(act|extract|click|fill|navigate|form|website|page)\b/i,
   ]) || appResearch;
 
   const file = includesAny(text, [
@@ -130,9 +141,18 @@ export function planComputerTaskPreview(task: string): ComputerTaskPlanPreview {
   if (browser) {
     return {
       kind: 'browser_task',
-      label: 'Browser task',
-      detail: 'This request looks primarily about websites, forms, browsing, or live web execution.',
-      requiredCapabilities: ['browser_automation'],
+      label: browserbaseWorkflow.label === 'General browser automation'
+        ? 'Browser task'
+        : browserbaseWorkflow.label,
+      detail: browserbaseWorkflow.kind === 'general_browser'
+        ? 'This request looks primarily about websites, forms, browsing, or live web execution.'
+        : browserbaseWorkflow.summary,
+      requiredCapabilities: browserbaseWorkflow.requiresPersistentContext
+        ? ['browser_automation', 'browser_sessions']
+        : browserbaseWorkflow.kind === 'web_data_retrieval' || browserbaseWorkflow.kind === 'form_submission' || browserbaseWorkflow.requiresStagehand
+          ? ['browser_automation', 'browser_sessions']
+          : ['browser_automation'],
+      browserbaseWorkflow,
     };
   }
   return {

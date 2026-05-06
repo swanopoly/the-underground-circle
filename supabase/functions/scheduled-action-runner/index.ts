@@ -50,7 +50,8 @@ interface ExecResult {
   retryable?: boolean;   // false → don't bump retry count, mark failed
 }
 
-type Executor = (action: ScheduledAction, supabase: ReturnType<typeof createClient>) => Promise<ExecResult>;
+type SupabaseEdgeClient = any;
+type Executor = (action: ScheduledAction, supabase: SupabaseEdgeClient) => Promise<ExecResult>;
 
 // ─── Kind executors ─────────────────────────────────────────────────────────
 
@@ -417,6 +418,12 @@ const execSlackPost: Executor = async (action, supabase) => {
   }
 };
 
+const execNotImplemented: Executor = async (action) => ({
+  ok: false,
+  error: `No executor implemented for scheduled action kind: ${action.kind}`,
+  retryable: false,
+});
+
 const EXECUTORS: Record<string, Executor> = {
   webhook: execWebhook,
   bluesky_post: execBlueskyPost,
@@ -433,7 +440,7 @@ const EXECUTORS: Record<string, Executor> = {
 // ─── Credential helpers ─────────────────────────────────────────────────────
 
 async function getUserProviderKey(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseEdgeClient,
   userId: string,
   provider: string,
 ): Promise<{ identifier: string; password: string } | null> {
@@ -465,7 +472,7 @@ async function getUserProviderKey(
  * null if the stored shape isn't recognised so the payload override path
  * can still succeed. */
 async function getUserWpCreds(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseEdgeClient,
   userId: string,
 ): Promise<{ site: string; username: string; app_password: string } | null> {
   try {
@@ -493,7 +500,7 @@ async function getUserWpCreds(
 }
 
 async function getUserOauthToken(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseEdgeClient,
   userId: string,
   provider: string,
 ): Promise<string | null> {
@@ -537,7 +544,7 @@ function base64UrlEncode(input: string): string {
 
 // ─── Core loop ──────────────────────────────────────────────────────────────
 
-async function runOnce(supabase: ReturnType<typeof createClient>): Promise<{ claimed: number; succeeded: number; failed: number; skipped: number }> {
+async function runOnce(supabase: SupabaseEdgeClient): Promise<{ claimed: number; succeeded: number; failed: number; skipped: number }> {
   // 1. Fetch IDs of due actions. We do a lookup + individual claim rather
   //    than a SKIP-LOCKED CTE because the Supabase SDK doesn't expose that
   //    syntax ergonomically. The race window is small and each claim is
@@ -614,7 +621,7 @@ async function runOnce(supabase: ReturnType<typeof createClient>): Promise<{ cla
 }
 
 async function handleApprovalGate(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseEdgeClient,
   action: ScheduledAction,
 ): Promise<'approved' | 'waiting' | 'rejected'> {
   if (action.approval_id) {
@@ -646,7 +653,7 @@ async function handleApprovalGate(
   return 'waiting';
 }
 
-async function markSucceeded(supabase: ReturnType<typeof createClient>, action: ScheduledAction, result: Record<string, unknown>) {
+async function markSucceeded(supabase: SupabaseEdgeClient, action: ScheduledAction, result: Record<string, unknown>) {
   await supabase.from('scheduled_actions').update({
     status: 'succeeded',
     completed_at: new Date().toISOString(),
@@ -655,7 +662,7 @@ async function markSucceeded(supabase: ReturnType<typeof createClient>, action: 
   }).eq('id', action.id);
 }
 
-async function markFailed(supabase: ReturnType<typeof createClient>, action: ScheduledAction, error: string, retryable: boolean) {
+async function markFailed(supabase: SupabaseEdgeClient, action: ScheduledAction, error: string, retryable: boolean) {
   await supabase.from('scheduled_actions').update({
     status: 'failed',
     completed_at: new Date().toISOString(),
@@ -664,7 +671,7 @@ async function markFailed(supabase: ReturnType<typeof createClient>, action: Sch
   }).eq('id', action.id);
 }
 
-async function scheduleRetry(supabase: ReturnType<typeof createClient>, action: ScheduledAction, error: string) {
+async function scheduleRetry(supabase: SupabaseEdgeClient, action: ScheduledAction, error: string) {
   const nextAttempt = action.retry_count + 1;
   // Exponential backoff: 15s × 2^n, capped at 30 min
   const delayMs = Math.min(15_000 * Math.pow(2, nextAttempt - 1), 30 * 60_000);

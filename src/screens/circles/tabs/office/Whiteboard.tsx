@@ -18,6 +18,14 @@ import {
   analyzeWorkloadDistribution, generateCostOptimizations,
   performHealthCheck,
 } from '../../../../lib/agentFarmMetrics';
+import type { AgentConnection } from '../../../../lib/connectionManager';
+import type { BudgetAlert } from '../../../../lib/budgetAlerts';
+import type { AgentApproval } from '../../../../services/hitlService';
+import {
+  loadSiteAgentReadiness,
+  type SiteAgentReadinessSnapshot,
+  type SiteAgentReadinessPriority,
+} from '../../../../lib/siteAgentReadiness';
 
 interface Props {
   editable?: boolean;
@@ -29,6 +37,10 @@ interface Props {
   circleId?: string | null;
   connectedCount?: number;
   totalConnections?: number;
+  connections?: AgentConnection[];
+  pendingApprovals?: AgentApproval[];
+  budgetAlerts?: BudgetAlert[];
+  periodCosts?: { today: number; week: number; month: number };
 }
 
 // ── COLORS ─────────────────────────────────────────────────────────────────
@@ -132,7 +144,48 @@ const TAB_LIST: { key: TabKey; label: string }[] = [
 ];
 
 const COLLAPSED_H = 46;
-const EXPANDED_H = 260;
+const EXPANDED_H = 390;
+
+type Tone = 'good' | 'live' | 'warn' | 'danger' | 'info' | 'muted';
+
+interface MissionCardVm {
+  title: string;
+  value: string;
+  detail: string;
+  tone: Tone;
+  foot?: string;
+}
+
+interface CommandIssueVm {
+  title: string;
+  detail: string;
+  tone: Tone;
+}
+
+interface ActionCueVm {
+  label: string;
+  detail: string;
+  tone: Tone;
+}
+
+interface CommandCenterVm {
+  readyScore: number;
+  stateLabel: string;
+  stateTone: Tone;
+  missionCards: MissionCardVm[];
+  issues: CommandIssueVm[];
+  actionCues: ActionCueVm[];
+  activeBrowserAgents: OfficeAgent[];
+  activeToolAgents: OfficeAgent[];
+  connectionStats: {
+    enabled: number;
+    connected: number;
+    connecting: number;
+    error: number;
+    disconnected: number;
+  };
+  readiness: SiteAgentReadinessSnapshot | null;
+}
 
 function fmtTok(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
@@ -144,11 +197,15 @@ export default function Whiteboard({
   editable, notes = [], onNotesChange,
   agents = [], statusHistory = [], cronJobs = [], circleId,
   connectedCount = 0, totalConnections = 0,
+  connections = [], pendingApprovals = [], budgetAlerts = [], periodCosts,
 }: Props) {
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
   const [editing, setEditing] = useState(false);
   const [noteText, setNoteText] = useState('');
   const [expanded, setExpanded] = useState(false);
+  const [readinessSnapshot, setReadinessSnapshot] = useState<SiteAgentReadinessSnapshot | null>(null);
+  const [readinessLoading, setReadinessLoading] = useState(false);
+  const [readinessError, setReadinessError] = useState<string | null>(null);
 
   // ── BlackSwan status ──
   const [bsStatus, setBsStatus] = useState<'local' | 'offline' | 'checking'>('checking');
@@ -216,6 +273,35 @@ export default function Whiteboard({
   const { activities } = useAgentActivity(circleId ?? null);
   const reward = useRewardState();
 
+  const refreshReadiness = useCallback(async () => {
+    if (!circleId) return;
+    setReadinessLoading(true);
+    setReadinessError(null);
+    try {
+      const snapshot = await loadSiteAgentReadiness(circleId);
+      setReadinessSnapshot(snapshot);
+    } catch (error: any) {
+      setReadinessError(error?.message || 'Automation readiness audit failed.');
+    } finally {
+      setReadinessLoading(false);
+    }
+  }, [circleId]);
+
+  useEffect(() => {
+    if (!expanded || !circleId) return;
+    let alive = true;
+    const run = async () => {
+      if (!alive) return;
+      await refreshReadiness();
+    };
+    run();
+    const timer = setInterval(run, 90_000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [circleId, expanded, refreshReadiness]);
+
   // Running tasks
   const runningTasks = useMemo(() => {
     const map = new Map<string, AgentActivity>();
@@ -256,6 +342,213 @@ export default function Whiteboard({
     const rate = completed + failed > 0 ? Math.round((completed / (completed + failed)) * 100) : null;
     return { completed, failed, rate };
   }, [activities]);
+
+  const commandCenter = useMemo<CommandCenterVm>(() => {
+    const enabledConnections = connections.filter(c => c.enabled);
+    const connected = enabledConnections.filter(c => c.status === 'connected').length || connectedCount;
+    const connecting = enabledConnections.filter(c => c.status === 'connecting').length;
+    const errorConnections = enabledConnections.filter(c => c.status === 'error');
+    const disconnected = enabledConnections.filter(c => c.status === 'disconnected').length;
+    const failedToday = todayStats.failed;
+    const dangerBudgetAlerts = budgetAlerts.filter(a => a.level === 'danger' || a.level === 'critical');
+    const warningBudgetAlerts = budgetAlerts.filter(a => a.level === 'warning' || a.level === 'info');
+    const healthIssues = healthCheck.issues ?? [];
+    const criticalHealth = healthIssues.filter((i: any) => i.severity === 'critical').length;
+    const warningHealth = healthIssues.filter((i: any) => i.severity === 'warning').length;
+    const activeBrowserAgents = agents.filter(a => {
+      const text = [
+        a.currentToolName,
+        a.activity,
+        a.currentToolFile,
+        ...(a.recentActions ?? []),
+      ].filter(Boolean).join(' ').toLowerCase();
+      return /(browser|computer|playwright|website|wordpress|shopify|webflow|chrome|safari|credential|login)/.test(text);
+    });
+    const activeToolAgents = agents.filter(a => !!a.currentToolName || (a.status === 'active' || a.status === 'building'));
+    const connectedRatio = totalConnections > 0 ? connected / totalConnections : agents.length > 0 ? 1 : 0;
+    let score = 100;
+    score -= pendingApprovals.length * 10;
+    score -= errorConnections.length * 12;
+    score -= disconnected * 5;
+    score -= dangerBudgetAlerts.length * 14;
+    score -= warningBudgetAlerts.length * 5;
+    score -= failedToday * 4;
+    score -= criticalHealth * 15;
+    score -= warningHealth * 5;
+    score -= connectedRatio < 1 && totalConnections > 0 ? Math.round((1 - connectedRatio) * 20) : 0;
+    if (readinessSnapshot) score = Math.round((score * 0.65) + (readinessSnapshot.score * 0.35));
+    if (readinessError) score -= 8;
+    score = Math.max(0, Math.min(100, Math.round(score)));
+
+    const issues: CommandIssueVm[] = [];
+    if (pendingApprovals.length > 0) {
+      const latest = pendingApprovals[0];
+      issues.push({
+        title: `${pendingApprovals.length} approval${pendingApprovals.length === 1 ? '' : 's'} waiting`,
+        detail: latest?.description || latest?.action_type || 'Review human-in-the-loop requests before agents continue.',
+        tone: 'warn',
+      });
+    }
+    if (errorConnections.length > 0) {
+      issues.push({
+        title: `${errorConnections.length} bridge${errorConnections.length === 1 ? '' : 's'} errored`,
+        detail: errorConnections.slice(0, 2).map(c => c.name).join(', '),
+        tone: 'danger',
+      });
+    }
+    if (dangerBudgetAlerts.length > 0) {
+      const alert = dangerBudgetAlerts[0];
+      issues.push({
+        title: `${alert.period.toUpperCase()} budget ${Math.round(alert.percentage)}%`,
+        detail: alert.message,
+        tone: alert.level === 'critical' ? 'danger' : 'warn',
+      });
+    }
+    if (failedToday > 0) {
+      issues.push({
+        title: `${failedToday} failed task${failedToday === 1 ? '' : 's'} today`,
+        detail: 'Open Activity to inspect the failed run timeline before retrying.',
+        tone: 'danger',
+      });
+    }
+    if (criticalHealth > 0 || warningHealth > 0) {
+      const issue = healthIssues[0];
+      issues.push({
+        title: `${criticalHealth || warningHealth} health issue${(criticalHealth || warningHealth) === 1 ? '' : 's'}`,
+        detail: issue?.message || 'Agent farm health needs attention.',
+        tone: criticalHealth > 0 ? 'danger' : 'warn',
+      });
+    }
+    if (readinessError) {
+      issues.push({
+        title: 'Readiness audit failed',
+        detail: readinessError,
+        tone: 'warn',
+      });
+    }
+    if (readinessSnapshot?.blockers.length) {
+      for (const blocker of readinessSnapshot.blockers.slice(0, 2)) {
+        issues.push({
+          title: 'Automation blocker',
+          detail: blocker,
+          tone: readinessSnapshot.grade === 'blocked' ? 'danger' : 'warn',
+        });
+      }
+    }
+
+    const actionCues: ActionCueVm[] = [];
+    if (pendingApprovals.length > 0) actionCues.push({ label: 'Review approvals', detail: 'Unblock waiting agents from the HITL queue.', tone: 'warn' });
+    if (errorConnections.length > 0) actionCues.push({ label: 'Reconnect bridges', detail: errorConnections[0]?.error || 'Run bridge diagnostics and retry failed links.', tone: 'danger' });
+    if (activeBrowserAgents.length > 0) actionCues.push({ label: 'Watch browser session', detail: `${activeBrowserAgents[0].name} is using browser/computer tools.`, tone: 'live' });
+    if (dangerBudgetAlerts.length > 0) actionCues.push({ label: 'Check spend controls', detail: dangerBudgetAlerts[0].message, tone: 'danger' });
+    if (readinessSnapshot?.recommendations.length) {
+      for (const rec of readinessSnapshot.recommendations.slice(0, 2)) {
+        actionCues.push({
+          label: rec.title,
+          detail: rec.detail,
+          tone: priorityTone(rec.priority),
+        });
+      }
+    }
+    if (runningTasks.length === 0 && agents.length > 0) actionCues.push({ label: 'Assign next mission', detail: 'No active task is running. Start from Chat or Terminal.', tone: 'info' });
+    if (actionCues.length === 0) actionCues.push({ label: 'Ready for work', detail: 'No blockers detected. Agents are ready for the next mission.', tone: 'good' });
+
+    const highestAlert = budgetAlerts[0];
+    const costs = periodCosts ?? {
+      today: farmMetrics.totalCostToday,
+      week: farmMetrics.totalCostWeek,
+      month: 0,
+    };
+    const missionCards: MissionCardVm[] = [
+      {
+        title: 'Active Runs',
+        value: String(runningTasks.length),
+        detail: runningTasks[0]?.title || (activeToolAgents[0]?.activity ?? 'No run in flight'),
+        tone: runningTasks.length > 0 || activeToolAgents.length > 0 ? 'live' : 'muted',
+        foot: activeToolAgents.length > 0 ? `${activeToolAgents.length} agent${activeToolAgents.length === 1 ? '' : 's'} working` : 'Queue is clear',
+      },
+      {
+        title: 'Blocked',
+        value: String(issues.length),
+        detail: issues[0]?.title || 'No blockers detected',
+        tone: issues.length > 0 ? (issues.some(i => i.tone === 'danger') ? 'danger' : 'warn') : 'good',
+        foot: pendingApprovals.length > 0 ? `${pendingApprovals.length} approval pending` : 'HITL clear',
+      },
+      {
+        title: 'Browser Use',
+        value: String(activeBrowserAgents.length),
+        detail: activeBrowserAgents[0]?.activity || 'No live browser/computer session',
+        tone: activeBrowserAgents.length > 0 ? 'live' : 'muted',
+        foot: activeBrowserAgents[0]?.name || 'Ready when granted',
+      },
+      {
+        title: 'Spend',
+        value: `$${costs.today.toFixed(2)}`,
+        detail: highestAlert?.message || `$${costs.week.toFixed(2)} this week`,
+        tone: dangerBudgetAlerts.length > 0 ? 'danger' : warningBudgetAlerts.length > 0 ? 'warn' : costs.today > 0 ? 'info' : 'muted',
+        foot: costs.month > 0 ? `$${costs.month.toFixed(2)} month` : 'Budget ledger',
+      },
+      {
+        title: 'Auto Ready',
+        value: readinessSnapshot ? String(readinessSnapshot.score) : readinessLoading ? '...' : '—',
+        detail: readinessSnapshot?.summary || readinessError || 'Open the board to audit automation readiness',
+        tone: readinessSnapshot ? gradeTone(readinessSnapshot.grade) : readinessError ? 'warn' : 'muted',
+        foot: readinessSnapshot ? readinessSnapshot.statusLabel : 'Capability audit',
+      },
+      {
+        title: 'Bridges',
+        value: `${connected}/${totalConnections || enabledConnections.length || 0}`,
+        detail: errorConnections[0]?.error || (connecting > 0 ? `${connecting} connecting` : 'Bridge links available'),
+        tone: errorConnections.length > 0 ? 'danger' : connected > 0 ? 'good' : totalConnections > 0 ? 'warn' : 'muted',
+        foot: errorConnections.length > 0 ? errorConnections[0]?.name : `${enabledConnections.length} enabled`,
+      },
+      {
+        title: 'Schedules',
+        value: String(cronJobs.filter(j => j.enabled).length),
+        detail: cronJobs.length > 0 ? `${cronJobs.length} cron job${cronJobs.length === 1 ? '' : 's'} configured` : 'No scheduled automations',
+        tone: cronJobs.some(j => j.enabled) ? 'info' : 'muted',
+        foot: 'Automation calendar',
+      },
+    ];
+
+    const stateTone: Tone = score >= 85 ? 'good' : score >= 65 ? 'info' : score >= 40 ? 'warn' : 'danger';
+    const stateLabel = score >= 85 ? 'READY' : score >= 65 ? 'WATCH' : score >= 40 ? 'NEEDS REVIEW' : 'BLOCKED';
+    return {
+      readyScore: score,
+      stateLabel,
+      stateTone,
+      missionCards,
+      issues,
+      actionCues: actionCues.slice(0, 4),
+      activeBrowserAgents,
+      activeToolAgents,
+      connectionStats: {
+        enabled: enabledConnections.length,
+        connected,
+        connecting,
+        error: errorConnections.length,
+        disconnected,
+      },
+      readiness: readinessSnapshot,
+    };
+  }, [
+    agents,
+    budgetAlerts,
+    connectedCount,
+    connections,
+    cronJobs,
+    farmMetrics.totalCostToday,
+    farmMetrics.totalCostWeek,
+    healthCheck,
+    pendingApprovals,
+    periodCosts,
+    readinessError,
+    readinessLoading,
+    readinessSnapshot,
+    runningTasks,
+    todayStats.failed,
+    totalConnections,
+  ]);
 
   const addNote = () => {
     if (noteText.trim() && onNotesChange) {
@@ -432,17 +725,28 @@ export default function Whiteboard({
               agents={agents} sortedAgents={sortedAgents} activities={activities}
               runningTasks={runningTasks} farmMetrics={farmMetrics} healthCheck={healthCheck}
               workloads={workloads} costOpts={costOpts} todayStats={todayStats}
-              reward={reward} badgeColor={badgeColor}
+              reward={reward} badgeColor={badgeColor} commandCenter={commandCenter}
+              readinessLoading={readinessLoading} readinessError={readinessError} onRefreshReadiness={refreshReadiness}
             />
           )}
           {activeTab === 'agents' && (
-            <AgentsTab agents={sortedAgents} agentScores={agentScores} workloads={workloads} />
+            <AgentsTab agents={sortedAgents} agentScores={agentScores} workloads={workloads} commandCenter={commandCenter} />
           )}
           {activeTab === 'activity' && (
-            <ActivityTab agents={agents} activities={activities} statusHistory={statusHistory} runningTasks={runningTasks} />
+            <ActivityTab agents={agents} activities={activities} statusHistory={statusHistory} runningTasks={runningTasks} commandCenter={commandCenter} />
           )}
           {activeTab === 'ops' && (
-            <OpsTab cronJobs={cronJobs} activities={activities} costOpts={costOpts} />
+            <OpsTab
+              cronJobs={cronJobs}
+              activities={activities}
+              costOpts={costOpts}
+              commandCenter={commandCenter}
+              budgetAlerts={budgetAlerts}
+              periodCosts={periodCosts}
+              readinessLoading={readinessLoading}
+              readinessError={readinessError}
+              onRefreshReadiness={refreshReadiness}
+            />
           )}
         </ScrollView>
       </Animated.View>
@@ -486,6 +790,294 @@ function MetricCell({ label, value, color }: { label: string; value: string; col
     <View style={s.metricCell}>
       <Text style={[s.metricCellVal, { color }]}>{value}</Text>
       <Text style={s.metricCellLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function toneColor(tone: Tone): string {
+  if (tone === 'good') return C.active;
+  if (tone === 'live') return C.live;
+  if (tone === 'warn') return C.amber;
+  if (tone === 'danger') return C.error;
+  if (tone === 'info') return C.accent;
+  return C.textTert;
+}
+
+function priorityTone(priority: SiteAgentReadinessPriority): Tone {
+  if (priority === 'critical') return 'danger';
+  if (priority === 'high') return 'warn';
+  if (priority === 'medium') return 'info';
+  return 'muted';
+}
+
+function gradeTone(grade: SiteAgentReadinessSnapshot['grade']): Tone {
+  if (grade === 'ready') return 'good';
+  if (grade === 'review') return 'info';
+  if (grade === 'setup') return 'warn';
+  return 'danger';
+}
+
+function CommandCenterPanel({ commandCenter }: { commandCenter: CommandCenterVm }) {
+  const stateColor = toneColor(commandCenter.stateTone);
+  return (
+    <View style={s.commandPanel}>
+      <View style={s.commandTopRow}>
+        <View style={s.commandTitleBlock}>
+          <Text style={s.commandEyebrow}>COMMAND CENTER</Text>
+          <Text style={s.commandHeadline}>Mission readiness</Text>
+        </View>
+        <View style={[s.readyBadge, { borderColor: stateColor + '55', backgroundColor: stateColor + '14' }]}>
+          <Text style={[s.readyScore, { color: stateColor }]}>{commandCenter.readyScore}</Text>
+          <Text style={[s.readyLabel, { color: stateColor }]}>{commandCenter.stateLabel}</Text>
+        </View>
+      </View>
+      <View style={s.readyTrack}>
+        <View style={[s.readyFill, { width: `${commandCenter.readyScore}%` as any, backgroundColor: stateColor }]} />
+      </View>
+      <View style={s.commandKpiRow}>
+        <CommandKpi label="LINKS" value={`${commandCenter.connectionStats.connected}/${commandCenter.connectionStats.enabled || 0}`} tone={commandCenter.connectionStats.error > 0 ? 'danger' : 'good'} />
+        <CommandKpi label="TOOLS" value={String(commandCenter.activeToolAgents.length)} tone={commandCenter.activeToolAgents.length > 0 ? 'live' : 'muted'} />
+        <CommandKpi label="BROWSER" value={String(commandCenter.activeBrowserAgents.length)} tone={commandCenter.activeBrowserAgents.length > 0 ? 'live' : 'muted'} />
+        <CommandKpi label="FIX" value={String(commandCenter.issues.length)} tone={commandCenter.issues.length > 0 ? 'warn' : 'good'} />
+      </View>
+    </View>
+  );
+}
+
+function CommandKpi({ label, value, tone }: { label: string; value: string; tone: Tone }) {
+  const color = toneColor(tone);
+  return (
+    <View style={[s.commandKpi, { borderColor: color + '25', backgroundColor: color + '0d' }]}>
+      <Text style={[s.commandKpiVal, { color }]}>{value}</Text>
+      <Text style={s.commandKpiLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function MissionBoardGrid({ cards }: { cards: MissionCardVm[] }) {
+  return (
+    <View style={s.missionGrid}>
+      {cards.map(card => <MissionCard key={card.title} card={card} />)}
+    </View>
+  );
+}
+
+function MissionCard({ card }: { card: MissionCardVm }) {
+  const color = toneColor(card.tone);
+  return (
+    <View style={[s.missionCard, { borderColor: color + '28', backgroundColor: color + '0a' }]}>
+      <View style={s.missionCardHead}>
+        <Text style={s.missionCardTitle}>{card.title}</Text>
+        <Text style={[s.missionCardValue, { color }]}>{card.value}</Text>
+      </View>
+      <Text style={s.missionCardDetail} numberOfLines={2}>{card.detail}</Text>
+      {card.foot ? <Text style={[s.missionCardFoot, { color }]} numberOfLines={1}>{card.foot}</Text> : null}
+    </View>
+  );
+}
+
+function IssueStack({ issues }: { issues: CommandIssueVm[] }) {
+  if (issues.length === 0) {
+    return (
+      <View style={s.clearState}>
+        <Text style={s.clearStateTitle}>NO BLOCKERS</Text>
+        <Text style={s.clearStateText}>Approvals, bridges, spend, and health checks are clear.</Text>
+      </View>
+    );
+  }
+  return (
+    <View>
+      {issues.slice(0, 5).map((issue, i) => {
+        const color = toneColor(issue.tone);
+        return (
+          <View key={`${issue.title}-${i}`} style={[s.issueRow, { borderLeftColor: color }]}>
+            <View style={[s.issueDot, { backgroundColor: color }]} />
+            <View style={s.issueCopy}>
+              <Text style={s.issueTitle}>{issue.title}</Text>
+              <Text style={s.issueDetail} numberOfLines={2}>{issue.detail}</Text>
+            </View>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function ActionCueList({ cues }: { cues: ActionCueVm[] }) {
+  return (
+    <View style={s.cueGrid}>
+      {cues.map(cue => {
+        const color = toneColor(cue.tone);
+        return (
+          <View key={cue.label} style={[s.cueCard, { borderColor: color + '25' }]}>
+            <Text style={[s.cueLabel, { color }]}>{cue.label}</Text>
+            <Text style={s.cueDetail} numberOfLines={2}>{cue.detail}</Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function AutomationReadinessPanel({
+  snapshot,
+  loading,
+  error,
+  onRefresh,
+  compact = false,
+}: {
+  snapshot: SiteAgentReadinessSnapshot | null;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+  compact?: boolean;
+}) {
+  const tone = snapshot ? gradeTone(snapshot.grade) : error ? 'warn' : 'muted';
+  const color = toneColor(tone);
+  return (
+    <View style={[s.readinessPanel, { borderColor: color + '35' }]}>
+      <View style={s.readinessHead}>
+        <View style={s.readinessTitleBlock}>
+          <Text style={s.readinessEyebrow}>AUTOMATION READINESS</Text>
+          <Text style={s.readinessTitle}>
+            {snapshot?.statusLabel || (loading ? 'Auditing capabilities...' : error ? 'Audit needs review' : 'Open board to audit')}
+          </Text>
+          <Text style={s.readinessSummary} numberOfLines={2}>
+            {snapshot?.summary || error || 'Checks browser/computer use, local bridges, MCP, vault access, observability, and guardrails.'}
+          </Text>
+        </View>
+        <View style={[s.readinessScoreBox, { backgroundColor: color + '12', borderColor: color + '45' }]}>
+          <Text style={[s.readinessScore, { color }]}>{snapshot ? snapshot.score : loading ? '...' : '—'}</Text>
+          <Text style={[s.readinessGrade, { color }]}>{snapshot?.grade?.toUpperCase() || 'AUDIT'}</Text>
+        </View>
+      </View>
+
+      {snapshot ? (
+        <>
+          <View style={s.readinessStatsGrid}>
+            <ReadinessStat label="CAPS READY" value={`${snapshot.stats.capabilitiesReady}/${snapshot.stats.capabilitiesReady + snapshot.stats.capabilitiesPartial + snapshot.stats.capabilitiesMissing || 8}`} tone={snapshot.stats.capabilitiesMissing > 0 ? 'warn' : 'good'} />
+            <ReadinessStat label="VAULT" value={snapshot.stats.vaultScore == null ? '—' : String(snapshot.stats.vaultScore)} tone={snapshot.stats.vaultCriticalIssues > 0 ? 'danger' : snapshot.stats.vaultHighRiskIssues > 0 ? 'warn' : 'good'} />
+            <ReadinessStat label="BRIDGES" value={String(snapshot.stats.activeBridgeProviders)} tone={snapshot.stats.activeBridgeProviders > 0 ? 'good' : 'warn'} />
+            <ReadinessStat label="MCP TOOLS" value={String(snapshot.stats.activeMcpToolCount)} tone={snapshot.stats.activeMcpToolCount > 0 ? 'info' : 'muted'} />
+            <ReadinessStat label="OBSERVE" value={snapshot.stats.observabilityConnected ? 'YES' : 'NO'} tone={snapshot.stats.observabilityConnected ? 'good' : 'warn'} />
+          </View>
+
+          {!compact && <CapabilityFindingGrid snapshot={snapshot} />}
+
+          <View style={s.secTight}>
+            <Text style={s.secTitle}>NEXT BEST SETUP</Text>
+            {snapshot.recommendations.slice(0, compact ? 2 : 5).map(rec => {
+              const recColor = toneColor(priorityTone(rec.priority));
+              return (
+                <View key={rec.id} style={[s.recommendationRow, { borderLeftColor: recColor }]}>
+                  <View style={s.recommendationTop}>
+                    <Text style={[s.recommendationPriority, { color: recColor }]}>{rec.priority.toUpperCase()}</Text>
+                    <Text style={s.recommendationArea}>{rec.area.toUpperCase()}</Text>
+                    <Text style={s.recommendationAction}>{rec.actionLabel}</Text>
+                  </View>
+                  <Text style={s.recommendationTitle}>{rec.title}</Text>
+                  <Text style={s.recommendationDetail} numberOfLines={2}>{rec.detail}</Text>
+                </View>
+              );
+            })}
+          </View>
+        </>
+      ) : (
+        <View style={s.readinessEmpty}>
+          <Text style={s.readinessEmptyText}>{loading ? 'Running readiness audit...' : 'No readiness snapshot yet.'}</Text>
+        </View>
+      )}
+
+      <Pressable
+        onPress={onRefresh}
+        disabled={loading}
+        style={[s.refreshAuditBtn, loading && { opacity: 0.6 }, Platform.OS === 'web' && { cursor: loading ? 'default' : 'pointer' } as any]}
+      >
+        <Text style={[s.refreshAuditText, { color }]}>{loading ? 'AUDITING...' : 'REFRESH READINESS'}</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function ReadinessStat({ label, value, tone }: { label: string; value: string; tone: Tone }) {
+  const color = toneColor(tone);
+  return (
+    <View style={[s.readinessStat, { borderColor: color + '25', backgroundColor: color + '0a' }]}>
+      <Text style={[s.readinessStatVal, { color }]}>{value}</Text>
+      <Text style={s.readinessStatLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function CapabilityFindingGrid({ snapshot }: { snapshot: SiteAgentReadinessSnapshot }) {
+  const findings = snapshot.capabilityAudit?.findings || [];
+  if (findings.length === 0) return null;
+  return (
+    <View style={s.secTight}>
+      <Text style={s.secTitle}>COMPUTER USE CAPABILITIES</Text>
+      <View style={s.capabilityGrid}>
+        {findings.map(finding => {
+          const tone: Tone = finding.status === 'ready' ? 'good' : finding.status === 'partial' ? 'warn' : 'danger';
+          const color = toneColor(tone);
+          return (
+            <View key={finding.id} style={[s.capabilityCard, { borderColor: color + '25' }]}>
+              <View style={s.capabilityHead}>
+                <Text style={s.capabilityLabel} numberOfLines={1}>{finding.label}</Text>
+                <Text style={[s.capabilityStatus, { color }]}>{finding.status.toUpperCase()}</Text>
+              </View>
+              <Text style={s.capabilityDetail} numberOfLines={2}>{finding.detail}</Text>
+              {finding.sources.length > 0 ? <Text style={s.capabilitySources} numberOfLines={1}>{finding.sources.join(' · ')}</Text> : null}
+            </View>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+function AutomationPlaybooksPanel({ snapshot }: { snapshot: SiteAgentReadinessSnapshot | null }) {
+  const caps = new Set(snapshot?.capabilityAudit?.availableIntegrationCapabilities || []);
+  const providers = new Set(snapshot?.capabilityAudit?.availableIntegrationProviders || []);
+  const playbooks = [
+    {
+      title: 'WordPress publishing',
+      detail: 'Use vault login/app password, browser replay, draft preview, then approval before publish.',
+      ready: snapshot ? snapshot.stats.vaultCredentials > 0 && (caps.has('web_automation') || providers.has('wordpress')) : false,
+    },
+    {
+      title: 'Website edits',
+      detail: 'Launch isolated browser, scope allowed domains, record selectors, verify visual diff before save.',
+      ready: snapshot ? caps.has('web_automation') || snapshot.stats.capabilitiesReady > 0 : false,
+    },
+    {
+      title: 'Desktop app work',
+      detail: 'Use local bridge for launch/focus/type/a11y tree, require approval for destructive actions.',
+      ready: snapshot ? (snapshot.capabilityAudit?.findings || []).some(f => f.id === 'desktop_control' && f.status !== 'missing') : false,
+    },
+    {
+      title: 'Research + build',
+      detail: 'Route through task preflight, trace tool calls, cap spend, and store reusable runbooks.',
+      ready: snapshot ? snapshot.stats.observabilityConnected || snapshot.stats.activeMcpToolCount > 0 : false,
+    },
+  ];
+
+  return (
+    <View style={s.sec}>
+      <Text style={s.secTitle}>AUTOMATION PLAYBOOKS</Text>
+      <View style={s.playbookGrid}>
+        {playbooks.map(playbook => {
+          const color = playbook.ready ? C.active : C.amber;
+          return (
+            <View key={playbook.title} style={[s.playbookCard, { borderColor: color + '25', backgroundColor: color + '08' }]}>
+              <View style={s.playbookHead}>
+                <Text style={s.playbookTitle}>{playbook.title}</Text>
+                <Text style={[s.playbookStatus, { color }]}>{playbook.ready ? 'READY' : 'SETUP'}</Text>
+              </View>
+              <Text style={s.playbookDetail} numberOfLines={3}>{playbook.detail}</Text>
+            </View>
+          );
+        })}
+      </View>
     </View>
   );
 }
@@ -566,7 +1158,23 @@ const sparkStyles = StyleSheet.create({
 });
 
 // ── OVERVIEW TAB ───────────────────────────────────────────────────────────
-function OverviewTab({ agents, sortedAgents, activities, runningTasks, farmMetrics, healthCheck, workloads, costOpts, todayStats, reward, badgeColor }: any) {
+function OverviewTab({
+  agents,
+  sortedAgents,
+  activities,
+  runningTasks,
+  farmMetrics,
+  healthCheck,
+  workloads,
+  costOpts,
+  todayStats,
+  reward,
+  badgeColor,
+  commandCenter,
+  readinessLoading,
+  readinessError,
+  onRefreshReadiness,
+}: any) {
   const now = Date.now();
   const buckets = [0, 0, 0, 0, 0, 0];
   for (const a of activities) {
@@ -586,6 +1194,34 @@ function OverviewTab({ agents, sortedAgents, activities, runningTasks, farmMetri
 
   return (
     <View>
+      <CommandCenterPanel commandCenter={commandCenter} />
+
+      <View style={s.sec}>
+        <AutomationReadinessPanel
+          snapshot={commandCenter.readiness}
+          loading={readinessLoading}
+          error={readinessError}
+          onRefresh={onRefreshReadiness}
+          compact
+        />
+      </View>
+
+      <View style={s.sec}>
+        <Text style={s.secTitle}>MISSION BOARD</Text>
+        <MissionBoardGrid cards={commandCenter.missionCards} />
+      </View>
+
+      <View style={s.splitSec}>
+        <View style={s.splitCol}>
+          <Text style={s.secTitle}>BLOCKERS</Text>
+          <IssueStack issues={commandCenter.issues} />
+        </View>
+        <View style={s.splitCol}>
+          <Text style={s.secTitle}>NEXT MOVES</Text>
+          <ActionCueList cues={commandCenter.actionCues} />
+        </View>
+      </View>
+
       {/* Health Alerts */}
       {healthCheck.issues.length > 0 && (
         <View style={s.sec}>
@@ -759,12 +1395,48 @@ function OverviewTab({ agents, sortedAgents, activities, runningTasks, farmMetri
 }
 
 // ── AGENTS TAB ─────────────────────────────────────────────────────────────
-function AgentsTab({ agents, agentScores, workloads }: { agents: OfficeAgent[]; agentScores: any[]; workloads: any[] }) {
+function AgentsTab({ agents, agentScores, workloads, commandCenter }: { agents: OfficeAgent[]; agentScores: any[]; workloads: any[]; commandCenter: CommandCenterVm }) {
+  const browserAgentIds = new Set(commandCenter.activeBrowserAgents.map(a => a.id));
+  const toolAgentIds = new Set(commandCenter.activeToolAgents.map(a => a.id));
   return (
     <View>
       {agents.length === 0 ? (
         <Text style={s.emptyInline}>No agents connected</Text>
-      ) : agents.map(agent => {
+      ) : (
+        <>
+          <View style={s.sec}>
+            <Text style={s.secTitle}>AGENT COMMAND MATRIX</Text>
+            <View style={s.agentMatrix}>
+              {agents.slice(0, 8).map(agent => {
+                const score = agentScores.find((sc: any) => sc.agentId === agent.id);
+                const wl = workloads.find((w: any) => w.agentId === agent.id);
+                const statusColor = STATUS_COLORS[agent.status] || C.textTert;
+                return (
+                  <View key={agent.id} style={s.matrixRow}>
+                    <View style={[s.matrixStatus, { backgroundColor: statusColor }]} />
+                    <Text style={s.matrixName} numberOfLines={1}>{agent.name}</Text>
+                    <Text style={s.matrixCellText} numberOfLines={1}>{agent.currentToolName || agent.model || 'ready'}</Text>
+                    <Text style={[s.matrixBadge, { color: toolAgentIds.has(agent.id) ? C.live : C.textTert }]}>
+                      {toolAgentIds.has(agent.id) ? 'WORK' : 'IDLE'}
+                    </Text>
+                    <Text style={[s.matrixBadge, { color: browserAgentIds.has(agent.id) ? C.accent : C.textTert }]}>
+                      {browserAgentIds.has(agent.id) ? 'WEB' : 'SAFE'}
+                    </Text>
+                    <Text style={[s.matrixBadge, { color: score?.grade === 'S' || score?.grade === 'A' ? C.active : score?.grade === 'B' ? C.idle : C.textTert }]}>
+                      {score?.grade || '—'}
+                    </Text>
+                    <Text style={[s.matrixBadge, { color: wl?.currentLoad > 85 ? C.error : wl?.currentLoad > 50 ? C.idle : C.active }]}>
+                      {wl ? `${wl.currentLoad}%` : '0%'}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+
+          <View style={s.sec}>
+            <Text style={s.secTitle}>AGENT DETAIL CARDS</Text>
+            {agents.map(agent => {
         const score = agentScores.find((sc: any) => sc.agentId === agent.id);
         const wl = workloads.find((w: any) => w.agentId === agent.id);
         return (
@@ -779,6 +1451,17 @@ function AgentsTab({ agents, agentScores, workloads }: { agents: OfficeAgent[]; 
               <Text style={s.agentCardMeta}>{agent.role}</Text>
               <Text style={s.agentCardMeta}>{agent.model}</Text>
               {agent.connectionName ? <Text style={s.agentCardMeta}>via {agent.connectionName}</Text> : null}
+            </View>
+            <View style={s.accessRow}>
+              <Text style={[s.accessChip, { color: toolAgentIds.has(agent.id) ? C.live : C.textTert, borderColor: toolAgentIds.has(agent.id) ? C.live + '35' : C.border }]}>
+                {toolAgentIds.has(agent.id) ? 'TOOL ACTIVE' : 'TOOLS READY'}
+              </Text>
+              <Text style={[s.accessChip, { color: browserAgentIds.has(agent.id) ? C.accent : C.textTert, borderColor: browserAgentIds.has(agent.id) ? C.accent + '35' : C.border }]}>
+                {browserAgentIds.has(agent.id) ? 'BROWSER WATCH' : 'NO BROWSER'}
+              </Text>
+              <Text style={[s.accessChip, { color: agent.providerType === 'claude-code' || agent.providerType === 'openswan' ? C.amber : C.textTert, borderColor: C.border }]}>
+                {agent.providerType === 'claude-code' || agent.providerType === 'openswan' ? 'LOCAL BRIDGE' : 'API'}
+              </Text>
             </View>
             {score && (
               <View style={s.scoreBreakdown}>
@@ -803,7 +1486,10 @@ function AgentsTab({ agents, agentScores, workloads }: { agents: OfficeAgent[]; 
             )}
           </View>
         );
-      })}
+            })}
+          </View>
+        </>
+      )}
       <View style={{ height: 12 }} />
     </View>
   );
@@ -823,9 +1509,10 @@ function ScoreBar({ label, value }: { label: string; value: number }) {
 }
 
 // ── ACTIVITY TAB ───────────────────────────────────────────────────────────
-function ActivityTab({ agents, activities, statusHistory, runningTasks }: {
+function ActivityTab({ agents, activities, statusHistory, runningTasks, commandCenter }: {
   agents: OfficeAgent[]; activities: AgentActivity[];
   statusHistory: Array<OfficeAgent[]>; runningTasks: AgentActivity[];
+  commandCenter: CommandCenterVm;
 }) {
   const agentNames = useMemo(() => {
     const names = new Set(activities.map(a => a.agent_name));
@@ -834,6 +1521,7 @@ function ActivityTab({ agents, activities, statusHistory, runningTasks }: {
 
   const [selected, setSelected] = useState('All');
   const filtered = selected === 'All' ? activities : activities.filter(a => a.agent_name === selected);
+  const recentRunSteps = filtered.slice(0, 8);
 
   return (
     <View>
@@ -848,6 +1536,39 @@ function ActivityTab({ agents, activities, statusHistory, runningTasks }: {
           </Pressable>
         ))}
       </ScrollView>
+
+      <View style={s.sec}>
+        <Text style={s.secTitle}>RUN INSPECTOR</Text>
+        <View style={s.inspectorGrid}>
+          <CommandKpi label="RUNNING" value={String(runningTasks.length)} tone={runningTasks.length > 0 ? 'live' : 'muted'} />
+          <CommandKpi label="BROWSER" value={String(commandCenter.activeBrowserAgents.length)} tone={commandCenter.activeBrowserAgents.length > 0 ? 'live' : 'muted'} />
+          <CommandKpi label="TOOLS" value={String(commandCenter.activeToolAgents.length)} tone={commandCenter.activeToolAgents.length > 0 ? 'info' : 'muted'} />
+          <CommandKpi label="BLOCKS" value={String(commandCenter.issues.length)} tone={commandCenter.issues.length > 0 ? 'warn' : 'good'} />
+        </View>
+        <View style={s.timeline}>
+          {recentRunSteps.length === 0 ? (
+            <Text style={s.emptyInline}>No run evidence yet</Text>
+          ) : recentRunSteps.map((step, index) => {
+            const ti = TYPE_ICONS[step.activity_type] ?? { icon: '·', color: C.textSec };
+            return (
+              <View key={step.id} style={s.timelineRow}>
+                <View style={s.timelineRail}>
+                  <View style={[s.timelineDot, { backgroundColor: ti.color }]} />
+                  {index < recentRunSteps.length - 1 ? <View style={s.timelineLine} /> : null}
+                </View>
+                <View style={s.timelineCard}>
+                  <View style={s.timelineCardHead}>
+                    <Text style={[s.timelineType, { color: ti.color }]}>{step.activity_type.replace('_', ' ').toUpperCase()}</Text>
+                    <Text style={s.timelineTime}>{timeAgo(step.created_at)}</Text>
+                  </View>
+                  <Text style={s.timelineTitle} numberOfLines={2}>{step.title}</Text>
+                  <Text style={s.timelineMeta} numberOfLines={1}>{step.agent_name} · {step.source}{step.source_detail ? ` · ${step.source_detail}` : ''}</Text>
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      </View>
 
       {runningTasks.length > 0 && (
         <View style={s.liveBanner}>
@@ -900,7 +1621,17 @@ function ActivityTab({ agents, activities, statusHistory, runningTasks }: {
 }
 
 // ── OPS TAB ────────────────────────────────────────────────────────────────
-function OpsTab({ cronJobs, activities, costOpts }: { cronJobs: CronJob[]; activities: AgentActivity[]; costOpts: any[] }) {
+function OpsTab({ cronJobs, activities, costOpts, commandCenter, budgetAlerts, periodCosts, readinessLoading, readinessError, onRefreshReadiness }: {
+  cronJobs: CronJob[];
+  activities: AgentActivity[];
+  costOpts: any[];
+  commandCenter: CommandCenterVm;
+  budgetAlerts: BudgetAlert[];
+  periodCosts?: { today: number; week: number; month: number };
+  readinessLoading: boolean;
+  readinessError: string | null;
+  onRefreshReadiness: () => void;
+}) {
   const completed = activities.filter(a => a.activity_type === 'task_completed').length;
   const failed = activities.filter(a => a.activity_type === 'task_failed').length;
   const toolCalls = activities.filter(a => a.activity_type === 'tool_call').length;
@@ -931,6 +1662,32 @@ function OpsTab({ cronJobs, activities, costOpts }: { cronJobs: CronJob[]; activ
   return (
     <View>
       <View style={s.sec}>
+        <Text style={s.secTitle}>CONTROL TOWER</Text>
+        <View style={s.controlTower}>
+          <View style={s.controlTowerHead}>
+            <View>
+              <Text style={s.controlTowerTitle}>{commandCenter.stateLabel}</Text>
+              <Text style={s.controlTowerSub}>Operational posture for agents, bridges, approvals, and spend.</Text>
+            </View>
+            <Text style={[s.controlTowerScore, { color: toneColor(commandCenter.stateTone) }]}>{commandCenter.readyScore}</Text>
+          </View>
+          <IssueStack issues={commandCenter.issues} />
+          <ActionCueList cues={commandCenter.actionCues} />
+        </View>
+      </View>
+
+      <View style={s.sec}>
+        <AutomationReadinessPanel
+          snapshot={commandCenter.readiness}
+          loading={readinessLoading}
+          error={readinessError}
+          onRefresh={onRefreshReadiness}
+        />
+      </View>
+
+      <AutomationPlaybooksPanel snapshot={commandCenter.readiness} />
+
+      <View style={s.sec}>
         <Text style={s.secTitle}>OPS METRICS</Text>
         <View style={s.metricGrid}>
           <MetricCell label="COMPLETED" value={String(completed)} color={C.active} />
@@ -940,6 +1697,25 @@ function OpsTab({ cronJobs, activities, costOpts }: { cronJobs: CronJob[]; activ
           <MetricCell label="UPTIME" value={uptimeStr} color={C.amber} />
           <MetricCell label="LOG SIZE" value={String(activities.length)} color={C.textSec} />
         </View>
+      </View>
+
+      <View style={s.sec}>
+        <Text style={s.secTitle}>SPEND LEDGER</Text>
+        <View style={s.ledgerRow}>
+          <MetricCell label="TODAY" value={`$${(periodCosts?.today ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'daily' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.active} />
+          <MetricCell label="WEEK" value={`$${(periodCosts?.week ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'weekly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.amber} />
+          <MetricCell label="MONTH" value={`$${(periodCosts?.month ?? 0).toFixed(2)}`} color={budgetAlerts.some(a => a.period === 'monthly' && (a.level === 'danger' || a.level === 'critical')) ? C.error : C.accent} />
+        </View>
+        {budgetAlerts.length > 0 ? (
+          budgetAlerts.slice(0, 3).map(alert => (
+            <View key={`${alert.period}-${alert.level}`} style={[s.budgetAlertRow, { borderLeftColor: alert.level === 'critical' || alert.level === 'danger' ? C.error : C.amber }]}>
+              <Text style={s.budgetAlertTitle}>{alert.period.toUpperCase()} · {Math.round(alert.percentage)}%</Text>
+              <Text style={s.budgetAlertDetail}>{alert.message}</Text>
+            </View>
+          ))
+        ) : (
+          <Text style={s.emptyInline}>No budget alerts active</Text>
+        )}
       </View>
 
       {busiestAgent && (
@@ -1293,7 +2069,89 @@ const s = StyleSheet.create({
 
   // ── Sections ──
   sec: { marginBottom: 6 },
+  secTight: { marginTop: 7 },
   secTitle: { fontSize: 5, fontWeight: '800', fontFamily: 'monospace', color: C.textTert, letterSpacing: 1, marginBottom: 3, opacity: 0.7 },
+  splitSec: { flexDirection: 'row', gap: 6, marginBottom: 6 },
+  splitCol: { flex: 1, minWidth: 0 },
+
+  // ── Command Center ──
+  commandPanel: {
+    backgroundColor: '#050505',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: C.accent + '30',
+    padding: 8,
+    marginBottom: 7,
+  },
+  commandTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  commandTitleBlock: { flex: 1 },
+  commandEyebrow: { fontSize: 5, fontWeight: '900', fontFamily: 'monospace', color: C.accent, letterSpacing: 1.2 },
+  commandHeadline: { fontSize: 10, fontWeight: '900', fontFamily: 'monospace', color: C.text, marginTop: 1 },
+  readyBadge: { width: 58, borderRadius: 8, borderWidth: 1, paddingVertical: 4, alignItems: 'center' },
+  readyScore: { fontSize: 17, fontWeight: '900', fontFamily: 'monospace', lineHeight: 18 },
+  readyLabel: { fontSize: 5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.7, marginTop: 1 },
+  readyTrack: { height: 4, borderRadius: 2, backgroundColor: C.border, overflow: 'hidden', marginTop: 7, marginBottom: 6 },
+  readyFill: { height: '100%' as any, borderRadius: 2 },
+  commandKpiRow: { flexDirection: 'row', gap: 4 },
+  commandKpi: { flex: 1, alignItems: 'center', borderRadius: 5, borderWidth: 1, paddingVertical: 4 },
+  commandKpiVal: { fontSize: 9, fontWeight: '900', fontFamily: 'monospace' },
+  commandKpiLabel: { fontSize: 4.5, fontWeight: '800', fontFamily: 'monospace', color: C.textTert, letterSpacing: 0.5, marginTop: 1 },
+  missionGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
+  missionCard: { width: '32%' as any, minHeight: 66, borderRadius: 7, borderWidth: 1, padding: 6 },
+  missionCardHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 4, marginBottom: 3 },
+  missionCardTitle: { fontSize: 5.5, fontWeight: '900', fontFamily: 'monospace', color: C.textTert, letterSpacing: 0.6, textTransform: 'uppercase' },
+  missionCardValue: { fontSize: 13, fontWeight: '900', fontFamily: 'monospace' },
+  missionCardDetail: { fontSize: 6.3, fontFamily: 'monospace', color: C.text, opacity: 0.9, minHeight: 22 },
+  missionCardFoot: { fontSize: 5.4, fontWeight: '800', fontFamily: 'monospace', marginTop: 'auto' as any, opacity: 0.9 },
+  clearState: { backgroundColor: C.active + '08', borderRadius: 6, borderWidth: 1, borderColor: C.active + '20', padding: 6 },
+  clearStateTitle: { fontSize: 6, fontWeight: '900', fontFamily: 'monospace', color: C.active, letterSpacing: 0.7 },
+  clearStateText: { fontSize: 6, fontFamily: 'monospace', color: C.textSec, marginTop: 2 },
+  issueRow: { flexDirection: 'row', gap: 5, backgroundColor: C.surface, borderRadius: 6, borderLeftWidth: 2, padding: 6, marginBottom: 4 },
+  issueDot: { width: 5, height: 5, borderRadius: 2.5, marginTop: 2 },
+  issueCopy: { flex: 1 },
+  issueTitle: { fontSize: 6.5, fontWeight: '900', fontFamily: 'monospace', color: C.text },
+  issueDetail: { fontSize: 6, fontFamily: 'monospace', color: C.textSec, marginTop: 1 },
+  cueGrid: { gap: 4 },
+  cueCard: { backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, padding: 6 },
+  cueLabel: { fontSize: 6.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.3 },
+  cueDetail: { fontSize: 6, fontFamily: 'monospace', color: C.textSec, marginTop: 2 },
+  readinessPanel: { backgroundColor: '#050505', borderRadius: 8, borderWidth: 1, padding: 8 },
+  readinessHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  readinessTitleBlock: { flex: 1 },
+  readinessEyebrow: { fontSize: 5, fontWeight: '900', fontFamily: 'monospace', color: C.textTert, letterSpacing: 1.2 },
+  readinessTitle: { fontSize: 9, fontWeight: '900', fontFamily: 'monospace', color: C.text, marginTop: 1 },
+  readinessSummary: { fontSize: 6.2, fontFamily: 'monospace', color: C.textSec, marginTop: 2 },
+  readinessScoreBox: { width: 58, borderRadius: 8, borderWidth: 1, alignItems: 'center', paddingVertical: 5 },
+  readinessScore: { fontSize: 17, fontWeight: '900', fontFamily: 'monospace', lineHeight: 18 },
+  readinessGrade: { fontSize: 5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.5, marginTop: 1 },
+  readinessStatsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 8 },
+  readinessStat: { width: '19%' as any, minWidth: 45, borderRadius: 6, borderWidth: 1, alignItems: 'center', paddingVertical: 4 },
+  readinessStatVal: { fontSize: 8, fontWeight: '900', fontFamily: 'monospace' },
+  readinessStatLabel: { fontSize: 4.3, fontWeight: '800', fontFamily: 'monospace', color: C.textTert, letterSpacing: 0.4, marginTop: 1 },
+  readinessEmpty: { backgroundColor: C.surface, borderRadius: 6, padding: 7, marginTop: 7 },
+  readinessEmptyText: { fontSize: 6.5, fontFamily: 'monospace', color: C.textSec, textAlign: 'center' },
+  refreshAuditBtn: { alignItems: 'center', justifyContent: 'center', borderRadius: 6, borderWidth: 1, borderColor: C.border, paddingVertical: 5, marginTop: 7 },
+  refreshAuditText: { fontSize: 6, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.7 },
+  capabilityGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
+  capabilityCard: { width: '49%' as any, backgroundColor: C.surface, borderRadius: 6, borderWidth: 1, padding: 6 },
+  capabilityHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 4 },
+  capabilityLabel: { flex: 1, fontSize: 6.2, fontWeight: '900', fontFamily: 'monospace', color: C.text },
+  capabilityStatus: { fontSize: 5, fontWeight: '900', fontFamily: 'monospace' },
+  capabilityDetail: { fontSize: 5.8, fontFamily: 'monospace', color: C.textSec, marginTop: 3 },
+  capabilitySources: { fontSize: 5.2, fontFamily: 'monospace', color: C.textTert, marginTop: 3 },
+  recommendationRow: { backgroundColor: C.surface, borderRadius: 6, borderLeftWidth: 2, padding: 6, marginBottom: 4 },
+  recommendationTop: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 2 },
+  recommendationPriority: { fontSize: 5.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.5 },
+  recommendationArea: { fontSize: 5, fontWeight: '800', fontFamily: 'monospace', color: C.textTert },
+  recommendationAction: { marginLeft: 'auto' as any, fontSize: 5, fontWeight: '800', fontFamily: 'monospace', color: C.accent },
+  recommendationTitle: { fontSize: 6.8, fontWeight: '900', fontFamily: 'monospace', color: C.text },
+  recommendationDetail: { fontSize: 6, fontFamily: 'monospace', color: C.textSec, marginTop: 2 },
+  playbookGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
+  playbookCard: { width: '49%' as any, minHeight: 70, borderRadius: 7, borderWidth: 1, padding: 7 },
+  playbookHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 4, marginBottom: 4 },
+  playbookTitle: { flex: 1, fontSize: 6.8, fontWeight: '900', fontFamily: 'monospace', color: C.text },
+  playbookStatus: { fontSize: 5.2, fontWeight: '900', fontFamily: 'monospace' },
+  playbookDetail: { fontSize: 6, fontFamily: 'monospace', color: C.textSec, lineHeight: 9 },
 
   // ── Alerts ──
   alertCard: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: C.surface, borderRadius: 4, padding: 4, marginBottom: 3, borderLeftWidth: 2 },
@@ -1371,6 +2229,12 @@ const s = StyleSheet.create({
   xpExpNext: { fontSize: 6, fontFamily: 'monospace', color: C.textTert, marginTop: 1 },
 
   // ── Agent Cards ──
+  agentMatrix: { backgroundColor: C.surface, borderRadius: 8, borderWidth: 1, borderColor: C.border, overflow: 'hidden' },
+  matrixRow: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 6, paddingVertical: 5, borderBottomWidth: 1, borderBottomColor: '#ffffff08' },
+  matrixStatus: { width: 5, height: 5, borderRadius: 2.5 },
+  matrixName: { width: 56, fontSize: 6.5, fontWeight: '900', fontFamily: 'monospace', color: C.text },
+  matrixCellText: { flex: 1, fontSize: 6, fontFamily: 'monospace', color: C.textSec },
+  matrixBadge: { width: 28, fontSize: 5.5, fontWeight: '900', fontFamily: 'monospace', textAlign: 'right' },
   agentCard: { backgroundColor: C.surface, borderRadius: 8, padding: 8, marginBottom: 6, borderLeftWidth: 2, borderLeftColor: C.border },
   agentCardHeader: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4 },
   agentCardDot: { width: 6, height: 6, borderRadius: 3 },
@@ -1379,6 +2243,8 @@ const s = StyleSheet.create({
   agentCardGrade: { fontSize: 10, fontWeight: '900', fontFamily: 'monospace' },
   agentCardInfo: { flexDirection: 'row', gap: 6, marginBottom: 5 },
   agentCardMeta: { fontSize: 6, fontFamily: 'monospace', color: C.textTert, opacity: 0.8 },
+  accessRow: { flexDirection: 'row', gap: 4, marginBottom: 5, flexWrap: 'wrap' },
+  accessChip: { fontSize: 5.4, fontWeight: '900', fontFamily: 'monospace', borderWidth: 1, borderRadius: 5, paddingHorizontal: 5, paddingVertical: 1, letterSpacing: 0.3 },
   scoreBreakdown: { flexDirection: 'row', gap: 5, marginBottom: 5 },
   scoreBarWrap: { flex: 1 },
   scoreBarLabel: { fontSize: 5, fontWeight: '800', fontFamily: 'monospace', color: C.textTert, marginBottom: 1, letterSpacing: 0.3, opacity: 0.7 },
@@ -1407,6 +2273,18 @@ const s = StyleSheet.create({
   },
   liveBannerText: { fontSize: 7, fontWeight: '700', fontFamily: 'monospace', color: C.text, flex: 1, opacity: 0.9 },
   liveBannerTime: { fontSize: 6, fontFamily: 'monospace', color: C.live },
+  inspectorGrid: { flexDirection: 'row', gap: 4, marginBottom: 6 },
+  timeline: { backgroundColor: C.surface, borderRadius: 8, borderWidth: 1, borderColor: C.border, padding: 6 },
+  timelineRow: { flexDirection: 'row', gap: 6 },
+  timelineRail: { width: 8, alignItems: 'center' },
+  timelineDot: { width: 7, height: 7, borderRadius: 3.5 },
+  timelineLine: { width: 1, flex: 1, minHeight: 28, backgroundColor: C.border },
+  timelineCard: { flex: 1, paddingBottom: 7 },
+  timelineCardHead: { flexDirection: 'row', justifyContent: 'space-between', gap: 6 },
+  timelineType: { fontSize: 5.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.5 },
+  timelineTime: { fontSize: 5.5, fontFamily: 'monospace', color: C.textTert },
+  timelineTitle: { fontSize: 7, fontWeight: '700', fontFamily: 'monospace', color: C.text, marginTop: 2 },
+  timelineMeta: { fontSize: 5.8, fontFamily: 'monospace', color: C.textTert, marginTop: 1 },
 
   logRow: { flexDirection: 'row', gap: 4, marginBottom: 5, paddingBottom: 5, borderBottomWidth: 0 },
   logSrc: { fontSize: 7, width: 10, marginTop: 1 },
@@ -1427,6 +2305,15 @@ const s = StyleSheet.create({
   snapStatus: { fontSize: 6, fontWeight: '600', fontFamily: 'monospace', color: C.textSec, opacity: 0.8 },
 
   // ── Ops ──
+  controlTower: { backgroundColor: '#050505', borderRadius: 8, borderWidth: 1, borderColor: C.borderActive, padding: 7 },
+  controlTowerHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 },
+  controlTowerTitle: { fontSize: 9, fontWeight: '900', fontFamily: 'monospace', color: C.text, letterSpacing: 0.7 },
+  controlTowerSub: { fontSize: 6, fontFamily: 'monospace', color: C.textTert, marginTop: 1 },
+  controlTowerScore: { fontSize: 18, fontWeight: '900', fontFamily: 'monospace' },
+  ledgerRow: { flexDirection: 'row', gap: 2 },
+  budgetAlertRow: { backgroundColor: C.surface, borderRadius: 6, borderLeftWidth: 2, padding: 6, marginTop: 4 },
+  budgetAlertTitle: { fontSize: 6.5, fontWeight: '900', fontFamily: 'monospace', color: C.text },
+  budgetAlertDetail: { fontSize: 6, fontFamily: 'monospace', color: C.textSec, marginTop: 2 },
   infoRow: { flexDirection: 'row', alignItems: 'center', gap: 5, flexWrap: 'wrap' },
   infoLabel: { fontSize: 7, fontWeight: '800', fontFamily: 'monospace', color: C.textSec },
   infoVal: { fontSize: 8, fontWeight: '700', fontFamily: 'monospace', color: C.text },

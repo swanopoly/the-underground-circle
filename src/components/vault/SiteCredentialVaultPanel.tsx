@@ -1,6 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
+  Easing,
   Platform,
   Pressable,
   ScrollView,
@@ -29,6 +31,14 @@ import {
   type PlatformConnectionResult,
   updateSiteCredentialVaultControls,
 } from '../../lib/siteAutomation';
+import {
+  analyzeVaultEntrySecurity,
+  buildVaultSecurityReport,
+  getVaultAccessGrants,
+  hardenVaultCredential,
+  isVaultAccessGrantExpired,
+  pruneExpiredVaultAccessGrants,
+} from '../../lib/vaultAgentAccess';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../hooks/useAuth';
 
@@ -38,7 +48,7 @@ interface Props {
   fullHeight?: boolean;
 }
 
-type RiskFilter = 'all' | 'ready' | 'needs_test' | 'rotation_due' | 'inactive';
+type RiskFilter = 'all' | 'ready' | 'needs_test' | 'rotation_due' | 'inactive' | 'security_risk';
 
 interface PlatformPreset {
   key: string;
@@ -127,7 +137,26 @@ const ROTATION_OPTIONS: Array<{ label: string; days: number | null }> = [
   { label: '180d', days: 180 },
 ];
 
-const PASSWORD_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*_-+=?';
+const PASSWORD_CHAR_GROUPS = [
+  'ABCDEFGHJKLMNPQRSTUVWXYZ',
+  'abcdefghijkmnopqrstuvwxyz',
+  '23456789',
+  '!@#$%^&*_-+=?',
+];
+const PASSWORD_CHARS = PASSWORD_CHAR_GROUPS.join('');
+
+const VAULT_SPARKS = [
+  { x: -278, y: -128, size: 8, delay: 0.2 },
+  { x: 268, y: -102, size: 5, delay: 0.24 },
+  { x: -214, y: 128, size: 6, delay: 0.3 },
+  { x: 246, y: 118, size: 8, delay: 0.34 },
+  { x: -82, y: -164, size: 5, delay: 0.38 },
+  { x: 104, y: 160, size: 6, delay: 0.42 },
+  { x: -338, y: -18, size: 7, delay: 0.46 },
+  { x: 342, y: 8, size: 5, delay: 0.5 },
+  { x: -22, y: 178, size: 4, delay: 0.54 },
+  { x: 14, y: -186, size: 4, delay: 0.58 },
+];
 
 function webCursor(cursor: string = 'pointer') {
   return Platform.OS === 'web' ? ({ cursor } as any) : null;
@@ -226,14 +255,41 @@ async function copyText(value: string): Promise<boolean> {
   return false;
 }
 
-function generateVaultPassword(length: number = 28): string {
+function secureRandomIndex(maxExclusive: number): number {
   const cryptoObj = (globalThis as any).crypto;
   if (!cryptoObj?.getRandomValues) {
     throw new Error('Secure random generator unavailable in this browser.');
   }
-  const bytes = new Uint32Array(length);
-  cryptoObj.getRandomValues(bytes);
-  return Array.from(bytes, (value) => PASSWORD_CHARS[value % PASSWORD_CHARS.length]).join('');
+  const bucket = new Uint32Array(1);
+  const limit = Math.floor(0x100000000 / maxExclusive) * maxExclusive;
+  do {
+    cryptoObj.getRandomValues(bucket);
+  } while (bucket[0] >= limit);
+  return bucket[0] % maxExclusive;
+}
+
+function securePick(chars: string): string {
+  return chars[secureRandomIndex(chars.length)];
+}
+
+function secureShuffle(chars: string[]): string[] {
+  const next = chars.slice();
+  for (let i = next.length - 1; i > 0; i--) {
+    const j = secureRandomIndex(i + 1);
+    const tmp = next[i];
+    next[i] = next[j];
+    next[j] = tmp;
+  }
+  return next;
+}
+
+function generateVaultPassword(length: number = 32): string {
+  const safeLength = Math.max(length, PASSWORD_CHAR_GROUPS.length + 8);
+  const chars = PASSWORD_CHAR_GROUPS.map(securePick);
+  while (chars.length < safeLength) {
+    chars.push(securePick(PASSWORD_CHARS));
+  }
+  return secureShuffle(chars).join('');
 }
 
 function scoreSecretStrength(value: string): { score: number; label: string; color: string } {
@@ -390,6 +446,15 @@ function automationReadiness(entry: SiteCredentialVaultEntry): { score: number; 
 }
 
 export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHeight = false }: Props) {
+  const { user } = useAuth();
+  const currentUserId = user?.id || null;
+  const [vaultUnlocked, setVaultUnlocked] = useState(false);
+  const [vaultOpening, setVaultOpening] = useState(false);
+  const [unlockPassword, setUnlockPassword] = useState('');
+  const [unlockError, setUnlockError] = useState('');
+  const [unlocking, setUnlocking] = useState(false);
+  const doorProgress = useRef(new Animated.Value(0)).current;
+  const lockShake = useRef(new Animated.Value(0)).current;
   const [entries, setEntries] = useState<SiteCredentialVaultEntry[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>('new');
   const [loading, setLoading] = useState(false);
@@ -404,6 +469,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   const [query, setQuery] = useState('');
   const [rotationOnly, setRotationOnly] = useState(false);
   const [riskFilter, setRiskFilter] = useState<RiskFilter>('all');
+  const [securityOpen, setSecurityOpen] = useState(true);
 
   const [platform, setPlatform] = useState('wordpress');
   const [label, setLabel] = useState('default');
@@ -473,10 +539,9 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   }, [entries]);
 
-  const { user } = useAuth();
-  const currentUserId = user?.id || null;
   const [members, setMembers] = useState<Array<{ user_id: string; display_name: string; username: string }>>([]);
   const loadMembers = useCallback(async () => {
+    if (!vaultUnlocked) return;
     const { data } = await supabase
       .from('circle_members')
       .select('user_id, profiles!user_id(display_name, username)')
@@ -490,10 +555,10 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
         })),
       );
     }
-  }, [circleId]);
+  }, [circleId, vaultUnlocked]);
   useEffect(() => {
-    loadMembers();
-  }, [loadMembers]);
+    if (vaultUnlocked) loadMembers();
+  }, [loadMembers, vaultUnlocked]);
 
   const allowedMemberIds = (entry: SiteCredentialVaultEntry): string[] => {
     const meta = (entry.metadata || {}) as Record<string, unknown>;
@@ -512,19 +577,34 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     return list.includes(currentUserId);
   };
 
+  const userVisibleEntries = useMemo(
+    () => entries.filter((entry) => isVisibleToCurrentUser(entry)),
+    [entries, currentUserId],
+  );
+
+  const securityReport = useMemo(
+    () => buildVaultSecurityReport(userVisibleEntries),
+    [userVisibleEntries],
+  );
+
+  const securityIssuesByCredential = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof analyzeVaultEntrySecurity>>();
+    for (const entry of userVisibleEntries) {
+      map.set(entry.id, analyzeVaultEntrySecurity(entry));
+    }
+    return map;
+  }, [userVisibleEntries]);
+
   const visibleEntries = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return entries.filter((entry) => {
-      // Per-member sharing: hide credentials I'm not on the share list for.
-      // (RLS enforces this server-side once the migration runs; this is the
-      // client-side mirror so the panel stays consistent.)
-      if (!isVisibleToCurrentUser(entry)) return false;
+    return userVisibleEntries.filter((entry) => {
       const readiness = automationReadiness(entry);
       if (rotationOnly && !isRotationDue(entry)) return false;
       if (riskFilter === 'ready' && readiness.label !== 'Ready') return false;
       if (riskFilter === 'needs_test' && entryMetadataString(entry, 'lastTestedAt') && entryMetadataBoolean(entry, 'lastTestSuccess') !== false) return false;
       if (riskFilter === 'rotation_due' && !isRotationDue(entry)) return false;
       if (riskFilter === 'inactive' && entry.isActive) return false;
+      if (riskFilter === 'security_risk' && !(securityIssuesByCredential.get(entry.id) || []).some((issue) => issue.severity === 'critical' || issue.severity === 'high')) return false;
       if (tagFilter && !entryTags(entry).includes(tagFilter)) return false;
       if (!q) return true;
       return [
@@ -538,9 +618,10 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
         entryTags(entry).join(' '),
       ].some((value) => value.toLowerCase().includes(q));
     });
-  }, [entries, query, riskFilter, rotationOnly, tagFilter, currentUserId]);
+  }, [query, riskFilter, rotationOnly, securityIssuesByCredential, tagFilter, userVisibleEntries]);
 
   const loadVault = useCallback(async () => {
+    if (!vaultUnlocked) return;
     setLoading(true);
     const result = await listSiteCredentialVault(circleId);
     if (result.error) {
@@ -552,9 +633,10 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
       setStatus('');
     }
     setLoading(false);
-  }, [circleId]);
+  }, [circleId, vaultUnlocked]);
 
   const loadAudit = useCallback(async (credentialId: string) => {
+    if (!vaultUnlocked) return;
     setAuditLoading((current) => ({ ...current, [credentialId]: true }));
     const result = await listSiteCredentialVaultAudit(circleId, credentialId, 20);
     if (!result.error) {
@@ -573,7 +655,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
       }));
     }
     setAuditLoading((current) => ({ ...current, [credentialId]: false }));
-  }, [circleId]);
+  }, [circleId, vaultUnlocked]);
 
   const [globalAuditOpen, setGlobalAuditOpen] = useState(false);
   const [globalAuditLoading, setGlobalAuditLoading] = useState(false);
@@ -606,6 +688,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   };
 
   const loadGlobalAudit = useCallback(async () => {
+    if (!vaultUnlocked) return;
     setGlobalAuditLoading(true);
     setGlobalAuditError('');
     const result = await listSiteCredentialVaultAudit(circleId, null, 50);
@@ -620,20 +703,21 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
       setGlobalAuditEntries(result.entries);
     }
     setGlobalAuditLoading(false);
-  }, [circleId]);
+  }, [circleId, vaultUnlocked]);
 
   useEffect(() => {
-    if (globalAuditOpen) loadGlobalAudit();
-  }, [globalAuditOpen, loadGlobalAudit]);
+    if (vaultUnlocked && globalAuditOpen) loadGlobalAudit();
+  }, [globalAuditOpen, loadGlobalAudit, vaultUnlocked]);
 
   useEffect(() => {
-    loadVault();
-  }, [loadVault]);
+    if (vaultUnlocked) loadVault();
+  }, [loadVault, vaultUnlocked]);
 
   useEffect(() => {
+    if (!vaultUnlocked) return;
     if (!expandedId || expandedId === 'new') return;
     loadAudit(expandedId);
-  }, [expandedId, loadAudit]);
+  }, [expandedId, loadAudit, vaultUnlocked]);
 
   useEffect(() => {
     if (activeRevealCount === 0) return;
@@ -1058,19 +1142,17 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     setStatus('Credential removed.');
   };
 
-  const runBulk = async (
+  const runBulkEntries = async (
     label: string,
+    targetEntries: SiteCredentialVaultEntry[],
     operate: (entry: SiteCredentialVaultEntry) => Promise<{ ok: boolean; reason?: string }>,
   ) => {
-    const ids = Array.from(selectedIds);
-    if (ids.length === 0) return;
+    if (targetEntries.length === 0) return;
     setBulkBusy(true);
     setStatus('');
     let successes = 0;
     const failures: string[] = [];
-    for (const id of ids) {
-      const entry = entries.find((item) => item.id === id);
-      if (!entry) continue;
+    for (const entry of targetEntries) {
       try {
         const result = await operate(entry);
         if (result.ok) successes++;
@@ -1087,6 +1169,15 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     } else {
       setStatus(`${label} done. ${successes} succeeded, ${failures.length} failed: ${failures.slice(0, 3).join('; ')}${failures.length > 3 ? '…' : ''}`);
     }
+  };
+
+  const runBulk = async (
+    label: string,
+    operate: (entry: SiteCredentialVaultEntry) => Promise<{ ok: boolean; reason?: string }>,
+  ) => {
+    const ids = Array.from(selectedIds);
+    const targets = ids.map((id) => entries.find((item) => item.id === id)).filter(Boolean) as SiteCredentialVaultEntry[];
+    await runBulkEntries(label, targets, operate);
   };
 
   const handleBulkDisable = () =>
@@ -1109,6 +1200,53 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
       const result = await updateSiteCredentialVaultControls({ credentialId: entry.id, rotationDueAt: yesterday });
       return { ok: !result.error, reason: result.error };
     });
+
+  const handleBulkHarden = () =>
+    runBulk('Harden', async (entry) => {
+      const result = await hardenVaultCredential(circleId, entry, currentUserId);
+      return { ok: result.ok, reason: result.ok ? undefined : result.resultsText };
+    });
+
+  const handleBulkPruneExpiredGrants = () =>
+    runBulk('Remove expired grants', async (entry) => {
+      const result = await pruneExpiredVaultAccessGrants(circleId, entry, currentUserId);
+      return { ok: result.ok, reason: result.ok ? undefined : result.resultsText };
+    });
+
+  const handleHardenHighRisk = async () => {
+    const highRiskIds = new Set(
+      securityReport.issues
+        .filter((issue) => issue.severity === 'critical' || issue.severity === 'high')
+        .map((issue) => issue.credentialId),
+    );
+    const targets = userVisibleEntries.filter((entry) => highRiskIds.has(entry.id));
+    if (targets.length === 0) {
+      setStatus('No high-risk credentials need hardening.');
+      return;
+    }
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      const ok = window.confirm(`Harden ${targets.length} high-risk credential${targets.length === 1 ? '' : 's'}? This turns approval on, caps reveal windows, scopes origins, removes expired grants, and enables high-trust where needed.`);
+      if (!ok) return;
+    }
+    await runBulkEntries('Harden high-risk', targets, async (entry) => {
+      const result = await hardenVaultCredential(circleId, entry, currentUserId);
+      return { ok: result.ok, reason: result.ok ? undefined : result.resultsText };
+    });
+  };
+
+  const handlePruneAllExpiredGrants = async () => {
+    const targets = userVisibleEntries.filter((entry) =>
+      getVaultAccessGrants(entry).some((grant) => isVaultAccessGrantExpired(grant)),
+    );
+    if (targets.length === 0) {
+      setStatus('No expired grants to remove.');
+      return;
+    }
+    await runBulkEntries('Remove expired grants', targets, async (entry) => {
+      const result = await pruneExpiredVaultAccessGrants(circleId, entry, currentUserId);
+      return { ok: result.ok, reason: result.ok ? undefined : result.resultsText };
+    });
+  };
 
   const handleBulkDelete = async () => {
     const count = selectedIds.size;
@@ -1186,6 +1324,98 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     }
   };
 
+  const playUnlockFailure = () => {
+    lockShake.setValue(0);
+    Animated.sequence([
+      Animated.timing(lockShake, { toValue: 10, duration: 42, useNativeDriver: true }),
+      Animated.timing(lockShake, { toValue: -10, duration: 42, useNativeDriver: true }),
+      Animated.timing(lockShake, { toValue: 7, duration: 42, useNativeDriver: true }),
+      Animated.timing(lockShake, { toValue: -7, duration: 42, useNativeDriver: true }),
+      Animated.timing(lockShake, { toValue: 0, duration: 58, useNativeDriver: true }),
+    ]).start();
+  };
+
+  const handleUnlockVault = async () => {
+    const password = unlockPassword;
+    if (!password.trim()) {
+      setUnlockError('Enter your account password to unlock the vault.');
+      playUnlockFailure();
+      return;
+    }
+
+    setUnlocking(true);
+    setUnlockError('');
+    const sessionUserEmail = user?.email;
+    const email = sessionUserEmail || (await supabase.auth.getUser().catch(() => ({ data: null as any })))?.data?.user?.email;
+    if (!email) {
+      setUnlocking(false);
+      setUnlockPassword('');
+      setUnlockError('Could not confirm your signed-in email. Sign in again, then unlock the vault.');
+      playUnlockFailure();
+      return;
+    }
+
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) {
+      setUnlocking(false);
+      setUnlockPassword('');
+      setUnlockError(error.message || 'Password check failed.');
+      playUnlockFailure();
+      return;
+    }
+
+    setUnlocking(false);
+    setUnlockPassword('');
+    setVaultOpening(true);
+    doorProgress.setValue(0);
+    Animated.timing(doorProgress, {
+      toValue: 1,
+      duration: 1250,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start(() => {
+      setVaultUnlocked(true);
+      setVaultOpening(false);
+    });
+  };
+
+  const handleLockVault = () => {
+    setVaultUnlocked(false);
+    setVaultOpening(false);
+    doorProgress.setValue(0);
+    setUnlockPassword('');
+    setUnlockError('');
+    setEntries([]);
+    setMembers([]);
+    setRevealed({});
+    setAuditEntries({});
+    setAuditErrors({});
+    setGlobalAuditEntries([]);
+    setGlobalAuditOpen(false);
+    setSelectedIds(new Set());
+    setExpandedId('new');
+    setStatus('');
+  };
+
+  if (!vaultUnlocked) {
+    return (
+      <VaultLockScreen
+        accentColor={accentColor}
+        circleId={circleId}
+        fullHeight={fullHeight}
+        email={user?.email || ''}
+        password={unlockPassword}
+        error={unlockError}
+        unlocking={unlocking}
+        opening={vaultOpening}
+        doorProgress={doorProgress}
+        shake={lockShake}
+        onPasswordChange={setUnlockPassword}
+        onUnlock={handleUnlockVault}
+      />
+    );
+  }
+
   return (
     <View
       style={[
@@ -1198,7 +1428,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
         <View style={styles.headerText}>
           <View style={styles.kickerRow}>
             <Text style={styles.kicker}>▣ SITE VAULT</Text>
-            <Text style={[styles.lockedPill, { color: accentColor, borderColor: accentColor + '55', backgroundColor: accentColor + '14' }]}>● LOCKED</Text>
+            <Text style={[styles.lockedPill, { color: accentColor, borderColor: accentColor + '55', backgroundColor: accentColor + '14' }]}>● VAULT OPEN</Text>
           </View>
           <Text style={styles.title}>Agent login vault</Text>
           <Text style={styles.subtitle}>
@@ -1227,6 +1457,12 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           >
             {loading ? <ActivityIndicator size="small" color={accentColor} /> : <Text style={[styles.refreshText, { color: accentColor }]}>↻ REFRESH</Text>}
           </Pressable>
+          <Pressable
+            onPress={handleLockVault}
+            style={[styles.refreshBtn, styles.lockNowBtn, { borderColor: '#f59e0b66' }, webCursor()]}
+          >
+            <Text style={[styles.refreshText, { color: '#f59e0b' }]}>LOCK</Text>
+          </Pressable>
           <Text style={styles.vaultSerial}>VAULT-{(circleId || '').replace(/-/g, '').slice(0, 8).toUpperCase() || '00000000'}</Text>
         </View>
       </View>
@@ -1243,6 +1479,134 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           <MetricCard label="Ready" value={String(readinessStats.ready)} color="#22c55e" />
           <MetricCard label="Needs Test" value={String(readinessStats.needsTest)} color="#f59e0b" />
           <MetricCard label="Rotation Due" value={String(readinessStats.rotationDue)} color="#f97316" />
+          <MetricCard
+            label="Security"
+            value={`${securityReport.score}/100`}
+            color={securityReport.grade === 'critical' ? '#ef4444' : securityReport.score >= 90 ? '#22c55e' : securityReport.score >= 75 ? '#f59e0b' : '#fb7185'}
+          />
+          <MetricCard
+            label="High Risk"
+            value={String(securityReport.counts.critical + securityReport.counts.high)}
+            color={securityReport.counts.critical + securityReport.counts.high > 0 ? '#ef4444' : '#22c55e'}
+          />
+        </View>
+
+        <View style={[styles.card, securityOpen && styles.cardExpanded]}>
+          <Pressable
+            onPress={() => setSecurityOpen((value) => !value)}
+            style={({ hovered, pressed }: any) => [
+              styles.cardHeader,
+              webTransition(),
+              securityOpen && accordionExpandedStyle(accentColor),
+              hovered && accordionHoverStyle(accentColor),
+              pressed && accordionPressedStyle(accentColor),
+              webCursor(),
+            ]}
+          >
+            <View style={styles.cardHeaderText}>
+              <Text style={styles.cardTitle}>Security Command Center</Text>
+              <Text style={styles.cardMeta}>
+                {securityReport.score}/100 · {securityReport.counts.critical} critical · {securityReport.counts.high} high · {securityReport.expiredGrantCount} expired grant{securityReport.expiredGrantCount === 1 ? '' : 's'}
+              </Text>
+            </View>
+            <AccordionChevron open={securityOpen} accent={accentColor} />
+          </Pressable>
+          {securityOpen ? (
+            <View style={styles.form}>
+              <View style={styles.securityHero}>
+                <View style={styles.securityScoreRing}>
+                  <Text
+                    style={[
+                      styles.securityScoreValue,
+                      {
+                        color: securityReport.grade === 'critical'
+                          ? '#ef4444'
+                          : securityReport.score >= 90
+                            ? '#22c55e'
+                            : securityReport.score >= 75
+                              ? '#f59e0b'
+                              : '#fb7185',
+                      },
+                    ]}
+                  >
+                    {securityReport.score}
+                  </Text>
+                  <Text style={styles.securityScoreLabel}>score</Text>
+                </View>
+                <View style={styles.securitySummaryBody}>
+                  <Text style={styles.sectionTitle}>
+                    {securityReport.grade === 'excellent'
+                      ? 'Vault posture is strong'
+                      : securityReport.grade === 'good'
+                        ? 'Vault posture is good'
+                        : securityReport.grade === 'critical'
+                          ? 'Critical vault fixes needed'
+                          : 'Vault needs hardening'}
+                  </Text>
+                  <Text style={styles.helperText}>
+                    Tracks approval gaps, scoped origins, high-risk actions, stale grants, rotation debt, failed tests, and breached-secret flags.
+                  </Text>
+                  <View style={styles.securityCountGrid}>
+                    <SecurityCount label="Critical" value={securityReport.counts.critical} color="#ef4444" />
+                    <SecurityCount label="High" value={securityReport.counts.high} color="#fb7185" />
+                    <SecurityCount label="Medium" value={securityReport.counts.medium} color="#f59e0b" />
+                    <SecurityCount label="Low" value={securityReport.counts.low} color="#94a3b8" />
+                  </View>
+                </View>
+              </View>
+
+              {securityReport.issues.length > 0 ? (
+                <View style={styles.securityIssueList}>
+                  {securityReport.issues.slice(0, 8).map((issue) => {
+                    const entry = entries.find((item) => item.id === issue.credentialId);
+                    const severityColor =
+                      issue.severity === 'critical' ? '#ef4444' :
+                      issue.severity === 'high' ? '#fb7185' :
+                      issue.severity === 'medium' ? '#f59e0b' :
+                      '#94a3b8';
+                    return (
+                      <View key={issue.id} style={[styles.securityIssueRow, { borderColor: severityColor + '44' }]}>
+                        <View style={styles.securityIssueTop}>
+                          <Text style={[styles.securitySeverity, { color: severityColor }]}>{issue.severity}</Text>
+                          <Text style={styles.securityIssueTarget}>
+                            {entry ? `${entry.platform}/${entry.label}` : issue.credentialId.slice(0, 8)}
+                          </Text>
+                        </View>
+                        <Text style={styles.securityIssueTitle}>{issue.title}</Text>
+                        <Text style={styles.helperText}>{issue.detail}</Text>
+                        <Text style={[styles.helperText, { color: severityColor }]}>Fix: {issue.fix}</Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              ) : (
+                <Text style={styles.helperText}>No vault security issues detected for credentials visible to you.</Text>
+              )}
+
+              <View style={styles.actionRow}>
+                <Pressable
+                  onPress={() => setRiskFilter('security_risk')}
+                  style={[styles.secondaryBtn, { borderColor: '#ef444466' }, webCursor()]}
+                >
+                  <Text style={[styles.secondaryText, { color: '#fca5a5' }]}>Review high-risk</Text>
+                </Pressable>
+                <Pressable
+                  onPress={handleHardenHighRisk}
+                  disabled={bulkBusy || securityReport.counts.critical + securityReport.counts.high === 0}
+                  style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, (bulkBusy || securityReport.counts.critical + securityReport.counts.high === 0) && styles.disabledBtn, webCursor(bulkBusy ? 'wait' : 'pointer')]}
+                >
+                  <Text style={[styles.secondaryText, { color: accentColor }]}>Harden high-risk</Text>
+                </Pressable>
+                <Pressable
+                  onPress={handlePruneAllExpiredGrants}
+                  disabled={bulkBusy || securityReport.expiredGrantCount === 0}
+                  style={[styles.secondaryBtn, (bulkBusy || securityReport.expiredGrantCount === 0) && styles.disabledBtn, webCursor(bulkBusy ? 'wait' : 'pointer')]}
+                >
+                  <Text style={styles.secondaryText}>Remove expired grants</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
         </View>
 
         <View style={[styles.card, importOpen && styles.cardExpanded]}>
@@ -1628,6 +1992,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                 { key: 'ready', label: `Ready (${readinessStats.ready})` },
                 { key: 'needs_test', label: `Needs test (${readinessStats.needsTest})` },
                 { key: 'rotation_due', label: `Rotation due (${readinessStats.rotationDue})` },
+                { key: 'security_risk', label: `Security risk (${securityReport.counts.critical + securityReport.counts.high})` },
                 { key: 'inactive', label: `Inactive (${readinessStats.inactive})` },
               ].map((filter) => {
                 const active = riskFilter === filter.key;
@@ -1779,6 +2144,12 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
               <Pressable disabled={bulkBusy} onPress={handleBulkMarkRotation} style={[styles.secondaryBtn, webCursor(bulkBusy ? 'wait' : 'pointer')]}>
                 <Text style={styles.secondaryText}>Mark rotation due</Text>
               </Pressable>
+              <Pressable disabled={bulkBusy} onPress={handleBulkHarden} style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor(bulkBusy ? 'wait' : 'pointer')]}>
+                <Text style={[styles.secondaryText, { color: accentColor }]}>Harden</Text>
+              </Pressable>
+              <Pressable disabled={bulkBusy} onPress={handleBulkPruneExpiredGrants} style={[styles.secondaryBtn, webCursor(bulkBusy ? 'wait' : 'pointer')]}>
+                <Text style={styles.secondaryText}>Remove expired grants</Text>
+              </Pressable>
               <Pressable disabled={bulkBusy} onPress={handleBulkDelete} style={[styles.secondaryBtn, { borderColor: '#ef444466' }, webCursor(bulkBusy ? 'wait' : 'pointer')]}>
                 <Text style={[styles.secondaryText, { color: '#fca5a5' }]}>Delete</Text>
               </Pressable>
@@ -1801,6 +2172,10 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
           const readiness = automationReadiness(entry);
           const actions = entryAllowedActions(entry);
           const origins = entryAllowedOrigins(entry);
+          const automationGrants = getVaultAccessGrants(entry);
+          const entrySecurityIssues = securityIssuesByCredential.get(entry.id) || [];
+          const highSecurityIssueCount = entrySecurityIssues.filter((issue) => issue.severity === 'critical' || issue.severity === 'high').length;
+          const expiredGrantCount = automationGrants.filter((grant) => isVaultAccessGrantExpired(grant)).length;
           const isBusy = !!updating[entry.id] || !!testing[entry.id];
           const isSelected = selectedIds.has(entry.id);
           const lastTestedAt = entryMetadataString(entry, 'lastTestedAt');
@@ -1844,6 +2219,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                       ) : null}
                       {rotationDue ? <Text style={styles.rotationBadge}>Rotation due</Text> : null}
                       {!entry.isActive ? <Text style={styles.inactiveBadge}>Inactive</Text> : null}
+                      {highSecurityIssueCount > 0 ? <Text style={styles.securityRiskBadge}>SECURITY ×{highSecurityIssueCount}</Text> : null}
                       {isHighTrust(entry) ? <Text style={styles.highTrustBadge}>HIGH-TRUST</Text> : null}
                       {isRestricted(entry) ? <Text style={styles.restrictedBadge}>RESTRICTED</Text> : null}
                       {entryTags(entry).slice(0, 4).map((tag) => (
@@ -1882,6 +2258,64 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
 
                   <View style={styles.sectionBox}>
                     <Text style={styles.sectionTitle}>Security controls</Text>
+                    {entrySecurityIssues.length > 0 ? (
+                      <View style={styles.entrySecurityList}>
+                        {entrySecurityIssues.slice(0, 5).map((issue) => {
+                          const severityColor =
+                            issue.severity === 'critical' ? '#ef4444' :
+                            issue.severity === 'high' ? '#fb7185' :
+                            issue.severity === 'medium' ? '#f59e0b' :
+                            '#94a3b8';
+                          return (
+                            <View key={issue.id} style={styles.entrySecurityIssue}>
+                              <Text style={[styles.securitySeverity, { color: severityColor }]}>{issue.severity}</Text>
+                              <Text style={styles.helperText}>{issue.title}: {issue.fix}</Text>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    ) : (
+                      <Text style={styles.helperText}>No security issues detected on this credential.</Text>
+                    )}
+                    <View style={styles.actionRow}>
+                      <Pressable
+                        onPress={() => updateEntryControls(entry, {}, 'No changes needed.')}
+                        disabled
+                        style={[styles.secondaryBtn, styles.disabledBtn]}
+                      >
+                        <Text style={styles.secondaryText}>{entrySecurityIssues.length} issue{entrySecurityIssues.length === 1 ? '' : 's'}</Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={async () => {
+                          setUpdating((current) => ({ ...current, [entry.id]: true }));
+                          const result = await hardenVaultCredential(circleId, entry, currentUserId);
+                          if (result.entry) replaceEntry(result.entry);
+                          setStatus(result.resultsText);
+                          await loadAudit(entry.id);
+                          setUpdating((current) => ({ ...current, [entry.id]: false }));
+                        }}
+                        disabled={!!updating[entry.id]}
+                        style={[styles.secondaryBtn, { borderColor: accentColor + '55' }, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                      >
+                        <Text style={[styles.secondaryText, { color: accentColor }]}>Harden now</Text>
+                      </Pressable>
+                      {expiredGrantCount > 0 ? (
+                        <Pressable
+                          onPress={async () => {
+                            setUpdating((current) => ({ ...current, [entry.id]: true }));
+                            const result = await pruneExpiredVaultAccessGrants(circleId, entry, currentUserId);
+                            if (result.entry) replaceEntry(result.entry);
+                            setStatus(result.resultsText);
+                            await loadAudit(entry.id);
+                            setUpdating((current) => ({ ...current, [entry.id]: false }));
+                          }}
+                          disabled={!!updating[entry.id]}
+                          style={[styles.secondaryBtn, webCursor(updating[entry.id] ? 'wait' : 'pointer')]}
+                        >
+                          <Text style={styles.secondaryText}>Remove {expiredGrantCount} expired grant{expiredGrantCount === 1 ? '' : 's'}</Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
                     <Pressable
                       onPress={() => updateEntryControls(entry, {
                         accessPolicy: {
@@ -1988,6 +2422,31 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
                         <Text style={styles.secondaryText}>Open to everyone</Text>
                       </Pressable>
                     ) : null}
+                  </View>
+
+                  <View style={styles.sectionBox}>
+                    <Text style={styles.sectionTitle}>Agent access</Text>
+                    {automationGrants.length === 0 ? (
+                      <Text style={styles.helperText}>
+                        No agent grants yet. Use /vault grant from chat to give OpenSwan, chat, or a named agent scoped login access.
+                      </Text>
+                    ) : (
+                      <>
+                        {automationGrants.slice(0, 8).map((grant) => {
+                          const expired = isVaultAccessGrantExpired(grant);
+                          const expiry = grant.expiresAt ? ` until ${grant.expiresAt.slice(0, 10)}` : '';
+                          return (
+                            <Text key={grant.id} style={styles.helperText}>
+                              {grant.granteeType}:{grant.grantee} - {grant.actions.join(', ')}{expiry}{expired ? ' [expired]' : ''}
+                            </Text>
+                          );
+                        })}
+                        {automationGrants.length > 8 ? (
+                          <Text style={styles.helperText}>+ {automationGrants.length - 8} more grant{automationGrants.length - 8 === 1 ? '' : 's'}</Text>
+                        ) : null}
+                      </>
+                    )}
+                    <Text style={styles.helperText}>Agents receive credential IDs and runbooks only. Secrets stay inside the approved vault/browser tools.</Text>
                   </View>
 
                   <View style={styles.sectionBox}>
@@ -2135,6 +2594,216 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   );
 }
 
+function VaultLockScreen({
+  accentColor,
+  circleId,
+  fullHeight,
+  email,
+  password,
+  error,
+  unlocking,
+  opening,
+  doorProgress,
+  shake,
+  onPasswordChange,
+  onUnlock,
+}: {
+  accentColor: string;
+  circleId: string;
+  fullHeight: boolean;
+  email: string;
+  password: string;
+  error: string;
+  unlocking: boolean;
+  opening: boolean;
+  doorProgress: Animated.Value;
+  shake: Animated.Value;
+  onPasswordChange: (value: string) => void;
+  onUnlock: () => void;
+}) {
+  const leftDoorX = doorProgress.interpolate({ inputRange: [0, 1], outputRange: [0, -260] });
+  const rightDoorX = doorProgress.interpolate({ inputRange: [0, 1], outputRange: [0, 260] });
+  const dialRotate = doorProgress.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '540deg'] });
+  const dialOpacity = doorProgress.interpolate({ inputRange: [0, 0.16, 0.34, 1], outputRange: [1, 0.78, 0.18, 0] });
+  const innerGlowOpacity = doorProgress.interpolate({ inputRange: [0, 0.35, 1], outputRange: [0.08, 0.45, 1] });
+  const escapeBackdropOpacity = doorProgress.interpolate({ inputRange: [0, 0.24, 1], outputRange: [0, 0.1, 1] });
+  const tunnelScale = doorProgress.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1.18] });
+  const tunnelRotate = doorProgress.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '18deg'] });
+  const serial = (circleId || '').replace(/-/g, '').slice(0, 8).toUpperCase() || '00000000';
+
+  return (
+    <View
+      style={[
+        styles.lockRoot,
+        fullHeight ? styles.rootFullHeight : styles.rootPanelHeight,
+      ]}
+      nativeID="section-site-credential-vault-lock"
+    >
+      <Animated.View style={[styles.lockShell, { transform: [{ translateX: shake }] }]}>
+        <View style={styles.lockCopy}>
+          <Text style={styles.lockEyebrow}>UNDERGROUND CIRCLE SECURE VAULT</Text>
+          <Text style={styles.lockTitle}>Credentials are sealed.</Text>
+          <Text style={styles.lockSubtitle}>
+            Re-enter your account password to unlock the dashboard. Vault records, audit logs, and shared credential metadata do not load until this check passes.
+          </Text>
+          <View style={styles.lockAssuranceRow}>
+            <Text style={styles.lockAssurance}>AES-GCM</Text>
+            <Text style={styles.lockAssurance}>RLS</Text>
+            <Text style={styles.lockAssurance}>RE-AUTH</Text>
+            <Text style={styles.lockAssurance}>AUDITED</Text>
+          </View>
+        </View>
+
+        <View style={styles.vaultStage}>
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.escapeBackdrop,
+              {
+                opacity: escapeBackdropOpacity,
+                transform: [{ scale: tunnelScale }, { rotate: tunnelRotate }],
+              },
+            ]}
+          />
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.escapeBeam,
+              styles.escapeBeamLeft,
+              {
+                opacity: escapeBackdropOpacity,
+                transform: [{ rotate: '-24deg' }, { scaleY: tunnelScale }],
+              },
+            ]}
+          />
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.escapeBeam,
+              styles.escapeBeamRight,
+              {
+                opacity: escapeBackdropOpacity,
+                transform: [{ rotate: '24deg' }, { scaleY: tunnelScale }],
+              },
+            ]}
+          />
+          <Animated.View style={[styles.vaultInteriorGlow, { opacity: innerGlowOpacity, backgroundColor: accentColor }]} />
+          {VAULT_SPARKS.map((spark, index) => {
+            const start = spark.delay;
+            const opacity = doorProgress.interpolate({
+              inputRange: [0, start, Math.min(1, start + 0.2), 1],
+              outputRange: [0, 0, 1, 0.18],
+            });
+            const translateX = doorProgress.interpolate({
+              inputRange: [0, start, 1],
+              outputRange: [0, 0, spark.x],
+            });
+            const translateY = doorProgress.interpolate({
+              inputRange: [0, start, 1],
+              outputRange: [0, 0, spark.y],
+            });
+            const scale = doorProgress.interpolate({
+              inputRange: [0, start, 1],
+              outputRange: [0.2, 0.2, 1.4],
+            });
+            return (
+              <Animated.View
+                key={`spark-${index}`}
+                pointerEvents="none"
+                style={[
+                  styles.escapeSpark,
+                  {
+                    width: spark.size,
+                    height: spark.size,
+                    borderRadius: spark.size,
+                    backgroundColor: index % 3 === 0 ? '#facc15' : index % 3 === 1 ? accentColor : '#38bdf8',
+                    opacity,
+                    transform: [{ translateX }, { translateY }, { scale }],
+                  },
+                ]}
+              />
+            );
+          })}
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.vaultDoor,
+              styles.vaultDoorLeft,
+              {
+                borderColor: accentColor + '33',
+                transform: [{ translateX: leftDoorX }],
+              },
+            ]}
+          >
+            <View style={styles.vaultRivetsLeft} />
+            <View style={styles.vaultDoorStripes} />
+          </Animated.View>
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.vaultDoor,
+              styles.vaultDoorRight,
+              {
+                borderColor: accentColor + '33',
+                transform: [{ translateX: rightDoorX }],
+              },
+            ]}
+          >
+            <View style={styles.vaultRivetsRight} />
+            <View style={styles.vaultDoorStripes} />
+          </Animated.View>
+          <View pointerEvents="none" style={[styles.vaultCenterSeam, { backgroundColor: accentColor + '55' }]} />
+          <Animated.View pointerEvents="none" style={[styles.vaultDial, { borderColor: accentColor + '77', opacity: dialOpacity, transform: [{ rotate: dialRotate }] }]}>
+            <View style={[styles.vaultDialCore, { backgroundColor: accentColor }]} />
+            <View style={styles.vaultDialSpoke} />
+            <View style={[styles.vaultDialSpoke, styles.vaultDialSpokeVertical]} />
+          </Animated.View>
+          <View pointerEvents="none" style={styles.vaultSerialPlate}>
+            <Text style={styles.vaultSerialPlateText}>VAULT-{serial}</Text>
+          </View>
+        </View>
+
+        <View style={styles.unlockPanel}>
+          <Text style={styles.unlockPanelTitle}>{opening ? 'Vault doors opening...' : 'Password required'}</Text>
+          <Text style={styles.unlockPanelText}>
+            Signed in as {email || 'current user'}. This uses Supabase password re-auth and does not store your password.
+          </Text>
+          <TextInput
+            value={password}
+            onChangeText={onPasswordChange}
+            onSubmitEditing={onUnlock}
+            editable={!unlocking && !opening}
+            secureTextEntry
+            autoCapitalize="none"
+            autoCorrect={false}
+            autoFocus={Platform.OS === 'web'}
+            placeholder="Enter account password"
+            placeholderTextColor="#657186"
+            style={[styles.unlockInput, error ? styles.unlockInputError : null]}
+          />
+          {error ? <Text style={styles.unlockError}>{error}</Text> : null}
+          <Pressable
+            onPress={onUnlock}
+            disabled={unlocking || opening}
+            style={[
+              styles.unlockButton,
+              { backgroundColor: accentColor },
+              (unlocking || opening) && styles.disabledBtn,
+              webCursor(unlocking || opening ? 'wait' : 'pointer'),
+            ]}
+          >
+            {unlocking || opening ? (
+              <ActivityIndicator size="small" color="#061018" />
+            ) : (
+              <Text style={styles.unlockButtonText}>Open Vault</Text>
+            )}
+          </Pressable>
+        </View>
+      </Animated.View>
+    </View>
+  );
+}
+
 function MetricCard({ label, value, color = '#cbd5e1' }: { label: string; value: string; color?: string }) {
   // Pad single-digit counts so the readout grid aligns like a vault display.
   const padded = /^\d+$/.test(value) && value.length < 3 ? value.padStart(3, '0') : value;
@@ -2149,6 +2818,15 @@ function MetricCard({ label, value, color = '#cbd5e1' }: { label: string; value:
   );
 }
 
+function SecurityCount({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <View style={[styles.securityCountPill, { borderColor: color + '44' }]}>
+      <Text style={[styles.securityCountValue, { color }]}>{value}</Text>
+      <Text style={styles.securityCountLabel}>{label}</Text>
+    </View>
+  );
+}
+
 function InfoLine({ label, value }: { label: string; value: string }) {
   return (
     <View style={styles.infoLine}>
@@ -2159,6 +2837,342 @@ function InfoLine({ label, value }: { label: string; value: string }) {
 }
 
 const styles = StyleSheet.create({
+  lockRoot: {
+    width: '100%',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#1f2937',
+    backgroundColor: '#020617',
+    overflow: 'hidden',
+    justifyContent: 'center',
+    ...Platform.select({
+      web: {
+        backgroundImage:
+          'radial-gradient(circle at 20% 0%, rgba(20, 184, 166, 0.12), transparent 30%), radial-gradient(circle at 80% 100%, rgba(245, 158, 11, 0.1), transparent 28%), linear-gradient(135deg, #020617 0%, #07111f 46%, #020617 100%)',
+        boxShadow: '0 24px 80px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  lockShell: {
+    flex: 1,
+    minHeight: 0,
+    padding: 22,
+    gap: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lockCopy: {
+    width: '100%',
+    maxWidth: 760,
+    alignItems: 'center',
+    gap: 8,
+  },
+  lockEyebrow: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 2,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+    textAlign: 'center',
+  },
+  lockTitle: {
+    color: '#f8fafc',
+    fontSize: 28,
+    fontWeight: '900',
+    letterSpacing: -0.6,
+    textAlign: 'center',
+  },
+  lockSubtitle: {
+    maxWidth: 680,
+    color: '#9ca3af',
+    fontSize: 13,
+    lineHeight: 20,
+    textAlign: 'center',
+  },
+  lockAssuranceRow: {
+    marginTop: 4,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  lockAssurance: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#ffffff16',
+    backgroundColor: '#0b1220',
+    color: '#cbd5e1',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  vaultStage: {
+    width: '100%',
+    maxWidth: 620,
+    height: 300,
+    borderRadius: 28,
+    borderWidth: 1,
+    borderColor: '#ffffff18',
+    backgroundColor: '#030712',
+    overflow: Platform.OS === 'web' ? 'visible' as any : 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...Platform.select({
+      web: {
+        backgroundImage:
+          'radial-gradient(circle at 50% 50%, rgba(20,184,166,0.18), transparent 18%), radial-gradient(circle at 24% 36%, rgba(250,204,21,0.12), transparent 21%), radial-gradient(circle at 76% 38%, rgba(56,189,248,0.12), transparent 21%), linear-gradient(135deg, #030712 0%, #071426 52%, #020617 100%)',
+        boxShadow: 'inset 0 0 80px rgba(15,23,42,0.9), 0 18px 60px rgba(0,0,0,0.5)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  escapeBackdrop: {
+    position: 'absolute' as any,
+    width: 430,
+    height: 430,
+    borderRadius: 999,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#ffffff10',
+    ...Platform.select({
+      web: {
+        backgroundImage:
+          'conic-gradient(from 25deg, rgba(20,184,166,0.36), rgba(250,204,21,0.28), rgba(56,189,248,0.32), rgba(168,85,247,0.25), rgba(20,184,166,0.36))',
+        filter: 'blur(1px)',
+        boxShadow: '0 0 80px rgba(20,184,166,0.22), inset 0 0 70px rgba(2,6,23,0.72)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  escapeBeam: {
+    position: 'absolute' as any,
+    width: 72,
+    height: 460,
+    borderRadius: 999,
+    backgroundColor: '#38bdf866',
+    ...Platform.select({
+      web: {
+        filter: 'blur(16px)',
+        boxShadow: '0 0 48px rgba(56,189,248,0.5)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  escapeBeamLeft: {
+    left: 138,
+    top: -74,
+    backgroundColor: '#14b8a666',
+  },
+  escapeBeamRight: {
+    right: 138,
+    top: -74,
+    backgroundColor: '#facc1566',
+  },
+  escapeSpark: {
+    position: 'absolute' as any,
+    zIndex: 2,
+    ...Platform.select({
+      web: {
+        boxShadow: '0 0 16px currentColor',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultInteriorGlow: {
+    position: 'absolute' as any,
+    width: 420,
+    height: 420,
+    borderRadius: 999,
+    opacity: 0.12,
+    ...Platform.select({
+      web: {
+        filter: 'blur(42px)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultDoor: {
+    position: 'absolute' as any,
+    top: 0,
+    bottom: 0,
+    width: '50%',
+    borderWidth: 1,
+    backgroundColor: '#111827',
+    overflow: 'hidden',
+    zIndex: 4,
+    ...Platform.select({
+      web: {
+        backgroundImage:
+          'linear-gradient(135deg, rgba(255,255,255,0.08), transparent 24%), repeating-linear-gradient(90deg, rgba(255,255,255,0.035) 0 1px, transparent 1px 18px), linear-gradient(180deg, #182235 0%, #0b1220 52%, #151f33 100%)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultDoorLeft: {
+    left: 0,
+    borderTopLeftRadius: 28,
+    borderBottomLeftRadius: 28,
+  },
+  vaultDoorRight: {
+    right: 0,
+    borderTopRightRadius: 28,
+    borderBottomRightRadius: 28,
+  },
+  vaultDoorStripes: {
+    position: 'absolute' as any,
+    top: 18,
+    bottom: 18,
+    left: 28,
+    right: 28,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#ffffff12',
+    backgroundColor: '#02061755',
+  },
+  vaultRivetsLeft: {
+    position: 'absolute' as any,
+    left: 14,
+    top: 22,
+    bottom: 22,
+    width: 8,
+    borderRadius: 999,
+    backgroundColor: '#020617',
+    borderWidth: 1,
+    borderColor: '#ffffff12',
+  },
+  vaultRivetsRight: {
+    position: 'absolute' as any,
+    right: 14,
+    top: 22,
+    bottom: 22,
+    width: 8,
+    borderRadius: 999,
+    backgroundColor: '#020617',
+    borderWidth: 1,
+    borderColor: '#ffffff12',
+  },
+  vaultCenterSeam: {
+    position: 'absolute' as any,
+    top: 0,
+    bottom: 0,
+    width: 2,
+    zIndex: 5,
+  },
+  vaultDial: {
+    position: 'absolute' as any,
+    width: 104,
+    height: 104,
+    borderRadius: 999,
+    borderWidth: 3,
+    backgroundColor: '#0b1220',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 6,
+    ...Platform.select({
+      web: {
+        boxShadow: '0 0 34px rgba(0,0,0,0.65), inset 0 0 20px rgba(255,255,255,0.06)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  vaultDialCore: {
+    width: 18,
+    height: 18,
+    borderRadius: 999,
+  },
+  vaultDialSpoke: {
+    position: 'absolute' as any,
+    width: 74,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: '#d1d5db',
+  },
+  vaultDialSpokeVertical: {
+    transform: [{ rotate: '90deg' }],
+  },
+  vaultSerialPlate: {
+    position: 'absolute' as any,
+    bottom: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#ffffff18',
+    backgroundColor: '#020617dd',
+    zIndex: 7,
+  },
+  vaultSerialPlateText: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1.4,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  unlockPanel: {
+    width: '100%',
+    maxWidth: 520,
+    padding: 16,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#ffffff18',
+    backgroundColor: '#060b14d9',
+    gap: 10,
+    ...Platform.select({
+      web: {
+        backdropFilter: 'blur(14px)',
+        boxShadow: '0 18px 50px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.05)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  unlockPanelTitle: {
+    color: '#f8fafc',
+    fontSize: 15,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+  },
+  unlockPanelText: {
+    color: '#9ca3af',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  unlockInput: {
+    minHeight: 48,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#ffffff20',
+    backgroundColor: '#020617',
+    color: '#f8fafc',
+    paddingHorizontal: 14,
+    fontSize: 14,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  unlockInputError: {
+    borderColor: '#ef444488',
+  },
+  unlockError: {
+    color: '#fca5a5',
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  unlockButton: {
+    minHeight: 46,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  unlockButtonText: {
+    color: '#061018',
+    fontSize: 12,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 1.3,
+  },
   root: {
     width: '100%',
     borderRadius: 18,
@@ -2291,6 +3305,10 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 0.6,
     fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  lockNowBtn: {
+    minWidth: 84,
+    backgroundColor: '#1c1408',
   },
   status: {
     margin: 12,
@@ -2491,6 +3509,120 @@ const styles = StyleSheet.create({
     fontSize: 11,
     lineHeight: 15,
   },
+  securityHero: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    alignItems: 'stretch',
+  },
+  securityScoreRing: {
+    width: 116,
+    minHeight: 116,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: '#ffffff18',
+    backgroundColor: '#050914',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    ...Platform.select({
+      web: {
+        backgroundImage: 'radial-gradient(circle at center, rgba(20,184,166,0.14), transparent 66%)',
+      } as any,
+      default: {},
+    }) as any,
+  },
+  securityScoreValue: {
+    fontSize: 34,
+    fontWeight: '900',
+    letterSpacing: 1,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  securityScoreLabel: {
+    color: '#64748b',
+    fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  securitySummaryBody: {
+    flex: 1,
+    minWidth: 240,
+    padding: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#ffffff12',
+    backgroundColor: '#070b13',
+    gap: 8,
+  },
+  securityCountGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  securityCountPill: {
+    minWidth: 88,
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 999,
+    borderWidth: 1,
+    backgroundColor: '#050914',
+  },
+  securityCountValue: {
+    fontSize: 15,
+    fontWeight: '900',
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  securityCountLabel: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  securityIssueList: {
+    gap: 8,
+  },
+  securityIssueRow: {
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    backgroundColor: '#050914',
+    gap: 4,
+  },
+  securityIssueTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  securitySeverity: {
+    fontSize: 9,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 0.9,
+    fontFamily: Platform.select({ web: 'ui-monospace, "SF Mono", Menlo, monospace', default: 'monospace' }),
+  },
+  securityIssueTarget: {
+    color: '#cbd5e1',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  securityIssueTitle: {
+    color: '#eef2ff',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  entrySecurityList: {
+    gap: 6,
+  },
+  entrySecurityIssue: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
   totpBox: {
     padding: 12,
     borderRadius: 12,
@@ -2603,6 +3735,18 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     overflow: 'hidden',
     backgroundColor: '#2b0b0b',
+    color: '#fecaca',
+    fontSize: 9,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 0.7,
+  },
+  securityRiskBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    overflow: 'hidden',
+    backgroundColor: '#7f1d1d',
     color: '#fecaca',
     fontSize: 9,
     fontWeight: '900',

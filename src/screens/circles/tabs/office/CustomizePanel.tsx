@@ -406,7 +406,7 @@ export default function CustomizePanel({
 
   const EMOJI_OPTIONS = ['🌟', '✨', '🔮', '💎', '🧠', '⚡', '🎯', '🛡️', '🌊', '🔥', '🌙', '🦊', '🐺', '🦅', '🐉', '👑', '🎭', '💀', '🤖', '🧙'];
 
-  const LLM_PROVIDERS: LLMProvider[] = ['openai', 'anthropic', 'openrouter', 'groq', 'ollama', 'replicate'];
+  const LLM_PROVIDERS: LLMProvider[] = ['openai', 'anthropic', 'openrouter', 'groq', 'ollama', 'replicate', 'github-models', 'huggingface', 'zai', 'minimax'];
 
   const hasKeyForProvider = (p: LLMProvider) => providerKeys.some(k => k.provider === p && k.isActive);
   const getKeyForProvider = (p: LLMProvider) => providerKeys.find(k => k.provider === p && k.isActive);

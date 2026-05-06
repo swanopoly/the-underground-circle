@@ -34,6 +34,7 @@ import {
   EMPTY_USAGE,
   type UsageBreakdown,
 } from "../_claude/anthropic.ts";
+import { byokMissingMessage, resolveUserModelApiKey } from "../_shared/edge.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -103,6 +104,51 @@ const ASK_USER_TOOL = {
   },
 };
 
+const FILL_SAVED_LOGIN_TOOL = {
+  name: "fill_saved_login",
+  description:
+    "Fill a login form with a saved vault credential after user approval. " +
+    "Use this only after navigating to the site's login page and focusing the username/email field. " +
+    "This tool never returns the secret. It types the username and secret directly into the browser.",
+  input_schema: {
+    type: "object",
+    properties: {
+      credential_id: {
+        type: "string",
+        description: "The saved vault credential id to use.",
+      },
+      purpose: {
+        type: "string",
+        description: "Short reason for using the credential, e.g. 'log in to publish a draft post'.",
+      },
+      grantee: {
+        type: "string",
+        description: "Automation grantee from the vault runbook, e.g. OpenSwan or a named agent.",
+      },
+      grantee_type: {
+        type: "string",
+        enum: ["agent", "runtime", "chat", "member", "openswan"],
+        description: "Automation grantee type from the vault runbook. Defaults to openswan when omitted.",
+      },
+      username_coordinate: {
+        type: "array",
+        description: "Optional [x, y] coordinate for the username/email field. If omitted, the current focus is used.",
+        items: { type: "number" },
+      },
+      password_coordinate: {
+        type: "array",
+        description: "Optional [x, y] coordinate for the password field. If omitted, Tab is used after typing username.",
+        items: { type: "number" },
+      },
+      submit: {
+        type: "boolean",
+        description: "Whether to press Enter after filling. Defaults to false; prefer false unless the user approved login.",
+      },
+    },
+    required: ["credential_id", "purpose"],
+  },
+};
+
 interface AgentRequest {
   task: string;
   circleId: string;
@@ -141,14 +187,6 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
-  if (!apiKey) {
-    return new Response(JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  }
-
   if (!body.task || !body.browserbase?.apiKey) {
     return new Response(JSON.stringify({ error: "task and browserbase credentials required" }), {
       status: 400,
@@ -160,6 +198,41 @@ Deno.serve(async (req: Request) => {
   const svcUrl = Deno.env.get("SUPABASE_URL");
   const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   const supabase = svcUrl && svcKey ? createClient(svcUrl, svcKey) : null;
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+  const authorization = req.headers.get("Authorization") || "";
+  const userSupabase = svcUrl && anonKey && authorization
+    ? createClient(svcUrl, anonKey, {
+        global: { headers: { Authorization: authorization } },
+      })
+    : null;
+  if (!supabase || !userSupabase) {
+    return new Response(JSON.stringify({ error: "Supabase service configuration required" }), {
+      status: 500,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  const { data: { user } } = await userSupabase.auth.getUser();
+  const userId = user?.id || null;
+  if (!userId) {
+    return new Response(JSON.stringify({ error: "Unauthenticated", code: "unauthenticated" }), {
+      status: 401,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
+
+  const apiKey = await resolveUserModelApiKey({
+    supabase,
+    userId,
+    provider: "anthropic",
+    envVarName: "ANTHROPIC_API_KEY",
+  });
+  if (!apiKey) {
+    return new Response(JSON.stringify({ error: byokMissingMessage("anthropic"), code: "key_missing" }), {
+      status: 400,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  }
 
   // Pull the most recent completed run for this circle to inject as
   // follow-up context. Caps the window at 30 minutes so day-old tasks
@@ -198,7 +271,7 @@ Deno.serve(async (req: Request) => {
         .from("computer_use_runs")
         .insert({
           circle_id: body.circleId,
-          user_id: body.userId || null,
+          user_id: userId,
           task: body.task,
           status: "running",
         })
@@ -262,6 +335,7 @@ Deno.serve(async (req: Request) => {
       let usage: UsageBreakdown = { ...EMPTY_USAGE };
       const startTime = Date.now();
       const DEADLINE_MS = 5 * 60 * 1000;
+      let credentialFillApprovedUntil = 0;
 
       // Conversation messages for the Claude loop. Prepend follow-up
       // context (from the most recent completed run in this circle) so
@@ -316,7 +390,7 @@ Deno.serve(async (req: Request) => {
             break;
           }
 
-          const claudeResponse = await callClaudeWithTools(apiKey, messages);
+          const claudeResponse = await callClaudeWithTools(apiKey.apiKey, messages);
           usage = addUsage(usage, claudeResponse.usage);
           // Running ticker — cache-aware. `inputTokens` stays the total
           // input-side count (uncached + create + read) for backwards
@@ -360,7 +434,8 @@ Deno.serve(async (req: Request) => {
             // thumbnail, etc.) so the agent has freedom to shape output
             // for different task types.
             const { findings, summaryWithoutFindings } = extractStructuredFindings(finalText);
-            const summary = summaryWithoutFindings || "(agent finished without a written summary)";
+            const { extractedData, summaryWithoutExtractedData } = extractStructuredData(summaryWithoutFindings);
+            const summary = summaryWithoutExtractedData || "(agent finished without a written summary)";
             // Mark the run complete in DB (best-effort — do this BEFORE
             // emitting so a disconnected client can still see the final
             // state via the follow-up-context read on the next run).
@@ -388,6 +463,7 @@ Deno.serve(async (req: Request) => {
             emit("result", {
               summary,
               findings,
+              extractedData,
               sessionId,
               liveUrl,
               tokens: {
@@ -426,10 +502,30 @@ Deno.serve(async (req: Request) => {
                   : ["Yes, continue", "No, cancel"];
                 const ctx = typeof (tu.input as any)?.context === "string" ? (tu.input as any).context : null;
                 const choice = await askUserAndWait(supabase, runId, question, options, ctx, emit);
+                if (isAffirmativeChoice(choice) && isCredentialApprovalQuestion(question, ctx)) {
+                  credentialFillApprovedUntil = Date.now() + 2 * 60 * 1000;
+                }
                 toolResults.push({
                   type: "tool_result",
                   tool_use_id: tu.id,
                   content: [{ type: "text", text: `User chose: ${choice}` }],
+                });
+                continue;
+              }
+
+              if (tu.name === "fill_saved_login") {
+                const out = await fillSavedLoginFromVault({
+                  creds: body.browserbase,
+                  sessionId,
+                  input: tu.input,
+                  circleId: body.circleId,
+                  userSupabase,
+                  approved: Date.now() <= credentialFillApprovedUntil,
+                });
+                toolResults.push({
+                  type: "tool_result",
+                  tool_use_id: tu.id,
+                  content: [{ type: "text", text: out.text || "Saved login filled. Secret was not returned." }],
                 });
                 continue;
               }
@@ -465,7 +561,7 @@ Deno.serve(async (req: Request) => {
         // reports the same way.
         await logClaudeUsage(supabase, {
           circleId: body.circleId || null,
-          userId:   body.userId   || null,
+          userId,
           source:   "computer-use-agent",
           model:    AGENT_MODEL,
           usage,
@@ -528,9 +624,16 @@ TASK COMPLETION
 - The summary should include concrete findings (prices, links, names, quotes) — not meta-commentary about what you did.
 - If the task can't be completed (blocked by login, paywall, captcha, stale info), explain what stopped you and stop.
 
+BROWSERBASE WORKFLOW PROFILES
+- Web data retrieval: open the source page, wait for dynamic content to render, extract only the requested fields/records, include source URLs when visible, and stop promptly. For list-like results, use the <FINDINGS> block. For table/record/json style output, use <EXTRACTED_DATA> with valid JSON after the human summary.
+- Stagehand-style browser work: break ambiguous UI work into small semantic actions (act/extract-sized steps), then verify with screenshots or visible text before continuing. Use deterministic clicks/typing when the target is obvious; do not overuse AI actions when a simple browser action is safer.
+- Form submission: wait for fields to load, fill text inputs/selects/radios/checkboxes/uploads in sequence, handle dynamic sections after each selection, ask_user before credentials/personal info/payment/final submit, then verify success through visible confirmation text, URL change, or validation errors.
+- Persistent login state: if the task needs an account, use vault-provided credentials through fill_saved_login only after approval and only on allowed origins. If the site needs 2FA, CAPTCHA, or a human-only checkpoint, stop and report it.
+
 SAFETY
 - ALWAYS call the \`ask_user\` tool BEFORE clicking any "Purchase", "Buy now", "Confirm", "Pay", "Submit", "Send", "Delete", "Publish", or similar button that commits a change. Include the specific amount and merchant/target in the question.
 - ALWAYS call \`ask_user\` before entering credentials, payment info, personal info, or posting publicly.
+- For saved vault credentials, navigate to the login page, focus the username/email field, call \`ask_user\` for permission to use the saved credential, then call \`fill_saved_login\` with the credential_id plus any grantee/grantee_type from the vault runbook. Never ask the user to paste a password or secret into chat.
 - If the user's task explicitly asked for that exact action ("buy X for $Y"), still call \`ask_user\` once at the commit step to confirm the final details.
 - Never guess credentials. If a site requires login you weren't given, call \`ask_user\` with the question "Log in as who?" and wait for direction.
 - If a site shows a CAPTCHA or 2FA, stop and report via a text summary — do not keep trying.
@@ -556,7 +659,14 @@ Format, verbatim including the tags:
 - \`price\` is a plain string with currency ("$499", "£12/mo", "Free").
 - \`thumbnail\` is optional; include only if you saw a clean product image URL.
 - Emit at most 10 items.
-- Do NOT emit a FINDINGS block for non-list tasks (single-fact lookups, transactions, etc).`;
+- Do NOT emit a FINDINGS block for non-list tasks (single-fact lookups, transactions, etc).
+- For arbitrary structured extraction that is not a ranked/list result, end with:
+
+<EXTRACTED_DATA>
+{"records":[{"field":"value"}]}
+</EXTRACTED_DATA>
+
+- The EXTRACTED_DATA payload must be valid JSON object or array. Keep it small and include only data actually observed.`;
 
 // Thin wrapper around the shared `callClaude()` — pins the computer-use
 // beta header + the frozen system prompt (cached automatically). The
@@ -567,7 +677,7 @@ async function callClaudeWithTools(apiKey: string, messages: Array<{ role: strin
     model: AGENT_MODEL,
     maxTokens: 8192,
     system: AGENT_SYSTEM_PROMPT,
-    tools: [COMPUTER_USE_TOOL, BASH_TOOL, ASK_USER_TOOL],
+    tools: [COMPUTER_USE_TOOL, BASH_TOOL, ASK_USER_TOOL, FILL_SAVED_LOGIN_TOOL],
     messages,
     betaHeaders: ["computer-use-2025-01-24"],
   });
@@ -647,6 +757,201 @@ async function askUserAndWait(
   return "User did not respond within 2 minutes — treating as a No / cancel. Try again and wait for the user.";
 }
 
+function isAffirmativeChoice(choice: string): boolean {
+  return /^(yes|y|continue|approve|approved|ok|okay|use|log in)/i.test(String(choice || "").trim());
+}
+
+function isCredentialApprovalQuestion(question: string, context: string | null): boolean {
+  const haystack = `${question || ""} ${context || ""}`.toLowerCase();
+  return /\b(credential|password|login|log in|sign in|username|vault|secret)\b/.test(haystack);
+}
+
+function normalizeRpcPayload(data: unknown): any {
+  if (typeof data === "string") {
+    try {
+      return JSON.parse(data);
+    } catch {
+      return data;
+    }
+  }
+  return data;
+}
+
+function hostnameFromUrl(value?: string | null): string | null {
+  if (!value) return null;
+  try {
+    const withProtocol = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+    return new URL(withProtocol).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+}
+
+function credentialPolicy(row: any): Record<string, any> {
+  return (row?.accessPolicy || row?.access_policy || {}) as Record<string, any>;
+}
+
+function credentialAllowedOrigins(row: any): string[] {
+  const policyOrigins = stringArray(credentialPolicy(row).allowed_origins);
+  if (policyOrigins.length > 0) return policyOrigins;
+  return [row?.siteUrl || row?.site_url, row?.loginUrl || row?.login_url]
+    .map((value) => hostnameFromUrl(value))
+    .filter(Boolean)
+    .map(String);
+}
+
+function credentialAllowedActions(row: any): string[] {
+  const actions = stringArray(credentialPolicy(row).allowed_actions).map((item) => item.toLowerCase());
+  return actions.length > 0 ? actions : ["login"];
+}
+
+function credentialMetadata(row: any): Record<string, any> {
+  return (row?.metadata || {}) as Record<string, any>;
+}
+
+function normalizeGrantType(value: unknown): string {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["runtime", "chat", "member", "openswan"].includes(normalized)) return normalized;
+  return "agent";
+}
+
+function credentialAutomationGrants(row: any): Array<Record<string, any>> {
+  const meta = credentialMetadata(row);
+  const raw = Array.isArray(meta.agentGrants)
+    ? meta.agentGrants
+    : Array.isArray(meta.automationGrants)
+      ? meta.automationGrants
+      : [];
+  return raw.filter((item) => item && typeof item === "object");
+}
+
+function grantExpired(grant: Record<string, any>): boolean {
+  const expiresAt = String(grant.expiresAt || grant.expires_at || "");
+  if (!expiresAt) return false;
+  const ts = Date.parse(expiresAt);
+  return Number.isFinite(ts) && ts <= Date.now();
+}
+
+function credentialGrantAllowsLogin(row: any, input: any): boolean {
+  const grants = credentialAutomationGrants(row).filter((grant) => !grantExpired(grant));
+  if (grants.length === 0) return true;
+  const grantee = String(input?.grantee || "").trim().toLowerCase();
+  const granteeType = normalizeGrantType(input?.grantee_type || input?.granteeType || "openswan");
+  if (!grantee) return false;
+  return grants.some((grant) => {
+    const grantGrantee = String(grant.grantee || "").trim().toLowerCase();
+    const grantType = normalizeGrantType(grant.granteeType || grant.grantee_type);
+    const grantActions = stringArray(grant.actions).map((item) => item.toLowerCase());
+    return grantGrantee === grantee && grantType === granteeType && grantActions.includes("login");
+  });
+}
+
+function hostAllowed(currentUrl: string | null | undefined, allowedOrigins: string[]): boolean {
+  const currentHost = hostnameFromUrl(currentUrl);
+  if (!currentHost) return false;
+  const allowedHosts = allowedOrigins
+    .map((origin) => hostnameFromUrl(origin) || origin.replace(/^www\./, "").toLowerCase())
+    .filter(Boolean);
+  return allowedHosts.some((host) => currentHost === host || currentHost.endsWith(`.${host}`));
+}
+
+function coordinate(input: unknown): [number, number] | null {
+  if (!Array.isArray(input) || input.length < 2) return null;
+  const x = Number(input[0]);
+  const y = Number(input[1]);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return [x, y];
+}
+
+async function fillSavedLoginFromVault(args: {
+  creds: BrowserbaseCreds;
+  sessionId: string;
+  input: any;
+  circleId: string;
+  userSupabase: any;
+  approved: boolean;
+}): Promise<ToolOutcome> {
+  const credentialId = String(args.input?.credential_id || "").trim();
+  const purpose = String(args.input?.purpose || "computer_use_login").slice(0, 240);
+  if (!credentialId) {
+    throw new Error("credential_id is required.");
+  }
+  if (!args.userSupabase) {
+    throw new Error("Saved credential login requires an authenticated user session.");
+  }
+
+  const { data: listData, error: listError } = await args.userSupabase.rpc("list_circle_site_credentials", {
+    p_circle_id: args.circleId,
+    p_platform: null,
+  });
+  if (listError) {
+    throw new Error(`Could not list vault credentials: ${listError.message || listError}`);
+  }
+  const rows = normalizeRpcPayload(listData);
+  const credential = Array.isArray(rows) ? rows.find((row: any) => String(row?.id) === credentialId) : null;
+  if (!credential) {
+    throw new Error("Saved credential was not found or you do not have access.");
+  }
+  if ((credential.isActive ?? credential.is_active) === false) {
+    throw new Error("Saved credential is inactive.");
+  }
+
+  const policy = credentialPolicy(credential);
+  if (policy.require_approval !== false && !args.approved) {
+    throw new Error("Saved credential use needs user approval first. Call ask_user, then retry fill_saved_login.");
+  }
+  if (!credentialAllowedActions(credential).includes("login")) {
+    throw new Error("This credential policy does not allow login actions.");
+  }
+  if (!credentialGrantAllowsLogin(credential, args.input)) {
+    throw new Error("This saved credential has scoped automation grants. Pass the matching grantee and grantee_type from the vault runbook before using it.");
+  }
+
+  const pageState = await bbCommand(args.creds, args.sessionId, "screenshot", {});
+  if (!hostAllowed(pageState.currentUrl, credentialAllowedOrigins(credential))) {
+    throw new Error(`Current page ${pageState.currentUrl || "(unknown URL)"} is not in this credential's allowed origins.`);
+  }
+
+  const { data: secretData, error: secretError } = await args.userSupabase.rpc("get_circle_site_credential_secret", {
+    p_credential_id: credentialId,
+    p_purpose: purpose || "computer_use_login",
+  });
+  if (secretError) {
+    throw new Error(`Could not retrieve saved credential: ${secretError.message || secretError}`);
+  }
+  const payload = normalizeRpcPayload(secretData);
+  const username = String(payload?.username || credential?.username || "");
+  const secret = String(payload?.secret || "");
+  if (!username || !secret) {
+    throw new Error("Saved credential is missing username or secret.");
+  }
+
+  const usernameCoordinate = coordinate(args.input?.username_coordinate);
+  const passwordCoordinate = coordinate(args.input?.password_coordinate);
+  if (usernameCoordinate) {
+    await bbCommand(args.creds, args.sessionId, "click", { x: usernameCoordinate[0], y: usernameCoordinate[1] }, false);
+  }
+  await bbCommand(args.creds, args.sessionId, "type", { text: username }, false);
+  if (passwordCoordinate) {
+    await bbCommand(args.creds, args.sessionId, "click", { x: passwordCoordinate[0], y: passwordCoordinate[1] }, false);
+  } else {
+    await bbCommand(args.creds, args.sessionId, "key", { key: "Tab" }, false);
+  }
+  await bbCommand(args.creds, args.sessionId, "type", { text: secret }, false);
+  if (args.input?.submit === true) {
+    await bbCommand(args.creds, args.sessionId, "key", { key: "Enter" }, false);
+  }
+
+  return {
+    currentUrl: pageState.currentUrl,
+    text: `Filled saved login for ${payload?.platform || credential?.platform || "site"}/${payload?.label || credential?.label || "default"} at ${pageState.currentUrl || "current page"}. Secret was not returned.`,
+  };
+}
+
 // ── Structured findings extractor ───────────────────────────────────────
 
 interface Finding {
@@ -661,6 +966,7 @@ interface Finding {
 
 const FINDINGS_TAG_RE = /<FINDINGS>\s*([\s\S]*?)\s*<\/FINDINGS>/i;
 const FINDINGS_FENCE_RE = /```(?:json)?\s*(\[[\s\S]*?\])\s*```/;
+const EXTRACTED_DATA_TAG_RE = /<EXTRACTED_DATA>\s*([\s\S]*?)\s*<\/EXTRACTED_DATA>/i;
 
 function extractStructuredFindings(text: string): {
   findings: Finding[] | null;
@@ -711,6 +1017,29 @@ function extractStructuredFindings(text: string): {
   } catch {
     // Bad JSON — keep the raw text in the summary, don't throw.
     return { findings: null, summaryWithoutFindings: text.trim() };
+  }
+}
+
+function extractStructuredData(text: string): {
+  extractedData: unknown | null;
+  summaryWithoutExtractedData: string;
+} {
+  if (!text) return { extractedData: null, summaryWithoutExtractedData: "" };
+
+  const tagMatch = text.match(EXTRACTED_DATA_TAG_RE);
+  if (!tagMatch) {
+    return { extractedData: null, summaryWithoutExtractedData: text.trim() };
+  }
+
+  const stripped = text.replace(EXTRACTED_DATA_TAG_RE, "").trim();
+  try {
+    const parsed = JSON.parse(tagMatch[1]);
+    if (!parsed || (typeof parsed !== "object" && !Array.isArray(parsed))) {
+      return { extractedData: null, summaryWithoutExtractedData: text.trim() };
+    }
+    return { extractedData: parsed, summaryWithoutExtractedData: stripped };
+  } catch {
+    return { extractedData: null, summaryWithoutExtractedData: text.trim() };
   }
 }
 
@@ -804,6 +1133,7 @@ async function bbCommand(
   sessionId: string,
   command: string,
   params: Record<string, any>,
+  returnScreenshot: boolean = true,
 ): Promise<ToolOutcome> {
   const MAX_ATTEMPTS = 3;
   let lastErr: unknown = null;
@@ -815,7 +1145,7 @@ async function bbCommand(
           "X-BB-API-Key": creds.apiKey,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ command, params, returnScreenshot: true }),
+        body: JSON.stringify({ command, params, returnScreenshot }),
         // 30s per-call cap — Browserbase commands are generally sub-5s,
         // so anything beyond this almost certainly means the session is
         // wedged and we're better off giving up.

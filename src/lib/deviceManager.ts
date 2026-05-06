@@ -6,7 +6,13 @@
  * the bridge at localhost:7778.
  */
 
-const BRIDGE_URL = 'http://localhost:7778';
+import { getBridgeUrl } from './bridgeEnvironment';
+
+const BRIDGE_PORT = 7778;
+
+function getDeviceBridgeUrl(): string | null {
+  return getBridgeUrl(BRIDGE_PORT);
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────────────
 
@@ -56,8 +62,10 @@ export type DeviceCategory = 'printers' | 'serial' | '3dprinter' | 'network' | '
 // ─── Bridge Communication ───────────────────────────────────────────────────────
 
 async function bridgeGet<T>(path: string): Promise<{ ok: boolean; data: T | null; error?: string }> {
+  const bridgeUrl = getDeviceBridgeUrl();
+  if (!bridgeUrl) return { ok: false, data: null, error: 'Bridge unavailable in this environment' };
   try {
-    const res = await fetch(`${BRIDGE_URL}${path}`, {
+    const res = await fetch(`${bridgeUrl}${path}`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -70,8 +78,10 @@ async function bridgeGet<T>(path: string): Promise<{ ok: boolean; data: T | null
 }
 
 async function bridgePost<T>(path: string, body: Record<string, any>): Promise<{ ok: boolean; data: T | null; error?: string }> {
+  const bridgeUrl = getDeviceBridgeUrl();
+  if (!bridgeUrl) return { ok: false, data: null, error: 'Bridge unavailable in this environment' };
   try {
-    const res = await fetch(`${BRIDGE_URL}${path}`, {
+    const res = await fetch(`${bridgeUrl}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

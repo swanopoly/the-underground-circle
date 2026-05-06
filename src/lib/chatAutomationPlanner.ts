@@ -1,5 +1,6 @@
 import { inferChatCommandExecution, matchesChatCommandRoute, type ChatCommandDecisionSource, type ChatCommandRouteId } from './chatCommandRegistry';
 import { planComputerTaskPreview } from './computerTaskPlanner';
+import { classifyBrowserbaseWorkflow } from './browserbaseWorkflowIntent';
 
 export type PlannerConversationalIntent =
   | { type: 'wordpress_publish'; title?: string; imageUrl?: string; status: 'draft' | 'publish' }
@@ -168,6 +169,10 @@ function looksLikeComputerTask(message: string): boolean {
   return preview.kind !== 'unknown';
 }
 
+function looksLikeBrowserbaseWorkflow(message: string): boolean {
+  return classifyBrowserbaseWorkflow(message).kind !== 'general_browser';
+}
+
 function resolvePlannerQuickActionExecution(text: string): { text: string; mode: 'send' | 'prefill' | 'special'; routeId: ChatCommandRouteId | null } {
   switch (text) {
     case '__COMPUTER_USE__':
@@ -268,6 +273,24 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
       approval: buildApproval(routeId, risk),
       confidence: 0.85,
       notes: ['Matched conversational intent router.'],
+    };
+  }
+
+  if (looksLikeBrowserbaseWorkflow(normalized)) {
+    return {
+      source: 'plain_chat',
+      intent: { kind: 'direct_chat', message: normalized },
+      execution: {
+        kind: 'run_computer_task',
+        routeId: 'browser',
+        commandText: normalized,
+      },
+      risk: /\b(delete|remove|overwrite|publish|submit|send|transfer|checkout|pay|apply|register)\b/i.test(normalized)
+        ? 'review'
+        : 'safe',
+      approval: { required: false, reason: null },
+      confidence: 0.82,
+      notes: ['Detected as a Browserbase workflow: web data retrieval, Stagehand semantic browser action, or form submission.'],
     };
   }
 

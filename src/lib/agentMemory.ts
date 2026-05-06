@@ -115,7 +115,9 @@ async function persistSoulRouting(
 
 // ── Memory Extraction ───────────────────────────────────────────────────────
 
-const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY || '';
+const GEMINI_API_KEY = process.env.EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS === 'true'
+  ? process.env.EXPO_PUBLIC_GEMINI_API_KEY || ''
+  : '';
 
 interface ExtractedMemory {
   kind: MemoryKind;

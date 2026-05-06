@@ -5,6 +5,7 @@ import {
   getInstalledIntegrationProviders,
   type CircleIntegrationProvider,
 } from './circleIntegrations';
+import { getBridgeUrl } from './bridgeEnvironment';
 
 export type ComputerCapabilityId =
   | 'browser_automation'
@@ -89,10 +90,12 @@ function hasCapability(capabilities: string[], capability: string): boolean {
  */
 async function probeDesktopBridge(): Promise<boolean> {
   if (typeof fetch === 'undefined') return false;
+  const base = getBridgeUrl(7778);
+  if (!base) return false;
   try {
     const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const timer = controller ? setTimeout(() => controller.abort(), 500) : null;
-    const res = await fetch('http://localhost:7778/desktop/health', {
+    const res = await fetch(`${base}/desktop/health`, {
       cache: 'no-store',
       signal: controller?.signal,
     });

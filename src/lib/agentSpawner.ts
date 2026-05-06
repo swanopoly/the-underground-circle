@@ -11,7 +11,13 @@
  *   - Scoped context: each agent gets only its relevant brief
  */
 
-const BRIDGE_URL = 'http://localhost:7778';
+import { getBridgeUrl } from './bridgeEnvironment';
+
+const BRIDGE_PORT = 7778;
+
+function getSpawnerBridgeUrl(): string | null {
+  return getBridgeUrl(BRIDGE_PORT);
+}
 
 export interface SpawnTask {
   task: string;
@@ -61,7 +67,11 @@ async function spawnSingleLegacy(
   task: SpawnTask,
   opts?: Pick<SpawnOpts, 'useWorktree' | 'workdir'>,
 ): Promise<{ ok: boolean; pid?: string; task: string; cwd?: string; logFile?: string; error?: string }> {
-  const res = await fetch(`${BRIDGE_URL}/spawn`, {
+  const bridgeUrl = getSpawnerBridgeUrl();
+  if (!bridgeUrl) {
+    return { ok: false, task: task.task, error: 'Bridge unavailable in this environment' };
+  }
+  const res = await fetch(`${bridgeUrl}/spawn`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -112,6 +122,16 @@ async function spawnSingleLegacy(
 
 export async function spawnAgents(opts: SpawnOpts): Promise<SpawnResult> {
   try {
+    const bridgeUrl = getSpawnerBridgeUrl();
+    if (!bridgeUrl) {
+      return {
+        ok: false,
+        spawned: 0,
+        total: opts.tasks.length,
+        results: [],
+        message: 'Claude Code Bridge unavailable in this environment.',
+      };
+    }
     if (opts.tasks.length > 1) {
       const results = await Promise.all(opts.tasks.map((task) => spawnSingleLegacy(task, opts)));
       const spawned = results.filter((result) => result.ok).length;
@@ -127,7 +147,7 @@ export async function spawnAgents(opts: SpawnOpts): Promise<SpawnResult> {
       };
     }
 
-    const res = await fetch(`${BRIDGE_URL}/spawn`, {
+    const res = await fetch(`${bridgeUrl}/spawn`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -200,8 +220,10 @@ export async function spawnFromMissionTasks(
 }
 
 export async function isBridgeAvailable(): Promise<boolean> {
+  const bridgeUrl = getSpawnerBridgeUrl();
+  if (!bridgeUrl) return false;
   try {
-    const res = await fetch(`${BRIDGE_URL}/health`, { signal: AbortSignal.timeout(3000) });
+    const res = await fetch(`${bridgeUrl}/health`, { signal: AbortSignal.timeout(3000) });
     return res.ok;
   } catch {
     return false;
@@ -213,8 +235,19 @@ export async function fetchSpawnedAgentStatus(opts: {
   logFile?: string | null;
   maxBytes?: number;
 }): Promise<SpawnedAgentStatus> {
+  const bridgeUrl = getSpawnerBridgeUrl();
+  if (!bridgeUrl) {
+    return {
+      ok: false,
+      pid: opts.pid || null,
+      logFile: opts.logFile || null,
+      isRunning: false,
+      completed: false,
+      error: 'Bridge unavailable in this environment',
+    };
+  }
   try {
-    const res = await fetch(`${BRIDGE_URL}/spawn/status`, {
+    const res = await fetch(`${bridgeUrl}/spawn/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

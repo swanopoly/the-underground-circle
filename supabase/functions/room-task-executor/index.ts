@@ -9,7 +9,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.95.3';
-import { errResponse, getAuthenticatedUser, jsonResponse } from '../_shared/edge.ts';
+import { byokMissingMessage, errResponse, getAuthenticatedUser, jsonResponse, resolveUserModelApiKey } from '../_shared/edge.ts';
 import { callClaude as callClaudeShared, logClaudeUsage, checkCircleClaudeBudget } from '../_claude/anthropic.ts';
 
 const ROOM_TASK_MODEL = 'claude-sonnet-4-6';
@@ -41,10 +41,7 @@ const LANG_TO_EXT: Record<string, string> = {
  * circleId in telemetry is null for now — pending a lookup via `project_rooms`
  * to map room_id → circle_id. Roadmap Phase 1d note.
  */
-async function callClaude(systemPrompt: string, userMessage: string): Promise<string> {
-  const apiKey = Deno.env.get('ANTHROPIC_API_KEY');
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
-
+async function callClaude(systemPrompt: string, userMessage: string, apiKey: string, userId: string, circleId: string | null): Promise<string> {
   const result = await callClaudeShared({
     apiKey,
     model: ROOM_TASK_MODEL,
@@ -55,14 +52,21 @@ async function callClaude(systemPrompt: string, userMessage: string): Promise<st
 
   // Fire-and-forget telemetry.
   logClaudeUsage(createSupabaseClient(), {
-    circleId: null,
-    userId: null,
+    circleId,
+    userId,
     source: 'room-task-executor',
     model: ROOM_TASK_MODEL,
     usage: result.usage,
   });
 
   return result.content?.[0]?.text || 'No response generated.';
+}
+
+function callClaudeForBody(body: any, systemPrompt: string, userMessage: string): Promise<string> {
+  if (!body.anthropicApiKey || !body.modelUserId) {
+    throw new Error(byokMissingMessage('anthropic'));
+  }
+  return callClaude(systemPrompt, userMessage, body.anthropicApiKey, body.modelUserId, body.circleIdForTelemetry || null);
 }
 
 function createSupabaseClient() {
@@ -117,7 +121,7 @@ async function handleGeneral(supabase: any, body: any): Promise<{ ok: boolean; f
       : '',
   ].join('\n');
 
-  const aiResponse = await callClaude(systemPrompt, prompt);
+  const aiResponse = await callClaudeForBody(body, systemPrompt, prompt);
 
   const codeMatch = aiResponse.match(/```(\w+)?\n([\s\S]+?)```/);
   let fileUpdated = false;
@@ -207,7 +211,7 @@ async function handleWebResearch(supabase: any, body: any): Promise<{ ok: boolea
     fetchedContent.length > 0 ? `## Fetched Page Content\n${fetchedContent.map(f => `### ${f.url}\n${f.text}`).join('\n\n')}` : '',
   ].join('\n');
 
-  const aiResponse = await callClaude(systemPrompt, userMessage);
+  const aiResponse = await callClaudeForBody(body, systemPrompt, userMessage);
   await postAgentOutput(supabase, roomId, agentName || 'Agent', `🔍 **Research Summary**\n\n${aiResponse}`, taskId, { task_type: 'web_research', sources: searchResults.map(r => r.url) });
   return { ok: true, responseLength: aiResponse.length };
 }
@@ -222,7 +226,7 @@ async function handleRunScript(supabase: any, body: any): Promise<{ ok: boolean;
     'After the code block, briefly explain what the script does and what output to expect.',
   ].join('\n');
 
-  const aiResponse = await callClaude(systemPrompt, prompt);
+  const aiResponse = await callClaudeForBody(body, systemPrompt, prompt);
   const content = `⚙️ **Script Generated**\n\n${aiResponse}\n\n---\n**Execution note:** direct server-side script execution is disabled for security. Review and run this script in a controlled environment.`;
   await postAgentOutput(supabase, roomId, agentName || 'Agent', content, taskId, { task_type: 'run_script', executed: false, execution_disabled: true });
   return { ok: true, responseLength: content.length };
@@ -247,7 +251,7 @@ async function handleFileOps(supabase: any, body: any): Promise<{ ok: boolean; r
       : 'No files provided.',
   ].join('\n');
 
-  const aiResponse = await callClaude(systemPrompt, userMessage);
+  const aiResponse = await callClaudeForBody(body, systemPrompt, userMessage);
   await postAgentOutput(supabase, roomId, agentName || 'Agent', `📁 **File Analysis**\n\n${aiResponse}`, taskId, { task_type: 'file_ops', file_count: fileList.length });
   return { ok: true, responseLength: aiResponse.length };
 }
@@ -265,7 +269,7 @@ async function handleDbQuery(supabase: any, body: any): Promise<{ ok: boolean; r
         return { ok: false, responseLength: errMsg.length };
       }
     }
-    const aiResponse = await callClaude(
+    const aiResponse = await callClaudeForBody(body,
       'You are a database expert. Review the proposed SQL query for correctness, safety, and performance. Explain what it does and call out any risk areas. Do not execute it.',
       `Original request: ${prompt}\n\nSQL:\n${sql}`,
     );
@@ -275,7 +279,7 @@ async function handleDbQuery(supabase: any, body: any): Promise<{ ok: boolean; r
   }
 
   // No SQL provided — ask Claude to help write the query
-  const aiResponse = await callClaude(
+  const aiResponse = await callClaudeForBody(body,
     'You are a database expert. Help the user write a SQL query based on their request. Provide the query in a ```sql code block and explain what it does.',
     prompt,
   );
@@ -288,7 +292,7 @@ async function handleApiCall(supabase: any, body: any): Promise<{ ok: boolean; r
 
   if (!endpoint) {
     // No endpoint — ask Claude to help construct the API call
-    const aiResponse = await callClaude(
+    const aiResponse = await callClaudeForBody(body,
       'You are an API integration expert. Help the user construct an API call based on their request. Provide the endpoint, method, headers, and body.',
       prompt,
     );
@@ -296,7 +300,7 @@ async function handleApiCall(supabase: any, body: any): Promise<{ ok: boolean; r
     return { ok: true, responseLength: aiResponse.length };
   }
 
-  const aiResponse = await callClaude(
+  const aiResponse = await callClaudeForBody(body,
     'You are an API integration expert. Review the proposed HTTP request, identify security and correctness issues, and provide a safe request example. Do not execute the request.',
     [
       `Original request: ${prompt}`,
@@ -378,6 +382,19 @@ Deno.serve(async (req: Request) => {
     if (!taskRow || taskRow.room_id !== roomId) {
       return errResponse(403, 'task_mismatch', 'Task does not belong to this room.');
     }
+
+    const resolvedAnthropicKey = await resolveUserModelApiKey({
+      supabase,
+      userId: user.id,
+      provider: 'anthropic',
+      envVarName: 'ANTHROPIC_API_KEY',
+    });
+    if (!resolvedAnthropicKey) {
+      return errResponse(400, 'key_missing', byokMissingMessage('anthropic'));
+    }
+    body.anthropicApiKey = resolvedAnthropicKey.apiKey;
+    body.modelUserId = user.id;
+    body.circleIdForTelemetry = room.circle_id;
 
     // Post "working on it" system message
     await postSystemMessage(supabase, roomId, agentName || 'Agent', `🤔 ${agentName || 'Agent'} is working on: ${body.taskName || prompt.slice(0, 60)}...`);

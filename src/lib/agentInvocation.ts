@@ -324,7 +324,7 @@ async function invokeGeminiCli(
 
 // ─── BYO LLM: Invoke via llm-proxy edge function ────────────────────────────
 
-const BYO_LLM_PROVIDERS = ['openai', 'anthropic', 'openrouter', 'groq', 'ollama'];
+const BYO_LLM_PROVIDERS = ['openai', 'anthropic', 'openrouter', 'groq', 'ollama', 'github-models', 'huggingface', 'zai', 'minimax'];
 
 function isBYOLLMAgent(agent: CircleOfficeAgent): boolean {
   return BYO_LLM_PROVIDERS.includes(agent.provider);
@@ -351,6 +351,10 @@ function parseBYOModel(modelKey: string | null | undefined, agentProvider: strin
       openrouter: 'anthropic/claude-sonnet-4-6',
       groq: 'llama-3.3-70b-versatile',
       ollama: 'blackswan',
+      'github-models': 'gpt-4o-mini',
+      huggingface: 'Qwen/Qwen3-32B',
+      zai: 'glm-5',
+      minimax: 'MiniMax-M1',
     };
     return { provider: agentProvider, model: defaults[agentProvider] || 'gpt-4o', thinkingLevel };
   }

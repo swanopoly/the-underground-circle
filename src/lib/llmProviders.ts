@@ -11,7 +11,7 @@ import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './pr
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type LLMProvider = 'openai' | 'anthropic' | 'openrouter' | 'groq' | 'ollama' | 'replicate' | 'github-models' | 'huggingface';
+export type LLMProvider = 'openai' | 'anthropic' | 'openrouter' | 'groq' | 'ollama' | 'replicate' | 'github-models' | 'huggingface' | 'zai' | 'minimax';
 
 export interface ProviderKey {
   id: string;
@@ -109,6 +109,16 @@ export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
     { id: 'meta-llama/Llama-3.1-8B-Instruct',      label: 'Llama 3.1 8B',    provider: 'huggingface', contextWindow: 131072, costTier: 'free' },
     { id: 'mistralai/Mistral-7B-Instruct-v0.3',    label: 'Mistral 7B',       provider: 'huggingface', contextWindow: 32768,  costTier: 'free' },
   ],
+  zai: [
+    { id: 'glm-5',       label: 'GLM-5',       provider: 'zai', contextWindow: 131072, costTier: 'mid' },
+    { id: 'glm-4-plus',  label: 'GLM-4 Plus',  provider: 'zai', contextWindow: 131072, costTier: 'mid' },
+    { id: 'glm-4-air',   label: 'GLM-4 Air',   provider: 'zai', contextWindow: 131072, costTier: 'cheap' },
+    { id: 'glm-4-flash', label: 'GLM-4 Flash', provider: 'zai', contextWindow: 128000, costTier: 'free' },
+  ],
+  minimax: [
+    { id: 'MiniMax-M1',      label: 'MiniMax M1',      provider: 'minimax', contextWindow: 1000000, costTier: 'mid' },
+    { id: 'MiniMax-Text-01', label: 'MiniMax Text 01', provider: 'minimax', contextWindow: 1000000, costTier: 'cheap' },
+  ],
 };
 
 // ─── Provider help text ─────────────────────────────────────────────────────
@@ -122,6 +132,8 @@ export const PROVIDER_HELP: Record<LLMProvider, { url: string; hint: string }> =
   replicate:      { url: 'https://replicate.com/account/api-tokens',     hint: 'Get your API token from Replicate — AI image generation' },
   'github-models': { url: 'https://github.com/settings/tokens',            hint: 'Use a GitHub PAT with models scope — free tier with rate limits' },
   huggingface:     { url: 'https://huggingface.co/settings/tokens',          hint: 'Get your HF token — free tier available, PRO ($9/mo) gets 20x credits' },
+  zai:             { url: 'https://bigmodel.cn/usercenter/apikeys',          hint: 'Get your z.ai / GLM API key for GLM models' },
+  minimax:         { url: 'https://www.minimax.io/platform/user-center/basic-information/interface-key', hint: 'Get your MiniMax API key for MiniMax models' },
 };
 
 // ─── API Key CRUD ───────────────────────────────────────────────────────────

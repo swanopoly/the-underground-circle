@@ -486,7 +486,8 @@ export async function updateAgentAnalytics(
 
 // ─── Sync agent token snapshot to DB ──────────────────────────────────────────
 // Called every 30s from OfficeTab with cumulative session token counts.
-// The DB-side RPC computes deltas to safely increment _total columns.
+// The DB-side RPC tracks the prior snapshot key so bridge restarts cannot
+// reset daily/all-time aggregates back to zero.
 
 export async function syncAgentTokenSnapshot(
   circleId: string,
@@ -497,6 +498,7 @@ export async function syncAgentTokenSnapshot(
   messageCount: number,
   estimatedCost: number,
   model?: string,
+  snapshotKey?: string,
 ): Promise<void> {
   try {
     const { data: auth } = await supabase.auth.getUser();
@@ -512,9 +514,24 @@ export async function syncAgentTokenSnapshot(
       p_message_count:  messageCount,
       p_estimated_cost: estimatedCost,
       p_model:          model || null,
+      p_snapshot_key:   snapshotKey || null,
     });
 
     if (error) {
+      if (snapshotKey && /p_snapshot_key|sync_agent_token_snapshot|function/i.test(error.message || '')) {
+        const { error: legacyError } = await supabase.rpc('sync_agent_token_snapshot', {
+          p_circle_id:      circleId,
+          p_owner_id:       auth.user.id,
+          p_agent_name:     agentName,
+          p_input_tokens:   inputTokens,
+          p_output_tokens:  outputTokens,
+          p_cached_tokens:  cachedTokens,
+          p_message_count:  messageCount,
+          p_estimated_cost: estimatedCost,
+          p_model:          model || null,
+        });
+        if (!legacyError) return;
+      }
       console.warn('[syncAgentTokenSnapshot] RPC failed:', error.message);
     }
   } catch (err) {

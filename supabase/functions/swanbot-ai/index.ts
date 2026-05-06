@@ -2,7 +2,13 @@
 // Gathers circle context, sends to Claude, returns intelligent response
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
-import { createServiceRoleClient, errResponse, getAuthenticatedUser } from "../_shared/edge.ts";
+import {
+  byokMissingMessage,
+  createServiceRoleClient,
+  errResponse,
+  getAuthenticatedUser,
+  resolveUserModelApiKey,
+} from "../_shared/edge.ts";
 import { checkCircleClaudeBudget } from "../_claude/anthropic.ts";
 
 const corsHeaders = {
@@ -667,6 +673,7 @@ interface ClaudeResult {
 }
 
 interface CallClaudeOptions {
+  apiKey?: string;
   modelKey?: string | null;
   conversationMessages?: Array<{ role: string; content: string }>;
   thinkingLevel?: "fast" | "balanced" | "deep";
@@ -1226,6 +1233,13 @@ async function executeToolCall(
   userId: string,
 ): Promise<string> {
   try {
+    const callHfProxyForUser = (
+      task: string,
+      inputs: any,
+      model?: string,
+      options?: Record<string, any>,
+    ) => callHfProxy(task, inputs, model, options, userId);
+
     switch (toolName) {
       case "create_task": {
         const { title, description, priority, status, assigned_agent_id } = toolInput;
@@ -1357,7 +1371,7 @@ async function executeToolCall(
 
       // ── HuggingSwan: HF Tool Execution ──────────────────────────────────
       case "hf_generate_image": {
-        const result = await callHfProxy("text-to-image", toolInput.prompt, toolInput.model);
+        const result = await callHfProxyForUser("text-to-image", toolInput.prompt, toolInput.model);
         if (result.error) return JSON.stringify({ error: result.error });
         await logHfActivity(supabase, circleId, "hf_generate_image", toolInput.prompt, result);
         return JSON.stringify({
@@ -1369,7 +1383,7 @@ async function executeToolCall(
       }
 
       case "hf_summarize": {
-        const result = await callHfProxy("summarization", toolInput.text, undefined, {
+        const result = await callHfProxyForUser("summarization", toolInput.text, undefined, {
           max_length: toolInput.max_length || 150,
         });
         if (result.error) return JSON.stringify({ error: result.error });
@@ -1390,14 +1404,14 @@ async function executeToolCall(
           inputs = { inputs: toolInput.text, parameters: { candidate_labels: toolInput.labels.split(",").map((l: string) => l.trim()) } };
         }
 
-        const result = await callHfProxy(hfTask, inputs, model);
+        const result = await callHfProxyForUser(hfTask, inputs, model);
         if (result.error) return JSON.stringify({ error: result.error });
         await logHfActivity(supabase, circleId, "hf_classify", toolInput.text.slice(0, 100), result.result);
         return JSON.stringify({ success: true, classification: result.result, model: result.model });
       }
 
       case "hf_translate": {
-        const result = await callHfProxy("translation", toolInput.text, undefined, {
+        const result = await callHfProxyForUser("translation", toolInput.text, undefined, {
           src_lang: toolInput.src_lang || "en_XX",
           tgt_lang: toolInput.tgt_lang,
         });
@@ -1408,7 +1422,7 @@ async function executeToolCall(
       }
 
       case "hf_text_to_speech": {
-        const result = await callHfProxy("text-to-speech", toolInput.text);
+        const result = await callHfProxyForUser("text-to-speech", toolInput.text);
         if (result.error) return JSON.stringify({ error: result.error });
         await logHfActivity(supabase, circleId, "hf_text_to_speech", toolInput.text.slice(0, 100), { generated: true });
         return JSON.stringify({
@@ -1421,7 +1435,7 @@ async function executeToolCall(
 
       case "hf_chat": {
         const model = toolInput.model || "Qwen/Qwen2.5-7B-Instruct-1M";
-        const result = await callHfProxy("chat", { messages: [{ role: "user", content: toolInput.message }] }, model);
+        const result = await callHfProxyForUser("chat", { messages: [{ role: "user", content: toolInput.message }] }, model);
         if (result.error) return JSON.stringify({ error: result.error });
         const reply = result.result?.choices?.[0]?.message?.content || JSON.stringify(result.result);
         await logHfActivity(supabase, circleId, "hf_chat", toolInput.message.slice(0, 100), { model, reply: reply.slice(0, 200) });
@@ -1429,7 +1443,7 @@ async function executeToolCall(
       }
 
       case "hf_embeddings": {
-        const result = await callHfProxy("embeddings", toolInput.text);
+        const result = await callHfProxyForUser("embeddings", toolInput.text);
         if (result.error) return JSON.stringify({ error: result.error });
         const dims = Array.isArray(result.result) ? result.result.length : 0;
         return JSON.stringify({ success: true, dimensions: dims, model: result.model, note: `Generated ${dims}-dimensional embedding vector.` });
@@ -1437,7 +1451,7 @@ async function executeToolCall(
 
       case "hf_zero_shot": {
         const labels = toolInput.labels.split(",").map((l: string) => l.trim());
-        const result = await callHfProxy("zero-shot-classification", toolInput.text, "facebook/bart-large-mnli", {
+        const result = await callHfProxyForUser("zero-shot-classification", toolInput.text, "facebook/bart-large-mnli", {
           candidate_labels: labels,
         });
         if (result.error) return JSON.stringify({ error: result.error });
@@ -1446,7 +1460,7 @@ async function executeToolCall(
       }
 
       case "hf_transcribe": {
-        const result = await callHfProxy("speech-to-text", toolInput.audio_url, "openai/whisper-large-v3");
+        const result = await callHfProxyForUser("speech-to-text", toolInput.audio_url, "openai/whisper-large-v3");
         if (result.error) return JSON.stringify({ error: result.error });
         const transcript = result.result?.text || JSON.stringify(result.result);
         await logHfActivity(supabase, circleId, "hf_transcribe", "audio transcription", { transcript: transcript.slice(0, 200) });
@@ -1456,8 +1470,8 @@ async function executeToolCall(
       case "hf_similarity": {
         // Get embeddings for both texts and compute cosine similarity
         const [emb1, emb2] = await Promise.all([
-          callHfProxy("embeddings", toolInput.text1),
-          callHfProxy("embeddings", toolInput.text2),
+          callHfProxyForUser("embeddings", toolInput.text1),
+          callHfProxyForUser("embeddings", toolInput.text2),
         ]);
         if (emb1.error) return JSON.stringify({ error: emb1.error });
         if (emb2.error) return JSON.stringify({ error: emb2.error });
@@ -1482,7 +1496,7 @@ async function executeToolCall(
         const codePrompt = toolInput.language
           ? `Write ${toolInput.language} code: ${toolInput.prompt}`
           : toolInput.prompt;
-        const result = await callHfProxy("chat", {
+        const result = await callHfProxyForUser("chat", {
           messages: [
             { role: "system", content: "You are an expert programmer. Write clean, well-commented code. Return ONLY the code unless asked for explanations." },
             { role: "user", content: codePrompt },
@@ -1499,7 +1513,7 @@ async function executeToolCall(
         const inputs = toolInput.question
           ? { image: toolInput.image_url, question: toolInput.question }
           : toolInput.image_url;
-        const result = await callHfProxy(task, inputs);
+        const result = await callHfProxyForUser(task, inputs);
         if (result.error) return JSON.stringify({ error: result.error });
         const answer = Array.isArray(result.result)
           ? result.result[0]?.generated_text || result.result[0]?.answer || JSON.stringify(result.result[0])
@@ -1509,7 +1523,7 @@ async function executeToolCall(
       }
 
       case "hf_qa": {
-        const result = await callHfProxy("question-answering", {
+        const result = await callHfProxyForUser("question-answering", {
           question: toolInput.question,
           context: toolInput.context,
         });
@@ -1644,7 +1658,7 @@ async function executeToolCall(
         const translated: string[] = [];
 
         for (const chunk of chunks.slice(0, 10)) { // Max 10 chunks
-          const result = await callHfProxy("translation", chunk, undefined, { src_lang: "en_XX", tgt_lang: tgtLang });
+          const result = await callHfProxyForUser("translation", chunk, undefined, { src_lang: "en_XX", tgt_lang: tgtLang });
           if (result.error) {
             translated.push(chunk); // Keep original on error
           } else {
@@ -1673,10 +1687,8 @@ async function callHfProxy(
   inputs: any,
   model?: string,
   options?: Record<string, any>,
+  userId?: string,
 ): Promise<{ result?: any; model?: string; error?: string }> {
-  const hfToken = Deno.env.get("HF_TOKEN");
-  if (!hfToken) return { error: "HF_TOKEN not configured — ask your admin to set it" };
-
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
@@ -1687,7 +1699,7 @@ async function callHfProxy(
         "Content-Type": "application/json",
         "Authorization": `Bearer ${serviceKey}`,
       },
-      body: JSON.stringify({ task, inputs, model, options }),
+      body: JSON.stringify({ task, inputs, model, options, userId }),
     });
 
     if (!resp.ok) {
@@ -1727,9 +1739,9 @@ async function logHfActivity(
 }
 
 async function callClaude(frozenPrompt: string, volatilePrompt: string, userMessage: string, options: CallClaudeOptions = {}): Promise<ClaudeResult> {
-  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+  const apiKey = options.apiKey;
   if (!apiKey) {
-    throw new Error("ANTHROPIC_API_KEY not set");
+    throw new Error(byokMissingMessage("anthropic"));
   }
 
   const { modelKey, conversationMessages, thinkingLevel, maxTokens: requestedMaxTokens, supabase, circleId, userId, enableTools } = options;
@@ -2247,15 +2259,22 @@ Deno.serve(async (req: Request) => {
     } catch { /* fail-open by design */ }
 
     const userId = user.id;
+    const supabase = createServiceRoleClient();
+    const anthropicKey = await resolveUserModelApiKey({
+      supabase,
+      userId,
+      provider: "anthropic",
+      envVarName: "ANTHROPIC_API_KEY",
+    });
+    if (!anthropicKey) {
+      return errResponse(400, "key_missing", byokMissingMessage("anthropic"));
+    }
 
     // ─── Relay mode: client controls tools + system prompt ────────────
     // When the client sends a `tools` array, we act as a transparent relay
     // to the Anthropic API. The client builds the full system prompt and
     // dispatches tool results locally. We just forward and return raw content.
     if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
-      const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
-      if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
-
       const relayModel = (model && CLAUDE_MODEL_MAP[model]) || model || "claude-sonnet-4-6";
       const relayMessages = body.tool_messages && body.tool_messages.length > 0
         ? body.tool_messages
@@ -2287,7 +2306,7 @@ Deno.serve(async (req: Request) => {
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
-          "x-api-key": apiKey,
+          "x-api-key": anthropicKey.apiKey,
           "anthropic-version": "2023-06-01",
           "content-type": "application/json",
         },
@@ -2319,7 +2338,6 @@ Deno.serve(async (req: Request) => {
     }
     // ─── End relay mode ───────────────────────────────────────────────
 
-    const supabase = createServiceRoleClient();
     const { data: membership } = await supabase
       .from("circle_members")
       .select("user_id")
@@ -2820,7 +2838,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
           { role: "system", content: combinedSystemPrompt },
           { role: "user", content: message },
         ],
-      }, hfModelId);
+      }, hfModelId, undefined, userId);
 
       if (!hfResult.error && hfResult.result) {
         aiResponse = hfResult.result?.choices?.[0]?.message?.content || JSON.stringify(hfResult.result);
@@ -2866,6 +2884,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         conversationMessages,
         thinkingLevel: thinkingLevel || "balanced",
         maxTokens,
+        apiKey: anthropicKey.apiKey,
         supabase,
         circleId,
         userId,

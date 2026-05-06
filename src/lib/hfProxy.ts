@@ -21,6 +21,8 @@ export type HfProxyErrorCode =
   | 'token_missing'        // HF_TOKEN env var not set on the edge function
   | 'token_invalid'        // HF rejected the token (401)
   | 'token_rate_limited'   // HF returned 429
+  | 'unauthenticated'      // no user session
+  | 'key_missing'          // user has not saved a Hugging Face key
   | 'tool_not_found'       // toolId provided but RLS denied access
   | 'model_not_found'      // 404 from HF
   | 'bad_request'          // validation failure
@@ -119,9 +121,13 @@ export async function callHfProxy<T = unknown>(req: HfProxyRequest): Promise<HfP
 export function hfErrorGuidance(code: HfProxyErrorCode): string {
   switch (code) {
     case 'token_missing':
-      return 'HuggingFace isn\'t configured. An admin needs to set HF_TOKEN via `npx supabase secrets set HF_TOKEN=hf_xxx` and redeploy hf-proxy.';
+      return 'Add your Hugging Face API key in Office > Customize > API Keys.';
+    case 'key_missing':
+      return 'Add your Hugging Face API key in Office > Customize > API Keys.';
+    case 'unauthenticated':
+      return 'Sign in again before using Hugging Face models.';
     case 'token_invalid':
-      return 'The HuggingFace token was rejected. Generate a new one at huggingface.co/settings/tokens and update HF_TOKEN.';
+      return 'The HuggingFace token was rejected. Generate a new one at huggingface.co/settings/tokens and update your saved Hugging Face key.';
     case 'token_rate_limited':
       return 'HuggingFace rate limit hit — wait a minute and try again, or upgrade your HF account for higher quotas.';
     case 'tool_not_found':

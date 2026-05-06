@@ -10,6 +10,17 @@ import { focusRoomWorkspaceFile, primeRoomWorkspaceLaunch } from './roomWorkspac
 import { detectClaudeCodeBridge, execBridgeCommand } from './claudeCodeDetector';
 import { describeComputerUsePlan, toBrowserPlanCardData, type BrowserPlanCardData } from './computerUse';
 import { getPlugin } from './pluginRegistry';
+import {
+  buildVaultAgentRunbook,
+  findVaultAutomationEntries,
+  formatVaultEntryAutomationSummary,
+  formatVaultGrantList,
+  grantVaultAutomationAccess,
+  resolveVaultCredentialForTask,
+  revokeVaultAutomationAccess,
+  selectVaultAutomationEntry,
+  type VaultGranteeType,
+} from './vaultAgentAccess';
 
 export type OpenSwanToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
 export type OpenSwanRuntimeToolName =
@@ -35,6 +46,13 @@ export type OpenSwanRuntimeToolName =
   | 'wp.create_slide'
   | 'wp.list_posts'
   | 'credentials.get'
+  | 'vault.list'
+  | 'vault.find'
+  | 'vault.grants'
+  | 'vault.grant'
+  | 'vault.revoke'
+  | 'vault.runbook'
+  | 'vault.resolve_for_task'
   | 'tasks.comment'
   | 'tasks.add_artifact'
   | 'goals.list'
@@ -126,7 +144,8 @@ export type OpenSwanToolPolicyFamily =
   | 'coordination'
   | 'browser'
   | 'workspace'
-  | 'approval';
+  | 'approval'
+  | 'vault';
 
 export type OpenSwanToolApprovalMode = 'auto' | 'ask';
 
@@ -204,6 +223,28 @@ type ScheduleActionArgs = {
   recurrence?: string;
 };
 
+type VaultCredentialQueryArgs = {
+  credentialId?: string;
+  query?: string;
+  platform?: string;
+  action?: string;
+};
+
+type VaultGrantArgs = VaultCredentialQueryArgs & {
+  grantee: string;
+  granteeType?: VaultGranteeType;
+  actions?: string[];
+  expiresAt?: string;
+  note?: string;
+};
+
+type VaultResolveTaskArgs = {
+  task: string;
+  platform?: string;
+  siteUrl?: string;
+  action?: string;
+};
+
 export type OpenSwanToolExecutionArgs = {
   'workspace.create_room': CreateRoomWorkspaceArgs;
   'workspace.apply_artifacts': ApplyArtifactsArgs;
@@ -256,6 +297,13 @@ export type OpenSwanToolExecutionArgs = {
   'approvals.list': Record<string, never>;
   'approvals.request': { runId: string; approvalKind: string; title: string; description?: string; payload?: Record<string, unknown>; timeoutSeconds?: number };
   'approvals.resolve': { approvalId: string; status: 'approved' | 'rejected' };
+  'vault.list': { platform?: string; query?: string; action?: string };
+  'vault.find': VaultCredentialQueryArgs;
+  'vault.grants': VaultCredentialQueryArgs;
+  'vault.grant': VaultGrantArgs;
+  'vault.revoke': VaultCredentialQueryArgs & { grantee: string; granteeType?: VaultGranteeType };
+  'vault.runbook': VaultCredentialQueryArgs & { task?: string; grantee?: string; granteeType?: VaultGranteeType };
+  'vault.resolve_for_task': VaultResolveTaskArgs;
   'desktop.launch_app':      { appName: string };
   'desktop.focus_app':       { appName: string };
   'desktop.type_text':       { text: string };
@@ -350,6 +398,13 @@ export type OpenSwanToolExecutionResultMap = {
   'approvals.list': { ok: boolean; resultsText: string };
   'approvals.request': { ok: boolean; resultsText: string };
   'approvals.resolve': { ok: boolean; resultsText: string };
+  'vault.list': { ok: boolean; resultsText: string };
+  'vault.find': { ok: boolean; resultsText: string };
+  'vault.grants': { ok: boolean; resultsText: string };
+  'vault.grant': { ok: boolean; resultsText: string };
+  'vault.revoke': { ok: boolean; resultsText: string };
+  'vault.runbook': { ok: boolean; resultsText: string };
+  'vault.resolve_for_task': { ok: boolean; resultsText: string };
   'desktop.launch_app':        { ok: boolean; resultsText: string };
   'desktop.focus_app':         { ok: boolean; resultsText: string };
   'desktop.type_text':         { ok: boolean; resultsText: string };
@@ -396,7 +451,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'browser.plan_task',
     label: 'Plan Browser Task',
     surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
-    description: 'Plan a browser automation task, choose the right backend, and explain the required approval path.',
+    description: 'Plan browser automation with Browserbase support for data retrieval, Stagehand-style semantic actions, form submissions, saved-login guardrails, output shape, and approval gates.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -831,6 +886,98 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     surfaces: ['main_chat', 'room_chat', 'office'],
     description: 'Fetch credentials from 1Password. Returns field values for the named item. Never exposes credentials to the user.',
     inputSchema: { type: 'object', properties: { item: { type: 'string', description: '1Password item name' }, vault: { type: 'string' }, fields: { type: 'array', items: { type: 'string' } } }, required: ['item'] },
+  },
+  // ── Circle Vault Automation Access ───────────────────────────────────────
+  {
+    name: 'vault.list',
+    label: 'List Vault Credentials',
+    surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+    description: 'List saved circle vault credentials as redacted automation summaries. Does not return secrets.',
+    inputSchema: { type: 'object', properties: { platform: { type: 'string' }, query: { type: 'string' }, action: { type: 'string', description: 'Filter to credentials allowing this action, e.g. login, post, edit.' } } },
+  },
+  {
+    name: 'vault.find',
+    label: 'Find Vault Credential',
+    surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+    description: 'Find a saved vault credential by id, platform, label, username, URL, tag, or grantee. Does not return secrets.',
+    inputSchema: { type: 'object', properties: { credentialId: { type: 'string' }, query: { type: 'string' }, platform: { type: 'string' }, action: { type: 'string' } } },
+  },
+  {
+    name: 'vault.grants',
+    label: 'List Vault Grants',
+    surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+    description: 'Show which agents, chat surfaces, members, or OpenSwan runtimes have scoped access to matching saved credentials.',
+    inputSchema: { type: 'object', properties: { credentialId: { type: 'string' }, query: { type: 'string' }, platform: { type: 'string' } } },
+  },
+  {
+    name: 'vault.grant',
+    label: 'Grant Vault Access',
+    surfaces: ['main_chat', 'room_chat', 'office'],
+    description: 'Grant scoped automation access to a saved credential. Secrets still stay in the vault; agents receive credential IDs and allowed actions only. Requires approval.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        credentialId: { type: 'string' },
+        query: { type: 'string', description: 'Credential search query when credentialId is not known.' },
+        platform: { type: 'string' },
+        grantee: { type: 'string', description: 'Agent, member, chat, or runtime name.' },
+        granteeType: { type: 'string', enum: ['agent', 'runtime', 'chat', 'member', 'openswan'] },
+        actions: { type: 'array', items: { type: 'string' }, description: 'Scoped actions to grant. Must already be allowed by the credential policy.' },
+        expiresAt: { type: 'string', description: 'Optional ISO date/time when the grant expires.' },
+        note: { type: 'string' },
+      },
+      required: ['grantee'],
+    },
+  },
+  {
+    name: 'vault.revoke',
+    label: 'Revoke Vault Access',
+    surfaces: ['main_chat', 'room_chat', 'office'],
+    description: 'Remove a scoped automation grant from a saved vault credential. Requires approval.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        credentialId: { type: 'string' },
+        query: { type: 'string' },
+        platform: { type: 'string' },
+        grantee: { type: 'string' },
+        granteeType: { type: 'string', enum: ['agent', 'runtime', 'chat', 'member', 'openswan'] },
+      },
+      required: ['grantee'],
+    },
+  },
+  {
+    name: 'vault.runbook',
+    label: 'Build Vault Runbook',
+    surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+    description: 'Build safe agent instructions for using a saved login through Computer Use. Includes credential id, allowed actions, origins, and fill_saved_login guidance, but never returns the secret.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        credentialId: { type: 'string' },
+        query: { type: 'string' },
+        platform: { type: 'string' },
+        task: { type: 'string' },
+        grantee: { type: 'string' },
+        granteeType: { type: 'string', enum: ['agent', 'runtime', 'chat', 'member', 'openswan'] },
+      },
+    },
+  },
+  {
+    name: 'vault.resolve_for_task',
+    label: 'Resolve Vault For Task',
+    surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+    description: 'Find the best saved credential for a login-dependent website automation task and return a safe runbook. Does not reveal secrets.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'Website automation task, e.g. log into WordPress and draft a post.' },
+        platform: { type: 'string' },
+        siteUrl: { type: 'string' },
+        action: { type: 'string', description: 'Requested action, e.g. login, post, edit.' },
+      },
+      required: ['task'],
+    },
   },
   // ── Integrations + Office ─────────────────────────────────────────────────
   {
@@ -1357,6 +1504,20 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     };
   }
 
+  if (tool.startsWith('vault.')) {
+    const mutates = tool === 'vault.grant' || tool === 'vault.revoke';
+    return {
+      family: 'vault',
+      approvalMode: mutates ? 'ask' : 'auto',
+      mutatesState: mutates,
+      externalSideEffect: false,
+      approvalKind: mutates ? 'privileged_action' : undefined,
+      summary: mutates
+        ? 'Changes scoped credential access for agents or runtimes without revealing secrets.'
+        : 'Reads redacted vault automation metadata, grants, or runbooks without revealing secrets.',
+    };
+  }
+
   if (tool.startsWith('desktop.')) {
     // Read-only tools (list apps, screen size, screenshot, wait_for_app)
     // auto-approve — they observe state, they don't change it. Every
@@ -1541,6 +1702,19 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'memory.forget': ['execute', 'support'],
   // Automation toggle — only when user is actively executing changes.
   'automations.toggle_enabled': ['execute'],
+  // Vault grant mutations are sensitive; read-only vault tools stay
+  // available everywhere, but changing access needs explicit action intent.
+  'vault.grant': ['execute', 'plan'],
+  'vault.revoke': ['execute', 'plan'],
+  // Desktop write/control actions only belong in execute mode. Read-only
+  // desktop tools are intentionally left mode-agnostic for diagnostics.
+  'desktop.launch_app': ['execute'],
+  'desktop.focus_app':  ['execute'],
+  'desktop.type_text':  ['execute'],
+  'desktop.press_keys': ['execute'],
+  'desktop.open_url':   ['execute'],
+  'desktop.open_path':  ['execute'],
+  'desktop.click_at':   ['execute'],
 };
 
 /** Returns the mode list for a tool (inline def wins over the central map). */
@@ -1619,6 +1793,24 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'approvals.list',
   'approvals.request',
   'approvals.resolve',
+  'vault.list',
+  'vault.find',
+  'vault.grants',
+  'vault.grant',
+  'vault.revoke',
+  'vault.runbook',
+  'vault.resolve_for_task',
+  'desktop.launch_app',
+  'desktop.focus_app',
+  'desktop.type_text',
+  'desktop.press_keys',
+  'desktop.list_running_apps',
+  'desktop.wait_for_app',
+  'desktop.screenshot',
+  'desktop.open_url',
+  'desktop.open_path',
+  'desktop.click_at',
+  'desktop.screen_size',
   // App-edit tools (Phase 1-4) — let BlackSwan modify anything the user can edit
   'circle.update_settings',
   'circle.update_budget_caps',
@@ -1907,6 +2099,13 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'approvals.list':
     case 'approvals.request':
     case 'approvals.resolve':
+    case 'vault.list':
+    case 'vault.find':
+    case 'vault.grants':
+    case 'vault.grant':
+    case 'vault.revoke':
+    case 'vault.runbook':
+    case 'vault.resolve_for_task':
     case 'desktop.launch_app':
     case 'desktop.focus_app':
     case 'desktop.type_text':
@@ -3165,6 +3364,120 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         if (posts.length === 0) return { ok: true, resultsText: 'No items found.' } as any;
         const lines = posts.map((p: any) => `- [${p.status}] ${p.title?.rendered || 'Untitled'} (ID: ${p.id})`);
         return { ok: true, resultsText: lines.join('\n') } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    // ── Vault Automation Access ────────────────────────────────────────
+    case 'vault.list': {
+      try {
+        const a = args as any;
+        const result = await findVaultAutomationEntries(context.circleId, {
+          query: typeof a.query === 'string' ? a.query : undefined,
+          platform: typeof a.platform === 'string' ? a.platform : undefined,
+          action: typeof a.action === 'string' ? a.action : undefined,
+        });
+        if (result.error) return { ok: false, resultsText: result.vaultMissing ? 'Vault is not deployed yet.' : result.error } as any;
+        if (result.entries.length === 0) return { ok: true, resultsText: 'No matching vault credentials found.' } as any;
+        const lines = result.entries.slice(0, 25).map(formatVaultEntryAutomationSummary);
+        if (result.entries.length > 25) lines.push(`...and ${result.entries.length - 25} more. Narrow with query or platform.`);
+        return { ok: true, resultsText: lines.join('\n\n') } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'vault.find': {
+      try {
+        const a = args as any;
+        const selection = await selectVaultAutomationEntry(context.circleId, {
+          credentialId: typeof a.credentialId === 'string' ? a.credentialId : undefined,
+          query: typeof a.query === 'string' ? a.query : undefined,
+          platform: typeof a.platform === 'string' ? a.platform : undefined,
+          action: typeof a.action === 'string' ? a.action : undefined,
+        });
+        if (!selection.ok) return { ok: false, resultsText: selection.error } as any;
+        return { ok: true, resultsText: formatVaultEntryAutomationSummary(selection.entry) } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'vault.grants': {
+      try {
+        const a = args as any;
+        const hasSelector = Boolean(a.credentialId || a.query || a.platform);
+        if (hasSelector) {
+          const selection = await selectVaultAutomationEntry(context.circleId, {
+            credentialId: typeof a.credentialId === 'string' ? a.credentialId : undefined,
+            query: typeof a.query === 'string' ? a.query : undefined,
+            platform: typeof a.platform === 'string' ? a.platform : undefined,
+          });
+          if (!selection.ok) return { ok: false, resultsText: selection.error } as any;
+          return { ok: true, resultsText: formatVaultGrantList(selection.entry) } as any;
+        }
+        const result = await findVaultAutomationEntries(context.circleId);
+        if (result.error) return { ok: false, resultsText: result.vaultMissing ? 'Vault is not deployed yet.' : result.error } as any;
+        const lines = result.entries
+          .map(formatVaultGrantList)
+          .filter((line) => line.includes('->'));
+        return { ok: true, resultsText: lines.length ? lines.join('\n\n') : 'No vault automation grants found.' } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'vault.grant': {
+      try {
+        const a = args as any;
+        const result = await grantVaultAutomationAccess(context.circleId, {
+          credentialId: typeof a.credentialId === 'string' ? a.credentialId : undefined,
+          query: typeof a.query === 'string' ? a.query : undefined,
+          platform: typeof a.platform === 'string' ? a.platform : undefined,
+          action: typeof a.action === 'string' ? a.action : undefined,
+          grantee: String(a.grantee || ''),
+          granteeType: a.granteeType,
+          actions: Array.isArray(a.actions) ? a.actions.map(String) : undefined,
+          expiresAt: typeof a.expiresAt === 'string' ? a.expiresAt : undefined,
+          note: typeof a.note === 'string' ? a.note : undefined,
+          createdBy: context.userId,
+        });
+        return { ok: result.ok, resultsText: result.resultsText } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'vault.revoke': {
+      try {
+        const a = args as any;
+        const result = await revokeVaultAutomationAccess(context.circleId, {
+          credentialId: typeof a.credentialId === 'string' ? a.credentialId : undefined,
+          query: typeof a.query === 'string' ? a.query : undefined,
+          platform: typeof a.platform === 'string' ? a.platform : undefined,
+          action: typeof a.action === 'string' ? a.action : undefined,
+          grantee: String(a.grantee || ''),
+          granteeType: a.granteeType,
+        });
+        return { ok: result.ok, resultsText: result.resultsText } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'vault.runbook': {
+      try {
+        const a = args as any;
+        const selection = await selectVaultAutomationEntry(context.circleId, {
+          credentialId: typeof a.credentialId === 'string' ? a.credentialId : undefined,
+          query: typeof a.query === 'string' ? a.query : undefined,
+          platform: typeof a.platform === 'string' ? a.platform : undefined,
+          action: typeof a.action === 'string' ? a.action : 'login',
+        });
+        if (!selection.ok) return { ok: false, resultsText: selection.error } as any;
+        return {
+          ok: true,
+          resultsText: buildVaultAgentRunbook(selection.entry, {
+            task: typeof a.task === 'string' ? a.task : undefined,
+            grantee: typeof a.grantee === 'string' ? a.grantee : 'OpenSwan',
+            granteeType: a.granteeType || 'openswan',
+          }),
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'vault.resolve_for_task': {
+      try {
+        const a = args as any;
+        const result = await resolveVaultCredentialForTask(context.circleId, {
+          task: String(a.task || ''),
+          platform: typeof a.platform === 'string' ? a.platform : undefined,
+          siteUrl: typeof a.siteUrl === 'string' ? a.siteUrl : undefined,
+          action: typeof a.action === 'string' ? a.action : undefined,
+        });
+        return { ok: result.ok, resultsText: result.resultsText } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'credentials.get': {

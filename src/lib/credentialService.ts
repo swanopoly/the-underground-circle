@@ -12,7 +12,13 @@
  *   4. Start the bridge: node scripts/claude-bridge.js
  */
 
-const BRIDGE_URL = 'http://localhost:7778';
+import { getBridgeUrl } from './bridgeEnvironment';
+
+const BRIDGE_PORT = 7778;
+
+function getCredentialBridgeUrl(): string | null {
+  return getBridgeUrl(BRIDGE_PORT);
+}
 
 export interface CredentialFields {
   [key: string]: string;
@@ -23,8 +29,12 @@ export async function getCredentials(opts: {
   vault?: string;
   fields?: string[];
 }): Promise<{ ok: boolean; fields: CredentialFields; error?: string }> {
+  const bridgeUrl = getCredentialBridgeUrl();
+  if (!bridgeUrl) {
+    return { ok: false, fields: {}, error: 'Credential bridge unavailable in this environment.' };
+  }
   try {
-    const res = await fetch(`${BRIDGE_URL}/secrets`, {
+    const res = await fetch(`${bridgeUrl}/secrets`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(opts),
@@ -45,8 +55,10 @@ export async function getCredentials(opts: {
 }
 
 export async function readSecret(uri: string): Promise<string | null> {
+  const bridgeUrl = getCredentialBridgeUrl();
+  if (!bridgeUrl) return null;
   try {
-    const res = await fetch(`${BRIDGE_URL}/secrets`, {
+    const res = await fetch(`${bridgeUrl}/secrets`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ uri }),
@@ -60,8 +72,10 @@ export async function readSecret(uri: string): Promise<string | null> {
 }
 
 export async function isOnePasswordAvailable(): Promise<boolean> {
+  const bridgeUrl = getCredentialBridgeUrl();
+  if (!bridgeUrl) return false;
   try {
-    const res = await fetch(`${BRIDGE_URL}/secrets`, {
+    const res = await fetch(`${bridgeUrl}/secrets`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ item: '__health_check__' }),

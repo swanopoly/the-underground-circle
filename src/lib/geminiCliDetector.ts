@@ -16,8 +16,13 @@ import { supabase } from './supabase';
 import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
 
 import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+import { getBridgeUrl } from './bridgeEnvironment';
 
-const BRIDGE_URL = 'http://localhost:7780';
+const BRIDGE_PORT = 7780;
+
+function getGeminiBridgeUrl(): string | null {
+  return getBridgeUrl(BRIDGE_PORT);
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -44,12 +49,14 @@ const GEMINI_COLORS = [
 // ── Detection ────────────────────────────────────────────────────────────────
 
 export async function detectGeminiCliBridge(): Promise<boolean> {
+  const bridgeUrl = getGeminiBridgeUrl();
+  if (!bridgeUrl) return false;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
     // Check sessions endpoint — only detect if actual sessions exist
     const token = await ensureBridgeToken();
-    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
     clearTimeout(timeout);
     if (!res.ok) return false;
     const data = await res.json();
@@ -61,11 +68,13 @@ export async function detectGeminiCliBridge(): Promise<boolean> {
 }
 
 export async function fetchGeminiCliSessions(): Promise<GeminiCliSession[]> {
+  const bridgeUrl = getGeminiBridgeUrl();
+  if (!bridgeUrl) return [];
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     const token = await ensureBridgeToken();
-    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
     clearTimeout(timeout);
     if (!res.ok) return [];
     const data = await res.json();
@@ -109,11 +118,13 @@ export async function execGeminiCliCommand(
   command: string,
   sessionId?: string,
 ): Promise<{ ok: boolean; response?: string; error?: string }> {
+  const bridgeUrl = getGeminiBridgeUrl();
+  if (!bridgeUrl) return { ok: false, error: 'Bridge unavailable in this environment' };
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 35000);
     const token = await ensureBridgeToken();
-    const res = await fetch(`${BRIDGE_URL}/send`, {
+    const res = await fetch(`${bridgeUrl}/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
       body: JSON.stringify({ command, sessionId }),
@@ -194,7 +205,7 @@ export async function publishGeminiCliAgent(
     name: GEMINI_CLI_AGENT_NAME,
     color: display?.color || '#4285f4',
     toolIcon: display?.icon || '♊',
-    gatewayUrl: BRIDGE_URL,
+    gatewayUrl: getGeminiBridgeUrl() || 'http://localhost:7780',
     isPublic: false,
   });
 

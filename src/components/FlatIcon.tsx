@@ -23,6 +23,7 @@ const ICON_CATALOG: Record<string, number> = {
   backpack:      2542524,
   feed:          10931508,
   challenges:    12281613,
+  vault:         2592258,
   members:       3839469,
   analytics:     646249,
   integrations:  4013278,

@@ -19,6 +19,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.95.3';
+import { byokMissingMessage, getAuthenticatedUser, resolveUserModelApiKey } from '../_shared/edge.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -29,6 +30,8 @@ type ErrorCode =
   | 'token_missing'
   | 'token_invalid'
   | 'token_rate_limited'
+  | 'unauthenticated'
+  | 'key_missing'
   | 'tool_not_found'
   | 'model_not_found'
   | 'bad_request'
@@ -50,7 +53,7 @@ async function hfApiErrorResponse(response: Response): Promise<Response> {
   const body = await response.text();
   if (response.status === 401) {
     return errResponse(401, 'token_invalid',
-      'HuggingFace rejected the API token. The HF_TOKEN env var is set but invalid or revoked. Generate a new token at https://huggingface.co/settings/tokens.');
+      'HuggingFace rejected the API token. Generate a new token at https://huggingface.co/settings/tokens and update your saved Hugging Face key.');
   }
   if (response.status === 429) {
     return errResponse(429, 'token_rate_limited',
@@ -88,16 +91,6 @@ Deno.serve(async (req: Request) => {
     return new Response('ok', { headers: corsHeaders });
   }
 
-  // Fail fast on missing token with a clear, actionable error code so the
-  // client can render "HuggingFace not configured — set HF_TOKEN" instead of
-  // a generic "command failed". This was the #1 silent failure mode.
-  const hfToken = Deno.env.get('HF_TOKEN');
-  if (!hfToken) {
-    console.error('[hf-proxy] HF_TOKEN env var not set');
-    return errResponse(503, 'token_missing',
-      'HuggingFace is not configured on the server. Set HF_TOKEN via `npx supabase secrets set HF_TOKEN=hf_xxx` and redeploy hf-proxy.');
-  }
-
   try {
     const body = await req.json();
     const { task, model, inputs, toolId, options } = body;
@@ -106,10 +99,33 @@ Deno.serve(async (req: Request) => {
       return errResponse(400, 'bad_request', 'Missing `inputs` in request body.');
     }
 
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+    const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+    const authHeader = req.headers.get('Authorization') || req.headers.get('authorization') || '';
+    const token = authHeader.replace(/^Bearer\s+/i, '');
+    const isServiceRole = Boolean(serviceKey && token === serviceKey);
+    const authUser = isServiceRole ? null : await getAuthenticatedUser(req);
+    const userId = isServiceRole ? (typeof body.userId === 'string' ? body.userId : null) : authUser?.id;
+    if (!userId) {
+      return errResponse(401, 'unauthenticated', 'Valid user JWT required, or service role must pass body.userId.');
+    }
+
+    const serviceClient = createClient(supabaseUrl, serviceKey);
+    const hfKey = await resolveUserModelApiKey({
+      supabase: serviceClient,
+      userId,
+      provider: 'huggingface',
+      envVarName: 'HF_TOKEN',
+    });
+    if (!hfKey) {
+      return errResponse(400, 'key_missing', byokMissingMessage('huggingface'));
+    }
+    const hfToken = hfKey.apiKey;
+
     // If toolId is provided, verify access via RLS
     if (toolId) {
       const supabaseClient = createClient(
-        Deno.env.get('SUPABASE_URL') ?? '',
+        supabaseUrl,
         Deno.env.get('SUPABASE_ANON_KEY') ?? '',
         { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
       );
@@ -428,7 +444,7 @@ Deno.serve(async (req: Request) => {
     // structured codes so the client UI can show specific guidance.
     if (/\b401\b/.test(message)) {
       return errResponse(401, 'token_invalid',
-        'HuggingFace rejected the API token. Generate a new one at https://huggingface.co/settings/tokens and update HF_TOKEN.');
+        'HuggingFace rejected the API token. Generate a new one at https://huggingface.co/settings/tokens and update your saved Hugging Face key.');
     }
     if (/\b429\b/.test(message)) {
       return errResponse(429, 'token_rate_limited',

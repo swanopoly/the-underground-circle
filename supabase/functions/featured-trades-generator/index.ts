@@ -3,6 +3,7 @@
 // Generates 3-5 daily trade ideas with real market data
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
+import { getAuthenticatedUser, resolveUserModelApiKey } from "../_shared/edge.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -74,10 +75,29 @@ Deno.serve(async (req) => {
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const geminiKey = Deno.env.get("GEMINI_API_KEY") || Deno.env.get("EXPO_PUBLIC_GEMINI_API_KEY") || "";
-    const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY") || "";
-
     const supabase = createClient(supabaseUrl, supabaseKey);
+    const authHeader = req.headers.get("Authorization") || req.headers.get("authorization") || "";
+    const token = authHeader.replace(/^Bearer\s+/i, "");
+    const isServiceRole = Boolean(token && token === supabaseKey);
+    const authUser = isServiceRole ? null : await getAuthenticatedUser(req);
+    if (!isServiceRole && authUser?.id !== userId) {
+      return new Response(JSON.stringify({ error: "Valid JWT required for requested userId" }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    const geminiKey = (await resolveUserModelApiKey({
+      supabase,
+      userId,
+      provider: "google_ai",
+      envVarName: "GEMINI_API_KEY",
+    }))?.apiKey || "";
+    const anthropicKey = (await resolveUserModelApiKey({
+      supabase,
+      userId,
+      provider: "anthropic",
+      envVarName: "ANTHROPIC_API_KEY",
+    }))?.apiKey || "";
 
     // ── Step 1: Load past learnings ──────────────────────────────────────────
     const { data: learnings } = await supabase

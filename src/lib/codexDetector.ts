@@ -11,8 +11,13 @@ import { supabase } from './supabase';
 import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
 
 import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+import { getBridgeUrl } from './bridgeEnvironment';
 
-const BRIDGE_URL = 'http://localhost:7779';
+const BRIDGE_PORT = 7779;
+
+function getCodexBridgeUrl(): string | null {
+  return getBridgeUrl(BRIDGE_PORT);
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -48,12 +53,14 @@ function codexTaskLabel(status: AgentStatus, session: CodexSession): string {
 // ── Detection ────────────────────────────────────────────────────────────────
 
 export async function detectCodexBridge(): Promise<boolean> {
+  const bridgeUrl = getCodexBridgeUrl();
+  if (!bridgeUrl) return false;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
     // Check sessions endpoint, not just health — only detect if actual sessions exist
     const token = await ensureBridgeToken();
-    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
     clearTimeout(timeout);
     if (!res.ok) return false;
     const data = await res.json();
@@ -65,11 +72,13 @@ export async function detectCodexBridge(): Promise<boolean> {
 }
 
 export async function fetchCodexSessions(): Promise<CodexSession[]> {
+  const bridgeUrl = getCodexBridgeUrl();
+  if (!bridgeUrl) return [];
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     const token = await ensureBridgeToken();
-    const res = await fetch(`${BRIDGE_URL}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
+    const res = await fetch(`${bridgeUrl}/sessions`, { signal: controller.signal, headers: bridgeAuthHeaders(token) });
     clearTimeout(timeout);
     if (!res.ok) return [];
     const data = await res.json();
@@ -197,7 +206,7 @@ export async function publishCodexAgent(
         circleId, provider: 'codex', name,
         color: CODEX_COLORS[i % CODEX_COLORS.length],
         toolIcon: display?.icon || '🧠',
-        gatewayUrl: BRIDGE_URL, isPublic: false,
+        gatewayUrl: getCodexBridgeUrl() || 'http://localhost:7779', isPublic: false,
       });
       await supabase.from('circle_office_agents')
         .update({
@@ -217,7 +226,7 @@ export async function publishCodexAgent(
     name: CODEX_AGENT_NAME,
     color: display?.color || '#10a37f',
     toolIcon: display?.icon || '🧠',
-    gatewayUrl: BRIDGE_URL, isPublic: false,
+    gatewayUrl: getCodexBridgeUrl() || 'http://localhost:7779', isPublic: false,
   });
 
   if (result.error) {

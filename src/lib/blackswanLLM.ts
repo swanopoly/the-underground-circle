@@ -10,6 +10,8 @@
  *  - Intelligent fallback: local BlackSwan → direct Ollama → cloud
  */
 
+import { getBridgeUrl } from './bridgeEnvironment';
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface BlackSwanMessage {
@@ -53,13 +55,17 @@ export interface CircleContext {
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
-const BRIDGE_URL   = 'http://localhost:7779';
+const BRIDGE_PORT  = 7779;
 const OLLAMA_URL   = 'http://localhost:11434';
 const DEFAULT_TIMEOUT  = 30_000;
 const HEALTH_TIMEOUT   = 2_000;
 const HEALTH_CACHE_TTL = 30_000;
 
 let healthCache: { status: boolean; checkedAt: number } | null = null;
+
+function getBlackSwanBridgeUrl(): string | null {
+  return getBridgeUrl(BRIDGE_PORT);
+}
 
 // ─── Health ─────────────────────────────────────────────────────────────────
 
@@ -68,10 +74,15 @@ export async function isBlackSwanAvailable(): Promise<boolean> {
   if (healthCache && now - healthCache.checkedAt < HEALTH_CACHE_TTL) {
     return healthCache.status;
   }
+  const bridgeUrl = getBlackSwanBridgeUrl();
+  if (!bridgeUrl) {
+    healthCache = { status: false, checkedAt: now };
+    return false;
+  }
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), HEALTH_TIMEOUT);
-    const res = await fetch(`${BRIDGE_URL}/health`, { signal: ctrl.signal });
+    const res = await fetch(`${bridgeUrl}/health`, { signal: ctrl.signal });
     clearTimeout(t);
     const data: BlackSwanHealth = await res.json();
     const ok = res.ok && data.status === 'ok';
@@ -151,9 +162,14 @@ export async function callBlackSwan(
   const start = Date.now();
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  const bridgeUrl = getBlackSwanBridgeUrl();
+  if (!bridgeUrl) {
+    clearTimeout(t);
+    throw new Error('BlackSwan bridge unavailable in this environment');
+  }
 
   try {
-    const res = await fetch(`${BRIDGE_URL}/v1/chat/completions`, {
+    const res = await fetch(`${bridgeUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -230,9 +246,14 @@ export async function callBlackSwanStream(
     : ctrl.signal;
 
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  const bridgeUrl = getBlackSwanBridgeUrl();
+  if (!bridgeUrl) {
+    clearTimeout(t);
+    throw new Error('BlackSwan bridge unavailable in this environment');
+  }
 
   try {
-    const res = await fetch(`${BRIDGE_URL}/v1/chat/completions`, {
+    const res = await fetch(`${bridgeUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

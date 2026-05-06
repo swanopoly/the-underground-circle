@@ -5,7 +5,7 @@ import { readLocalSecret, writeLocalSecret } from './localSecrets';
 
 export type ProviderType =
   | 'openswan' | 'claude-code' | 'generic-agent' | 'codex' | 'gemini' | 'cursor' | 'blackswan-local'
-  | 'openai' | 'anthropic' | 'openrouter' | 'groq' | 'ollama' | 'replicate' | 'figma'
+  | 'openai' | 'anthropic' | 'openrouter' | 'groq' | 'ollama' | 'replicate' | 'figma' | 'zai' | 'minimax'
   | 'github-models' | 'huggingface';
 
 export interface AgentConnection {
@@ -42,6 +42,8 @@ export const PROVIDER_META: Record<ProviderType, { icon: string; label: string; 
   'gemini':         { icon: '♊', label: 'Google Gemini',   color: '#4285f4', defaultEndpoint: 'http://localhost:7780' },
   // ── Creative tools ──
   'replicate':      { icon: '🎨', label: 'Replicate',      color: '#ec4899', defaultEndpoint: 'https://api.replicate.com/v1',   isLLM: true },
+  'zai':            { icon: '🧩', label: 'z.ai',           color: '#22d3ee', defaultEndpoint: 'https://api.z.ai/api/paas/v4',   isLLM: true },
+  'minimax':        { icon: '🧬', label: 'MiniMax',        color: '#fb7185', defaultEndpoint: 'https://api.minimax.io/v1',      isLLM: true },
   'figma':          { icon: '🎨', label: 'Figma',          color: '#a259ff', defaultEndpoint: 'https://api.figma.com' },
   'github-models':  { icon: '🐙', label: 'GitHub Models',  color: '#6e40c9', defaultEndpoint: 'https://models.inference.ai.azure.com', isLLM: true },
   'huggingface':    { icon: '🤗', label: 'Hugging Face',   color: '#ffbd45', defaultEndpoint: 'https://router.huggingface.co/v1',    isLLM: true },

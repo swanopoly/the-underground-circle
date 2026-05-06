@@ -202,7 +202,7 @@ async function refreshTokenIfNeeded(
   // Re-store with new tokens — we need to call the RPC as the user
   // Since we can't impersonate, store directly using service role
   const passphrase = "tuc-default-enc-key-change-me"; // fallback
-  await serviceClient.rpc("store_user_api_key_service", {
+  const { error: storeError } = await serviceClient.rpc("store_user_api_key_service", {
     p_user_id: userId,
     p_provider: provider,
     p_api_key: newAccessToken,
@@ -212,10 +212,10 @@ async function refreshTokenIfNeeded(
       expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
       email: tokens.email,
     }),
-  }).catch(() => {
-    // Fallback: direct update
-    // Just update the raw row
   });
+  if (storeError) {
+    console.warn("[email-calendar-oauth] token refresh store failed:", storeError.message);
+  }
 
   return newAccessToken;
 }

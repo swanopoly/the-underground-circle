@@ -46,7 +46,9 @@ function noCreds(): WpCommandResult {
 
 // ── Featured image generation ───────────────────────────────────────────────
 
-const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY || '';
+const GEMINI_API_KEY = process.env.EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS === 'true'
+  ? process.env.EXPO_PUBLIC_GEMINI_API_KEY || ''
+  : '';
 
 async function generateFeaturedImage(title: string): Promise<{ blob: Blob; fileName: string } | null> {
   if (!GEMINI_API_KEY) return null;

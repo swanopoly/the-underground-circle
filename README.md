@@ -47,8 +47,11 @@ Create a `.env` file:
 ```
 EXPO_PUBLIC_SUPABASE_URL=your_supabase_url
 EXPO_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
-EXPO_PUBLIC_GEMINI_API_KEY=your_gemini_key
+EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS=false
 ```
+
+Model provider keys should not be bundled into the public app. Users add their
+own model keys in the app before using chat/agent features.
 
 ## 📱 Live App
 

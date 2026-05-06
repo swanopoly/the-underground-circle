@@ -10,12 +10,12 @@
  * offline bridge. Doing all of that inline in the panel was making
  * the component hard to read; this library is the seam.
  */
-import { probeBridges, type BridgeProbeResult } from './bridgeHealthDiag';
+import { BRIDGE_CATALOG, probeBridges, type BridgeProbeResult } from './bridgeHealthDiag';
+import { getBridgeEnvironment, getBridgeUrl } from './bridgeEnvironment';
 import { ensureDesktopBridgePaired, isDesktopBridgePaired } from './desktopBridge';
 
-/** Command we tell users to run from a fresh terminal to bring all
- *  bridges up if they haven't installed yet or the daemon died. */
-export const REOPEN_COMMAND = 'npx @underground-circle/connect';
+/** Command for a cloned repo that starts Expo plus every local bridge. */
+export const REOPEN_COMMAND = 'npm run start';
 
 /** Shape rendered by ConnectAllBridgesPanel. */
 export interface ConnectAllBridgesResult {
@@ -44,12 +44,36 @@ export interface ConnectAllBridgesResult {
  * partial failures end up as offline rows in the bridges array.
  */
 export async function connectAllBridges(): Promise<ConnectAllBridgesResult> {
+  const env = getBridgeEnvironment();
+  if (!env.available) {
+    const bridges = BRIDGE_CATALOG.map((entry) => ({
+      name: entry.name,
+      label: entry.label,
+      port: entry.port,
+      status: 'offline' as const,
+      detail: 'bridge probing disabled in this environment',
+      hint: 'Run locally, enable local bridge opt-in, or configure per-port tunnel URLs.',
+    }));
+    return {
+      bridges,
+      liveAgentCount: 0,
+      liveAgentsByBridge: Object.fromEntries(bridges.map((b) => [b.name, 0])),
+      desktopBridge: {
+        reachable: false,
+        paired: false,
+        pairedJustNow: false,
+        reason: 'Bridge environment unavailable from this runtime.',
+      },
+      summary: 'Bridge tunnel is not configured for this environment. Use the Control Panel tunnel setup or run the app locally.',
+    };
+  }
+
   const wasPairedBeforeRun = isDesktopBridgePaired();
 
   // Probe + pair fan out together so the user-visible latency is
   // bounded by the slowest bridge probe (3s default), not their sum.
   const [bridges, pairing] = await Promise.all([
-    probeBridges(),
+    probeBridges({ urlForPort: (port) => getBridgeUrl(port) }),
     ensureDesktopBridgePaired().catch((err) => ({
       ok: false as const,
       error: err?.message || 'pair failed',
@@ -82,7 +106,7 @@ export async function connectAllBridges(): Promise<ConnectAllBridgesResult> {
     ? `All ${bridges.length} bridges healthy${liveAgentCount > 0 ? ` · ${liveAgentCount} live agent${liveAgentCount === 1 ? '' : 's'} discovered` : ''}.`
     : healthyCount > 0
       ? `${healthyCount} of ${bridges.length} bridges healthy. Restart the offline ones to pick up their agents.`
-      : `No bridges reachable. Run \`${REOPEN_COMMAND}\` in Terminal to install + start them.`;
+      : `No bridges reachable. Run \`${REOPEN_COMMAND}\` in Terminal from the repo to start the local bridge stack.`;
 
   return {
     bridges,

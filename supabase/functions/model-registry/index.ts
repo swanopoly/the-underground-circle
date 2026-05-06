@@ -276,8 +276,9 @@ Deno.serve(async (req) => {
       }
 
       // Fetch API keys from environment or user_api_keys table
-      const openaiKey = Deno.env.get("OPENAI_API_KEY") || "";
-      const geminiKey = Deno.env.get("GEMINI_API_KEY") || Deno.env.get("GOOGLE_AI_KEY") || "";
+      const allowPlatformKeys = Deno.env.get("ALLOW_SERVICE_ROLE_PLATFORM_MODEL_KEYS") === "true";
+      const openaiKey = allowPlatformKeys ? Deno.env.get("OPENAI_API_KEY") || "" : "";
+      const geminiKey = allowPlatformKeys ? Deno.env.get("GEMINI_API_KEY") || Deno.env.get("GOOGLE_AI_KEY") || "" : "";
 
       const results: { provider: string; fetched: number; error?: string }[] = [];
       const allModels: ModelEntry[] = [];
