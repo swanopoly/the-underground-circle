@@ -2467,6 +2467,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
   // integration credentials in the edge function (see swanbot-ai).
   const [modelOverride, setModelOverride] = useState<string>('auto');
   const [modelGroups, setModelGroups] = useState<Array<import('../../../lib/integrations/modelProviderRegistry').ModelGroup>>([]);
+  // Picker filter — once OpenRouter is connected the catalog jumps to
+  // 200+ entries, so a free-text filter keeps the menu usable. Filters
+  // the visible models within each group; groups stay so disconnected
+  // providers still surface their hint.
+  const [modelFilter, setModelFilter] = useState<string>('');
   // Pull the dynamic model list whenever the circle changes — connected
   // marketplace integrations (OpenRouter / HF / Replicate / Modal) light
   // up extra model groups in the picker.
@@ -3751,106 +3756,156 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
             style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 99 }}
           />
           <View style={s.moreMenu}>
-            <View style={s.moreMenuSection}>
-              <Text style={s.moreMenuLabel}>MODE</Text>
-              <Pressable
-                onPress={() => { setPlanMode((v) => !v); }}
-                style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
-                <Text style={[s.moreMenuItemText, planMode && { color: '#f59e0b', fontWeight: '900' }]}>
-                  ◷ Plan-only mode
-                </Text>
-                <Text style={s.moreMenuItemHint}>{planMode ? 'ON' : 'OFF'}</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => { setToolApprovalMode((m) => m === 'yolo' ? 'review' : 'yolo'); }}
-                style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
-                <Text style={[s.moreMenuItemText, toolApprovalMode === 'review' && { color: '#22c55e', fontWeight: '900' }]}>
-                  {toolApprovalMode === 'review' ? '⏸' : '⚡'} {toolApprovalMode === 'review' ? 'Review each tool' : 'YOLO (auto-approve)'}
-                </Text>
-                <Text style={s.moreMenuItemHint}>{toolApprovalMode === 'review' ? 'REVIEW' : 'YOLO'}</Text>
-              </Pressable>
-            </View>
-
-            <View style={s.moreMenuDivider} />
-
-            <View style={s.moreMenuSection}>
-              <Text style={s.moreMenuLabel}>MODEL</Text>
-
-              {/* Auto entry — always first. Delegates to the soul/intent
-                  resolver in serviceProfileSouls. */}
-              <Pressable
-                onPress={() => setModelOverride('auto')}
-                style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
-                <View style={{ width: 12, height: 12, borderRadius: 999, borderWidth: 1, borderColor: modelOverride === 'auto' ? accentColor : '#1f2937', backgroundColor: modelOverride === 'auto' ? accentColor : 'transparent' }} />
-                <Text style={[s.moreMenuItemText, modelOverride === 'auto' && { color: accentColor, fontWeight: '900' }]}>Auto (smart route)</Text>
-              </Pressable>
-
-              {modelGroups.map((group) => (
-                <View key={group.provider} style={{ marginTop: 4 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 8, paddingVertical: 4 }}>
-                    <Text style={{ color: '#475569', fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: MONO }}>
-                      {group.label.toUpperCase()}
-                    </Text>
-                    {!group.connected ? (
-                      <Text style={{ color: '#475569', fontSize: 9, fontStyle: 'italic' }}>not connected</Text>
-                    ) : null}
-                  </View>
-                  {group.models.map((opt) => {
-                    const active = modelOverride === opt.id;
-                    return (
-                      <Pressable
-                        key={opt.id}
-                        onPress={() => {
-                          if (!opt.ready) return;
-                          setModelOverride(opt.id);
-                        }}
-                        disabled={!opt.ready}
-                        style={({ hovered }: any) => [
-                          s.moreMenuItem,
-                          hovered && opt.ready && { backgroundColor: '#1f2937' },
-                          !opt.ready && { opacity: 0.4 },
-                        ]}>
-                        <View style={{ width: 12, height: 12, borderRadius: 999, borderWidth: 1, borderColor: active ? accentColor : '#1f2937', backgroundColor: active ? accentColor : 'transparent' }} />
-                        <Text style={[s.moreMenuItemText, active && { color: accentColor, fontWeight: '900' }]} numberOfLines={1}>
-                          {opt.label}
-                        </Text>
-                        {opt.description ? (
-                          <Text style={s.moreMenuItemHint} numberOfLines={1}>{opt.description}</Text>
-                        ) : null}
-                      </Pressable>
-                    );
-                  })}
-                  {!group.connected && group.hint ? (
-                    <Text style={{ color: '#475569', fontSize: 10, paddingHorizontal: 8, paddingVertical: 4, lineHeight: 14 }}>
-                      {group.hint}
-                    </Text>
-                  ) : null}
-                </View>
-              ))}
-            </View>
-
-            <View style={s.moreMenuDivider} />
-
-            <View style={s.moreMenuSection}>
-              <Text style={s.moreMenuLabel}>ACTIONS</Text>
-              <Pressable
-                onPress={() => { setShowMoreMenu(false); setShowSpawnAgent(true); if (showAssign) setShowAssign(false); }}
-                style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
-                <Text style={s.moreMenuItemText}>+ Spawn agent</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => { setShowMoreMenu(false); setShowRunHistory(true); }}
-                style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
-                <Text style={s.moreMenuItemText}>↻ Run history</Text>
-              </Pressable>
-              {Platform.OS === 'web' && messages.length > 0 ? (
+            <ScrollView
+              style={{ maxHeight: 548 }}
+              contentContainerStyle={{ paddingVertical: 0 }}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator
+              nestedScrollEnabled
+            >
+              <View style={s.moreMenuSection}>
+                <Text style={s.moreMenuLabel}>MODE</Text>
                 <Pressable
-                  onPress={() => { setShowMoreMenu(false); handleExportChat(); }}
+                  onPress={() => { setPlanMode((v) => !v); }}
                   style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
-                  <Text style={s.moreMenuItemText}>⤓ Export chat (.md)</Text>
+                  <Text style={[s.moreMenuItemText, planMode && { color: '#f59e0b', fontWeight: '900' }]}>
+                    ◷ Plan-only mode
+                  </Text>
+                  <Text style={s.moreMenuItemHint}>{planMode ? 'ON' : 'OFF'}</Text>
                 </Pressable>
-              ) : null}
-            </View>
+                <Pressable
+                  onPress={() => { setToolApprovalMode((m) => m === 'yolo' ? 'review' : 'yolo'); }}
+                  style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                  <Text style={[s.moreMenuItemText, toolApprovalMode === 'review' && { color: '#22c55e', fontWeight: '900' }]}>
+                    {toolApprovalMode === 'review' ? '⏸' : '⚡'} {toolApprovalMode === 'review' ? 'Review each tool' : 'YOLO (auto-approve)'}
+                  </Text>
+                  <Text style={s.moreMenuItemHint}>{toolApprovalMode === 'review' ? 'REVIEW' : 'YOLO'}</Text>
+                </Pressable>
+              </View>
+
+              <View style={s.moreMenuDivider} />
+
+              <View style={s.moreMenuSection}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 6 }}>
+                  <Text style={s.moreMenuLabel}>MODEL</Text>
+                  {(() => {
+                    const total = modelGroups.reduce((acc, g) => acc + g.models.length, 0);
+                    return total > 0 ? (
+                      <Text style={{ color: '#334155', fontSize: 9, fontFamily: MONO }}>{total} avail</Text>
+                    ) : null;
+                  })()}
+                </View>
+
+                {/* Filter input — only meaningful once a marketplace
+                    integration's live catalog has loaded, but render it
+                    unconditionally so the picker layout doesn't shift
+                    when OpenRouter connects mid-session. */}
+                <View style={{ paddingHorizontal: 6, paddingTop: 2, paddingBottom: 6 }}>
+                  <TextInput
+                    value={modelFilter}
+                    onChangeText={setModelFilter}
+                    placeholder="Filter models — e.g. gpt, sonnet, llama"
+                    placeholderTextColor="#475569"
+                    style={{
+                      paddingHorizontal: 10, paddingVertical: 6,
+                      borderRadius: 8, borderWidth: 1, borderColor: '#1f2937',
+                      backgroundColor: '#0b1322',
+                      color: '#cbd5e1', fontSize: 11, fontFamily: MONO,
+                      ...(Platform.OS === 'web' ? ({ outlineWidth: 0, outlineStyle: 'none' } as any) : {}),
+                    }}
+                  />
+                </View>
+
+                {/* Auto entry — always first. Delegates to the soul/intent
+                    resolver in serviceProfileSouls. */}
+                <Pressable
+                  onPress={() => setModelOverride('auto')}
+                  style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                  <View style={{ width: 12, height: 12, borderRadius: 999, borderWidth: 1, borderColor: modelOverride === 'auto' ? accentColor : '#1f2937', backgroundColor: modelOverride === 'auto' ? accentColor : 'transparent' }} />
+                  <Text style={[s.moreMenuItemText, modelOverride === 'auto' && { color: accentColor, fontWeight: '900' }]}>Auto (smart route)</Text>
+                </Pressable>
+
+                {modelGroups.map((group) => {
+                  const filterQ = modelFilter.trim().toLowerCase();
+                  const filteredModels = filterQ.length > 0
+                    ? group.models.filter((m) =>
+                        m.id.toLowerCase().includes(filterQ)
+                        || m.label.toLowerCase().includes(filterQ)
+                        || (m.description || '').toLowerCase().includes(filterQ),
+                      )
+                    : group.models;
+                  // Hide the whole group when filtering and nothing matched —
+                  // the user is searching, not browsing, so empty headers
+                  // are noise.
+                  if (filterQ.length > 0 && filteredModels.length === 0) return null;
+                  return (
+                    <View key={group.provider} style={{ marginTop: 4 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 8, paddingVertical: 4 }}>
+                        <Text style={{ color: '#475569', fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: MONO }}>
+                          {group.label.toUpperCase()}
+                        </Text>
+                        {!group.connected ? (
+                          <Text style={{ color: '#475569', fontSize: 9, fontStyle: 'italic' }}>not connected</Text>
+                        ) : null}
+                      </View>
+                      {filteredModels.map((opt) => {
+                        const active = modelOverride === opt.id;
+                        return (
+                          <Pressable
+                            key={opt.id}
+                            onPress={() => {
+                              if (!opt.ready) return;
+                              setModelOverride(opt.id);
+                            }}
+                            disabled={!opt.ready}
+                            style={({ hovered }: any) => [
+                              s.moreMenuItem,
+                              hovered && opt.ready && { backgroundColor: '#1f2937' },
+                              !opt.ready && { opacity: 0.4 },
+                            ]}>
+                            <View style={{ width: 12, height: 12, borderRadius: 999, borderWidth: 1, borderColor: active ? accentColor : '#1f2937', backgroundColor: active ? accentColor : 'transparent' }} />
+                            <Text style={[s.moreMenuItemText, active && { color: accentColor, fontWeight: '900' }]} numberOfLines={1}>
+                              {opt.label}
+                            </Text>
+                            {opt.description ? (
+                              <Text style={s.moreMenuItemHint} numberOfLines={1}>{opt.description}</Text>
+                            ) : null}
+                          </Pressable>
+                        );
+                      })}
+                      {!group.connected && group.hint && filterQ.length === 0 ? (
+                        <Text style={{ color: '#475569', fontSize: 10, paddingHorizontal: 8, paddingVertical: 4, lineHeight: 14 }}>
+                          {group.hint}
+                        </Text>
+                      ) : null}
+                    </View>
+                  );
+                })}
+              </View>
+
+              <View style={s.moreMenuDivider} />
+
+              <View style={s.moreMenuSection}>
+                <Text style={s.moreMenuLabel}>ACTIONS</Text>
+                <Pressable
+                  onPress={() => { setShowMoreMenu(false); setShowSpawnAgent(true); if (showAssign) setShowAssign(false); }}
+                  style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                  <Text style={s.moreMenuItemText}>+ Spawn agent</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => { setShowMoreMenu(false); setShowRunHistory(true); }}
+                  style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                  <Text style={s.moreMenuItemText}>↻ Run history</Text>
+                </Pressable>
+                {Platform.OS === 'web' && messages.length > 0 ? (
+                  <Pressable
+                    onPress={() => { setShowMoreMenu(false); handleExportChat(); }}
+                    style={({ hovered }: any) => [s.moreMenuItem, hovered && { backgroundColor: '#1f2937' }]}>
+                    <Text style={s.moreMenuItemText}>⤓ Export chat (.md)</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            </ScrollView>
           </View>
         </>
       ) : null}
@@ -7714,13 +7769,16 @@ const s = StyleSheet.create({
     position: 'absolute',
     top: 44,
     right: 12,
-    minWidth: 220,
+    minWidth: 280,
+    maxWidth: 380,
+    maxHeight: 560,
     backgroundColor: '#0a0e1a',
     borderWidth: 1,
     borderColor: '#1f2937',
     borderRadius: 12,
     paddingVertical: 6,
     zIndex: 100,
+    overflow: 'hidden',
     ...(Platform.OS === 'web'
       ? { boxShadow: '0 16px 36px rgba(0,0,0,0.7)' } as any
       : { elevation: 10 }),
