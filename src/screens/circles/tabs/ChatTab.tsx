@@ -721,6 +721,33 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [showCreateProposal, setShowCreateProposal] = useState(false);
   const [showCreatePoll, setShowCreatePoll] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_CHAT_MODEL);
+  // Pull the marketplace catalog at the parent level — both the
+  // composer (for the picker UI + Auto preview) and the send flow
+  // (for resolving 'auto' → concrete model id with provider bias) need
+  // to know which integrations are connected.
+  const [marketplaceModelGroups, setMarketplaceModelGroups] = useState<Array<import('../../../lib/integrations/modelProviderRegistry').ModelGroup>>([]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!circleId) {
+      setMarketplaceModelGroups([]);
+      return;
+    }
+    (async () => {
+      try {
+        const { loadModelGroups } = await import('../../../lib/integrations/modelProviderRegistry');
+        const groups = await loadModelGroups(circleId, { includeDisconnected: true });
+        if (!cancelled) setMarketplaceModelGroups(groups);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [circleId]);
+  const connectedProviderSet: ReadonlySet<string> = useMemo(() => {
+    return new Set(
+      marketplaceModelGroups
+        .filter((g) => g.connected)
+        .map((g) => g.provider as string),
+    );
+  }, [marketplaceModelGroups]);
   // Web Search toggle — when on, the user's next chat send routes
   // through OpenRouter with the `openrouter:web_search` server tool
   // attached so the model can fetch up-to-date facts. Persists per-
@@ -747,6 +774,27 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   }, [circleId, webSearchEnabled]);
   const [sessionProfile, setSessionProfile] = useState<SessionCodingProfile>('auto');
   const [sessionDelegationMode, setSessionDelegationMode] = useState<SessionDelegationMode>('auto');
+  // Resolve 'auto' to a concrete model id at send time so the call hits
+  // exactly what the picker preview promised. Pure helper — recomputes
+  // each call so a freshly-typed message gets routed by its own intent
+  // (not the previous turn's). Returns the original pick when not auto.
+  const resolveSendModel = useCallback((messageText: string): string | null => {
+    if (selectedModel !== 'auto') return selectedModel;
+    try {
+      const draft = (messageText || '').trim();
+      const intent = draft.length > 0
+        ? analyzeMessageRouting(draft, 'main_chat').route.intent
+        : undefined;
+      return resolveModelForProfile(
+        (sessionProfile as any) || 'senior',
+        null,
+        intent,
+        connectedProviderSet,
+      );
+    } catch {
+      return null;
+    }
+  }, [selectedModel, sessionProfile, connectedProviderSet]);
   const [codingWorkbenchPrompt, setCodingWorkbenchPrompt] = useState<string | null>(null);
   const [codingWorkbenchTick, setCodingWorkbenchTick] = useState(0);
   // Live streaming state for /build-page — filled by subscribeBuildStream()
@@ -4319,10 +4367,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   chatHistory,
                   sessionArchiveContext: sessionArchiveContext || undefined,
                 });
-                const streamModel = resolveModelForSoul(
-                  spiritIdForProfile(resolvedSessionProfile),
-                  selectedModel !== 'auto' ? selectedModel : undefined,
-                );
+                // Auto resolution honours the connected marketplace
+                // providers — when OpenRouter is wired, this picks an
+                // OR-prefixed slug so the call routes through the team
+                // OR key (handled by the relay path in swanbot-ai).
+                // Falls back to platform Sonnet if the helper somehow
+                // returns null so we never send an unresolved 'auto'.
+                const streamModel = resolveSendModel(cleanContent) || 'claude-sonnet-4-6';
                 const pendingMsg = addPendingBotMessage('');
                 setRunStatus('running');
                 let accumulated = '';
@@ -6748,6 +6799,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         accentColor={accentColor}
         selectedModel={selectedModel}
         onModelChange={handleSessionModelChange}
+        marketplaceModelGroups={marketplaceModelGroups}
         attachments={attachments}
         onPickImage={async () => {
           const results = await pickAttachments();
@@ -8119,6 +8171,7 @@ function EnhancedInput({
   accentColor,
   selectedModel,
   onModelChange,
+  marketplaceModelGroups: marketplaceModelGroupsProp,
   onQuickAction,
   attachments,
   onPickImage,
@@ -8181,6 +8234,11 @@ function EnhancedInput({
       });
     }).catch(() => {});
   }, []);
+
+  // Marketplace catalog comes from the parent (ChatTab) so the picker
+  // here and the send-time auto-resolution in the parent agree on
+  // which providers are connected.
+  const marketplaceModelGroups: Array<import('../../../lib/integrations/modelProviderRegistry').ModelGroup> = marketplaceModelGroupsProp || [];
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
@@ -8270,11 +8328,23 @@ function EnhancedInput({
   const allModels = [...CHAT_MODELS, ...customModels];
   const currentModel = allModels.find(m => m.id === selectedModel) || CHAT_MODELS[0];
 
+  // Connected provider set — drives Auto's bias toward the team's BYOK
+  // keys. When OpenRouter is connected, Auto routes through OR-prefixed
+  // model ids so the spend lands on the team account; otherwise the
+  // resolver stays on the platform Anthropic ladder.
+  const connectedProviderSet: ReadonlySet<string> = useMemo(() => {
+    return new Set(
+      marketplaceModelGroups
+        .filter((g) => g.connected)
+        .map((g) => g.provider as string),
+    );
+  }, [marketplaceModelGroups]);
+
   // Live Auto preview — when selectedModel is 'auto', resolve what the
   // runtime would actually pick for the current input, given the active
-  // SOUL profile. Updates as the user types so they can see the routing
-  // shift between Haiku / Sonnet / Opus before they hit send. Empty
-  // input falls back to the SOUL default (usually Sonnet).
+  // SOUL profile + connected marketplace providers. Updates as the user
+  // types so they can see the routing shift between Haiku / Sonnet /
+  // Opus / OR-routed picks before they hit send.
   const autoResolvedModel = useMemo(() => {
     if (selectedModel !== 'auto') return null;
     try {
@@ -8286,15 +8356,21 @@ function EnhancedInput({
         (sessionProfile as any) || 'senior',
         null,
         intent,
+        connectedProviderSet,
       );
       return resolved;
     } catch {
       return null;
     }
-  }, [selectedModel, input, sessionProfile]);
+  }, [selectedModel, input, sessionProfile, connectedProviderSet]);
 
   const autoResolvedShortLabel = useMemo(() => {
     if (!autoResolvedModel) return null;
+    // OpenRouter-prefixed: surface the upstream model id sans provider.
+    if (autoResolvedModel.startsWith('openrouter/')) {
+      const tail = autoResolvedModel.split('/').pop() || autoResolvedModel;
+      return `OR · ${tail.replace(/^claude-/, '').split('-').slice(0, 3).join(' ')}`;
+    }
     if (autoResolvedModel.includes('opus')) return 'Opus';
     if (autoResolvedModel.includes('sonnet')) return 'Sonnet';
     if (autoResolvedModel.includes('haiku')) return 'Haiku';
@@ -8422,6 +8498,75 @@ function EnhancedInput({
                   </View>
                 );
               })}
+
+              {/* Marketplace integrations — connected providers
+                  surface their models here, disconnected ones show a
+                  tiny "connect to use" hint. Same source as the room
+                  chat picker so a key entered in Marketplace lights
+                  up everywhere at once. */}
+              {marketplaceModelGroups
+                .filter((g) => g.provider !== 'anthropic')
+                .map((group) => {
+                  const providerColor = group.connected ? '#a78bfa' : '#475569';
+                  return (
+                    <View key={`mkt-${group.provider}`}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 4 }}>
+                        <Text style={[styles.dropdownCategoryTitle, { color: providerColor, paddingHorizontal: 0, paddingVertical: 0 }]}>
+                          {group.label.toUpperCase()}
+                        </Text>
+                        {!group.connected ? (
+                          <Text style={{ color: '#475569', fontSize: 8, fontStyle: 'italic' }}>not connected</Text>
+                        ) : null}
+                      </View>
+                      {group.models.slice(0, group.connected ? 25 : 4).map((opt) => {
+                        const isActive = opt.id === selectedModel;
+                        const isHovered = hoveredModel === opt.id;
+                        return (
+                          <Pressable
+                            key={opt.id}
+                            onPress={() => {
+                              if (!opt.ready) return;
+                              onModelChange(opt.id);
+                              setShowModelPicker(false);
+                            }}
+                            disabled={!opt.ready}
+                            onHoverIn={() => setHoveredModel(opt.id)}
+                            onHoverOut={() => setHoveredModel(null)}
+                            accessibilityRole="button"
+                            style={[
+                              styles.dropdownItem,
+                              isActive && { backgroundColor: providerColor + '18', borderColor: providerColor + '40' },
+                              isHovered && opt.ready && !isActive && { backgroundColor: '#1a1a28' },
+                              !opt.ready && { opacity: 0.35 },
+                              ...(Platform.OS === 'web' ? [{ cursor: opt.ready ? 'pointer' : 'not-allowed' } as any] : []),
+                            ]}
+                          >
+                            <View style={[styles.dropdownItemIcon, { backgroundColor: providerColor + '20' }]}>
+                              <Text style={[styles.dropdownItemIconText, { color: providerColor }]}>{opt.label.charAt(0)}</Text>
+                            </View>
+                            <View style={styles.dropdownItemText}>
+                              <Text style={[styles.dropdownItemLabel, isActive && { color: providerColor }]} numberOfLines={1}>{opt.label}</Text>
+                              {opt.description ? (
+                                <Text style={styles.dropdownItemDesc} numberOfLines={1}>{opt.description}</Text>
+                              ) : null}
+                            </View>
+                            {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: providerColor }]} />}
+                          </Pressable>
+                        );
+                      })}
+                      {!group.connected && group.hint ? (
+                        <Text style={{ color: '#475569', fontSize: 9, paddingHorizontal: 12, paddingBottom: 6, lineHeight: 13, fontStyle: 'italic' }}>
+                          {group.hint}
+                        </Text>
+                      ) : null}
+                      {group.connected && group.models.length > 25 ? (
+                        <Text style={{ color: '#475569', fontSize: 9, paddingHorizontal: 12, paddingBottom: 6, fontStyle: 'italic' }}>
+                          +{group.models.length - 25} more — pick from the room chat ⋯ menu for the full list.
+                        </Text>
+                      ) : null}
+                    </View>
+                  );
+                })}
 
               {/* Custom HF models */}
               {customModels.length > 0 && (

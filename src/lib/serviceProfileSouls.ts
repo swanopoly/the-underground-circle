@@ -32,8 +32,17 @@ export function resolveModelForProfile(
   profile: SessionCodingProfile,
   userModelPick: string | null | undefined,
   intent?: import('./agenticCodingProfile').MessageIntent,
+  connectedProviders?: ConnectedProviderSet,
 ): string {
-  return resolveModelForSoul(spiritIdForProfile(profile), userModelPick, intent);
+  return resolveModelForSoul(
+    spiritIdForProfile(profile),
+    userModelPick,
+    intent,
+    /* complexity */ undefined,
+    /* buildConverging */ undefined,
+    /* buildExploring */ undefined,
+    connectedProviders,
+  );
 }
 
 // Per-SOUL model preferences. User's explicit model pick always wins;
@@ -68,6 +77,15 @@ const DEFAULT_MODEL = 'claude-haiku-4-5';
  * reasoning depth they actually need. Lightweight chat stays on Haiku
  * so Anthropic spend doesn't balloon.
  */
+/**
+ * Connected marketplace providers used to bias the Auto router. Today
+ * only the OpenRouter route is fully wired in the edge function; when
+ * the rest of the Wave 2 native providers (OpenAI / Google AI / Groq /
+ * etc.) get their own edge-function handlers, this set will widen and
+ * the routing table below can prefer them directly.
+ */
+export type ConnectedProviderSet = ReadonlySet<string>;
+
 export function resolveModelForSoul(
   spiritId: string | null | undefined,
   userModelPick: string | null | undefined,
@@ -80,6 +98,11 @@ export function resolveModelForSoul(
    *  is just asking the next clarifying question. Haiku handles this at a
    *  fraction of the latency of Sonnet/Opus. */
   buildExploring?: boolean,
+  /** Marketplace integrations the team has connected. Lets Auto bias
+   *  toward the user's BYOK keys — e.g., when OpenRouter is connected,
+   *  routes through OR-prefixed Anthropic / OpenAI models so the bill
+   *  goes to their OR account instead of the platform key. */
+  connectedProviders?: ConnectedProviderSet,
 ): string {
   if (userModelPick && userModelPick !== 'auto') return userModelPick;
 
@@ -87,15 +110,32 @@ export function resolveModelForSoul(
   const SONNET = 'claude-sonnet-4-6';
   const OPUS = 'claude-opus-4-7';
 
+  // OpenRouter routing — when the team has the OR key wired, prefer
+  // routing Auto through OR so the spend lands on their account. We
+  // map the same intent ladder to OR-prefixed slugs that the edge
+  // function knows how to dispatch (see callMarketplaceProvider in
+  // swanbot-ai). Different intents map to different upstream providers
+  // since OR aggregates them all behind one key:
+  //   - heavy reasoning  → Anthropic Opus 4
+  //   - code / general   → Anthropic Sonnet 4
+  //   - light / chat     → OpenAI GPT-5 mini (cheap + fast)
+  //   - long context     → Google Gemini 2.5 Pro
+  const orConnected = !!connectedProviders?.has('openrouter');
+
+  const OR_OPUS = 'openrouter/anthropic/claude-opus-4';
+  const OR_SONNET = 'openrouter/anthropic/claude-sonnet-4';
+  const OR_FAST = 'openrouter/openai/gpt-5-mini';
+  const OR_LONG = 'openrouter/google/gemini-2.5-pro';
+
   // Exploring phase: ask one focused question — Haiku is plenty, ~2-3x
   // faster than Sonnet. User-visible latency drops hard here because
   // discovery turns are the most latency-sensitive part of the flow
   // (each one gates the next user action).
-  if (buildExploring) return HAIKU;
+  if (buildExploring) return orConnected ? OR_FAST : HAIKU;
 
   // Build-converging phase always gets Opus — the model is about to commit
   // to a brief, and this is where reasoning depth matters most.
-  if (buildConverging) return OPUS;
+  if (buildConverging) return orConnected ? OR_OPUS : OPUS;
 
   if (intent) {
     const isLight = complexity === 'trivial' || complexity === 'simple';
@@ -103,30 +143,40 @@ export function resolveModelForSoul(
 
     // Always-Haiku intents regardless of complexity — low signal, low cost.
     if (intent === 'casual' || intent === 'social' || intent === 'status' || intent === 'memory') {
-      return HAIKU;
+      return orConnected ? OR_FAST : HAIKU;
     }
 
     // Questions: Haiku for simple factual, Sonnet when they ask "compare" /
     // "tradeoffs" / "which is better" (caught as moderate+ complexity).
     if (intent === 'question') {
+      if (orConnected) return isLight ? OR_FAST : OR_SONNET;
       return isLight ? HAIKU : SONNET;
     }
 
     // Research + architect ALWAYS reach for Opus. These are the scenarios
-    // where the model has to hold multiple threads in its head.
-    if (intent === 'research' || intent === 'architect') {
-      return OPUS;
+    // where the model has to hold multiple threads in its head. Long-form
+    // research benefits from Gemini's 2M context when the team has it
+    // routed through OR.
+    if (intent === 'research') {
+      return orConnected ? OR_LONG : OPUS;
+    }
+    if (intent === 'architect') {
+      return orConnected ? OR_OPUS : OPUS;
     }
 
     // Coding intents scale with complexity.
     if (intent === 'build' || intent === 'debug' || intent === 'review') {
+      if (orConnected) return isHeavy ? OR_OPUS : OR_SONNET;
       if (isHeavy) return OPUS;
       return SONNET;
     }
 
     // Remaining intents (task_mgmt, creative, design, support, browser).
-    if (intent === 'design' || intent === 'creative') return SONNET;
+    if (intent === 'design' || intent === 'creative') {
+      return orConnected ? OR_SONNET : SONNET;
+    }
     if (intent === 'task_mgmt' || intent === 'support' || intent === 'browser') {
+      if (orConnected) return isLight ? OR_FAST : OR_SONNET;
       return isLight ? HAIKU : SONNET;
     }
   }
