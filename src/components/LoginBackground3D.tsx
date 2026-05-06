@@ -1679,10 +1679,23 @@ function StarDust({ count = 300 }: { count?: number }) {
     return geo;
   }, [count]);
 
+  // Slow rotation on Y so the starfield gives off the parallax it
+  // should have when the camera moves — without this, the sky looked
+  // pinned to the canvas when everything else around the planet moved.
+  const groupRef = useRef<THREE.Group>(null);
+  useFrame((state) => {
+    if (!groupRef.current) return;
+    const t = state.clock.elapsedTime;
+    groupRef.current.rotation.y = t * 0.012;
+    groupRef.current.rotation.x = Math.sin(t * 0.04) * 0.05;
+  });
+
   return (
-    <points geometry={geometry}>
-      <pointsMaterial color={0xffffff} size={0.06} sizeAttenuation transparent opacity={0.4} depthWrite={false} />
-    </points>
+    <group ref={groupRef}>
+      <points geometry={geometry}>
+        <pointsMaterial color={0xffffff} size={0.06} sizeAttenuation transparent opacity={0.4} depthWrite={false} />
+      </points>
+    </group>
   );
 }
 
@@ -2642,45 +2655,70 @@ function ShootingStars({ count = 6 }: { count?: number }) {
 
 function BackgroundPlanets() {
   const planets = useMemo(() => [
-    // Spread wide across the sky — distant glowing worlds
-    { pos: [-80, 30, -120] as [number,number,number], r: 1.0, color: '#3a2a5e', emissive: '#9955ff', ei: 3.0 },
-    { pos: [90, 20, -130] as [number,number,number], r: 0.8, color: '#2a3a2e', emissive: '#44ff66', ei: 3.5 },
-    { pos: [-50, -30, -110] as [number,number,number], r: 1.2, color: '#3a2525', emissive: '#ff6644', ei: 2.5 },
-    { pos: [60, 45, -100] as [number,number,number], r: 0.7, color: '#252a4e', emissive: '#6688ff', ei: 4.0 },
-    { pos: [-95, -15, -140] as [number,number,number], r: 0.9, color: '#3e3a2a', emissive: '#ffcc44', ei: 3.0 },
-    { pos: [75, -35, -115] as [number,number,number], r: 0.7, color: '#2a3a3a', emissive: '#44dddd', ei: 3.5 },
-    { pos: [-30, 50, -130] as [number,number,number], r: 0.5, color: '#2a2a3e', emissive: '#ff88cc', ei: 4.0 },
-    { pos: [40, -45, -125] as [number,number,number], r: 0.8, color: '#1a3a2a', emissive: '#88ffaa', ei: 3.0 },
+    // Spread wide across the sky — distant glowing worlds. spinSpeed
+    // and atmoSpeed give each its own slow rotation so the field
+    // doesn't feel frozen when the user idles on the auth screen.
+    { pos: [-80, 30, -120] as [number,number,number], r: 1.0, color: '#3a2a5e', emissive: '#9955ff', ei: 3.0, spinSpeed: 0.05, atmoSpeed: -0.02 },
+    { pos: [90, 20, -130] as [number,number,number], r: 0.8, color: '#2a3a2e', emissive: '#44ff66', ei: 3.5, spinSpeed: -0.06, atmoSpeed: 0.03 },
+    { pos: [-50, -30, -110] as [number,number,number], r: 1.2, color: '#3a2525', emissive: '#ff6644', ei: 2.5, spinSpeed: 0.04, atmoSpeed: -0.025 },
+    { pos: [60, 45, -100] as [number,number,number], r: 0.7, color: '#252a4e', emissive: '#6688ff', ei: 4.0, spinSpeed: -0.07, atmoSpeed: 0.04 },
+    { pos: [-95, -15, -140] as [number,number,number], r: 0.9, color: '#3e3a2a', emissive: '#ffcc44', ei: 3.0, spinSpeed: 0.045, atmoSpeed: -0.02 },
+    { pos: [75, -35, -115] as [number,number,number], r: 0.7, color: '#2a3a3a', emissive: '#44dddd', ei: 3.5, spinSpeed: -0.05, atmoSpeed: 0.03 },
+    { pos: [-30, 50, -130] as [number,number,number], r: 0.5, color: '#2a2a3e', emissive: '#ff88cc', ei: 4.0, spinSpeed: 0.06, atmoSpeed: -0.03 },
+    { pos: [40, -45, -125] as [number,number,number], r: 0.8, color: '#1a3a2a', emissive: '#88ffaa', ei: 3.0, spinSpeed: -0.04, atmoSpeed: 0.025 },
   ], []);
 
+  // Refs for slow per-planet rotation. Whole-field also gets a slow
+  // azimuth drift so distant worlds parallax against the foreground.
+  const fieldRef = useRef<THREE.Group>(null);
+  const planetRefs = useRef<Array<THREE.Group | null>>([]);
+
+  useFrame((state) => {
+    const t = state.clock.elapsedTime;
+    if (fieldRef.current) {
+      // Whole-field azimuth drift — full lap every ~12 minutes so it
+      // reads as celestial motion, not animation jitter.
+      fieldRef.current.rotation.y = t * 0.009;
+    }
+    for (let i = 0; i < planetRefs.current.length; i++) {
+      const ref = planetRefs.current[i];
+      const p = planets[i];
+      if (!ref || !p) continue;
+      ref.rotation.y = t * p.spinSpeed;
+      ref.rotation.x = Math.sin(t * 0.05 + i) * 0.08;
+    }
+  });
+
   return (
-    <group>
+    <group ref={fieldRef}>
       {planets.map((p, i) => (
         <group key={i} position={p.pos}>
-          {/* Planet body */}
-          <mesh>
-            <icosahedronGeometry args={[p.r, 1]} />
-            <meshStandardMaterial
-              color={p.color}
-              emissive={p.emissive}
-              emissiveIntensity={p.ei}
-              roughness={0.8}
-              flatShading
-            />
-          </mesh>
-          {/* Bright atmosphere glow — large halo so they read at extreme distance */}
-          <mesh>
-            <sphereGeometry args={[p.r * 2.5, 16, 16]} />
-            <meshStandardMaterial
-              color={p.emissive}
-              emissive={p.emissive}
-              emissiveIntensity={2.0}
-              transparent
-              opacity={0.12}
-              depthWrite={false}
-              toneMapped={false}
-            />
-          </mesh>
+          <group ref={(el) => { planetRefs.current[i] = el; }}>
+            {/* Planet body */}
+            <mesh>
+              <icosahedronGeometry args={[p.r, 1]} />
+              <meshStandardMaterial
+                color={p.color}
+                emissive={p.emissive}
+                emissiveIntensity={p.ei}
+                roughness={0.8}
+                flatShading
+              />
+            </mesh>
+            {/* Bright atmosphere glow — large halo so they read at extreme distance */}
+            <mesh>
+              <sphereGeometry args={[p.r * 2.5, 16, 16]} />
+              <meshStandardMaterial
+                color={p.emissive}
+                emissive={p.emissive}
+                emissiveIntensity={2.0}
+                transparent
+                opacity={0.12}
+                depthWrite={false}
+                toneMapped={false}
+              />
+            </mesh>
+          </group>
         </group>
       ))}
     </group>
@@ -2849,11 +2887,11 @@ function PortalPhoenix() {
   // mostly sees it as a tiny silhouette circling the horizon, then
   // every ~22s it dives close enough to read the feathers.
   const orbitCenter = useMemo(() => new THREE.Vector3(0, 6.0, 1.0), []);
-  const farRadiusX = 30.0;    // bumped from 14 — bird stays far by default
-  const farRadiusZ = 26.0;    // bumped from 12
-  const closeRadiusX = 9.0;   // close-pass radius — bird visibly approaches
-  const closeRadiusZ = 7.0;
-  const orbitPeriod = 16.0; // seconds — orbit lap time
+  const farRadiusX = 44.0;    // bumped — bird stays much farther by default
+  const farRadiusZ = 38.0;
+  const closeRadiusX = 13.0;  // close-pass radius — bird still visibly approaches
+  const closeRadiusZ = 10.0;
+  const orbitPeriod = 18.0; // seconds — orbit lap time
 
   // Phoenix scale — bumped so the bird stays readable at the new
   // orbit distance.
@@ -3286,9 +3324,9 @@ function AlienSaucer() {
   // way out at a steady wide orbit and never approaches the portal,
   // unlike the phoenix which has a brief close-pass each lap.
   const orbitCenter = useMemo(() => new THREE.Vector3(0, 4.5, 1.0), []);
-  const orbitRadiusX = 38.0; // bumped from 19 — saucer sits much farther
-  const orbitRadiusZ = 32.0; // bumped from 16
-  const orbitPeriod = 32.0;  // slower lap to match the larger radius
+  const orbitRadiusX = 56.0; // bumped — saucer sits FAR out in the background
+  const orbitRadiusZ = 48.0;
+  const orbitPeriod = 42.0;  // slower lap to match the larger radius
 
   const v = 0.28;
   const v92 = v * 0.92;
