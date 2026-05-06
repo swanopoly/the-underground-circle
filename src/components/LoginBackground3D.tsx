@@ -2844,12 +2844,16 @@ function PortalPhoenix() {
   const emberRef = useRef<THREE.Group>(null);
   const tStart = useRef(performance.now() / 1000);
 
-  // Phoenix flies a varied path AROUND the planet, kept farther
-  // out so it's clearly orbiting rather than hugging the surface.
+  // Phoenix flies a varied path AROUND the planet — sits FAR out by
+  // default, only occasionally swoops close to the portal. The viewer
+  // mostly sees it as a tiny silhouette circling the horizon, then
+  // every ~22s it dives close enough to read the feathers.
   const orbitCenter = useMemo(() => new THREE.Vector3(0, 6.0, 1.0), []);
-  const orbitRadiusX = 14.0;
-  const orbitRadiusZ = 12.0;
-  const orbitPeriod = 16.0; // seconds — slightly slower for the bigger lap
+  const farRadiusX = 30.0;    // bumped from 14 — bird stays far by default
+  const farRadiusZ = 26.0;    // bumped from 12
+  const closeRadiusX = 9.0;   // close-pass radius — bird visibly approaches
+  const closeRadiusZ = 7.0;
+  const orbitPeriod = 16.0; // seconds — orbit lap time
 
   // Phoenix scale — bumped so the bird stays readable at the new
   // orbit distance.
@@ -3117,32 +3121,33 @@ function PortalPhoenix() {
   // current and next-tick to derive velocity for facing direction.
   const pathAt = useMemo(() => (t: number): [number, number, number] => {
     const theta = (t / orbitPeriod) * Math.PI * 2;
-    // Distance multiplier pulses 1.0 (close — flying around the
-    // portal) to ~3.0 (far — swooping out toward the camera/edge).
-    // Squared sin so the bird spends more time NEAR the portal
-    // and only briefly swoops far away, like a comet on a long
-    // elliptical orbit.
+    // closeFactor briefly peaks at 1 (close pass), sits near 0 most
+    // of the time. Pow(1.6) sharpens the close window so the bird
+    // spends most of the lap far out and only briefly dives toward
+    // the portal — like a comet on a long elliptical orbit.
     const distT = (t / distPeriod) * Math.PI * 2;
     const distRaw = 0.5 + 0.5 * Math.sin(distT); // 0..1
-    const distMul = 1.0 + Math.pow(distRaw, 1.6) * 2.4; // ~1.0 to ~3.4
+    const closeFactor = Math.pow(distRaw, 1.6);
+    const radiusX = farRadiusX * (1 - closeFactor) + closeRadiusX * closeFactor;
+    const radiusZ = farRadiusZ * (1 - closeFactor) + closeRadiusZ * closeFactor;
     // Combined harmonics — primary ellipse + secondary wobble at 2x
     // frequency on different axes. Orbit varies each lap so the bird
     // visits different airspace around the portal instead of tracing
     // the same loop.
     const x = orbitCenter.x
-            + Math.cos(theta) * orbitRadiusX * distMul
+            + Math.cos(theta) * radiusX
             + Math.cos(theta * 2 + 1.7) * 1.6;
     const z = orbitCenter.z
-            + Math.sin(theta * 1.15) * orbitRadiusZ * distMul
+            + Math.sin(theta * 1.15) * radiusZ
             + Math.sin(theta * 2 + 0.5) * 1.6;
-    // Rise as it flies away — gives the path more visual depth so
-    // it doesn't just shrink straight back, but climbs and dives.
+    // Rise when far, dive when close — distance from portal modulates
+    // altitude so the path has visual depth instead of a flat ring.
     const y = orbitCenter.y
             + Math.sin(theta * 1.5) * 1.4
             + Math.cos(theta * 0.7) * 0.9
-            + (distMul - 1) * 1.4;
+            + (1 - closeFactor) * 3.2;
     return [x, y, z];
-  }, [orbitCenter, orbitRadiusX, orbitRadiusZ, orbitPeriod, distPeriod]);
+  }, [orbitCenter, farRadiusX, farRadiusZ, closeRadiusX, closeRadiusZ, orbitPeriod, distPeriod]);
 
   useFrame(() => {
     const t = performance.now() / 1000 - tStart.current;
@@ -3277,12 +3282,13 @@ function AlienSaucer() {
   const tStart = useRef(performance.now() / 1000);
 
   // Orbit center is the planet (slightly above so the saucer doesn't
-  // dive into it). Larger radii than the phoenix so it visibly stays
-  // farther out — viewer sees both at once with the saucer further.
+  // dive into it). The saucer is the FAR-distance object — it stays
+  // way out at a steady wide orbit and never approaches the portal,
+  // unlike the phoenix which has a brief close-pass each lap.
   const orbitCenter = useMemo(() => new THREE.Vector3(0, 4.5, 1.0), []);
-  const orbitRadiusX = 19.0;
-  const orbitRadiusZ = 16.0;
-  const orbitPeriod = 22.0;
+  const orbitRadiusX = 38.0; // bumped from 19 — saucer sits much farther
+  const orbitRadiusZ = 32.0; // bumped from 16
+  const orbitPeriod = 32.0;  // slower lap to match the larger radius
 
   const v = 0.28;
   const v92 = v * 0.92;
