@@ -12,6 +12,7 @@ import {
 import WordPressConnector from '../../../components/integrations/WordPressConnector';
 import WordPressPostForm from '../../../components/integrations/WordPressPostForm';
 import LoadingWave from '../../../components/LoadingWave';
+import LlmProviderMarketplace from '../../../components/marketplace/LlmProviderMarketplace';
 import {
   CIRCLE_INTEGRATION_CATALOG,
   CIRCLE_INTEGRATION_GROUPS,
@@ -974,6 +975,13 @@ export default function MarketplaceTab({
               <Text style={styles.summaryCardHint}>Managed provider apps</Text>
             </View>
           </View>
+
+          {/* AI Models & APIs — connect once, every chat / agent /
+              automation surface that goes through llm-proxy uses these
+              keys. Sits prominently above the rest of the marketplace
+              because routing the right model is upstream of every
+              other connector decision. */}
+          <LlmProviderMarketplace circleId={circleId} />
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
             {([
               { key: 'all', label: 'All' },
