@@ -4422,6 +4422,17 @@ function MentionText({ text, baseStyle, accentColor, knownFileNames, onPeek }: {
   );
 }
 
+// Map common short language tags to the names highlightLine expects.
+function normalizeCodeLang(lang?: string): string {
+  const l = (lang || '').toLowerCase().trim();
+  if (l === 'js' || l === 'jsx' || l === 'javascript') return 'javascript';
+  if (l === 'ts' || l === 'tsx' || l === 'typescript') return 'typescript';
+  if (l === 'py' || l === 'python') return 'python';
+  if (l === 'html' || l === 'htm' || l === 'xml') return 'html';
+  if (l === 'css' || l === 'scss' || l === 'sass') return 'css';
+  return l;
+}
+
 function ChatCodeBlock({ content, lang, accentColor }: { content: string; lang?: string; accentColor: string }) {
   const [copied, setCopied] = useState(false);
   const lineCount = content.split('\n').length;
@@ -4461,9 +4472,17 @@ function ChatCodeBlock({ content, lang, accentColor }: { content: string; lang?:
         ) : null}
       </View>
       <ScrollView horizontal contentContainerStyle={{ paddingHorizontal: 10, paddingVertical: 8 }}>
-        <Text selectable style={{ color: '#e2e8f0', fontSize: 11, fontFamily: MONO, lineHeight: 17 }}>
-          {content}
-        </Text>
+        <View>
+          {content.split('\n').map((line, idx) => (
+            <Text
+              key={idx}
+              selectable
+              style={{ fontSize: 11, fontFamily: MONO, lineHeight: 17 }}
+            >
+              {highlightLine(line, normalizeCodeLang(lang))}
+            </Text>
+          ))}
+        </View>
       </ScrollView>
     </View>
   );
