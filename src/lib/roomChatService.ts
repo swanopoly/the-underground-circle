@@ -159,18 +159,12 @@ export async function sendRoomStructuredChatMessage({
     : '';
   const specialContext = await buildSpecialContext(roomId, cleanContent, availableFiles);
 
-  // Normalize the model override. Anthropic short ids ('claude-...') route
-  // through the existing platform path. Provider-prefixed ids
-  // ('openrouter/...', 'huggingface/...', etc.) require the edge function
-  // to be extended with marketplace integration secret routing — until
-  // that ships, we transparently fall back to Sonnet 4.6 so the chat
-  // still works while preserving the user's selection in the picker UI.
-  const normalizedModel = (() => {
-    if (!modelOverride || modelOverride === 'auto') return undefined;
-    if (modelOverride.startsWith('claude-')) return modelOverride;
-    // Provider-routed model — fall back to Sonnet for the in-flight call.
-    return 'claude-sonnet-4-6';
-  })();
+  // Pass the user's model selection through unchanged. Anthropic short ids
+  // ('claude-...') run on the platform Claude path; provider-prefixed ids
+  // ('openrouter/...', 'huggingface/...', 'replicate/...') get routed inside
+  // the swanbot-ai edge function via the connected marketplace integration
+  // (Phase 2). 'auto' / empty falls back to the soul/intent resolver.
+  const normalizedModel = !modelOverride || modelOverride === 'auto' ? undefined : modelOverride;
 
   let structured: import('./openswanSessionRuntime').OpenSwanTurnResult;
   try {

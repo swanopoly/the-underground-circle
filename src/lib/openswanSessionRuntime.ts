@@ -410,7 +410,16 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   ].filter(Boolean).join('\n\n');
   const runSurface = opts.runSurface || opts.surface;
   const taskPlan = buildOpenSwanTaskPlan(cleanMessage, profile, entities);
-  const runtimeToolNames = selectRuntimeToolNames(taskPlan, opts.mode || null);
+  // Marketplace-routed models (OpenRouter / Hugging Face / Replicate) take
+  // the text-only path. The Anthropic tool_use schema doesn't translate
+  // 1:1 to OpenAI function calling, so for the first cut we ship "the
+  // model you picked actually answers" and defer cross-provider tool
+  // translation. Native Anthropic ids continue to run the full tool loop.
+  const isProviderRoutedModel = typeof opts.context.model === 'string'
+    && /^(openrouter|huggingface|replicate)\//.test(opts.context.model);
+  const runtimeToolNames = isProviderRoutedModel
+    ? []
+    : selectRuntimeToolNames(taskPlan, opts.mode || null);
   const toolRoundBudget = getToolRoundBudget(taskPlan, opts.mode || null);
   const { resolveModelForProfile } = await import('./serviceProfileSouls');
   const resolvedModel = resolveModelForProfile(

@@ -1349,12 +1349,17 @@ async function executeToolCall(
 
       case "search_web": {
         const { query, count } = toolInput;
-        const braveKey = Deno.env.get("BRAVE_API_KEY");
-        if (!braveKey) return JSON.stringify({ error: "Web search not configured" });
+        const braveKey = await resolveUserModelApiKey({
+          supabase,
+          userId,
+          provider: "brave",
+          envVarName: "BRAVE_API_KEY",
+        });
+        if (!braveKey) return JSON.stringify({ error: "Web search requires your own Brave Search API key." });
         try {
           const resp = await fetch(
             `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count || 5}`,
-            { headers: { "Accept": "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": braveKey } },
+            { headers: { "Accept": "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": braveKey.apiKey } },
           );
           if (!resp.ok) return JSON.stringify({ error: `Brave API ${resp.status}` });
           const data = await resp.json();
@@ -1736,6 +1741,119 @@ async function logHfActivity(
       metadata: { tool, hf: true },
     });
   } catch {} // Non-critical
+}
+
+// ── Marketplace integrations: read circle-stored API key + provider call ─
+// When the user picks a model from a connected marketplace integration
+// (OpenRouter / Hugging Face / Replicate), we route the call through that
+// provider using the API key the team stored in `circle_integration_secrets`.
+// Secrets are written client-side as base64(utf-8) — see
+// `encodeSecret` in src/lib/circleIntegrations.ts. Service role bypasses RLS.
+async function loadCircleProviderApiKey(
+  supabase: any,
+  circleId: string,
+  provider: string,
+  key = "api_key",
+): Promise<string | null> {
+  try {
+    const { data: integ } = await supabase
+      .from("circle_integrations")
+      .select("id")
+      .eq("circle_id", circleId)
+      .eq("provider", provider)
+      .eq("is_active", true)
+      .eq("status", "connected")
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (!integ?.id) return null;
+    const { data: secret } = await supabase
+      .from("circle_integration_secrets")
+      .select("value_encrypted")
+      .eq("integration_id", integ.id)
+      .eq("key", key)
+      .maybeSingle();
+    const enc = secret?.value_encrypted;
+    if (!enc || typeof enc !== "string") return null;
+    const bytes = Uint8Array.from(atob(enc), (c) => c.charCodeAt(0));
+    return new TextDecoder("utf-8").decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+type MarketplaceProviderKey = "openrouter" | "hugging_face" | "replicate";
+
+// Most marketplace LLM providers expose an OpenAI-compatible chat endpoint,
+// so we use a single dispatcher and only swap URL + auth headers.
+async function callMarketplaceProvider(opts: {
+  provider: MarketplaceProviderKey;
+  modelId: string;          // already stripped of provider prefix
+  systemPrompt: string;
+  userMessage: string;
+  apiKey: string;
+  maxTokens?: number;
+}): Promise<{ text: string | null; usage: any; error?: string }> {
+  const { provider, modelId, systemPrompt, userMessage, apiKey } = opts;
+  const maxTokens = opts.maxTokens ?? 2048;
+  const messages = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userMessage },
+  ];
+
+  let endpoint: string;
+  let extraHeaders: Record<string, string> = {};
+  switch (provider) {
+    case "openrouter":
+      endpoint = "https://openrouter.ai/api/v1/chat/completions";
+      extraHeaders = {
+        "HTTP-Referer": "https://app.chrisswanson.xyz",
+        "X-Title": "Underground Circle",
+      };
+      break;
+    case "hugging_face":
+      endpoint = `https://api-inference.huggingface.co/models/${modelId}/v1/chat/completions`;
+      break;
+    case "replicate":
+      // Replicate is prediction-based (POST /predictions then poll).
+      // The OpenAI-compatible adapter only covers a subset of models, so
+      // we surface a friendly fallback instead of pretending it works.
+      return { text: null, usage: {}, error: "replicate routing pending — use OpenRouter for now" };
+  }
+
+  try {
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        ...extraHeaders,
+      },
+      body: JSON.stringify({ model: modelId, messages, max_tokens: maxTokens }),
+    });
+    if (!resp.ok) {
+      const errBody = await resp.text();
+      return { text: null, usage: {}, error: `${provider} ${resp.status}: ${errBody.slice(0, 300)}` };
+    }
+    const data = await resp.json();
+    const text: string | null = data?.choices?.[0]?.message?.content || null;
+    const u = data?.usage || {};
+    const inTok = u.prompt_tokens ?? Math.ceil((systemPrompt.length + userMessage.length) / 4);
+    const outTok = u.completion_tokens ?? Math.ceil((text?.length || 0) / 4);
+    return {
+      text,
+      usage: {
+        model: modelId,
+        input_tokens: inTok,
+        output_tokens: outTok,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        total_tokens: u.total_tokens ?? (inTok + outTok),
+      },
+    };
+  } catch (e: any) {
+    return { text: null, usage: {}, error: e?.message || `${provider} call failed` };
+  }
 }
 
 async function callClaude(frozenPrompt: string, volatilePrompt: string, userMessage: string, options: CallClaudeOptions = {}): Promise<ClaudeResult> {
@@ -2791,7 +2909,12 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       "mistral":      "mistralai/Mistral-Large-2411",
     };
 
-    const hfModelId = effectiveModel
+    // Platform HF proxy handles terminal aliases ("qwen3.5") and bare
+    // org/model slugs. Marketplace-prefixed ids ("huggingface/Qwen/...",
+    // "openrouter/...", "replicate/...") get routed below via the circle's
+    // own integration credential, so exclude them here to avoid double-call.
+    const isMarketplacePrefix = !!effectiveModel && /^(openrouter|huggingface|replicate)\//.test(effectiveModel);
+    const hfModelId = effectiveModel && !isMarketplacePrefix
       ? (HF_MODEL_MAP[effectiveModel] || (effectiveModel.includes("/") ? effectiveModel : null))
       : null;
 
@@ -2830,6 +2953,44 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
     const combinedSystemPrompt = volatilePrompt && volatilePrompt.trim().length > 0
       ? frozenPrompt + "\n\n" + volatilePrompt
       : frozenPrompt;
+
+    // ── Marketplace integration routing ───────────────────────────────────
+    // The chat picker prefixes provider-routed model ids with the
+    // integration's provider key. We strip the prefix, look up the
+    // circle's stored API key, and call the provider directly so the user
+    // gets the model they actually picked. If the circle hasn't connected
+    // the integration we fall through to the Claude fallback below.
+    if (!aiResponse && isMarketplacePrefix && circleId && effectiveModel) {
+      const slashIdx = effectiveModel.indexOf("/");
+      const head = effectiveModel.slice(0, slashIdx);
+      const tail = effectiveModel.slice(slashIdx + 1);
+      const providerKey: MarketplaceProviderKey | null =
+        head === "openrouter" ? "openrouter"
+        : head === "huggingface" ? "hugging_face"
+        : head === "replicate" ? "replicate"
+        : null;
+      if (providerKey) {
+        const providerApiKey = await loadCircleProviderApiKey(supabase, circleId, providerKey);
+        if (providerApiKey) {
+          const provResult = await callMarketplaceProvider({
+            provider: providerKey,
+            modelId: tail,
+            systemPrompt: combinedSystemPrompt,
+            userMessage: message,
+            apiKey: providerApiKey,
+            maxTokens: maxTokens || 2048,
+          });
+          if (provResult.text) {
+            aiResponse = provResult.text;
+            tokenBreakdown = provResult.usage;
+          } else if (provResult.error) {
+            console.warn(`[swanbot-ai] marketplace ${providerKey} call failed:`, provResult.error);
+          }
+        } else {
+          console.warn(`[swanbot-ai] no ${providerKey} api_key found for circle ${circleId}; falling through to Claude`);
+        }
+      }
+    }
 
     // Route to HuggingFace if user selected an open model
     if (!aiResponse && hfModelId && !isClaudeModel) {
