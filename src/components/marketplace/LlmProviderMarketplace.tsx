@@ -50,6 +50,12 @@ import {
   useUserApiKeys,
   type LLMProvider,
 } from '../../lib/llmProviders';
+import {
+  buildBillingPreview,
+  getProviderRoutingMode,
+  setProviderRoutingMode,
+  type ProviderRoutingMode,
+} from '../../lib/billingPriority';
 
 interface ProviderCardSpec {
   /** LLMProvider id when the provider has native llm-proxy support, or
@@ -168,6 +174,21 @@ export default function LlmProviderMarketplace(_props: Props) {
     [hasProvider],
   );
 
+  // Billing-priority preview — shows the user the actual order their
+  // requests will be routed in, given which keys they've connected
+  // and their preferred routing mode. Updates immediately when keys
+  // are added / removed because `keys` is the live source.
+  const [routingMode, setRoutingMode] = useState<ProviderRoutingMode>(() => getProviderRoutingMode());
+  const handleRoutingModeChange = useCallback((mode: ProviderRoutingMode) => {
+    setRoutingMode(mode);
+    setProviderRoutingMode(mode);
+  }, []);
+  const billingPreview = useMemo(() => {
+    const connected = new Set<LLMProvider | 'openswan'>();
+    for (const k of keys) if (k.isActive) connected.add(k.provider);
+    return buildBillingPreview(connected, routingMode);
+  }, [keys, routingMode]);
+
   const handleStartConnect = useCallback((id: LLMProvider) => {
     setExpandedId(id);
     setKeyInput('');
@@ -251,6 +272,60 @@ export default function LlmProviderMarketplace(_props: Props) {
           <Text style={styles.headerBadgeSlash}>/{PROVIDER_CARDS.filter((c) => c.id).length}</Text>
         </View>
       </View>
+
+      {/* Billing priority — shown only when 2+ providers are
+          connected. Single connection = no decision to surface. */}
+      {billingPreview.length >= 2 && (
+        <View style={styles.billingBlock}>
+          <View style={styles.billingHeaderRow}>
+            <Text style={styles.billingHeaderLabel}>Billing priority</Text>
+            <View style={styles.billingModeRow}>
+              {([
+                { key: 'prefer_direct',     label: 'Direct first' },
+                { key: 'prefer_openrouter', label: 'OpenRouter first' },
+                { key: 'cheapest',          label: 'Cheapest' },
+              ] as const).map(opt => {
+                const active = routingMode === opt.key;
+                return (
+                  <Pressable
+                    key={opt.key}
+                    onPress={() => handleRoutingModeChange(opt.key)}
+                    style={[styles.billingModeChip, active && styles.billingModeChipActive]}
+                  >
+                    <Text style={[styles.billingModeChipText, active && styles.billingModeChipTextActive]}>
+                      {opt.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+          <Text style={styles.billingHeaderSub}>
+            When the model you pick is on multiple providers, here's the order each turn is billed against.
+          </Text>
+          <View style={styles.billingChain}>
+            {billingPreview.map((entry, idx) => (
+              <View key={entry.provider} style={[styles.billingRow, idx === 0 && styles.billingRowPrimary]}>
+                <View style={styles.billingRowHeader}>
+                  <Text style={[styles.billingPosition, idx === 0 && styles.billingPositionPrimary]}>
+                    {idx + 1}
+                  </Text>
+                  <Text style={[styles.billingProviderLabel, idx === 0 && styles.billingProviderLabelPrimary]}>
+                    {entry.label}
+                  </Text>
+                  {idx === 0 && (
+                    <View style={styles.billingPrimaryChip}>
+                      <Text style={styles.billingPrimaryChipText}>PRIMARY</Text>
+                    </View>
+                  )}
+                  <Text style={styles.billingScope}>{entry.scope}</Text>
+                </View>
+                <Text style={styles.billingReason}>{entry.reason}</Text>
+              </View>
+            ))}
+          </View>
+        </View>
+      )}
 
       <View style={styles.grid}>
         {PROVIDER_CARDS.map((card) => {
@@ -447,6 +522,88 @@ const styles = StyleSheet.create({
   },
   headerBadgeNum: { color: '#a5b4fc', fontSize: 13, fontWeight: '800' },
   headerBadgeSlash: { color: '#64748b', fontSize: 11 },
+  // ── Billing priority block ───────────────────────────────────────
+  billingBlock: {
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    borderRadius: 10,
+    padding: 12,
+    gap: 8,
+  },
+  billingHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flexWrap: 'wrap',
+  },
+  billingHeaderLabel: {
+    color: '#cbd5e1',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+    flex: 1,
+  },
+  billingHeaderSub: { color: '#64748b', fontSize: 11, lineHeight: 16 },
+  billingModeRow: {
+    flexDirection: 'row',
+    gap: 4,
+  },
+  billingModeChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: '#020617',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  billingModeChipActive: {
+    backgroundColor: '#1e1b4b',
+    borderColor: '#6366f1',
+  },
+  billingModeChipText: { color: '#64748b', fontSize: 10, fontWeight: '700' },
+  billingModeChipTextActive: { color: '#a5b4fc' },
+  billingChain: { gap: 6 },
+  billingRow: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    backgroundColor: '#020617',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    borderRadius: 8,
+    gap: 4,
+  },
+  billingRowPrimary: {
+    backgroundColor: '#16a34a11',
+    borderColor: '#16a34a55',
+  },
+  billingRowHeader: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  billingPosition: {
+    color: '#475569',
+    fontSize: 12,
+    fontWeight: '800',
+    minWidth: 16,
+  },
+  billingPositionPrimary: { color: '#22c55e' },
+  billingProviderLabel: { color: '#e2e8f0', fontSize: 13, fontWeight: '700' },
+  billingProviderLabelPrimary: { color: '#86efac' },
+  billingPrimaryChip: {
+    backgroundColor: '#16a34a22',
+    borderWidth: 1,
+    borderColor: '#16a34a66',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 999,
+  },
+  billingPrimaryChipText: { color: '#86efac', fontSize: 9, fontWeight: '900', letterSpacing: 0.5 },
+  billingScope: { color: '#64748b', fontSize: 11, marginLeft: 'auto' },
+  billingReason: { color: '#94a3b8', fontSize: 11, lineHeight: 16, paddingLeft: 24 },
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',

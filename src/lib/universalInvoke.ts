@@ -30,6 +30,7 @@ import {
   type ProviderRoute,
   type RouteResolutionOptions,
 } from './crossProviderRouter';
+import { getProviderRoutingMode, preferenceForMode } from './billingPriority';
 
 export interface UniversalInvokeRequest {
   /** Logical or provider-specific model id. The router will alias-
@@ -204,9 +205,15 @@ export async function invokeAnyChat(
   const available = req.userKeys
     ? buildAvailableSet(req.userKeys, { openswanReachable: req.openswanReachable })
     : new Set<'openrouter' | 'huggingface' | 'anthropic' | 'openai' | 'groq' | 'openswan'>(['openrouter']);
+  // Honor the user's billing-priority preference (set in the
+  // marketplace) when the caller didn't pin an explicit order.
+  // Default `prefer_direct` keeps native keys ahead of OpenRouter,
+  // which is what most users actually want — pay providers
+  // directly with no markup.
+  const prefer = req.prefer ?? preferenceForMode(getProviderRoutingMode());
   const routes = resolveProviderRoutes(req.modelId, {
     available,
-    prefer: req.prefer,
+    prefer,
     preferFree: req.preferFree,
   });
   return executeRouteChain(routes, req);
