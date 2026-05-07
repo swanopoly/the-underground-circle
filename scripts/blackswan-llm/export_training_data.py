@@ -132,30 +132,34 @@ TABLES = {
     # behaviors we want BlackSwan to learn — accountability rituals
     # (missions), shipping summaries (proof-of-work + github events),
     # and team rhythm (automations).
+    # Column names match real prod schemas: see migrations
+    # 20260410_circle_missions, 20260311_github_integration,
+    # 20260313_circle_automations.
     "circle_missions": {
-        "select": "id,circle_id,title,description,goal,status,priority,due_date,completed_at,template_key,created_by,created_at",
+        "select": "id,circle_id,title,description,owner_id,status,deadline,template_id,created_at,updated_at",
         "order": "created_at.asc",
     },
     "mission_tasks": {
-        "select": "id,mission_id,circle_id,title,description,status,assignee_user_id,assignee_agent_name,priority,completed_at,proof_of_work_id,created_at",
+        "select": "id,mission_id,title,description,assignee_id,agent_name,status,sort_order,evidence,completed_at,created_at",
         "order": "created_at.asc",
     },
     "mission_agents": {
-        "select": "id,mission_id,agent_name,role,assigned_by,created_at",
-        "order": "created_at.asc",
+        "select": "id,mission_id,agent_name,role,assigned_at",
+        "order": "assigned_at.asc",
     },
     "proof_of_work": {
-        "select": "id,circle_id,user_id,title,description,kind,artifact_url,artifact_metadata,xp_awarded,created_at",
+        "select": "id,circle_id,mission_id,user_id,agent_name,pow_type,title,detail,created_at",
         "order": "created_at.asc",
     },
     "circle_github_events": {
-        # Only the fields needed for shipping summaries — keep payloads
-        # out of the export to dodge bloat + secrets in commit messages.
-        "select": "id,circle_id,event_type,repo_name,actor_login,branch,commit_sha,pr_number,pr_title,pr_state,workflow_name,workflow_status,delivered_at",
-        "order": "delivered_at.asc",
+        # Only the summary fields — payload column would balloon the
+        # export AND occasionally carries secrets in commit messages.
+        # Real columns per 20260311_github_integration.sql.
+        "select": "id,circle_id,event_type,action,title,body,author,ref,commits_count,additions,created_at",
+        "order": "created_at.asc",
     },
-    "automations": {
-        "select": "id,circle_id,name,template_key,schedule,enabled,last_run_at,last_run_status,last_run_summary,created_at",
+    "circle_automations": {
+        "select": "id,circle_id,created_by,name,description,trigger_type,cron_expression,enabled,last_run_at,last_error,template_id,created_at,updated_at",
         "order": "created_at.asc",
     },
 }
@@ -176,6 +180,13 @@ def main():
         "office_terminal_messages": "training_safe_terminal",
         "tasks": "training_safe_tasks",
         "north_star_entries": "training_safe_goals",
+        # Wave 2 — see 20260506c_training_safe_wave2_tables.sql
+        "circle_missions":       "training_safe_missions",
+        "mission_tasks":         "training_safe_mission_tasks",
+        "mission_agents":        "training_safe_mission_agents",
+        "proof_of_work":         "training_safe_proof_of_work",
+        "circle_github_events":  "training_safe_github_events",
+        "circle_automations":    "training_safe_automations",
     }
 
     print(f"Exporting from {SUPABASE_URL}")

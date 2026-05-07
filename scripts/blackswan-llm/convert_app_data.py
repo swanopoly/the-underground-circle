@@ -154,7 +154,16 @@ def convert_room_messages():
 
 
 def convert_missions():
-    """Convert circle missions + tasks into accountability + planning conversations."""
+    """Convert circle missions + tasks into accountability + planning conversations.
+
+    Schema reference (see migration 20260410_circle_missions.sql):
+      circle_missions: id, circle_id, title, description, owner_id,
+                       status (draft/active/completed/archived),
+                       deadline, template_id, created_at, updated_at
+      mission_tasks:   id, mission_id, title, description, assignee_id,
+                       agent_name, status (pending/in_progress/done/blocked),
+                       sort_order, evidence (jsonb), completed_at, created_at
+    """
     missions = load_json("circle_missions")
     tasks = load_json("mission_tasks")
     examples = []
@@ -169,11 +178,15 @@ def convert_missions():
 
     for m in missions:
         title = (m.get("title") or "").strip()
-        goal = (m.get("goal") or m.get("description") or "").strip()
+        # No `goal` column in real schema — description carries the goal.
+        goal = (m.get("description") or "").strip()
         status = m.get("status", "")
         if not title or len(title) < 5:
             continue
         mission_tasks = tasks_by_mission.get(m["id"], [])
+        # Sort by the real `sort_order` column so the breakdown
+        # reads in the order the operator laid it out.
+        mission_tasks.sort(key=lambda t: t.get("sort_order", 0))
 
         # Mission planning conversation — what would BlackSwan
         # propose as a task breakdown for this title?
@@ -191,8 +204,8 @@ def convert_missions():
             if task_lines:
                 ask = f"Help me plan a mission: {title}."
                 if goal:
-                    ask += f" Goal: {goal[:200]}."
-                reply = f"Here's how I'd break it down:\n\n" + "\n".join(task_lines)
+                    ask += f" Context: {goal[:200]}."
+                reply = "Here's how I'd break it down:\n\n" + "\n".join(task_lines)
                 if status == "completed":
                     reply += "\n\nThis one's already shipped — keep that energy."
                 elif status == "active":
@@ -225,36 +238,58 @@ def convert_missions():
 
 
 def convert_proof_of_work():
-    """Convert proof-of-work entries into shipping summaries."""
+    """Convert proof-of-work entries into shipping summaries.
+
+    Schema (20260410_circle_missions.sql):
+      proof_of_work: id, circle_id, mission_id, user_id, agent_name,
+                     pow_type ('commit'|'pr'|'deploy'|'agent_run'|'checkin'|'manual'),
+                     title, detail (jsonb), created_at
+    The `detail` JSONB usually carries the description / url / metadata
+    fields — we pull a short summary out of it for the recap.
+    """
     pow_entries = load_json("proof_of_work")
     examples = []
 
-    # Group by user so we can build per-user shipping summaries.
-    by_user = {}
+    def detail_summary(entry):
+        d = entry.get("detail")
+        if isinstance(d, dict):
+            for key in ("summary", "description", "body", "message", "url"):
+                v = d.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        return ""
+
+    # Group by user (or agent if no user_id) so we can build
+    # per-actor shipping summaries.
+    by_actor = {}
     for entry in pow_entries:
-        uid = entry.get("user_id")
-        if not uid:
+        actor = entry.get("user_id") or entry.get("agent_name")
+        if not actor:
             continue
         title = (entry.get("title") or "").strip()
-        desc = (entry.get("description") or "").strip()
         if not title:
             continue
-        by_user.setdefault(uid, []).append((title, desc, entry.get("kind", ""), entry.get("created_at", "")))
+        by_actor.setdefault(actor, []).append((
+            title,
+            detail_summary(entry),
+            entry.get("pow_type", ""),
+            entry.get("created_at", ""),
+        ))
 
-    # Per-user "what did I ship" recap. Keeps the last 6 entries to
+    # Per-actor "what did I ship" recap. Keeps the last 6 entries to
     # stay realistic for a weekly recap window.
-    for uid, items in by_user.items():
+    for _actor, items in by_actor.items():
         items.sort(key=lambda x: x[3], reverse=True)
         recent = items[:6]
         if len(recent) < 2:
             continue
         bullets = []
-        for (title, desc, kind, _) in recent:
+        for (title, detail_text, pow_type, _) in recent:
             line = f"- {title}"
-            if kind:
-                line += f" ({kind})"
-            if desc and len(desc) > 20:
-                line += f" — {desc[:140]}"
+            if pow_type:
+                line += f" ({pow_type})"
+            if detail_text and len(detail_text) > 20:
+                line += f" — {detail_text[:140]}"
             bullets.append(line)
         examples.append({
             "conversations": [
@@ -267,14 +302,14 @@ def convert_proof_of_work():
     # Individual entry → "describe what you shipped" example.
     for entry in pow_entries:
         title = (entry.get("title") or "").strip()
-        desc = (entry.get("description") or "").strip()
-        if not title or not desc or len(desc) < 30:
+        detail_text = detail_summary(entry)
+        if not title or not detail_text or len(detail_text) < 30:
             continue
         examples.append({
             "conversations": [
                 {"from": "system", "value": BLACKSWAN_SYSTEM},
                 {"from": "human", "value": f"I just shipped: {title}"},
-                {"from": "gpt", "value": f"Logged. `{title}` — {desc[:300]}. That's the kind of receipt that compounds."},
+                {"from": "gpt", "value": f"Logged. `{title}` — {detail_text[:300]}. That's the kind of receipt that compounds."},
             ]
         })
     return examples
@@ -286,6 +321,13 @@ def convert_github_events():
     The killer-feature behavior per CLAUDE.md: BlackSwan watches the
     repo and tells the team what shipped this week. We chunk events
     by week per circle and build "summarize the week" conversations.
+
+    Schema reference (20260311_github_integration.sql):
+      circle_github_events: id, circle_id, connection_id, event_type
+                            ('push'|'pull_request'|'issues'|'release'|'workflow_run'),
+                            action (e.g. 'opened', 'closed', 'merged',
+                            'completed'), title, body, author, ref,
+                            commits_count, additions, ..., created_at.
     """
     events = load_json("circle_github_events")
     examples = []
@@ -295,7 +337,7 @@ def convert_github_events():
     buckets = {}
     for ev in events:
         cid = ev.get("circle_id", "")
-        ts = ev.get("delivered_at") or ev.get("created_at") or ""
+        ts = ev.get("created_at", "")
         if not cid or not ts:
             continue
         try:
@@ -309,26 +351,31 @@ def convert_github_events():
         # Need a few events to make a meaningful summary.
         if len(evs) < 3:
             continue
-        # Bucket by event type
+        # Bucket by event type. PR state lives in `action` for this
+        # schema (opened / closed / merged), not a separate column.
         pushes = [e for e in evs if e.get("event_type") == "push"]
-        prs_opened = [e for e in evs if e.get("event_type") == "pull_request" and e.get("pr_state") == "open"]
-        prs_merged = [e for e in evs if e.get("event_type") == "pull_request" and e.get("pr_state") == "merged"]
-        ci_failed = [e for e in evs if e.get("event_type") == "workflow_run" and e.get("workflow_status") in ("failure", "failed")]
-        ci_passed = [e for e in evs if e.get("event_type") == "workflow_run" and e.get("workflow_status") == "success"]
+        prs_opened = [e for e in evs if e.get("event_type") == "pull_request" and e.get("action") == "opened"]
+        prs_merged = [e for e in evs if e.get("event_type") == "pull_request" and e.get("action") in ("merged", "closed")]
+        ci_failed = [e for e in evs if e.get("event_type") == "workflow_run" and e.get("action") in ("failure", "failed")]
+        ci_passed = [e for e in evs if e.get("event_type") == "workflow_run" and e.get("action") in ("success", "completed")]
 
-        # Top contributors
+        # Top contributors — `author` is the GitHub login.
         actors = {}
         for e in evs:
-            login = e.get("actor_login")
+            login = e.get("author")
             if login:
                 actors[login] = actors.get(login, 0) + 1
         top = sorted(actors.items(), key=lambda x: -x[1])[:3]
 
         bullet_parts = []
         if pushes:
-            bullet_parts.append(f"- {len(pushes)} push{'es' if len(pushes) != 1 else ''}")
+            commits_total = sum(int(p.get("commits_count") or 0) for p in pushes)
+            line = f"- {len(pushes)} push{'es' if len(pushes) != 1 else ''}"
+            if commits_total:
+                line += f" ({commits_total} commit{'s' if commits_total != 1 else ''})"
+            bullet_parts.append(line)
         if prs_merged:
-            titles = [e.get("pr_title") for e in prs_merged[:3] if e.get("pr_title")]
+            titles = [e.get("title") for e in prs_merged[:3] if e.get("title")]
             line = f"- {len(prs_merged)} PR{'s' if len(prs_merged) != 1 else ''} merged"
             if titles:
                 line += f" — {', '.join(titles)}"
@@ -357,21 +404,41 @@ def convert_github_events():
 
 
 def convert_automations():
-    """Convert automations + their last-run summaries into ops conversations."""
-    autos = load_json("automations")
+    """Convert automation rows into ops-style conversations.
+
+    Schema (20260313_circle_automations.sql):
+      circle_automations: id, circle_id, created_by, name, description,
+                          icon, trigger_type, cron_expression,
+                          enabled, last_run_at, last_error,
+                          template_id, created_at, updated_at, ...
+    There's no last_run_summary column in this table — the automation
+    reports its result to agent_activity. So we synthesize the
+    conversation from the automation's intent (description + trigger)
+    rather than its last response.
+    """
+    autos = load_json("circle_automations")
     examples = []
     for a in autos:
         name = (a.get("name") or "").strip()
-        summary = (a.get("last_run_summary") or "").strip()
-        status = a.get("last_run_status", "")
-        template = a.get("template_key", "")
-        if not name or not summary or len(summary) < 30:
+        desc = (a.get("description") or "").strip()
+        trigger = a.get("trigger_type") or ""
+        cron = a.get("cron_expression") or ""
+        enabled = a.get("enabled", False)
+        last_err = (a.get("last_error") or "").strip()
+        if not name or not desc or len(desc) < 20:
             continue
+        if last_err:
+            reply = f"`{name}` ({trigger or 'custom trigger'}) is currently failing: {last_err[:200]}. {desc[:240]}"
+        elif not enabled:
+            reply = f"`{name}` ({trigger or 'custom trigger'}) is paused. Original intent: {desc[:280]}"
+        else:
+            schedule = f"runs on {cron}" if cron and trigger == 'schedule' else f"{trigger or 'custom'} trigger"
+            reply = f"`{name}` — {schedule}. Purpose: {desc[:280]}"
         examples.append({
             "conversations": [
                 {"from": "system", "value": BLACKSWAN_SYSTEM},
-                {"from": "human", "value": f"What did the {name} automation report?"},
-                {"from": "gpt", "value": f"`{name}` ({template or 'custom'}) — {status or 'last run'}: {summary[:400]}"},
+                {"from": "human", "value": f"What does the {name} automation do?"},
+                {"from": "gpt", "value": reply},
             ]
         })
     return examples
