@@ -211,6 +211,39 @@ if [ "${DEPLOY_OLLAMA}" = true ]; then
     echo
 fi
 
+# ─── Step 10: Prune old adapter directories ────────────────────────────
+# Each cycle drops a fresh `models/v5/lora_<timestamp>/` (~65 MB each).
+# Without pruning the directory grows ~3 GB/year. Keep the last
+# RETAIN_ADAPTERS so we can roll back a bad cycle without filling
+# the disk. lora_v2/ is the canonical "currently-deployed" copy and
+# is preserved separately.
+RETAIN_ADAPTERS=3
+echo "═══ Step 10: Prune old adapter dirs (keep last ${RETAIN_ADAPTERS}) ═══"
+if [ -d models/v5 ]; then
+    pushd models/v5 > /dev/null
+    # Collect timestamped lora dirs (lora_YYYYMMDD_HHMMSS), sort newest first.
+    # macOS ships bash 3.2 with no `mapfile`, so use a portable while-read loop.
+    adapter_dirs=()
+    while IFS= read -r d; do
+        adapter_dirs+=("$d")
+    done < <(ls -1d lora_2* 2>/dev/null | sort -r || true)
+    total="${#adapter_dirs[@]}"
+    if [ "${total}" -gt "${RETAIN_ADAPTERS}" ]; then
+        i=0
+        for d in "${adapter_dirs[@]}"; do
+            i=$((i + 1))
+            if [ "${i}" -gt "${RETAIN_ADAPTERS}" ]; then
+                echo "  pruning ${d}"
+                rm -rf "${d}"
+            fi
+        done
+    else
+        echo "  ${total} adapter dir(s) on disk — nothing to prune."
+    fi
+    popd > /dev/null
+fi
+echo
+
 # ─── Done ──────────────────────────────────────────────────────────────
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║   ✅  BlackSwan retrain cycle complete                   ║"
