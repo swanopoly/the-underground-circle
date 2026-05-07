@@ -11,13 +11,15 @@
  * so the edge function can dispatch to the right API.
  */
 import { listCircleIntegrations, type CircleIntegrationProvider } from '../circleIntegrations';
+import { listApiKeys, PROVIDER_MODELS, type LLMProvider } from '../llmProviders';
+import { getModelsByProvider, refreshModelRegistry, type RegisteredModel } from '../modelRegistry';
 
 export interface ModelOption {
   /** Identifier passed all the way to the edge function. */
   id: string;
   label: string;
   /** Provider key — matches the integration's provider id. */
-  provider: 'anthropic' | CircleIntegrationProvider;
+  provider: string;
   description?: string;
   contextWindow?: number;
   /** True when the underlying credential is wired up. */
@@ -34,10 +36,30 @@ export interface ModelGroup {
   models: ModelOption[];
 }
 
-const ANTHROPIC_MODELS: ModelOption[] = [
-  { id: 'claude-haiku-4-5', label: 'Haiku 4.5', provider: 'anthropic', description: 'Fast, low cost', contextWindow: 200_000, ready: true },
-  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', provider: 'anthropic', description: 'Balanced', contextWindow: 1_000_000, ready: true },
-  { id: 'claude-opus-4-7', label: 'Opus 4.7', provider: 'anthropic', description: 'Deep reasoning', contextWindow: 1_000_000, ready: true },
+const ANTHROPIC_MODELS: Omit<ModelOption, 'ready'>[] = (PROVIDER_MODELS.anthropic || []).map((model) => ({
+  id: model.id,
+  label: model.label,
+  provider: 'anthropic',
+  description: `Anthropic | ${model.costTier}`,
+  contextWindow: model.contextWindow,
+}));
+
+// BlackSwan — our own custom Qwen3.5-4B fine-tune hosted at
+// huggingface.co/cswan801/BlackSwan-v5. Routes through the HF
+// Inference API endpoint using whatever Hugging Face key the team
+// connected in Marketplace, so picking it actually answers from the
+// fine-tuned weights (not platform Anthropic). The provider key
+// MUST stay "hugging_face" so the edge function's marketplace router
+// dispatches it correctly; the group label and visual treatment are
+// what make it read as BlackSwan in the picker.
+const BLACKSWAN_MODELS: Omit<ModelOption, 'ready'>[] = [
+  {
+    id: 'huggingface/cswan801/BlackSwan-v5',
+    label: 'BlackSwan v5',
+    provider: 'hugging_face',
+    description: 'Our custom Qwen3.5-4B fine-tune · trained on app data',
+    contextWindow: 32_768,
+  },
 ];
 
 // Curated OpenRouter shortlist — used as a fallback if the live catalog
@@ -63,6 +85,8 @@ let _openRouterCatalogCache: { fetchedAt: number; models: Omit<ModelOption, 'rea
 const OPENROUTER_CATALOG_TTL_MS = 5 * 60_000;
 
 const OR_PRIMARY_FAMILIES = ['anthropic', 'openai', 'google', 'meta-llama', 'qwen', 'mistralai', 'deepseek', 'x-ai'];
+const DIRECT_PROVIDER_REFRESH_TTL_MS = 60 * 60_000;
+const _lastDirectProviderRefresh: Partial<Record<LLMProvider, number>> = {};
 
 async function loadLiveOpenRouterCatalog(): Promise<Omit<ModelOption, 'ready'>[] | null> {
   const now = Date.now();
@@ -130,15 +154,149 @@ async function loadLiveOpenRouterCatalog(): Promise<Omit<ModelOption, 'ready'>[]
   }
 }
 
-const HUGGING_FACE_MODELS: Omit<ModelOption, 'ready'>[] = [
-  { id: 'huggingface/Qwen/Qwen2.5-72B-Instruct', label: 'Qwen 2.5 72B', provider: 'hugging_face', description: 'Inference Endpoints' },
-  { id: 'huggingface/meta-llama/Llama-3.3-70B-Instruct', label: 'Llama 3.3 70B', provider: 'hugging_face', description: 'Inference Endpoints' },
-];
+const HUGGING_FACE_MODELS: Omit<ModelOption, 'ready'>[] = (PROVIDER_MODELS.huggingface || []).map((model) => ({
+  id: `huggingface/${model.id}`,
+  label: model.label,
+  provider: 'hugging_face',
+  description: `HF Router | ${model.costTier}`,
+  contextWindow: model.contextWindow,
+}));
 
 const REPLICATE_MODELS: Omit<ModelOption, 'ready'>[] = [
   { id: 'replicate/meta/meta-llama-3.1-405b-instruct', label: 'Llama 3.1 405B', provider: 'replicate', description: 'Frontier OSS' },
   { id: 'replicate/anthropic/claude-3.5-sonnet', label: 'Claude 3.5 Sonnet', provider: 'replicate', description: 'Anthropic via Replicate' },
 ];
+
+const DIRECT_BYOK_PROVIDERS: Array<{
+  userProvider: LLMProvider;
+  marketplaceProvider: CircleIntegrationProvider;
+  label: string;
+  hint: string;
+}> = [
+  {
+    userProvider: 'openai',
+    marketplaceProvider: 'openai',
+    label: 'OpenAI',
+    hint: 'Connect OpenAI in Marketplace to use GPT and reasoning models with the user-owned key.',
+  },
+  {
+    userProvider: 'groq',
+    marketplaceProvider: 'groq',
+    label: 'Groq',
+    hint: 'Connect Groq in Marketplace for low-latency Llama and Mixtral models.',
+  },
+  {
+    userProvider: 'google_ai',
+    marketplaceProvider: 'google_ai',
+    label: 'Google AI',
+    hint: 'Connect Google AI in Marketplace for Gemini models.',
+  },
+  {
+    userProvider: 'mistral_ai',
+    marketplaceProvider: 'mistral_ai',
+    label: 'Mistral AI',
+    hint: 'Connect Mistral AI in Marketplace for Mistral and Codestral models.',
+  },
+  {
+    userProvider: 'cohere',
+    marketplaceProvider: 'cohere',
+    label: 'Cohere',
+    hint: 'Connect Cohere in Marketplace for Command models, embeddings, and rerank workflows.',
+  },
+  {
+    userProvider: 'perplexity',
+    marketplaceProvider: 'perplexity',
+    label: 'Perplexity',
+    hint: 'Connect Perplexity in Marketplace for Sonar search-grounded models.',
+  },
+  {
+    userProvider: 'together_ai',
+    marketplaceProvider: 'together_ai',
+    label: 'Together AI',
+    hint: 'Connect Together AI in Marketplace for hosted OSS models.',
+  },
+  {
+    userProvider: 'fireworks_ai',
+    marketplaceProvider: 'fireworks_ai',
+    label: 'Fireworks AI',
+    hint: 'Connect Fireworks AI in Marketplace for low-latency OSS inference.',
+  },
+  {
+    userProvider: 'deepseek',
+    marketplaceProvider: 'deepseek',
+    label: 'DeepSeek',
+    hint: 'Connect DeepSeek in Marketplace for chat and reasoner models.',
+  },
+  {
+    userProvider: 'zai',
+    marketplaceProvider: 'z_ai',
+    label: 'Z.AI / GLM',
+    hint: 'Connect Z.AI / GLM in Marketplace for GLM chat models.',
+  },
+  {
+    userProvider: 'minimax',
+    marketplaceProvider: 'minimax',
+    label: 'MiniMax',
+    hint: 'Connect MiniMax in Marketplace for long-context multilingual models.',
+  },
+  {
+    userProvider: 'ollama',
+    marketplaceProvider: 'ollama',
+    label: 'Ollama',
+    hint: 'Connect Ollama in Marketplace with a local base URL for no-cloud model runs.',
+  },
+];
+
+function directModelsForProvider(userProvider: LLMProvider, marketplaceProvider: string): Omit<ModelOption, 'ready'>[] {
+  return (PROVIDER_MODELS[userProvider] || []).map((model) => ({
+    id: `${userProvider}/${model.id}`,
+    label: model.label,
+    provider: marketplaceProvider,
+    description: `${userProvider} · ${model.costTier}`,
+    contextWindow: model.contextWindow,
+  }));
+}
+
+function registeredModelsToOptions(
+  models: RegisteredModel[],
+  userProvider: LLMProvider,
+  marketplaceProvider: string,
+): Omit<ModelOption, 'ready'>[] {
+  const skipRuntimeFamilies = ['transcribe', 'tts', 'realtime', 'audio', 'embedding', 'moderation', 'image', 'dall-e', 'whisper'];
+  return models
+    .filter((model) => model.category === 'chat' || model.category === 'reasoning' || model.category === 'code')
+    .filter((model) => !skipRuntimeFamilies.some((pattern) => model.model_id.toLowerCase().includes(pattern)))
+    .map((model) => ({
+      id: marketplaceProvider === 'anthropic' ? model.model_id : `${userProvider}/${model.model_id}`,
+      label: model.label,
+      provider: marketplaceProvider,
+      description: `${model.tier}${model.released_at ? ` | released ${model.released_at.slice(0, 10)}` : ''}${model.last_verified_at ? ` | verified ${model.last_verified_at.slice(0, 10)}` : ''}`,
+      contextWindow: model.context_window,
+    }));
+}
+
+function mergeModelOptions<T extends Omit<ModelOption, 'ready'>>(baseModels: T[], liveModels: T[]): T[] {
+  const seen = new Set<string>();
+  const merged: T[] = [];
+  for (const model of [...baseModels, ...liveModels]) {
+    if (!model.id || seen.has(model.id)) continue;
+    seen.add(model.id);
+    merged.push(model);
+  }
+  return merged;
+}
+
+function maybeRefreshDirectProviderCatalog(provider: LLMProvider) {
+  const now = Date.now();
+  if (_lastDirectProviderRefresh[provider] && now - _lastDirectProviderRefresh[provider]! < DIRECT_PROVIDER_REFRESH_TTL_MS) {
+    return;
+  }
+  _lastDirectProviderRefresh[provider] = now;
+  void refreshModelRegistry(provider).catch(() => {
+    // Non-blocking: the static catalog remains available and the next
+    // successful refresh will populate model_registry.
+  });
+}
 
 interface RegistryOpts {
   /** When true, providers without a connected integration are still shown
@@ -149,19 +307,63 @@ interface RegistryOpts {
 
 export async function loadModelGroups(circleId: string | null | undefined, opts: RegistryOpts = {}): Promise<ModelGroup[]> {
   const groups: ModelGroup[] = [];
+  const userApiKeys = await listApiKeys().catch(() => []);
+  const activeUserApiProviders = new Set(
+    userApiKeys
+      .filter((key) => key.isActive)
+      .map((key) => key.provider),
+  );
+  // Accept legacy marketplace provider names if they were saved before
+  // the user_api_keys provider catalog was normalised.
+  if (activeUserApiProviders.has('hugging_face' as LLMProvider)) activeUserApiProviders.add('huggingface');
+  if (activeUserApiProviders.has('z_ai' as LLMProvider)) activeUserApiProviders.add('zai');
 
-  // Anthropic always available — the platform key is what the chat has
-  // historically used and the existing edge function path stays unchanged.
+  if (activeUserApiProviders.has('openai')) maybeRefreshDirectProviderCatalog('openai');
+  if (activeUserApiProviders.has('anthropic')) maybeRefreshDirectProviderCatalog('anthropic');
+
+  const [registeredAnthropicModels, registeredOpenAIModels] = await Promise.all([
+    getModelsByProvider('anthropic').catch(() => []),
+    getModelsByProvider('openai').catch(() => []),
+  ]);
+  const anthropicModels = mergeModelOptions(
+    ANTHROPIC_MODELS,
+    registeredModelsToOptions(registeredAnthropicModels, 'anthropic', 'anthropic'),
+  );
+
+  // Anthropic is the native default path, but it still needs the user's
+  // own stored key unless the backend explicitly allows platform keys for
+  // that account.
+  const anthropicReady = activeUserApiProviders.has('anthropic');
   groups.push({
     provider: 'anthropic',
     label: 'Anthropic',
-    connected: true,
-    models: ANTHROPIC_MODELS,
+    connected: anthropicReady,
+    hint: anthropicReady ? undefined : 'Add your Anthropic key in Marketplace > Models before using Claude chat models.',
+    models: anthropicModels.map((model) => ({ ...model, ready: anthropicReady })),
   });
 
   if (!circleId) return groups;
 
   const integrations = await listCircleIntegrations(circleId);
+
+  // BlackSwan group — surface the team's own model first so it reads
+  // as "your model" not "another OSS option in the HF list". Routes
+  // through the Hugging Face inference endpoint using whichever HF
+  // key is wired in Marketplace, so it's only `ready` when HF is
+  // connected. Sits right after Anthropic in the picker.
+  const huggingFaceConnectedForBlackswan = !!integrations.find(
+    (i) => i.provider === 'hugging_face' && i.is_active !== false && i.status === 'connected',
+  );
+  groups.push({
+    provider: 'hugging_face',
+    label: 'BlackSwan',
+    connected: huggingFaceConnectedForBlackswan,
+    hint: huggingFaceConnectedForBlackswan
+      ? 'Your circle\'s custom-trained model. Refreshes weekly from app data.'
+      : 'Connect Hugging Face in Marketplace to call BlackSwan — needs the HF inference API key the trainer pushed weights with.',
+    models: BLACKSWAN_MODELS.map((m) => ({ ...m, ready: huggingFaceConnectedForBlackswan })),
+  });
+
   // Three states matter for the picker: connected (ready to use),
   // degraded (connected but the key probe failed — re-validate in the
   // Marketplace), and not-connected (group greyed out with a connect
@@ -180,12 +382,39 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
     }
   }
 
+  for (const entry of DIRECT_BYOK_PROVIDERS) {
+    const hasUserKey = activeUserApiProviders.has(entry.userProvider);
+    const hasCircleIntegration = connectedSet.has(entry.marketplaceProvider);
+    const degradedReason = degradedMessages.get(entry.marketplaceProvider);
+    const isDegraded = !hasUserKey && !!degradedReason;
+    if (!hasUserKey && !hasCircleIntegration && !isDegraded && !opts.includeDisconnected) continue;
+    const hint = hasUserKey
+      ? 'Uses your encrypted user API key for chat, agents, and model tools.'
+      : hasCircleIntegration
+        ? 'Circle integration exists, but this user still needs to save their own API key before chat can bill their account.'
+        : isDegraded
+          ? `Key invalid (${degradedReason}). Re-enter in Marketplace.`
+          : entry.hint;
+    groups.push({
+      provider: entry.marketplaceProvider,
+      label: hasUserKey ? entry.label : `${entry.label} - key needed`,
+      connected: hasUserKey,
+      hint,
+      models: mergeModelOptions(
+        directModelsForProvider(entry.userProvider, entry.marketplaceProvider),
+        entry.userProvider === 'openai'
+          ? registeredModelsToOptions(registeredOpenAIModels, 'openai', 'openai')
+          : [],
+      ).map((model) => ({ ...model, ready: hasUserKey })),
+    });
+  }
+
   // Pull the live OpenRouter catalog when the integration is connected so
   // the picker reflects the real ~200-model lineup (and current prices)
   // rather than a stale 10-item shortlist. Catalog is public, so no auth
   // is needed — we only fetch when the team has actually connected the
   // integration to keep the request budget tight.
-  const openRouterConnected = connectedSet.has('openrouter');
+  const openRouterConnected = connectedSet.has('openrouter') || activeUserApiProviders.has('openrouter');
   const openRouterModels = openRouterConnected
     ? (await loadLiveOpenRouterCatalog()) || OPENROUTER_MODELS
     : OPENROUTER_MODELS;
@@ -220,7 +449,12 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
   ];
 
   for (const entry of providerHydrators) {
-    const isConnected = connectedSet.has(entry.provider);
+    const userProvider =
+      entry.provider === 'hugging_face' ? 'huggingface'
+      : entry.provider === 'replicate' ? 'replicate'
+      : entry.provider === 'openrouter' ? 'openrouter'
+      : null;
+    const isConnected = connectedSet.has(entry.provider) || (userProvider ? activeUserApiProviders.has(userProvider as LLMProvider) : false);
     const degradedReason = degradedMessages.get(entry.provider);
     const isDegraded = !isConnected && !!degradedReason;
     if (!isConnected && !isDegraded && !opts.includeDisconnected) continue;
