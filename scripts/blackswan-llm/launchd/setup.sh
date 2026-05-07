@@ -20,6 +20,9 @@ if [ ! -f "${ENV_FILE}" ]; then
 export SUPABASE_URL="https://YOUR-PROJECT.supabase.co"
 export SUPABASE_SERVICE_ROLE_KEY="eyJ..."
 export HF_TOKEN="hf_..."
+# HF Inference Endpoint refresh — when set, the train cycle tells the
+# named endpoint to pull freshly-pushed weights. Leave empty to skip.
+export HF_ENDPOINT_NAME="blackswan-v5"
 # Optional — used only if you opt into synthetic data generation.
 # export ANTHROPIC_API_KEY="sk-ant-..."
 EOF

@@ -197,6 +197,23 @@ else
     echo
 fi
 
+# ─── Step 8.5: Refresh the HF Inference Endpoint ───────────────────────
+# After the new weights land in `cswan801/BlackSwan-v5`, tell the
+# dedicated HF Inference Endpoint to pull them. Without this, the
+# running endpoint keeps serving the previous commit and the team
+# chats with stale weights even though HF has the fresh ones. No-op
+# when HF_ENDPOINT_NAME isn't set (i.e., the team hasn't paid for an
+# endpoint and is fine with the public Inference API).
+if [ "${SKIP_PUSH}" = false ]; then
+    echo "═══ Step 8.5: Refresh HF Inference Endpoint ═════════════════"
+    if [ -z "${HF_TOKEN:-}" ] || [ -z "${HF_ENDPOINT_NAME:-}" ]; then
+        echo "  HF_ENDPOINT_NAME or HF_TOKEN missing — skipping endpoint update."
+    else
+        "${PYTHON}" update_hf_endpoint.py || echo "  endpoint update reported a problem — see log."
+    fi
+    echo
+fi
+
 # ─── Step 9: (Optional) deploy to local Ollama ─────────────────────────
 if [ "${DEPLOY_OLLAMA}" = true ]; then
     echo "═══ Step 9: Deploy to local Ollama ══════════════════════════"
