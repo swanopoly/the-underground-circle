@@ -104,6 +104,114 @@ function formatMarketplaceIntegrationsForPrompt(rows: any[] | undefined): string
   return lines.join("\n");
 }
 
+function normalizeMemoryImportance(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return 0.55;
+  if (n > 1) return Math.max(0, Math.min(1, n / 10));
+  return Math.max(0, Math.min(1, n));
+}
+
+function memoryKindFromCategory(category: unknown): string {
+  const normalized = String(category || "").toLowerCase();
+  if (/\b(preference|style|setting)\b/.test(normalized)) return "preference";
+  if (/\b(policy|rule|guardrail)\b/.test(normalized)) return "policy";
+  if (/\b(decision|chose|picked)\b/.test(normalized)) return "decision";
+  if (/\b(finding|insight|learned)\b/.test(normalized)) return "finding";
+  if (/\b(instruction|how_to|process|workflow)\b/.test(normalized)) return "instruction";
+  if (/\b(context|pattern|topic|tech|team|member)\b/.test(normalized)) return "context";
+  return "fact";
+}
+
+function titleFromMemoryKey(key: unknown, category: unknown): string {
+  const raw = String(key || category || "swanbot_memory")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (raw || "SwanBot memory").slice(0, 120);
+}
+
+async function saveSwanbotMemoryEntry(
+  supabase: any,
+  circleId: string,
+  userId: string,
+  memory: { key?: unknown; value?: unknown; category?: unknown; importance?: unknown },
+  sourceSurface = "swanbot_auto_memory",
+): Promise<{ id?: string; error?: string }> {
+  const content = String(memory.value || "").trim();
+  if (!content) return { error: "memory value is required" };
+
+  const category = String(memory.category || "general");
+  const importance = normalizeMemoryImportance(memory.importance);
+  const scope = /\b(private|personal|user|preference)\b/i.test(category) ? "user" : "circle";
+  const title = titleFromMemoryKey(memory.key, category);
+  const now = new Date().toISOString();
+  const payload = {
+    circle_id: circleId,
+    user_id: userId,
+    scope,
+    memory_kind: memoryKindFromCategory(category),
+    title,
+    content: content.slice(0, 4000),
+    source_surface: sourceSurface,
+    retrieval_mode: importance >= 0.85 ? "startup" : "on_demand",
+    importance,
+    visibility: scope === "user" ? "private" : "circle_shared",
+    is_active: true,
+    updated_at: now,
+    metadata: {
+      source: "swanbot-ai",
+      legacy_key: memory.key || null,
+      category,
+    },
+  };
+
+  const existing = await supabase
+    .from("memory_entries")
+    .select("id")
+    .eq("circle_id", circleId)
+    .eq("user_id", userId)
+    .eq("source_surface", sourceSurface)
+    .eq("title", title)
+    .eq("is_active", true)
+    .maybeSingle();
+
+  if (existing?.data?.id) {
+    const { error } = await supabase
+      .from("memory_entries")
+      .update(payload)
+      .eq("id", existing.data.id);
+    if (error) return { error: error.message };
+    return { id: existing.data.id };
+  }
+
+  const { data, error } = await supabase
+    .from("memory_entries")
+    .insert({ ...payload, created_at: now })
+    .select("id")
+    .maybeSingle();
+  if (error) return { error: error.message };
+  return { id: data?.id };
+}
+
+async function maybeCircleClaudeBudgetExceededResponse(supabase: any, circleId: string): Promise<Response | null> {
+  try {
+    const cap = await checkCircleClaudeBudget(supabase, circleId);
+    if (!cap.allowed) {
+      return new Response(
+        JSON.stringify({
+          error: "circle_claude_budget_exceeded",
+          detail: cap.reason,
+          spent24h: cap.spent24h,
+          cap: cap.cap,
+          reply: `🛑 Daily AI budget reached ($${cap.spent24h.toFixed(2)} of $${cap.cap.toFixed(2)}). Raise the cap in circle settings → AI SPEND, or wait for the 24h window to roll.`,
+        }),
+        { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+  } catch { /* fail-open by design */ }
+  return null;
+}
+
 // ─── Skills System (Progressive Disclosure) ─────────────────────────────────
 // Only inject skill-specific instructions when the user's message triggers them.
 // This saves tokens and keeps responses focused.
@@ -1397,17 +1505,15 @@ async function executeToolCall(
 
       case "store_memory": {
         const { key, value, category, importance } = toolInput;
-        const { error } = await supabase.from("blackswan_memory").upsert({
-          circle_id: circleId,
-          user_id: userId,
-          key,
-          value,
-          category: category || "general",
-          importance: importance || 5,
-          updated_at: new Date().toISOString(),
-        }, { onConflict: "circle_id,key" });
-        if (error) return JSON.stringify({ error: error.message });
-        return JSON.stringify({ success: true, stored: key });
+        const stored = await saveSwanbotMemoryEntry(
+          supabase,
+          circleId,
+          userId,
+          { key, value, category: category || "general", importance: importance || 5 },
+          "swanbot_tool_memory",
+        );
+        if (stored.error) return JSON.stringify({ error: stored.error });
+        return JSON.stringify({ success: true, stored: key, memory_id: stored.id });
       }
 
       case "list_tasks": {
@@ -1904,9 +2010,35 @@ async function loadCircleProviderApiKey(
   }
 }
 
-type MarketplaceProviderKey = "openai" | "openrouter" | "hugging_face" | "replicate";
+type MarketplaceProviderKey =
+  | "openai"
+  | "openrouter"
+  | "hugging_face"
+  | "replicate"
+  // Wave 2 native BYOK providers — most are OpenAI-compatible chat APIs
+  // dispatched through callMarketplaceProvider's switch below. Cohere
+  // and MiniMax use their own request shapes and aren't wired yet —
+  // user picks of those slugs will fall through to platform Sonnet.
+  | "groq"
+  | "google_ai"
+  | "mistral_ai"
+  | "perplexity"
+  | "together_ai"
+  | "fireworks_ai"
+  | "deepseek"
+  | "z_ai"
+  | "ollama";
 
 function userApiProviderForMarketplaceProvider(provider: MarketplaceProviderKey): string {
+  if (provider === "hugging_face") return "huggingface";
+  if (provider === "z_ai") return "zai";
+  return provider;
+}
+
+// Returns the prefix string the chat picker uses for this provider's
+// model ids (e.g. `groq/llama-3.3-70b-versatile`). Used both to detect
+// the prefix in incoming model strings and to log usage entries.
+function modelPrefixForMarketplaceProvider(provider: MarketplaceProviderKey): string {
   if (provider === "hugging_face") return "huggingface";
   return provider;
 }
@@ -2083,6 +2215,34 @@ async function loadCircleHfEndpointUrl(
   return endpointUrl;
 }
 
+// Ollama runs on the user's local network. Without a baseUrl on the
+// integration metadata we have nothing to call. Returns the raw URL
+// the team configured (typically http://localhost:11434) — no auth
+// header is added; the caller appends /v1/chat/completions.
+async function loadCircleOllamaBaseUrl(
+  supabase: any,
+  circleId: string,
+): Promise<string | null> {
+  try {
+    const { data: integ } = await supabase
+      .from("circle_integrations")
+      .select("metadata")
+      .eq("circle_id", circleId)
+      .eq("provider", "ollama")
+      .eq("is_active", true)
+      .eq("status", "connected")
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const url = (integ?.metadata as any)?.baseUrl;
+    if (typeof url !== "string") return null;
+    const trimmed = url.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
+
 async function callMarketplaceProvider(opts: {
   provider: MarketplaceProviderKey;
   modelId: string;          // already stripped of provider prefix
@@ -2104,7 +2264,7 @@ async function callMarketplaceProvider(opts: {
     { role: "user", content: userMessage },
   ];
 
-  let endpoint: string;
+  let endpoint = "";
   let extraHeaders: Record<string, string> = {};
   if (opts.endpointOverride) {
     // Dedicated HF Inference Endpoint — base URL + /v1/chat/completions.
@@ -2128,6 +2288,40 @@ async function callMarketplaceProvider(opts: {
         break;
       case "replicate":
         return await callReplicateProvider({ modelId, systemPrompt, userMessage, apiKey, maxTokens });
+      // ── Wave 2 native BYOK providers (OpenAI-compatible) ──
+      case "groq":
+        endpoint = "https://api.groq.com/openai/v1/chat/completions";
+        break;
+      case "google_ai":
+        // Google AI Studio's OpenAI-compatible endpoint expects the
+        // model id in the body; the auth header is the API key.
+        endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+        break;
+      case "mistral_ai":
+        endpoint = "https://api.mistral.ai/v1/chat/completions";
+        break;
+      case "perplexity":
+        endpoint = "https://api.perplexity.ai/chat/completions";
+        break;
+      case "together_ai":
+        endpoint = "https://api.together.xyz/v1/chat/completions";
+        break;
+      case "fireworks_ai":
+        endpoint = "https://api.fireworks.ai/inference/v1/chat/completions";
+        break;
+      case "deepseek":
+        endpoint = "https://api.deepseek.com/v1/chat/completions";
+        break;
+      case "z_ai":
+        // Zhipu / Z.AI's OpenAI-compatible endpoint at the Open
+        // Platform — same auth shape, expects glm-* model ids in body.
+        endpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+        break;
+      case "ollama":
+        // Ollama runs locally on the team's machine. Base URL must be
+        // present on the integration metadata; we noop here and let
+        // the ollamaBaseUrl override path below handle it.
+        return { text: null, usage: {}, error: "ollama: missing baseUrl override" };
     }
   }
 
@@ -2346,6 +2540,8 @@ async function callMarketplaceProviderWithTools(opts: {
         // exposed, so for the relay path we skip Replicate and let the
         // caller fall back to Anthropic.
         return { data: null, error: "replicate relay not yet wired" };
+      default:
+        return { data: null, error: `unsupported marketplace relay provider: ${provider}` };
     }
   }
 
@@ -2891,37 +3087,38 @@ async function extractAndStoreMemories(
 
   if (memories.length === 0) return;
 
-  // Store memories — use upsert to avoid duplicates per circle+key
+  // Store memories in the canonical memory_entries pipeline so BlackSwan,
+  // OpenSwan, semantic retrieval, and UI feedback all read the same facts.
   for (const mem of memories) {
     try {
-      await supabase.from("blackswan_memory").upsert({
-        circle_id: circleId,
-        user_id: userId,
-        ...mem,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: "circle_id,key" });
+      await saveSwanbotMemoryEntry(supabase, circleId, userId, mem, "swanbot_auto_memory");
     } catch { /* non-critical */ }
   }
 
-  // ── Memory consolidation: cap at 50 per circle, prune lowest importance ──
+  // ── Memory consolidation: cap auto-extracted memories at 50 per circle. ──
   try {
     const { count } = await supabase
-      .from("blackswan_memory")
+      .from("memory_entries")
       .select("id", { count: "exact", head: true })
-      .eq("circle_id", circleId);
+      .eq("circle_id", circleId)
+      .eq("source_surface", "swanbot_auto_memory")
+      .eq("is_active", true);
     if (count && count > 50) {
-      // Delete oldest low-importance memories to stay under 50
+      // Soft-disable oldest low-importance auto memories to stay under 50
+      // without deleting audit history or user-promoted memories.
       const { data: toPrune } = await supabase
-        .from("blackswan_memory")
+        .from("memory_entries")
         .select("id")
         .eq("circle_id", circleId)
+        .eq("source_surface", "swanbot_auto_memory")
+        .eq("is_active", true)
         .order("importance", { ascending: true })
         .order("updated_at", { ascending: true })
         .limit(count - 50);
       if (toPrune && toPrune.length > 0) {
         await supabase
-          .from("blackswan_memory")
-          .delete()
+          .from("memory_entries")
+          .update({ is_active: false, updated_at: new Date().toISOString() })
           .in("id", toPrune.map((m: any) => m.id));
       }
     }
@@ -2952,33 +3149,16 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Umbrella budget cap — covers this uncapped surface (no per-source
-    // cap of its own) by falling back to the circle-wide 24h Claude spend
-    // limit set via `circles.settings.claude_total_max_cost_usd`. Default
-    // is $10/day — a loose safety net, not a primary guard. Fail-open if
-    // the check itself errors (telemetry drift should not brick chat).
-    // This is the one ≤ 15 LOC change to swanbot-ai that Phase 1c will
-    // replace end-to-end; deliberately surgical to avoid touching the
-    // 2904-line tool loop below.
-    try {
-      const svcForCap = createServiceRoleClient();
-      const cap = await checkCircleClaudeBudget(svcForCap, circleId);
-      if (!cap.allowed) {
-        return new Response(
-          JSON.stringify({
-            error: "circle_claude_budget_exceeded",
-            detail: cap.reason,
-            spent24h: cap.spent24h,
-            cap: cap.cap,
-            reply: `🛑 Daily AI budget reached ($${cap.spent24h.toFixed(2)} of $${cap.cap.toFixed(2)}). Raise the cap in circle settings → AI SPEND, or wait for the 24h window to roll.`,
-          }),
-          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-        );
-      }
-    } catch { /* fail-open by design */ }
-
     const userId = user.id;
     const supabase = createServiceRoleClient();
+    const marketplaceRequested = !!model && /^(openai|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|perplexity|together_ai|fireworks_ai|deepseek|z_ai|ollama)\//.test(model);
+    // Umbrella Claude budget cap only applies before known-Claude routes.
+    // Marketplace routes (BlackSwan/HF/OpenRouter/etc.) use their own provider
+    // keys and should not be blocked unless they actually fall back to Claude.
+    if (!marketplaceRequested) {
+      const budgetResponse = await maybeCircleClaudeBudgetExceededResponse(supabase, circleId);
+      if (budgetResponse) return budgetResponse;
+    }
     const anthropicKey = await resolveUserModelApiKey({
       supabase,
       userId,
@@ -2996,7 +3176,7 @@ Deno.serve(async (req: Request) => {
     //      unchanged.
     //   2. Native Anthropic model: forward to api.anthropic.com unchanged.
     if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
-      const isMarketplaceRelay = !!model && /^(openai|openrouter|huggingface|huggingface_endpoint|replicate)\//.test(model);
+      const isMarketplaceRelay = !!model && /^(openai|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|perplexity|together_ai|fireworks_ai|deepseek|z_ai|ollama)\//.test(model);
       let routingFallback: { provider: string; reason: string } | null = null;
 
       if (isMarketplaceRelay && circleId) {
@@ -3006,6 +3186,15 @@ Deno.serve(async (req: Request) => {
           : model!.startsWith("openrouter/") ? "openrouter"
           : (model!.startsWith("huggingface/") || model!.startsWith("huggingface_endpoint/")) ? "hugging_face"
           : model!.startsWith("replicate/") ? "replicate"
+          : model!.startsWith("groq/") ? "groq"
+          : model!.startsWith("google_ai/") ? "google_ai"
+          : model!.startsWith("mistral_ai/") ? "mistral_ai"
+          : model!.startsWith("perplexity/") ? "perplexity"
+          : model!.startsWith("together_ai/") ? "together_ai"
+          : model!.startsWith("fireworks_ai/") ? "fireworks_ai"
+          : model!.startsWith("deepseek/") ? "deepseek"
+          : model!.startsWith("z_ai/") ? "z_ai"
+          : model!.startsWith("ollama/") ? "ollama"
           : null;
         const tail = model!.slice(slashIdx + 1);
         // Mirror of the non-relay endpoint-override path: when the
@@ -3100,6 +3289,10 @@ Deno.serve(async (req: Request) => {
       const relaySystem = body.system_override || "You are OpenSwan, a helpful AI assistant.";
       const relayMaxTokens = maxTokens || 4096;
 
+      if (isMarketplaceRelay) {
+        const budgetResponse = await maybeCircleClaudeBudgetExceededResponse(supabase, circleId);
+        if (budgetResponse) return budgetResponse;
+      }
       if (!anthropicKey) {
         return errResponse(400, "key_missing", byokMissingMessage("anthropic"));
       }
@@ -3622,7 +3815,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
     // dedicated HF Inference Endpoint and saved its URL in the
     // integration metadata. Same provider key for credential lookup
     // as plain `huggingface/`, just a different endpoint.
-    const isMarketplacePrefix = !!effectiveModel && /^(openai|openrouter|huggingface|huggingface_endpoint|replicate)\//.test(effectiveModel);
+    const isMarketplacePrefix = !!effectiveModel && /^(openai|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|perplexity|together_ai|fireworks_ai|deepseek|z_ai|ollama)\//.test(effectiveModel);
     const hfModelId = effectiveModel && !isMarketplacePrefix
       ? (HF_MODEL_MAP[effectiveModel] || (effectiveModel.includes("/") ? effectiveModel : null))
       : null;
@@ -3684,6 +3877,15 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         : head === "openrouter" ? "openrouter"
         : (head === "huggingface" || head === "huggingface_endpoint") ? "hugging_face"
         : head === "replicate" ? "replicate"
+        : head === "groq" ? "groq"
+        : head === "google_ai" ? "google_ai"
+        : head === "mistral_ai" ? "mistral_ai"
+        : head === "perplexity" ? "perplexity"
+        : head === "together_ai" ? "together_ai"
+        : head === "fireworks_ai" ? "fireworks_ai"
+        : head === "deepseek" ? "deepseek"
+        : head === "z_ai" ? "z_ai"
+        : head === "ollama" ? "ollama"
         : null;
       // For the endpoint variant we read the URL + token-provider from
       // the dedicated BlackSwan integration (with HF metadata
@@ -3693,6 +3895,17 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       // endpoint.
       let endpointOverride: string | undefined;
       let tokenProviderOverride: MarketplaceProviderKey | null = null;
+      if (head === "ollama") {
+        const ollamaUrl = await loadCircleOllamaBaseUrl(supabase, circleId);
+        if (ollamaUrl) {
+          endpointOverride = ollamaUrl;
+        } else {
+          nonRelayRouting.routing_fallback = {
+            provider: "ollama",
+            reason: "Ollama baseUrl not set on the integration metadata",
+          };
+        }
+      }
       if (head === "huggingface_endpoint") {
         const routing = await loadCircleBlackswanRouting(supabase, circleId);
         if (routing.endpointUrl) {
@@ -3710,7 +3923,12 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
           };
         }
       }
-      if (providerKey && (head !== "huggingface_endpoint" || endpointOverride)) {
+      // Skip the call when an override-required head couldn't resolve
+      // its URL (huggingface_endpoint without BlackSwan/HF metadata,
+      // or ollama without a baseUrl). The routing_fallback signal set
+      // above tells the UI which one missed.
+      const needsOverride = head === "huggingface_endpoint" || head === "ollama";
+      if (providerKey && (!needsOverride || endpointOverride)) {
         // BlackSwan-card-routed endpoint reads its own api_token; all
         // other paths (regular huggingface, openrouter, openai,
         // legacy HF-card-only BlackSwan) use loadMarketplaceProviderApiKey.
@@ -3792,6 +4010,10 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
     }
 
     if (!aiResponse) {
+      if (marketplaceRequested) {
+        const budgetResponse = await maybeCircleClaudeBudgetExceededResponse(supabase, circleId);
+        if (budgetResponse) return budgetResponse;
+      }
       if (!anthropicKey) {
         return errResponse(400, "key_missing", byokMissingMessage("anthropic"));
       }
