@@ -1,0 +1,8 @@
+.venv/
+training_data/
+raw_data/
+models/
+__pycache__/
+*.pyc
+*.log
+.DS_Store

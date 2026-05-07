@@ -153,6 +153,230 @@ def convert_room_messages():
     return examples
 
 
+def convert_missions():
+    """Convert circle missions + tasks into accountability + planning conversations."""
+    missions = load_json("circle_missions")
+    tasks = load_json("mission_tasks")
+    examples = []
+
+    # Index tasks by mission_id so we can attach the breakdown.
+    tasks_by_mission = {}
+    for t in tasks:
+        mid = t.get("mission_id")
+        if not mid:
+            continue
+        tasks_by_mission.setdefault(mid, []).append(t)
+
+    for m in missions:
+        title = (m.get("title") or "").strip()
+        goal = (m.get("goal") or m.get("description") or "").strip()
+        status = m.get("status", "")
+        if not title or len(title) < 5:
+            continue
+        mission_tasks = tasks_by_mission.get(m["id"], [])
+
+        # Mission planning conversation — what would BlackSwan
+        # propose as a task breakdown for this title?
+        if mission_tasks and len(mission_tasks) >= 2:
+            task_lines = []
+            for t in mission_tasks:
+                tt = (t.get("title") or "").strip()
+                td = (t.get("description") or "").strip()
+                if not tt:
+                    continue
+                line = f"- {tt}"
+                if td:
+                    line += f": {td[:140]}"
+                task_lines.append(line)
+            if task_lines:
+                ask = f"Help me plan a mission: {title}."
+                if goal:
+                    ask += f" Goal: {goal[:200]}."
+                reply = f"Here's how I'd break it down:\n\n" + "\n".join(task_lines)
+                if status == "completed":
+                    reply += "\n\nThis one's already shipped — keep that energy."
+                elif status == "active":
+                    reply += "\n\nKnock the first task out today and the rest get easier."
+                examples.append({
+                    "conversations": [
+                        {"from": "system", "value": BLACKSWAN_SYSTEM},
+                        {"from": "human", "value": ask},
+                        {"from": "gpt", "value": reply},
+                    ]
+                })
+
+        # Status-check conversation when the mission is in flight.
+        if status in ("active", "completed"):
+            done_count = sum(1 for t in mission_tasks if t.get("status") == "done")
+            total = len(mission_tasks)
+            if total > 0:
+                pct = round(100 * done_count / total)
+                state = "DONE 🎯" if status == "completed" else f"{pct}% in flight"
+                examples.append({
+                    "conversations": [
+                        {"from": "system", "value": BLACKSWAN_SYSTEM},
+                        {"from": "human", "value": f"How's '{title}' going?"},
+                        {"from": "gpt", "value": f"Mission `{title}` — {state}. {done_count}/{total} tasks shipped." + (
+                            " Don't lose momentum on the rest." if status != "completed" else ""
+                        )},
+                    ]
+                })
+    return examples
+
+
+def convert_proof_of_work():
+    """Convert proof-of-work entries into shipping summaries."""
+    pow_entries = load_json("proof_of_work")
+    examples = []
+
+    # Group by user so we can build per-user shipping summaries.
+    by_user = {}
+    for entry in pow_entries:
+        uid = entry.get("user_id")
+        if not uid:
+            continue
+        title = (entry.get("title") or "").strip()
+        desc = (entry.get("description") or "").strip()
+        if not title:
+            continue
+        by_user.setdefault(uid, []).append((title, desc, entry.get("kind", ""), entry.get("created_at", "")))
+
+    # Per-user "what did I ship" recap. Keeps the last 6 entries to
+    # stay realistic for a weekly recap window.
+    for uid, items in by_user.items():
+        items.sort(key=lambda x: x[3], reverse=True)
+        recent = items[:6]
+        if len(recent) < 2:
+            continue
+        bullets = []
+        for (title, desc, kind, _) in recent:
+            line = f"- {title}"
+            if kind:
+                line += f" ({kind})"
+            if desc and len(desc) > 20:
+                line += f" — {desc[:140]}"
+            bullets.append(line)
+        examples.append({
+            "conversations": [
+                {"from": "system", "value": BLACKSWAN_SYSTEM},
+                {"from": "human", "value": "What have I shipped recently?"},
+                {"from": "gpt", "value": "Here's the proof of work I've got for you:\n\n" + "\n".join(bullets) + "\n\nKeep stacking wins."},
+            ]
+        })
+
+    # Individual entry → "describe what you shipped" example.
+    for entry in pow_entries:
+        title = (entry.get("title") or "").strip()
+        desc = (entry.get("description") or "").strip()
+        if not title or not desc or len(desc) < 30:
+            continue
+        examples.append({
+            "conversations": [
+                {"from": "system", "value": BLACKSWAN_SYSTEM},
+                {"from": "human", "value": f"I just shipped: {title}"},
+                {"from": "gpt", "value": f"Logged. `{title}` — {desc[:300]}. That's the kind of receipt that compounds."},
+            ]
+        })
+    return examples
+
+
+def convert_github_events():
+    """Convert circle_github_events into team shipping summaries.
+
+    The killer-feature behavior per CLAUDE.md: BlackSwan watches the
+    repo and tells the team what shipped this week. We chunk events
+    by week per circle and build "summarize the week" conversations.
+    """
+    events = load_json("circle_github_events")
+    examples = []
+
+    # Bucket events by (circle_id, week) — week is YYYY-WW.
+    from datetime import datetime
+    buckets = {}
+    for ev in events:
+        cid = ev.get("circle_id", "")
+        ts = ev.get("delivered_at") or ev.get("created_at") or ""
+        if not cid or not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            wk = f"{dt.year}-W{dt.isocalendar().week:02d}"
+        except (ValueError, AttributeError):
+            continue
+        buckets.setdefault((cid, wk), []).append(ev)
+
+    for (_cid, wk), evs in buckets.items():
+        # Need a few events to make a meaningful summary.
+        if len(evs) < 3:
+            continue
+        # Bucket by event type
+        pushes = [e for e in evs if e.get("event_type") == "push"]
+        prs_opened = [e for e in evs if e.get("event_type") == "pull_request" and e.get("pr_state") == "open"]
+        prs_merged = [e for e in evs if e.get("event_type") == "pull_request" and e.get("pr_state") == "merged"]
+        ci_failed = [e for e in evs if e.get("event_type") == "workflow_run" and e.get("workflow_status") in ("failure", "failed")]
+        ci_passed = [e for e in evs if e.get("event_type") == "workflow_run" and e.get("workflow_status") == "success"]
+
+        # Top contributors
+        actors = {}
+        for e in evs:
+            login = e.get("actor_login")
+            if login:
+                actors[login] = actors.get(login, 0) + 1
+        top = sorted(actors.items(), key=lambda x: -x[1])[:3]
+
+        bullet_parts = []
+        if pushes:
+            bullet_parts.append(f"- {len(pushes)} push{'es' if len(pushes) != 1 else ''}")
+        if prs_merged:
+            titles = [e.get("pr_title") for e in prs_merged[:3] if e.get("pr_title")]
+            line = f"- {len(prs_merged)} PR{'s' if len(prs_merged) != 1 else ''} merged"
+            if titles:
+                line += f" — {', '.join(titles)}"
+            bullet_parts.append(line)
+        if prs_opened:
+            bullet_parts.append(f"- {len(prs_opened)} PR{'s' if len(prs_opened) != 1 else ''} still open")
+        if ci_passed:
+            bullet_parts.append(f"- {len(ci_passed)} CI runs passed")
+        if ci_failed:
+            bullet_parts.append(f"- {len(ci_failed)} CI failure{'s' if len(ci_failed) != 1 else ''} (worth a look)")
+        if top:
+            who = ", ".join([f"{login} ({n})" for login, n in top])
+            bullet_parts.append(f"- Most active: {who}")
+
+        if not bullet_parts:
+            continue
+
+        examples.append({
+            "conversations": [
+                {"from": "system", "value": BLACKSWAN_SYSTEM},
+                {"from": "human", "value": "What shipped this week?"},
+                {"from": "gpt", "value": f"Here's the shipping report for {wk}:\n\n" + "\n".join(bullet_parts) + ("\n\nKeep cooking." if not ci_failed else "\n\nClose those CI failures before they pile up.")},
+            ]
+        })
+    return examples
+
+
+def convert_automations():
+    """Convert automations + their last-run summaries into ops conversations."""
+    autos = load_json("automations")
+    examples = []
+    for a in autos:
+        name = (a.get("name") or "").strip()
+        summary = (a.get("last_run_summary") or "").strip()
+        status = a.get("last_run_status", "")
+        template = a.get("template_key", "")
+        if not name or not summary or len(summary) < 30:
+            continue
+        examples.append({
+            "conversations": [
+                {"from": "system", "value": BLACKSWAN_SYSTEM},
+                {"from": "human", "value": f"What did the {name} automation report?"},
+                {"from": "gpt", "value": f"`{name}` ({template or 'custom'}) — {status or 'last run'}: {summary[:400]}"},
+            ]
+        })
+    return examples
+
+
 def main():
     all_examples = []
 
@@ -175,6 +399,22 @@ def main():
     room = convert_room_messages()
     print(f"Room conversation examples: {len(room)}")
     all_examples.extend(room)
+
+    missions = convert_missions()
+    print(f"Mission examples: {len(missions)}")
+    all_examples.extend(missions)
+
+    pow_examples = convert_proof_of_work()
+    print(f"Proof-of-work examples: {len(pow_examples)}")
+    all_examples.extend(pow_examples)
+
+    gh_examples = convert_github_events()
+    print(f"GitHub event examples: {len(gh_examples)}")
+    all_examples.extend(gh_examples)
+
+    auto_examples = convert_automations()
+    print(f"Automation examples: {len(auto_examples)}")
+    all_examples.extend(auto_examples)
 
     print(f"\nTotal app training examples: {len(all_examples)}")
 

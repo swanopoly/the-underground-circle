@@ -127,6 +127,37 @@ TABLES = {
         "select": "id,circle_id,owner_id,provider,name,status,token_usage_today,message_count_today,last_command,created_at",
         "order": "created_at.asc",
     },
+    # ── Wave 2: missions, proof-of-work, github events ──
+    # Added 2026-05-06. These are the highest-leverage app-specific
+    # behaviors we want BlackSwan to learn — accountability rituals
+    # (missions), shipping summaries (proof-of-work + github events),
+    # and team rhythm (automations).
+    "circle_missions": {
+        "select": "id,circle_id,title,description,goal,status,priority,due_date,completed_at,template_key,created_by,created_at",
+        "order": "created_at.asc",
+    },
+    "mission_tasks": {
+        "select": "id,mission_id,circle_id,title,description,status,assignee_user_id,assignee_agent_name,priority,completed_at,proof_of_work_id,created_at",
+        "order": "created_at.asc",
+    },
+    "mission_agents": {
+        "select": "id,mission_id,agent_name,role,assigned_by,created_at",
+        "order": "created_at.asc",
+    },
+    "proof_of_work": {
+        "select": "id,circle_id,user_id,title,description,kind,artifact_url,artifact_metadata,xp_awarded,created_at",
+        "order": "created_at.asc",
+    },
+    "circle_github_events": {
+        # Only the fields needed for shipping summaries — keep payloads
+        # out of the export to dodge bloat + secrets in commit messages.
+        "select": "id,circle_id,event_type,repo_name,actor_login,branch,commit_sha,pr_number,pr_title,pr_state,workflow_name,workflow_status,delivered_at",
+        "order": "delivered_at.asc",
+    },
+    "automations": {
+        "select": "id,circle_id,name,template_key,schedule,enabled,last_run_at,last_run_status,last_run_summary,created_at",
+        "order": "created_at.asc",
+    },
 }
 
 

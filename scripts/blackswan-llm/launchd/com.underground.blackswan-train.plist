@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  BlackSwan v5 — weekly continuous-learning trigger.
+
+  Install:
+    cp scripts/blackswan-llm/launchd/com.underground.blackswan-train.plist \
+       ~/Library/LaunchAgents/com.underground.blackswan-train.plist
+    launchctl load ~/Library/LaunchAgents/com.underground.blackswan-train.plist
+
+  Manual trigger:
+    launchctl kickstart -k gui/$UID/com.underground.blackswan-train
+
+  Disable:
+    launchctl unload ~/Library/LaunchAgents/com.underground.blackswan-train.plist
+
+  Schedule: every Sunday at 03:00 local time. Skips if the Mac is asleep
+  (RunAtLoad=false), runs at next wake when caught up.
+
+  Secrets: this plist does NOT include the Supabase / HF tokens. Drop them
+  into ~/.blackswan-train/env.sh which the wrapper script (run_cycle_with_env.sh)
+  sources before exec'ing train_cycle_v5.sh. That keeps the secrets out of
+  any plist that might end up checked into git.
+-->
+<dict>
+  <key>Label</key>
+  <string>com.underground.blackswan-train</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-l</string>
+    <string>-c</string>
+    <string>cd "$HOME/the-underground-circle/scripts/blackswan-llm" &amp;&amp; bash launchd/run_cycle_with_env.sh</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>0</integer>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/blackswan-train.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/blackswan-train.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/cswanson/the-underground-circle/scripts/blackswan-llm</string>
+
+  <!--
+    The Mac will hold the trigger until it wakes if it's asleep at 03:00.
+    Without this the run is skipped silently when the laptop's lid is closed.
+  -->
+  <key>StartOnMount</key>
+  <false/>
+</dict>
+</plist>

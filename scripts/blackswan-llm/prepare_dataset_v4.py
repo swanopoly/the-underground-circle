@@ -17,9 +17,20 @@ REAL_FILE = DATA_DIR / "blackswan_real.jsonl"
 SYNTHETIC_FILE = DATA_DIR / "blackswan_synthetic.jsonl"
 MULTITURN_FILE = DATA_DIR / "blackswan_multiturn.jsonl"
 PUBLIC_FILE = DATA_DIR / "public_curated_v4.jsonl"
+APP_FILE = DATA_DIR / "app_data.jsonl"
 TRAIN_FILE = DATA_DIR / "train_v4.jsonl"
 EVAL_FILE = DATA_DIR / "eval_v4.jsonl"
 STATS_FILE = DATA_DIR / "stats_v4.json"
+
+# Oversample factor for app-derived examples. Last training run had
+# the app at 0.34% of the mix (142 of 41,990), which is why the model
+# barely showed any app personality beyond what the system prompt
+# leaked at inference. Repeating each app example N times biases the
+# loss toward the app voice + the killer-feature behaviors (mission
+# planning, proof-of-work summaries, GitHub shipping recaps) without
+# requiring 5K hand-written examples. Dedup runs after this so there's
+# a ceiling on amplification — true near-duplicates still get pruned.
+APP_OVERSAMPLE = 12
 
 # ─── PII patterns ────────────────────────────────────────────────────────────
 
@@ -142,13 +153,24 @@ def main():
     synthetic = load_jsonl(SYNTHETIC_FILE)
     multiturn = load_jsonl(MULTITURN_FILE)
     public = load_jsonl(PUBLIC_FILE)
-    print(f"Loaded: {len(real)} real, {len(synthetic)} synthetic, {len(multiturn)} multiturn, {len(public)} public_v4")
+    app = load_jsonl(APP_FILE)
+    # Oversample app data so the loss gets a meaningful signal from
+    # how Underground Circle actually talks. Dedup later prunes
+    # exact duplicates so this isn't unbounded amplification.
+    app_oversampled = app * APP_OVERSAMPLE if app else []
+    print(
+        f"Loaded: {len(real)} real, {len(synthetic)} synthetic, "
+        f"{len(multiturn)} multiturn, {len(public)} public_v4, "
+        f"{len(app)} app (oversampled {APP_OVERSAMPLE}x → {len(app_oversampled)})"
+    )
     stats["sources"] = {
         "real": len(real), "synthetic": len(synthetic),
         "multiturn": len(multiturn), "public_v4": len(public),
+        "app_unique": len(app), "app_oversample": APP_OVERSAMPLE,
+        "app_after_oversample": len(app_oversampled),
     }
 
-    all_convs = real + synthetic + multiturn + public
+    all_convs = real + synthetic + multiturn + public + app_oversampled
     print(f"Total raw: {len(all_convs)}")
 
     # Step 1: PII cleaning
