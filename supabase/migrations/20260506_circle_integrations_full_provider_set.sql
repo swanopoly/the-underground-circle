@@ -16,7 +16,7 @@ ALTER TABLE circle_integrations
   CHECK (provider IN (
     -- Browser / automation
     'browserbase', 'stagehand', 'playwright_mcp', 'browserless', 'browserstack',
-    'firecrawl', 'apify', 'steel', 'hyperbrowser', 'airtop', 'skyvern', 'browser_use',
+    'firecrawl', 'brave', 'apify', 'steel', 'hyperbrowser', 'airtop', 'skyvern', 'browser_use',
     -- Cloud / infrastructure / observability / auth
     'aws', 'cloudflare', 'cloudflare_r2', 'datadog', 'descope', 'launchdarkly', 'clerk',
     -- Knowledge / collaboration
