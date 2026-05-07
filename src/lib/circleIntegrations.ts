@@ -7,6 +7,7 @@ export type CircleIntegrationProvider =
   | 'browserless'
   | 'browserstack'
   | 'firecrawl'
+  | 'brave'
   | 'apify'
   | 'steel'
   | 'hyperbrowser'
@@ -196,6 +197,19 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
       { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Research Web Data' },
     ],
     validationHints: ['Use for research and RAG ingestion where clean markdown is cheaper than full browser control.'],
+  },
+  brave: {
+    provider: 'brave',
+    label: 'Brave Search',
+    description: 'Independent web search API for current research, source discovery, and grounded chat answers.',
+    capabilityFlags: ['web_search', 'current_research', 'source_discovery', 'chat_grounding'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'country', label: 'Default Country', placeholder: 'us' },
+      { key: 'searchLang', label: 'Search Language', placeholder: 'en' },
+    ],
+    validationHints: ['Paste your Brave Search API subscription token. Chat uses it server-side through the search_web tool; the key is never sent to the browser prompt.'],
   },
   apify: {
     provider: 'apify',
@@ -744,6 +758,13 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
     optionalSecretKeys: [],
     metadataFields: [
       { key: 'defaultOrg', label: 'Default Org', placeholder: 'your-org' },
+      // Paste a dedicated Inference Endpoint URL (the
+      // `https://*.endpoints.huggingface.cloud` one HF gives you when
+      // you spin up a paid endpoint at ui.endpoints.huggingface.co).
+      // When set, the chat picker surfaces a `BlackSwan v5 (Endpoint)`
+      // option that routes through this URL — instant responses
+      // instead of the public Inference API's ~30s cold start.
+      { key: 'blackswan_endpoint_url', label: 'BlackSwan Endpoint URL (optional)', placeholder: 'https://abc123.us-east-1.aws.endpoints.huggingface.cloud' },
     ],
     validationHints: ['Use a User Access Token with read scope; bump to write only if deploying endpoints from chat.'],
   },
@@ -1268,6 +1289,11 @@ const CONNECTOR_PROVIDER_ALIASES: Record<string, CircleIntegrationProvider[]> = 
   browserless: ['browserless'],
   browserstack: ['browserstack'],
   firecrawl: ['firecrawl'],
+  brave: ['brave'],
+  'brave-search': ['brave'],
+  search: ['brave'],
+  web_search: ['brave'],
+  'web-search': ['brave'],
   apify: ['apify'],
   steel: ['steel'],
   hyperbrowser: ['hyperbrowser'],
@@ -1636,6 +1662,11 @@ export function inferTaskIntegrationRequirements(task: {
     requiredConnectors.add('aws');
     requiredCapabilities.add('manage_infra');
   }
+  if (/web search|research|current info|current information|source discovery|brave/i.test(text)) {
+    requiredConnectors.add('brave');
+    requiredCapabilities.add('web_search');
+    requiredCapabilities.add('current_research');
+  }
   if (/browser automation|browser session|web automation|computer use|website task|login flow|form fill|click|navigate|qa flow|ui test/i.test(text)) {
     requiredConnectors.add('browserbase');
     requiredCapabilities.add('web_automation');
@@ -1757,6 +1788,21 @@ export async function validateProviderApiKey(
       if (!resp.ok) return { ok: false, message: `Hugging Face probe ${resp.status}` };
       return { ok: true };
     }
+    if (provider === 'brave') {
+      const resp = await fetch('https://api.search.brave.com/res/v1/web/search?q=hello&count=1', {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'Accept-Encoding': 'gzip',
+          'X-Subscription-Token': apiKey.trim(),
+        },
+      });
+      if (resp.status === 401 || resp.status === 403) {
+        return { ok: false, message: 'Brave Search rejected the API key' };
+      }
+      if (!resp.ok) return { ok: false, message: `Brave Search probe ${resp.status}` };
+      return { ok: true };
+    }
     if (provider === 'replicate') {
       // GET /v1/account returns the authed account.
       const resp = await fetch('https://api.replicate.com/v1/account', {
@@ -1792,7 +1838,7 @@ export async function connectGenericCircleIntegration(opts: {
   let initialStatus: 'connected' | 'degraded' = 'connected';
   let validationMessage: string | undefined;
   const probableKey = opts.secrets?.api_key || opts.secrets?.api_token;
-  if (probableKey && (opts.provider === 'openrouter' || opts.provider === 'hugging_face' || opts.provider === 'replicate')) {
+  if (probableKey && (opts.provider === 'openrouter' || opts.provider === 'hugging_face' || opts.provider === 'replicate' || opts.provider === 'brave')) {
     const probe = await validateProviderApiKey(opts.provider, probableKey);
     if (!probe.ok) {
       initialStatus = 'degraded';

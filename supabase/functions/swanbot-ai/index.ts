@@ -39,6 +39,71 @@ interface RequestBody {
   system_override?: string;
 }
 
+const SECRETISH_METADATA_KEY_RE = /(secret|token|password|private|credential|api[_-]?key|access[_-]?key|refresh|client[_-]?secret)/i;
+const SAFE_INTEGRATION_METADATA_KEYS = new Set([
+  "workspaceName",
+  "defaultModel",
+  "defaultModelProvider",
+  "defaultOrg",
+  "defaultRegion",
+  "defaultBrowser",
+  "defaultProfile",
+  "defaultDatabase",
+  "defaultDatasetName",
+  "defaultActorId",
+  "defaultProjectKey",
+  "baseUrl",
+  "teamKey",
+  "projectRef",
+  "clusterName",
+  "workspace",
+  "siteUrl",
+  "last_validation_error",
+]);
+
+function clipSafeText(value: unknown, max = 90): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  return text.length > max ? `${text.slice(0, max - 1)}...` : text;
+}
+
+function sanitizeIntegrationMetadata(metadata: Record<string, unknown> | null | undefined): Record<string, string> {
+  const safe: Record<string, string> = {};
+  for (const [key, value] of Object.entries(metadata || {})) {
+    if (SECRETISH_METADATA_KEY_RE.test(key)) continue;
+    if (!SAFE_INTEGRATION_METADATA_KEYS.has(key)) continue;
+    const text = clipSafeText(value);
+    if (text) safe[key] = text;
+  }
+  return safe;
+}
+
+function formatMarketplaceIntegrationsForPrompt(rows: any[] | undefined): string | null {
+  const integrations = (rows || []).filter((row) => row?.is_active !== false);
+  if (integrations.length === 0) return null;
+  const connectedCount = integrations.filter((row) => row.status === "connected").length;
+  const degradedCount = integrations.filter((row) => row.status === "degraded").length;
+  const lines = [
+    "## Marketplace Integrations (sanitized)",
+    `Connected: ${connectedCount}/${integrations.length}. Degraded: ${degradedCount}.`,
+    "Security: secret values are not in this prompt. Use approved server-side tools or vault grants; never ask users to paste API keys into chat.",
+  ];
+  for (const row of integrations.slice(0, 25)) {
+    const label = row.display_name || row.label || row.provider;
+    const caps = Array.isArray(row.capability_flags) && row.capability_flags.length > 0
+      ? row.capability_flags.slice(0, 5).join(", ")
+      : "capabilities not declared";
+    const metadata = Object.entries(sanitizeIntegrationMetadata(row.metadata || {}))
+      .map(([key, value]) => `${key}=${value}`)
+      .slice(0, 4)
+      .join(", ");
+    lines.push(`- ${label} [${row.provider}] ${row.status}: ${caps}${metadata ? `; metadata: ${metadata}` : ""}`);
+  }
+  return lines.join("\n");
+}
+
 // ─── Skills System (Progressive Disclosure) ─────────────────────────────────
 // Only inject skill-specific instructions when the user's message triggers them.
 // This saves tokens and keeps responses focused.
@@ -317,7 +382,7 @@ async function gatherCircleContext(supabase: any, circleId: string, userId: stri
   const [
     memberXp, userAchievements, activeChallenges, userGoals,
     agentActivity, githubEvents, githubRepos, knowledgeEntries,
-    rooms, automations, memories, agentPersonality, agentSpirit, soulWisdomRows,
+    rooms, automations, marketplaceIntegrations, memories, agentPersonality, agentSpirit, soulWisdomRows,
   ] = await Promise.all([
     memberIds.length > 0
       ? supabase.from("user_xp").select("user_id, total_xp, level, title").in("user_id", memberIds).then((r: any) => r.data || [])
@@ -333,6 +398,9 @@ async function gatherCircleContext(supabase: any, circleId: string, userId: stri
     safe(supabase.from("circle_rooms").select("id, name, description, language, updated_at").eq("circle_id", circleId).eq("is_active", true).order("updated_at", { ascending: false }).limit(10)),
     // New: active automations
     safe(supabase.from("circle_automations").select("name, trigger_type, schedule, enabled, last_run_at, last_error, agent, spirit").eq("circle_id", circleId).eq("enabled", true).limit(15)),
+    // Marketplace integrations: sanitized before prompt injection. Never
+    // select secret values here.
+    safe(supabase.from("circle_integrations").select("id, provider, label, status, display_name, metadata, capability_flags, is_active, updated_at").eq("circle_id", circleId).eq("is_active", true).order("updated_at", { ascending: false }).limit(40)),
     // Persistent memories — Phase 0-4 architecture: use memory_entries (the
     // real pipeline table with soul routing + embeddings) instead of the
     // legacy blackswan_memory table. Ordered by importance then recency so
@@ -385,6 +453,7 @@ async function gatherCircleContext(supabase: any, circleId: string, userId: stri
     roomFiles,
     roomMessages,
     automations,
+    marketplaceIntegrations,
     memories,
     agentPersonality: agentPersonality?.personality || null,
     spirit: agentSpirit?.spirit || null,
@@ -554,6 +623,11 @@ ${ctx.knowledgeEntries.map((k: any) => {
 
   if (ctx.githubEvents?.length > 0) {
     volatile += `\n\n## Recent GitHub Activity\n${ctx.githubEvents.slice(0, 8).map((e: any) => `- [${e.event_type}] ${e.title} by ${e.author || "unknown"}`).join("\n")}`;
+  }
+
+  const integrationBlock = formatMarketplaceIntegrationsForPrompt(ctx.marketplaceIntegrations);
+  if (integrationBlock) {
+    volatile += `\n\n${integrationBlock}`;
   }
 
   if (ctx.rooms && ctx.rooms.length > 0) {
@@ -996,6 +1070,8 @@ const BLACKSWAN_TOOLS = [
       properties: {
         query: { type: "string", description: "Search query" },
         count: { type: "number", description: "Number of results (default 5)" },
+        country: { type: "string", description: "Optional Brave Search country code such as us, gb, ca" },
+        search_lang: { type: "string", description: "Optional Brave Search language code such as en, es, fr" },
       },
       required: ["query"],
     },
@@ -1348,7 +1424,7 @@ async function executeToolCall(
       }
 
       case "search_web": {
-        const { query, count } = toolInput;
+        const { query, count, country, search_lang } = toolInput;
         const braveKey = await resolveUserModelApiKey({
           supabase,
           userId,
@@ -1357,13 +1433,34 @@ async function executeToolCall(
         });
         if (!braveKey) return JSON.stringify({ error: "Web search requires your own Brave Search API key." });
         try {
+          const { data: braveIntegration } = await supabase
+            .from("circle_integrations")
+            .select("metadata")
+            .eq("circle_id", circleId)
+            .eq("provider", "brave")
+            .eq("is_active", true)
+            .order("updated_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          const metadata = (braveIntegration?.metadata || {}) as Record<string, unknown>;
+          const configuredCountry = typeof metadata.country === "string" ? metadata.country.trim() : "";
+          const configuredLang = typeof metadata.searchLang === "string" ? metadata.searchLang.trim() : "";
+          const safeCount = Math.min(Math.max(Number(count) || 5, 1), 10);
+          const params = new URLSearchParams({
+            q: String(query || ""),
+            count: String(safeCount),
+          });
+          const resolvedCountry = typeof country === "string" && country.trim() ? country.trim() : configuredCountry;
+          const resolvedLang = typeof search_lang === "string" && search_lang.trim() ? search_lang.trim() : configuredLang;
+          if (resolvedCountry) params.set("country", resolvedCountry);
+          if (resolvedLang) params.set("search_lang", resolvedLang);
           const resp = await fetch(
-            `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count || 5}`,
+            `https://api.search.brave.com/res/v1/web/search?${params.toString()}`,
             { headers: { "Accept": "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": braveKey.apiKey } },
           );
           if (!resp.ok) return JSON.stringify({ error: `Brave API ${resp.status}` });
           const data = await resp.json();
-          const results = (data.web?.results || []).slice(0, count || 5).map((r: any) => ({
+          const results = (data.web?.results || []).slice(0, safeCount).map((r: any) => ({
             title: r.title,
             url: r.url,
             description: r.description,
@@ -1743,10 +1840,12 @@ async function logHfActivity(
   } catch {} // Non-critical
 }
 
-// ── Marketplace integrations: read circle-stored API key + provider call ─
+// ── Marketplace integrations: read user/circle API key + provider call ─
 // When the user picks a model from a connected marketplace integration
 // (OpenRouter / Hugging Face / Replicate), we route the call through that
-// provider using the API key the team stored in `circle_integration_secrets`.
+// provider using the user's own key first. Circle-level secrets remain a
+// fallback for explicitly circle-scoped integrations, but model billing
+// should prefer per-user BYOK credentials.
 // Secrets are written client-side as base64(utf-8) — see
 // `encodeSecret` in src/lib/circleIntegrations.ts. Service role bypasses RLS.
 //
@@ -1805,7 +1904,33 @@ async function loadCircleProviderApiKey(
   }
 }
 
-type MarketplaceProviderKey = "openrouter" | "hugging_face" | "replicate";
+type MarketplaceProviderKey = "openai" | "openrouter" | "hugging_face" | "replicate";
+
+function userApiProviderForMarketplaceProvider(provider: MarketplaceProviderKey): string {
+  if (provider === "hugging_face") return "huggingface";
+  return provider;
+}
+
+async function loadMarketplaceProviderApiKey(
+  supabase: any,
+  circleId: string,
+  userId: string,
+  provider: MarketplaceProviderKey,
+): Promise<string | null> {
+  try {
+    const { data } = await supabase.rpc("get_user_api_key", {
+      p_user_id: userId,
+      p_provider: userApiProviderForMarketplaceProvider(provider),
+      p_label: "default",
+    });
+    const row = Array.isArray(data) ? data[0] : data;
+    if (typeof row === "string" && row.trim()) return row.trim();
+    if (typeof row?.api_key === "string" && row.api_key.trim()) return row.api_key.trim();
+  } catch {
+    // Fall through to circle integration secret.
+  }
+  return loadCircleProviderApiKey(supabase, circleId, provider);
+}
 
 // Replicate is async — start a prediction, then poll the get URL until it
 // reaches a terminal state. Most chat-trained models on Replicate accept
@@ -1900,6 +2025,34 @@ async function callReplicateProvider(opts: {
 // Most marketplace LLM providers expose an OpenAI-compatible chat endpoint,
 // so we use a single dispatcher and only swap URL + auth headers. Replicate
 // uses a separate async prediction lifecycle.
+// Read the dedicated Inference Endpoint URL the team set on their HF
+// integration metadata (when they spun up a paid endpoint at
+// ui.endpoints.huggingface.co). Returns null when the field is empty
+// or the integration isn't connected.
+async function loadCircleHfEndpointUrl(
+  supabase: any,
+  circleId: string,
+): Promise<string | null> {
+  try {
+    const { data: integ } = await supabase
+      .from("circle_integrations")
+      .select("metadata")
+      .eq("circle_id", circleId)
+      .eq("provider", "hugging_face")
+      .eq("is_active", true)
+      .eq("status", "connected")
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const url = (integ?.metadata as any)?.blackswan_endpoint_url;
+    if (typeof url !== "string") return null;
+    const trimmed = url.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
+
 async function callMarketplaceProvider(opts: {
   provider: MarketplaceProviderKey;
   modelId: string;          // already stripped of provider prefix
@@ -1907,6 +2060,12 @@ async function callMarketplaceProvider(opts: {
   userMessage: string;
   apiKey: string;
   maxTokens?: number;
+  /**
+   * When set, POST to this URL + /v1/chat/completions instead of the
+   * provider's default endpoint. Used to route BlackSwan through a
+   * dedicated HF Inference Endpoint when the team has paid for one.
+   */
+  endpointOverride?: string;
 }): Promise<{ text: string | null; usage: any; error?: string }> {
   const { provider, modelId, systemPrompt, userMessage, apiKey } = opts;
   const maxTokens = opts.maxTokens ?? 2048;
@@ -1917,19 +2076,29 @@ async function callMarketplaceProvider(opts: {
 
   let endpoint: string;
   let extraHeaders: Record<string, string> = {};
-  switch (provider) {
-    case "openrouter":
-      endpoint = "https://openrouter.ai/api/v1/chat/completions";
-      extraHeaders = {
-        "HTTP-Referer": "https://app.chrisswanson.xyz",
-        "X-Title": "Underground Circle",
-      };
-      break;
-    case "hugging_face":
-      endpoint = `https://api-inference.huggingface.co/models/${modelId}/v1/chat/completions`;
-      break;
-    case "replicate":
-      return await callReplicateProvider({ modelId, systemPrompt, userMessage, apiKey, maxTokens });
+  if (opts.endpointOverride) {
+    // Dedicated HF Inference Endpoint — base URL + /v1/chat/completions.
+    // Strip a trailing slash so we don't end up with a //v1 path.
+    const base = opts.endpointOverride.replace(/\/+$/, "");
+    endpoint = `${base}/v1/chat/completions`;
+  } else {
+    switch (provider) {
+      case "openai":
+        endpoint = "https://api.openai.com/v1/chat/completions";
+        break;
+      case "openrouter":
+        endpoint = "https://openrouter.ai/api/v1/chat/completions";
+        extraHeaders = {
+          "HTTP-Referer": "https://app.chrisswanson.xyz",
+          "X-Title": "Underground Circle",
+        };
+        break;
+      case "hugging_face":
+        endpoint = "https://router.huggingface.co/v1/chat/completions";
+        break;
+      case "replicate":
+        return await callReplicateProvider({ modelId, systemPrompt, userMessage, apiKey, maxTokens });
+    }
   }
 
   try {
@@ -2113,29 +2282,41 @@ async function callMarketplaceProviderWithTools(opts: {
   tools?: any[];        // OpenAI shape
   apiKey: string;
   maxTokens?: number;
+  /** Same role as in callMarketplaceProvider — overrides the provider's
+   *  default endpoint when set, so dedicated HF Inference Endpoints
+   *  pick up tool calls just like the public Inference API would. */
+  endpointOverride?: string;
 }): Promise<{ data: any | null; error?: string }> {
   const { provider, modelId, systemPrompt, messages, tools, apiKey } = opts;
   const maxTokens = opts.maxTokens ?? 4096;
 
   let endpoint: string;
   let extraHeaders: Record<string, string> = {};
-  switch (provider) {
-    case "openrouter":
-      endpoint = "https://openrouter.ai/api/v1/chat/completions";
-      extraHeaders = {
-        "HTTP-Referer": "https://app.chrisswanson.xyz",
-        "X-Title": "Underground Circle",
-      };
-      break;
-    case "hugging_face":
-      endpoint = `https://api-inference.huggingface.co/models/${modelId}/v1/chat/completions`;
-      break;
-    case "replicate":
-      // Replicate's chat endpoints are model-specific and prediction-based.
-      // Tool calling is largely OSS-model dependent and not consistently
-      // exposed, so for the relay path we skip Replicate and let the
-      // caller fall back to Anthropic.
-      return { data: null, error: "replicate relay not yet wired" };
+  if (opts.endpointOverride) {
+    const base = opts.endpointOverride.replace(/\/+$/, "");
+    endpoint = `${base}/v1/chat/completions`;
+  } else {
+    switch (provider) {
+      case "openai":
+        endpoint = "https://api.openai.com/v1/chat/completions";
+        break;
+      case "openrouter":
+        endpoint = "https://openrouter.ai/api/v1/chat/completions";
+        extraHeaders = {
+          "HTTP-Referer": "https://app.chrisswanson.xyz",
+          "X-Title": "Underground Circle",
+        };
+        break;
+      case "hugging_face":
+        endpoint = "https://router.huggingface.co/v1/chat/completions";
+        break;
+      case "replicate":
+        // Replicate's chat endpoints are model-specific and prediction-based.
+        // Tool calling is largely OSS-model dependent and not consistently
+        // exposed, so for the relay path we skip Replicate and let the
+        // caller fall back to Anthropic.
+        return { data: null, error: "replicate relay not yet wired" };
+    }
   }
 
   const body: any = {
@@ -2399,8 +2580,12 @@ const CLAUDE_USAGE_PRICES: Record<string, [number, number]> = {
   "claude-haiku-4-5-20251001": [1.00, 5.00],
   "claude-haiku-4-5":          [1.00, 5.00],
   "claude-sonnet-4-6":         [3.00, 15.00],
+  "claude-sonnet-4-5":         [3.00, 15.00],
   "claude-opus-4-6":           [5.00, 25.00],
   "claude-opus-4-7":           [5.00, 25.00],
+  "claude-3-7-sonnet-latest":  [3.00, 15.00],
+  "claude-3-5-sonnet-latest":  [3.00, 15.00],
+  "claude-3-5-haiku-latest":   [0.80, 4.00],
 };
 
 function costForModel(model: string): [number, number] {
@@ -2424,6 +2609,22 @@ function costForModel(model: string): [number, number] {
     if (slug.includes("deepseek-r1"))                         return [0.55, 2.20];
     if (slug.includes("grok"))                                return [3.00, 15.00];
     return [1.00, 3.00]; // generic OSS-tier fallback
+  }
+  if (model.startsWith("openai/")) {
+    const slug = model.slice("openai/".length).toLowerCase();
+    if (slug.includes("gpt-5.5")) return [5.00, 30.00];
+    if (slug.includes("gpt-5.4-mini") || slug.includes("gpt-5-mini")) return [0.75, 4.50];
+    if (slug.includes("gpt-5.4-nano") || slug.includes("gpt-5-nano")) return [0.20, 1.20];
+    if (slug.includes("gpt-5.4") || slug.includes("gpt-5.2") || slug.includes("gpt-5")) return [2.50, 15.00];
+    if (slug.includes("gpt-4.1-mini")) return [0.40, 1.60];
+    if (slug.includes("gpt-4.1-nano")) return [0.10, 0.40];
+    if (slug.includes("gpt-4.1")) return [2.00, 8.00];
+    if (slug.includes("gpt-4o-mini")) return [0.15, 0.60];
+    if (slug.includes("gpt-4o")) return [2.50, 10.00];
+    if (slug.includes("o4-mini") || slug.includes("o3-mini")) return [1.10, 4.40];
+    if (slug.includes("o3-pro")) return [20.00, 80.00];
+    if (slug.includes("o3")) return [10.00, 40.00];
+    return [2.50, 10.00];
   }
   if (model.startsWith("huggingface/") || model.startsWith("replicate/")) {
     return [1.00, 3.00];
@@ -2754,9 +2955,6 @@ Deno.serve(async (req: Request) => {
       provider: "anthropic",
       envVarName: "ANTHROPIC_API_KEY",
     });
-    if (!anthropicKey) {
-      return errResponse(400, "key_missing", byokMissingMessage("anthropic"));
-    }
 
     // ─── Relay mode: client controls tools + system prompt ────────────
     // When the client sends a `tools` array, we act as a transparent relay.
@@ -2768,19 +2966,37 @@ Deno.serve(async (req: Request) => {
     //      unchanged.
     //   2. Native Anthropic model: forward to api.anthropic.com unchanged.
     if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
-      const isMarketplaceRelay = !!model && /^(openrouter|huggingface|replicate)\//.test(model);
+      const isMarketplaceRelay = !!model && /^(openai|openrouter|huggingface|huggingface_endpoint|replicate)\//.test(model);
       let routingFallback: { provider: string; reason: string } | null = null;
 
       if (isMarketplaceRelay && circleId) {
         const slashIdx = model!.indexOf("/");
         const providerKey: MarketplaceProviderKey | null =
-          model!.startsWith("openrouter/") ? "openrouter"
-          : model!.startsWith("huggingface/") ? "hugging_face"
+          model!.startsWith("openai/") ? "openai"
+          : model!.startsWith("openrouter/") ? "openrouter"
+          : (model!.startsWith("huggingface/") || model!.startsWith("huggingface_endpoint/")) ? "hugging_face"
           : model!.startsWith("replicate/") ? "replicate"
           : null;
         const tail = model!.slice(slashIdx + 1);
-        if (providerKey) {
-          const providerApiKey = await loadCircleProviderApiKey(supabase, circleId, providerKey);
+        // Mirror of the non-relay endpoint-override path: when the
+        // user picked the BlackSwan v5 (Endpoint) entry, we read the
+        // dedicated URL out of the HF integration metadata. Missing
+        // URL falls back to the Anthropic relay below with a
+        // routing_fallback signal so the user sees what happened.
+        let endpointOverride: string | undefined;
+        if (model!.startsWith("huggingface_endpoint/")) {
+          const url = await loadCircleHfEndpointUrl(supabase, circleId);
+          if (url) {
+            endpointOverride = url;
+          } else {
+            routingFallback = {
+              provider: "hugging_face_endpoint",
+              reason: "blackswan_endpoint_url not set on HF integration metadata",
+            };
+          }
+        }
+        if (providerKey && (!model!.startsWith("huggingface_endpoint/") || endpointOverride)) {
+          const providerApiKey = await loadMarketplaceProviderApiKey(supabase, circleId, userId, providerKey);
           if (providerApiKey) {
             const oaiTools = anthropicToolsToOpenAI(body.tools);
             const oaiMessages = anthropicMessagesToOpenAI(
@@ -2791,6 +3007,7 @@ Deno.serve(async (req: Request) => {
             const relayResult = await callMarketplaceProviderWithTools({
               provider: providerKey,
               modelId: tail,
+              endpointOverride,
               systemPrompt: body.system_override || "You are OpenSwan, a helpful AI assistant.",
               messages: oaiMessages,
               tools: oaiTools,
@@ -2844,6 +3061,10 @@ Deno.serve(async (req: Request) => {
         : [{ role: "user", content: message }];
       const relaySystem = body.system_override || "You are OpenSwan, a helpful AI assistant.";
       const relayMaxTokens = maxTokens || 4096;
+
+      if (!anthropicKey) {
+        return errResponse(400, "key_missing", byokMissingMessage("anthropic"));
+      }
 
       const relayBody: Record<string, unknown> = {
         model: relayModel,
@@ -3359,7 +3580,11 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
     // org/model slugs. Marketplace-prefixed ids ("huggingface/Qwen/...",
     // "openrouter/...", "replicate/...") get routed below via the circle's
     // own integration credential, so exclude them here to avoid double-call.
-    const isMarketplacePrefix = !!effectiveModel && /^(openrouter|huggingface|replicate)\//.test(effectiveModel);
+    // `huggingface_endpoint/` is the cue the team has paid for a
+    // dedicated HF Inference Endpoint and saved its URL in the
+    // integration metadata. Same provider key for credential lookup
+    // as plain `huggingface/`, just a different endpoint.
+    const isMarketplacePrefix = !!effectiveModel && /^(openai|openrouter|huggingface|huggingface_endpoint|replicate)\//.test(effectiveModel);
     const hfModelId = effectiveModel && !isMarketplacePrefix
       ? (HF_MODEL_MAP[effectiveModel] || (effectiveModel.includes("/") ? effectiveModel : null))
       : null;
@@ -3417,12 +3642,30 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       const head = effectiveModel.slice(0, slashIdx);
       const tail = effectiveModel.slice(slashIdx + 1);
       const providerKey: MarketplaceProviderKey | null =
-        head === "openrouter" ? "openrouter"
-        : head === "huggingface" ? "hugging_face"
+        head === "openai" ? "openai"
+        : head === "openrouter" ? "openrouter"
+        : (head === "huggingface" || head === "huggingface_endpoint") ? "hugging_face"
         : head === "replicate" ? "replicate"
         : null;
-      if (providerKey) {
-        const providerApiKey = await loadCircleProviderApiKey(supabase, circleId, providerKey);
+      // For the endpoint variant we read the URL the team configured
+      // on the HF integration metadata. If they used the picker entry
+      // but the URL isn't set (e.g. they cleared it), fall through to
+      // the Claude fallback rather than calling the public API
+      // silently — the user explicitly asked for the endpoint.
+      let endpointOverride: string | undefined;
+      if (head === "huggingface_endpoint") {
+        const url = await loadCircleHfEndpointUrl(supabase, circleId);
+        if (url) {
+          endpointOverride = url;
+        } else {
+          nonRelayRouting.routing_fallback = {
+            provider: "hugging_face_endpoint",
+            reason: "blackswan_endpoint_url not set on HF integration metadata",
+          };
+        }
+      }
+      if (providerKey && (head !== "huggingface_endpoint" || endpointOverride)) {
+        const providerApiKey = await loadMarketplaceProviderApiKey(supabase, circleId, userId, providerKey);
         if (providerApiKey) {
           const provResult = await callMarketplaceProvider({
             provider: providerKey,
@@ -3431,6 +3674,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
             userMessage: message,
             apiKey: providerApiKey,
             maxTokens: maxTokens || 2048,
+            endpointOverride,
           });
           if (provResult.text) {
             aiResponse = provResult.text;
@@ -3497,6 +3741,9 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
     }
 
     if (!aiResponse) {
+      if (!anthropicKey) {
+        return errResponse(400, "key_missing", byokMissingMessage("anthropic"));
+      }
       // Fall back to Claude (using requested model or default Haiku)
       const claudeModelKey = effectiveModel?.startsWith("claude-opus")
         ? "claude-opus"

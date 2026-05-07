@@ -351,17 +351,43 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
   // through the Hugging Face inference endpoint using whichever HF
   // key is wired in Marketplace, so it's only `ready` when HF is
   // connected. Sits right after Anthropic in the picker.
-  const huggingFaceConnectedForBlackswan = !!integrations.find(
+  //
+  // When the team has set `blackswan_endpoint_url` on the HF
+  // integration metadata (i.e. they spun up a dedicated Inference
+  // Endpoint at ui.endpoints.huggingface.co), we add a second
+  // "BlackSwan v5 (Endpoint)" picker entry that routes through that
+  // URL — instant responses instead of the public Inference API's
+  // ~30s cold start.
+  const hfIntegration = integrations.find(
     (i) => i.provider === 'hugging_face' && i.is_active !== false && i.status === 'connected',
   );
+  const huggingFaceConnectedForBlackswan = !!hfIntegration;
+  const blackswanEndpointUrl = hfIntegration && (hfIntegration.metadata as any)?.blackswan_endpoint_url;
+  const blackswanModels: Omit<ModelOption, 'ready'>[] = [...BLACKSWAN_MODELS];
+  if (blackswanEndpointUrl && typeof blackswanEndpointUrl === 'string' && blackswanEndpointUrl.trim().length > 0) {
+    blackswanModels.push({
+      // The `huggingface_endpoint/` prefix is the cue the edge
+      // function watches for to read the URL out of integration
+      // metadata and POST chat completions there directly. Same model
+      // weights as the Inference API entry above; the difference is
+      // dedicated GPU vs shared.
+      id: 'huggingface_endpoint/cswan801/BlackSwan-v5',
+      label: 'BlackSwan v5 (Endpoint)',
+      provider: 'hugging_face',
+      description: 'Dedicated Inference Endpoint · instant, no cold start',
+      contextWindow: 32_768,
+    });
+  }
   groups.push({
     provider: 'hugging_face',
     label: 'BlackSwan',
     connected: huggingFaceConnectedForBlackswan,
     hint: huggingFaceConnectedForBlackswan
-      ? 'Your circle\'s custom-trained model. Refreshes weekly from app data.'
+      ? (blackswanEndpointUrl
+          ? 'Your circle\'s custom-trained model. Endpoint variant is instant; Inference API variant is free with cold-start.'
+          : 'Your circle\'s custom-trained model. Set blackswan_endpoint_url on the HF integration to add a dedicated Endpoint variant.')
       : 'Connect Hugging Face in Marketplace to call BlackSwan — needs the HF inference API key the trainer pushed weights with.',
-    models: BLACKSWAN_MODELS.map((m) => ({ ...m, ready: huggingFaceConnectedForBlackswan })),
+    models: blackswanModels.map((m) => ({ ...m, ready: huggingFaceConnectedForBlackswan })),
   });
 
   // Three states matter for the picker: connected (ready to use),
