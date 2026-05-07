@@ -2025,16 +2025,34 @@ async function callReplicateProvider(opts: {
 // Most marketplace LLM providers expose an OpenAI-compatible chat endpoint,
 // so we use a single dispatcher and only swap URL + auth headers. Replicate
 // uses a separate async prediction lifecycle.
-// Read the dedicated Inference Endpoint URL the team set on their HF
-// integration metadata (when they spun up a paid endpoint at
-// ui.endpoints.huggingface.co). Returns null when the field is empty
-// or the integration isn't connected.
-async function loadCircleHfEndpointUrl(
+// Read the dedicated BlackSwan endpoint config — URL + which
+// integration carries the auth token. The BlackSwan card is the
+// canonical source (one connect for the whole circle). Falls back
+// to the legacy `blackswan_endpoint_url` field on the HF integration
+// for circles wired before the BlackSwan card existed.
+async function loadCircleBlackswanRouting(
   supabase: any,
   circleId: string,
-): Promise<string | null> {
+): Promise<{ endpointUrl: string | null; tokenProvider: "blackswan" | "hugging_face" | null }> {
   try {
-    const { data: integ } = await supabase
+    // 1. Canonical: dedicated BlackSwan integration.
+    const { data: bs } = await supabase
+      .from("circle_integrations")
+      .select("metadata")
+      .eq("circle_id", circleId)
+      .eq("provider", "blackswan")
+      .eq("is_active", true)
+      .eq("status", "connected")
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const bsUrl = (bs?.metadata as any)?.endpoint_url;
+    if (typeof bsUrl === "string" && bsUrl.trim().length > 0) {
+      return { endpointUrl: bsUrl.trim(), tokenProvider: "blackswan" };
+    }
+
+    // 2. Legacy fallback: HF integration with `blackswan_endpoint_url`.
+    const { data: hf } = await supabase
       .from("circle_integrations")
       .select("metadata")
       .eq("circle_id", circleId)
@@ -2044,13 +2062,25 @@ async function loadCircleHfEndpointUrl(
       .order("updated_at", { ascending: false })
       .limit(1)
       .maybeSingle();
-    const url = (integ?.metadata as any)?.blackswan_endpoint_url;
-    if (typeof url !== "string") return null;
-    const trimmed = url.trim();
-    return trimmed.length > 0 ? trimmed : null;
+    const hfUrl = (hf?.metadata as any)?.blackswan_endpoint_url;
+    if (typeof hfUrl === "string" && hfUrl.trim().length > 0) {
+      return { endpointUrl: hfUrl.trim(), tokenProvider: "hugging_face" };
+    }
+
+    return { endpointUrl: null, tokenProvider: null };
   } catch {
-    return null;
+    return { endpointUrl: null, tokenProvider: null };
   }
+}
+
+// Backwards-compatible helper kept for non-relay callers that haven't
+// migrated to the new routing helper yet.
+async function loadCircleHfEndpointUrl(
+  supabase: any,
+  circleId: string,
+): Promise<string | null> {
+  const { endpointUrl } = await loadCircleBlackswanRouting(supabase, circleId);
+  return endpointUrl;
 }
 
 async function callMarketplaceProvider(opts: {
@@ -2979,24 +3009,32 @@ Deno.serve(async (req: Request) => {
           : null;
         const tail = model!.slice(slashIdx + 1);
         // Mirror of the non-relay endpoint-override path: when the
-        // user picked the BlackSwan v5 (Endpoint) entry, we read the
-        // dedicated URL out of the HF integration metadata. Missing
-        // URL falls back to the Anthropic relay below with a
-        // routing_fallback signal so the user sees what happened.
+        // user picked the BlackSwan v5 (Endpoint) entry, we read URL
+        // + token-provider from the dedicated BlackSwan integration
+        // (with HF metadata fallback). Missing URL falls back to the
+        // Anthropic relay below with a routing_fallback signal so
+        // the user sees what happened.
         let endpointOverride: string | undefined;
+        let tokenFromBlackswanCard = false;
         if (model!.startsWith("huggingface_endpoint/")) {
-          const url = await loadCircleHfEndpointUrl(supabase, circleId);
-          if (url) {
-            endpointOverride = url;
+          const routing = await loadCircleBlackswanRouting(supabase, circleId);
+          if (routing.endpointUrl) {
+            endpointOverride = routing.endpointUrl;
+            tokenFromBlackswanCard = routing.tokenProvider === "blackswan";
           } else {
             routingFallback = {
-              provider: "hugging_face_endpoint",
-              reason: "blackswan_endpoint_url not set on HF integration metadata",
+              provider: "blackswan",
+              reason: "Endpoint URL not set on the BlackSwan integration",
             };
           }
         }
         if (providerKey && (!model!.startsWith("huggingface_endpoint/") || endpointOverride)) {
-          const providerApiKey = await loadMarketplaceProviderApiKey(supabase, circleId, userId, providerKey);
+          // Read the BlackSwan card's own api_token when it's the
+          // source of truth, otherwise fall through to the standard
+          // marketplace-provider key resolver.
+          const providerApiKey = tokenFromBlackswanCard
+            ? await loadCircleProviderApiKey(supabase, circleId, "blackswan", "api_token")
+            : await loadMarketplaceProviderApiKey(supabase, circleId, userId, providerKey);
           if (providerApiKey) {
             const oaiTools = anthropicToolsToOpenAI(body.tools);
             const oaiMessages = anthropicMessagesToOpenAI(
@@ -3647,25 +3685,38 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         : (head === "huggingface" || head === "huggingface_endpoint") ? "hugging_face"
         : head === "replicate" ? "replicate"
         : null;
-      // For the endpoint variant we read the URL the team configured
-      // on the HF integration metadata. If they used the picker entry
-      // but the URL isn't set (e.g. they cleared it), fall through to
-      // the Claude fallback rather than calling the public API
-      // silently — the user explicitly asked for the endpoint.
+      // For the endpoint variant we read the URL + token-provider from
+      // the dedicated BlackSwan integration (with HF metadata
+      // fallback for legacy setups). If neither has the URL, fall
+      // through to the Claude fallback rather than calling the
+      // public API silently — the user explicitly asked for the
+      // endpoint.
       let endpointOverride: string | undefined;
+      let tokenProviderOverride: MarketplaceProviderKey | null = null;
       if (head === "huggingface_endpoint") {
-        const url = await loadCircleHfEndpointUrl(supabase, circleId);
-        if (url) {
-          endpointOverride = url;
+        const routing = await loadCircleBlackswanRouting(supabase, circleId);
+        if (routing.endpointUrl) {
+          endpointOverride = routing.endpointUrl;
+          // Token comes from the same integration that owns the URL.
+          // Falls back to hugging_face for legacy setups where only
+          // the HF card has the URL.
+          tokenProviderOverride = routing.tokenProvider === "blackswan"
+            ? null  // we'll handle the BlackSwan token below
+            : "hugging_face";
         } else {
           nonRelayRouting.routing_fallback = {
-            provider: "hugging_face_endpoint",
-            reason: "blackswan_endpoint_url not set on HF integration metadata",
+            provider: "blackswan",
+            reason: "Endpoint URL not set on the BlackSwan integration",
           };
         }
       }
       if (providerKey && (head !== "huggingface_endpoint" || endpointOverride)) {
-        const providerApiKey = await loadMarketplaceProviderApiKey(supabase, circleId, userId, providerKey);
+        // BlackSwan-card-routed endpoint reads its own api_token; all
+        // other paths (regular huggingface, openrouter, openai,
+        // legacy HF-card-only BlackSwan) use loadMarketplaceProviderApiKey.
+        const providerApiKey = head === "huggingface_endpoint" && tokenProviderOverride === null
+          ? await loadCircleProviderApiKey(supabase, circleId, "blackswan", "api_token")
+          : await loadMarketplaceProviderApiKey(supabase, circleId, userId, providerKey);
         if (providerApiKey) {
           const provResult = await callMarketplaceProvider({
             provider: providerKey,

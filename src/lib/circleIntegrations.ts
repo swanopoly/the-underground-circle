@@ -85,7 +85,9 @@ export type CircleIntegrationProvider =
   | 'deepseek'
   | 'z_ai'
   | 'minimax'
-  | 'ollama';
+  | 'ollama'
+  // ── BlackSwan: our own fine-tuned model, hosted on HF Inference Endpoint ──
+  | 'blackswan';
 
 export interface CircleIntegrationRecord {
   id: string;
@@ -1070,6 +1072,29 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
       { key: 'defaultModel', label: 'Default Model', placeholder: 'llama3.3' },
     ],
     validationHints: ['Run `ollama serve` on the same network. The chat will hit baseUrl + /v1/chat/completions (Ollama exposes an OpenAI-compatible endpoint).'],
+  },
+  blackswan: {
+    provider: 'blackswan',
+    label: 'BlackSwan',
+    description: 'Our circle\'s custom-trained Qwen3.5-4B fine-tune, hosted on a dedicated Hugging Face Inference Endpoint. Refreshes weekly from app data. Connect once and every member of the circle can chat with it.',
+    capabilityFlags: ['custom_model', 'fine_tuned', 'inference_endpoint', 'team_shared'],
+    requiredSecretKeys: ['api_token'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      // The dedicated HF Inference Endpoint URL — the
+      // `https://*.endpoints.huggingface.cloud` one HF gives you when
+      // you spin up an Endpoint at ui.endpoints.huggingface.co.
+      // Paste it once and every member of the circle can chat with
+      // BlackSwan; they don't each need to set up their own HF integration.
+      { key: 'endpoint_url', label: 'Inference Endpoint URL', placeholder: 'https://abc123.us-east-1.aws.endpoints.huggingface.cloud' },
+      // Lets us swap the served model later without changing client
+      // code — defaults to cswan801/BlackSwan-v5.
+      { key: 'model_id', label: 'Model ID', placeholder: 'cswan801/BlackSwan-v5' },
+    ],
+    validationHints: [
+      'Endpoint URL is the host HF assigns when you create the Endpoint — it\'s on the detail page in ui.endpoints.huggingface.co.',
+      'API token is your HF user access token (Read scope is enough for inference; Write only if the same token also pushes weights from the trainer).',
+    ],
   },
 };
 

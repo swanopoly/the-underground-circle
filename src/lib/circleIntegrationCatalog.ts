@@ -19,6 +19,7 @@ export type CircleIntegrationPlatformKey =
   | 'browserless'
   | 'browserstack'
   | 'firecrawl'
+  | 'brave'
   | 'apify'
   | 'steel'
   | 'hyperbrowser'
@@ -96,7 +97,8 @@ export type CircleIntegrationPlatformKey =
   | 'deepseek'
   | 'z_ai'
   | 'minimax'
-  | 'ollama';
+  | 'ollama'
+  | 'blackswan';
 
 export interface CircleIntegrationGroup {
   key: CircleIntegrationGroupKey;
@@ -284,6 +286,21 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     availability: 'available',
     platformKey: 'firecrawl',
     recentlyAdded: true,
+  },
+  {
+    id: 'brave-search',
+    label: 'Brave Search',
+    icon: 'BR',
+    color: '#FB542B',
+    group: 'data_search',
+    description: 'Independent web search API for current research, source discovery, and grounded chat answers.',
+    relationships: ['Web search', 'Research', 'Chat grounding'],
+    capabilityLabel: 'Web search API',
+    scopeLabel: 'User-linked',
+    availability: 'available',
+    platformKey: 'brave',
+    recentlyAdded: true,
+    popularityRank: 25,
   },
   {
     id: 'apify',
@@ -1245,6 +1262,28 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     platformKey: 'ollama',
     recentlyAdded: true,
     popularityRank: 20,
+  },
+  {
+    // BlackSwan — our own fine-tuned model. Top of the popularity
+    // ranking because it's the project's signature model and lives
+    // hosted at huggingface.co/cswan801/BlackSwan-v5 with a dedicated
+    // Inference Endpoint. Connect once at the circle level and every
+    // member can chat with it (no per-user setup).
+    id: 'blackswan',
+    label: 'BlackSwan',
+    icon: '🦢',
+    color: '#22d3ee',
+    group: 'ai_agents_services',
+    description: 'Our circle\'s custom-trained Qwen3.5-4B fine-tune, hosted on a dedicated Hugging Face Inference Endpoint. Refreshes weekly from app data — accountability rituals, mission planning, and shipping summaries trained right in.',
+    relationships: ['Fine-tuned', 'Custom model', 'HF Endpoint'],
+    capabilityLabel: 'Custom team model',
+    scopeLabel: 'Circle-wide',
+    availability: 'available',
+    platformKey: 'blackswan',
+    recentlyAdded: true,
+    // Pinned to the top of the marketplace popularity sort — it's
+    // the signature model, surfaces above every third-party LLM.
+    popularityRank: 0,
   },
   {
     id: 'linear',
