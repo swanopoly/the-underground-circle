@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  ActivityIndicator,
+  Modal,
   Platform as RNPlatform,
   Pressable,
   ScrollView,
@@ -25,6 +27,7 @@ import {
   INTEGRATION_DEFINITIONS,
   listCircleIntegrationSecretKeys,
   listCircleIntegrations,
+  getCircleIntegrationSecretValues,
   type CircleIntegrationRecord,
   validateCircleIntegrationSetup,
 } from '../../../lib/circleIntegrations';
@@ -561,6 +564,27 @@ function GenericIntegrationManager({
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [preflight, setPreflight] = useState<{ ok: boolean; missingCapabilities: string[]; missingConnectors: string[] } | null>(null);
+  // Reveal modal — when the user clicks the eye icon next to a saved
+  // secret, we re-prompt for their account password (not the integration
+  // token) before showing the value. Using Supabase signInWithPassword
+  // as the verifier is safe because a successful call just refreshes the
+  // current session for the same user; a failed call leaves the session
+  // untouched.
+  const [reveal, setReveal] = useState<{
+    open: boolean;
+    key: string | null;
+    password: string;
+    busy: boolean;
+    error: string | null;
+    value: string | null;
+  }>({ open: false, key: null, password: '', busy: false, error: null, value: null });
+  // The keys that actually have a saved value on the server. Drives the
+  // "•••••••• saved" placeholder + Reveal button on each field.
+  const savedSecretKeys = useMemo(
+    () => new Set(status?.secretKeys || []),
+    [status?.secretKeys],
+  );
+  const integrationId = status?.integrationId;
   const userApiProvider = marketplaceProviderToUserApiProvider(provider);
   const isModelProvider = isMarketplaceModelProvider(provider);
   const modelProviderChatReady = userApiProvider ? CHAT_READY_MODEL_USER_API_PROVIDERS.has(userApiProvider) : false;
@@ -744,35 +768,69 @@ function GenericIntegrationManager({
           </View>
         ))}
 
-        {definition.requiredSecretKeys.map(secretKey => (
-          <View key={secretKey} style={styles.genericFieldBlock}>
-            <Text style={styles.genericFieldLabel}>{secretKey.toUpperCase()}</Text>
-            <TextInput
-              value={secrets[secretKey] || ''}
-              onChangeText={(value) => setSecrets(prev => ({ ...prev, [secretKey]: value }))}
-              placeholder="Paste value"
-              placeholderTextColor="#5b6474"
-              secureTextEntry
-              style={styles.genericInput}
-            />
-          </View>
-        ))}
+        {definition.requiredSecretKeys.map(secretKey => {
+          const isSaved = savedSecretKeys.has(secretKey);
+          const localValue = secrets[secretKey] || '';
+          return (
+            <View key={secretKey} style={styles.genericFieldBlock}>
+              <Text style={styles.genericFieldLabel}>{secretKey.toUpperCase()}</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <TextInput
+                  value={localValue}
+                  onChangeText={(value) => setSecrets(prev => ({ ...prev, [secretKey]: value }))}
+                  placeholder={isSaved ? '•••••••••• saved — paste new value to overwrite' : 'Paste value'}
+                  placeholderTextColor={isSaved ? '#94a3b8' : '#5b6474'}
+                  secureTextEntry
+                  style={[styles.genericInput, { flex: 1 }]}
+                />
+                {isSaved && integrationId ? (
+                  <Pressable
+                    onPress={() => setReveal({ open: true, key: secretKey, password: '', busy: false, error: null, value: null })}
+                    style={({ hovered }: any) => [
+                      { paddingHorizontal: 10, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: accentColor + '55', backgroundColor: accentColor + '12' },
+                      hovered && { backgroundColor: accentColor + '22' },
+                      RNPlatform.OS === 'web' ? ({ cursor: 'pointer' } as any) : {},
+                    ]}
+                    accessibilityLabel={`Reveal ${secretKey}`}
+                  >
+                    <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }}>👁 Reveal</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            </View>
+          );
+        })}
 
         {definition.optionalSecretKeys && definition.optionalSecretKeys.length > 0 ? (
           <>
             <Text style={styles.genericFieldLabel}>OPTIONAL SECRETS</Text>
-            {definition.optionalSecretKeys.map(secretKey => (
-              <View key={secretKey} style={styles.genericFieldBlock}>
-                <TextInput
-                  value={secrets[secretKey] || ''}
-                  onChangeText={(value) => setSecrets(prev => ({ ...prev, [secretKey]: value }))}
-                  placeholder={secretKey}
-                  placeholderTextColor="#5b6474"
-                  secureTextEntry
-                  style={styles.genericInput}
-                />
-              </View>
-            ))}
+            {definition.optionalSecretKeys.map(secretKey => {
+              const isSaved = savedSecretKeys.has(secretKey);
+              const localValue = secrets[secretKey] || '';
+              return (
+                <View key={secretKey} style={styles.genericFieldBlock}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <TextInput
+                      value={localValue}
+                      onChangeText={(value) => setSecrets(prev => ({ ...prev, [secretKey]: value }))}
+                      placeholder={isSaved ? `•••••••••• saved (${secretKey})` : secretKey}
+                      placeholderTextColor={isSaved ? '#94a3b8' : '#5b6474'}
+                      secureTextEntry
+                      style={[styles.genericInput, { flex: 1 }]}
+                    />
+                    {isSaved && integrationId ? (
+                      <Pressable
+                        onPress={() => setReveal({ open: true, key: secretKey, password: '', busy: false, error: null, value: null })}
+                        style={{ paddingHorizontal: 10, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: accentColor + '55', backgroundColor: accentColor + '12' }}
+                        accessibilityLabel={`Reveal ${secretKey}`}
+                      >
+                        <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }}>👁 Reveal</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                </View>
+              );
+            })}
           </>
         ) : null}
       </View>
@@ -782,6 +840,117 @@ function GenericIntegrationManager({
       </Pressable>
 
       {message ? <Text style={styles.genericStatus}>{message}</Text> : null}
+
+      <Modal
+        visible={reveal.open}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setReveal({ open: false, key: null, password: '', busy: false, error: null, value: null })}
+      >
+        <Pressable
+          onPress={() => setReveal({ open: false, key: null, password: '', busy: false, error: null, value: null })}
+          style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'center', alignItems: 'center' }}
+        >
+          <Pressable
+            onPress={() => { /* swallow inner clicks so the backdrop doesn't dismiss */ }}
+            style={{ width: 360, maxWidth: '92%', backgroundColor: '#0a0e1a', borderRadius: 12, borderWidth: 1, borderColor: '#1f2937', padding: 18, gap: 12 }}
+          >
+            <Text style={{ color: '#cbd5e1', fontSize: 14, fontWeight: '900', letterSpacing: 0.4 }}>
+              Reveal saved value
+            </Text>
+            <Text style={{ color: '#94a3b8', fontSize: 11, lineHeight: 16 }}>
+              {reveal.value
+                ? `Showing the saved value for ${reveal.key}. Close this dialog to re-mask.`
+                : `Confirm your account password to view the saved ${reveal.key} for ${definition.label}.`}
+            </Text>
+
+            {reveal.value ? (
+              <View style={{ borderRadius: 6, borderWidth: 1, borderColor: '#1f2937', backgroundColor: '#0d1322', padding: 10 }}>
+                <Text selectable style={{ color: '#e2e8f0', fontSize: 12, fontFamily: RNPlatform.OS === 'ios' ? 'Menlo' : 'monospace' }}>
+                  {reveal.value}
+                </Text>
+                {RNPlatform.OS === 'web' ? (
+                  <Pressable
+                    onPress={() => {
+                      try {
+                        (navigator as any)?.clipboard?.writeText?.(reveal.value || '');
+                      } catch {}
+                    }}
+                    style={{ marginTop: 8, alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: accentColor + '55' }}
+                  >
+                    <Text style={{ color: accentColor, fontSize: 10, fontWeight: '700' }}>Copy to clipboard</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : (
+              <>
+                <TextInput
+                  value={reveal.password}
+                  onChangeText={(t) => setReveal((r) => ({ ...r, password: t, error: null }))}
+                  secureTextEntry
+                  placeholder="Account password"
+                  placeholderTextColor="#5b6474"
+                  style={styles.genericInput}
+                  autoFocus
+                />
+                {reveal.error ? (
+                  <Text style={{ color: '#f87171', fontSize: 11 }}>{reveal.error}</Text>
+                ) : null}
+              </>
+            )}
+
+            <View style={{ flexDirection: 'row', gap: 8, justifyContent: 'flex-end' }}>
+              <Pressable
+                onPress={() => setReveal({ open: false, key: null, password: '', busy: false, error: null, value: null })}
+                style={{ paddingHorizontal: 12, paddingVertical: 7, borderRadius: 6, borderWidth: 1, borderColor: '#1f2937' }}
+              >
+                <Text style={{ color: '#94a3b8', fontSize: 11, fontWeight: '700' }}>{reveal.value ? 'Close' : 'Cancel'}</Text>
+              </Pressable>
+              {!reveal.value ? (
+                <Pressable
+                  disabled={reveal.busy || !reveal.password}
+                  onPress={async () => {
+                    if (!reveal.password || !integrationId || !reveal.key) return;
+                    setReveal((r) => ({ ...r, busy: true, error: null }));
+                    try {
+                      const { data: userData } = await supabase.auth.getUser();
+                      const email = userData.user?.email;
+                      if (!email) {
+                        setReveal((r) => ({ ...r, busy: false, error: 'Could not identify your account session.' }));
+                        return;
+                      }
+                      const { error } = await supabase.auth.signInWithPassword({ email, password: reveal.password });
+                      if (error) {
+                        setReveal((r) => ({ ...r, busy: false, error: 'Password did not match.' }));
+                        return;
+                      }
+                      const values = await getCircleIntegrationSecretValues(integrationId);
+                      const v = values[reveal.key];
+                      if (typeof v !== 'string') {
+                        setReveal((r) => ({ ...r, busy: false, error: 'Saved value not found — re-save the integration.' }));
+                        return;
+                      }
+                      setReveal((r) => ({ ...r, busy: false, value: v }));
+                    } catch (e: any) {
+                      setReveal((r) => ({ ...r, busy: false, error: e?.message || 'Reveal failed.' }));
+                    }
+                  }}
+                  style={[
+                    { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 6, borderWidth: 1, borderColor: accentColor + '55', backgroundColor: accentColor + '18' },
+                    (reveal.busy || !reveal.password) && { opacity: 0.5 },
+                  ]}
+                >
+                  {reveal.busy ? (
+                    <ActivityIndicator size="small" color={accentColor} />
+                  ) : (
+                    <Text style={{ color: accentColor, fontSize: 11, fontWeight: '900' }}>Verify & reveal</Text>
+                  )}
+                </Pressable>
+              ) : null}
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </ScrollView>
   );
 }
