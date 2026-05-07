@@ -81,6 +81,7 @@ import { executeAgentRun, detectHandoff, HandoffSuggestion } from '../../../lib/
 import HandoffCard from '../../../components/agent/HandoffCard';
 import AgentModeSelector from '../../../components/agent/AgentModeSelector';
 import AddModelPanel from '../../../components/models/AddModelPanel';
+import type { ModelGroup } from '../../../lib/integrations/modelProviderRegistry';
 import { pickAttachments, ChatAttachment, getMediaTypeIcon, prepareImageForAI, buildAttachmentPromptContext } from '../../../lib/chatMedia';
 import { buildFigmaPromptFromReferences, resolveFigmaReferences, type FigmaReference } from '../../../lib/figmaBuilder';
 import {
@@ -725,7 +726,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // composer (for the picker UI + Auto preview) and the send flow
   // (for resolving 'auto' → concrete model id with provider bias) need
   // to know which integrations are connected.
-  const [marketplaceModelGroups, setMarketplaceModelGroups] = useState<Array<import('../../../lib/integrations/modelProviderRegistry').ModelGroup>>([]);
+  const [marketplaceModelGroups, setMarketplaceModelGroups] = useState<ModelGroup[]>([]);
   useEffect(() => {
     let cancelled = false;
     if (!circleId) {
@@ -745,7 +746,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return new Set(
       marketplaceModelGroups
         .filter((g) => g.connected)
-        .map((g) => g.provider as string),
+        .map((g) => normalizeConnectedProviderKey(g.provider as string)),
     );
   }, [marketplaceModelGroups]);
   // Web Search toggle — when on, the user's next chat send routes
@@ -4348,10 +4349,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // exposes. Forcing them off the streaming fast-path lets
             // BlackSwan actually call rooms.create / circle.update_* /
             // missions.* instead of replying "I can't do that."
+            const streamCandidateModel = resolveSendModel(cleanContent) || 'claude-sonnet-4-6';
             const canStream = sessionDelegationMode !== 'parallel'
               && !isFigmaBuildRequest
               && !isCodingGenerationRequest(cleanContent, sessionProfile)
-              && !looksLikeActionRequest(cleanContent);
+              && !looksLikeActionRequest(cleanContent)
+              && /^claude-/.test(streamCandidateModel);
 
             if (canStream) {
               try {
@@ -4373,7 +4376,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 // OR key (handled by the relay path in swanbot-ai).
                 // Falls back to platform Sonnet if the helper somehow
                 // returns null so we never send an unresolved 'auto'.
-                const streamModel = resolveSendModel(cleanContent) || 'claude-sonnet-4-6';
+                const streamModel = streamCandidateModel;
                 const pendingMsg = addPendingBotMessage('');
                 setRunStatus('running');
                 let accumulated = '';
@@ -4715,9 +4718,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           return;
         }
         addBotMessage(
-          "**Desktop Bridge paired.** The agent can now launch apps, type text, and send key combos on your Mac when you approve each action.\n\n" +
-          "Available tools: `desktop.launch_app`, `desktop.focus_app`, `desktop.type_text`, `desktop.press_keys`, `desktop.list_running_apps`.\n\n" +
-          "**First keystroke:** macOS will prompt for Accessibility permission for whichever Terminal/iTerm is running the bridge. Grant it in System Settings → Privacy & Security → Accessibility.",
+          "**Desktop Bridge paired.** The agent can now inspect and control your Mac when you approve each sensitive action.\n\n" +
+          "Available tools include app launch/focus, typing, key combos, running apps, browser tabs, window state, screenshots, clipboard read/write, mouse click/move/drag/scroll, window management, and macOS Shortcuts.\n\n" +
+          "**First keystroke:** macOS will prompt for Accessibility permission for whichever Terminal/iTerm is running the bridge. Grant it in System Settings → Privacy & Security → Accessibility.\n\n" +
+          "**First browser-tab read:** macOS may prompt for Automation permission so the bridge can read tab titles and URLs from Chrome/Safari.",
           undefined,
           { localOnly: true },
         );
@@ -7871,7 +7875,80 @@ const CHAT_MODE_CONFIG = getSelectableChatModes().map((policy) => ({
   color: policy.color,
 }));
 
-const CHAT_MODELS = [
+type ChatPickerModel = {
+  id: string;
+  label: string;
+  desc: string;
+  color: string;
+  icon: string;
+  group: string;
+  tags?: string[];
+  contextWindow?: number;
+};
+
+const POPULAR_OPENROUTER_MODELS: ChatPickerModel[] = [
+  { id: 'openrouter/tencent/hy3-preview:free', label: 'Hy3 preview (free)', desc: '#1 OpenRouter weekly usage | tencent | 3.71T tokens | +168% weekly', color: '#f59e0b', icon: '1', group: 'popular', tags: ['text', 'free'] },
+  { id: 'openrouter/moonshotai/kimi-k2.6', label: 'Kimi K2.6', desc: '#2 OpenRouter weekly usage | moonshotai | 1.79T tokens | -10% weekly', color: '#f59e0b', icon: '2', group: 'popular', tags: ['text', 'code'] },
+  { id: 'openrouter/anthropic/claude-sonnet-4.6', label: 'Claude Sonnet 4.6', desc: '#3 OpenRouter weekly usage | anthropic | 1.36T tokens | -1% weekly', color: '#6366f1', icon: '3', group: 'popular', tags: ['code', 'text', 'web'] },
+  { id: 'openrouter/google/gemini-3-flash-preview', label: 'Gemini 3 Flash Preview', desc: '#4 OpenRouter weekly usage | google | 992B tokens | -2% weekly', color: '#3b82f6', icon: '4', group: 'popular', tags: ['text', 'vision', 'web'] },
+  { id: 'openrouter/anthropic/claude-opus-4.7', label: 'Claude Opus 4.7', desc: '#5 OpenRouter weekly usage | anthropic | 956B tokens | -16% weekly', color: '#a855f7', icon: '5', group: 'popular', tags: ['reason', 'code', 'text'] },
+  { id: 'openrouter/deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash', desc: '#6 OpenRouter weekly usage | deepseek | 870B tokens | +111% weekly', color: '#ef4444', icon: '6', group: 'popular', tags: ['speed', 'code'] },
+  { id: 'openrouter/deepseek/deepseek-v3.2', label: 'DeepSeek V3.2', desc: '#7 OpenRouter weekly usage | deepseek | 809B tokens | -29% weekly', color: '#ef4444', icon: '7', group: 'popular', tags: ['code', 'text'] },
+  { id: 'openrouter/minimax/minimax-m2.7', label: 'MiniMax M2.7', desc: '#8 OpenRouter weekly usage | minimax | 745B tokens | -1% weekly', color: '#fb7185', icon: '8', group: 'popular', tags: ['text', 'long'] },
+  { id: 'openrouter/x-ai/grok-4.1-fast', label: 'Grok 4.1 Fast', desc: '#9 OpenRouter weekly usage | x-ai | 719B tokens | +1% weekly', color: '#22d3ee', icon: '9', group: 'popular', tags: ['speed', 'web'] },
+  { id: 'openrouter/deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro', desc: '#10 OpenRouter weekly usage | deepseek | 652B tokens | +409% weekly', color: '#ef4444', icon: '10', group: 'popular', tags: ['reason', 'code'] },
+  { id: 'openrouter/google/gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite', desc: '#11 OpenRouter weekly usage | google | 645B tokens | +3% weekly', color: '#3b82f6', icon: '11', group: 'popular', tags: ['speed', 'vision'] },
+  { id: 'openrouter/stepfun/step-3.5-flash', label: 'Step 3.5 Flash', desc: '#12 OpenRouter weekly usage | stepfun | 616B tokens | -27% weekly', color: '#22c55e', icon: '12', group: 'popular', tags: ['speed', 'text'] },
+  { id: 'openrouter/google/gemini-2.5-flash', label: 'Gemini 2.5 Flash', desc: '#13 OpenRouter weekly usage | google | 585B tokens | -4% weekly', color: '#3b82f6', icon: '13', group: 'popular', tags: ['speed', 'vision', 'web'] },
+  { id: 'openrouter/nvidia/nemotron-3-super-120b-a12b:free', label: 'Nemotron 3 Super (free)', desc: '#14 OpenRouter weekly usage | nvidia | 528B tokens | -21% weekly', color: '#84cc16', icon: '14', group: 'popular', tags: ['text', 'free'] },
+  { id: 'openrouter/inclusionai/ling-2.6-1t:free', label: 'Ling-2.6-1T (free)', desc: '#15 OpenRouter weekly usage | inclusionai | 470B tokens | -5% weekly', color: '#10b981', icon: '15', group: 'popular', tags: ['text', 'free'] },
+  { id: 'openrouter/anthropic/claude-opus-4.6', label: 'Claude Opus 4.6', desc: '#16 OpenRouter weekly usage | anthropic | 429B tokens | -33% weekly', color: '#a855f7', icon: '16', group: 'popular', tags: ['reason', 'code', 'text'] },
+  { id: 'openrouter/openai/gpt-oss-120b', label: 'gpt-oss-120b', desc: '#17 OpenRouter weekly usage | openai | 397B tokens | +10% weekly', color: '#10b981', icon: '17', group: 'popular', tags: ['open', 'text'] },
+  { id: 'openrouter/z-ai/glm-5.1', label: 'GLM 5.1', desc: '#18 OpenRouter weekly usage | z-ai | 357B tokens | -7% weekly', color: '#22d3ee', icon: '18', group: 'popular', tags: ['reason', 'text'] },
+  { id: 'openrouter/google/gemini-3.1-flash-lite-preview', label: 'Gemini 3.1 Flash Lite Preview', desc: '#19 OpenRouter weekly usage | google | 318B tokens | +11% weekly', color: '#3b82f6', icon: '19', group: 'popular', tags: ['speed', 'vision'] },
+  { id: 'openrouter/google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview', desc: '#20 OpenRouter weekly usage | google | 293B tokens | -17% weekly', color: '#3b82f6', icon: '20', group: 'popular', tags: ['reason', 'vision'] },
+];
+
+function colorForOpenRouterAuthor(author?: string): string {
+  const colors: Record<string, string> = {
+    anthropic: '#a855f7',
+    deepseek: '#ef4444',
+    google: '#3b82f6',
+    inclusionai: '#10b981',
+    minimax: '#fb7185',
+    moonshotai: '#f59e0b',
+    nvidia: '#84cc16',
+    openai: '#10b981',
+    stepfun: '#22c55e',
+    tencent: '#f59e0b',
+    'x-ai': '#22d3ee',
+    'z-ai': '#22d3ee',
+  };
+  return colors[author || ''] || '#a78bfa';
+}
+
+function popularRankingToChatModel(model: {
+  id: string;
+  label: string;
+  provider?: string;
+  rank?: number;
+  description?: string;
+  contextWindow?: number;
+}): ChatPickerModel {
+  const rank = model.rank || 0;
+  return {
+    id: model.id,
+    label: model.label,
+    desc: model.description || (rank ? `#${rank} OpenRouter weekly usage` : 'OpenRouter popular model'),
+    color: colorForOpenRouterAuthor(model.provider),
+    icon: rank > 0 ? String(rank) : 'OR',
+    group: 'popular',
+    tags: model.id.endsWith(':free') ? ['text', 'free'] : ['text'],
+    contextWindow: model.contextWindow,
+  };
+}
+
+const CHAT_MODELS: ChatPickerModel[] = [
   // ── Smart Pick ──
   // Default. Routes by detected intent + complexity:
   //   casual / status     → Haiku 4.5 (cheap + fast)
@@ -7922,12 +7999,13 @@ const CHAT_MODELS = [
 ];
 
 const MODEL_GROUPS: { key: string; label: string; color: string }[] = [
-  { key: 'smart', label: 'SMART PICK', color: '#22c55e' },
-  { key: 'code', label: 'CODING & ENGINEERING', color: '#a855f7' },
-  { key: 'reason', label: 'REASONING & RESEARCH', color: '#f59e0b' },
-  { key: 'speed', label: 'SPEED & COST', color: '#22d3ee' },
-  { key: 'creative', label: 'CREATIVE & MULTIMODAL', color: '#10b981' },
-  { key: 'open', label: 'OPEN SOURCE', color: '#f59e0b' },
+  { key: 'smart', label: 'Smart Pick', color: '#22c55e' },
+  { key: 'popular', label: 'Most Popular Models', color: '#f59e0b' },
+  { key: 'code', label: 'Coding & Engineering', color: '#a855f7' },
+  { key: 'reason', label: 'Reasoning & Research', color: '#f59e0b' },
+  { key: 'speed', label: 'Speed & Cost', color: '#22d3ee' },
+  { key: 'creative', label: 'Creative & Multimodal', color: '#10b981' },
+  { key: 'open', label: 'Open Source', color: '#f59e0b' },
 ];
 
 // ── Quick Actions animated header ───────────────────────────────────────────
@@ -8161,6 +8239,171 @@ const CONTROL_PANEL_LAUNCHERS = [
   },
 ];
 
+function normalizeConnectedProviderKey(provider: string): string {
+  if (provider === 'hugging_face') return 'huggingface';
+  if (provider === 'z_ai') return 'zai';
+  return provider;
+}
+
+function modelPickerProviderColor(provider?: string, connected = true): string {
+  if (!connected) return '#475569';
+  if (provider === 'openrouter') return '#a78bfa';
+  if (provider === 'hugging_face' || provider === 'huggingface') return '#f59e0b';
+  if (provider === 'replicate') return '#38bdf8';
+  return '#22d3ee';
+}
+
+function modelPickerProviderIcon(provider?: string): string {
+  if (provider === 'openrouter') return 'OR';
+  if (provider === 'hugging_face' || provider === 'huggingface') return 'HF';
+  if (provider === 'replicate') return 'R';
+  return 'AI';
+}
+
+function formatContextWindow(contextWindow?: number): string | null {
+  if (!contextWindow || contextWindow <= 0) return null;
+  if (contextWindow >= 1_000_000) return `${(contextWindow / 1_000_000).toFixed(1)}M ctx`;
+  if (contextWindow >= 1_000) return `${Math.round(contextWindow / 1_000)}K ctx`;
+  return `${contextWindow} ctx`;
+}
+
+type ModelBrowserItem = {
+  id: string;
+  label: string;
+  description?: string;
+  contextWindow?: number;
+  ready?: boolean;
+  provider?: string;
+  color?: string;
+  icon?: string;
+};
+
+type ModelBrowserSection = {
+  key: string;
+  label: string;
+  color: string;
+  icon: string;
+  connected?: boolean;
+  hint?: string;
+  models: ModelBrowserItem[];
+  sourceLabel?: string;
+};
+
+function ModelSectionBrowserPanel({
+  section,
+  selectedModel,
+  onSelect,
+  onClose,
+}: {
+  section: ModelBrowserSection | null;
+  selectedModel: string;
+  onSelect: (modelId: string) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState('');
+  const models = section?.models || [];
+  const connected = section?.connected !== false;
+  const accent = section?.color || '#a78bfa';
+  const icon = section?.icon || 'AI';
+  const filteredModels = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return models;
+    return models.filter((model) => {
+      return model.label.toLowerCase().includes(needle)
+        || model.id.toLowerCase().includes(needle)
+        || (model.description || '').toLowerCase().includes(needle);
+    });
+  }, [models, query]);
+
+  return (
+    <View style={styles.providerBrowserPanel} nativeID="section-model-browser">
+      <View style={styles.providerBrowserHeader}>
+        <View style={{ flex: 1 }}>
+          <Text style={[styles.providerBrowserTitle, { color: accent }]}>{section?.label || 'Models'}</Text>
+          <Text style={styles.providerBrowserSubtitle}>
+            {models.length > 0
+              ? connected
+                ? `${models.length} models available${section?.sourceLabel ? ` from ${section.sourceLabel}` : ''}`
+                : `${models.length} preview models. Connect this provider to run them.`
+              : 'No models loaded for this section yet'}
+          </Text>
+        </View>
+        <Pressable
+          onPress={onClose}
+          accessibilityRole="button"
+          style={[styles.providerBrowserClose, ...(Platform.OS === 'web' ? [{ cursor: 'pointer' } as any] : [])]}
+        >
+          <Text style={styles.providerBrowserCloseText}>X</Text>
+        </Pressable>
+      </View>
+
+      {!connected ? (
+        <View style={styles.providerBrowserNotice}>
+          <Text style={styles.providerBrowserNoticeText}>
+            API key required to run these models.
+          </Text>
+        </View>
+      ) : null}
+
+      <View style={styles.providerBrowserSearchRow}>
+        <Text style={[styles.providerBrowserSearchIcon, { color: accent }]}>{'>'}</Text>
+        <TextInput
+          value={query}
+          onChangeText={setQuery}
+          placeholder={`Search ${section?.label || 'models'}...`}
+          placeholderTextColor="#475569"
+          autoCapitalize="none"
+          autoCorrect={false}
+          style={styles.providerBrowserSearchInput}
+        />
+      </View>
+
+      <ScrollView style={styles.providerBrowserList} nestedScrollEnabled showsVerticalScrollIndicator>
+        {filteredModels.length === 0 ? (
+          <Text style={styles.providerBrowserEmpty}>No models match that search.</Text>
+        ) : null}
+        {filteredModels.map((model: ModelBrowserItem) => {
+          const isActive = model.id === selectedModel;
+          const contextLabel = formatContextWindow(model.contextWindow);
+          const ready = model.ready !== false;
+          const rowAccent = model.color || accent;
+          return (
+            <Pressable
+              key={model.id}
+              onPress={() => {
+                if (!ready) return;
+                onSelect(model.id);
+              }}
+              disabled={!ready}
+              accessibilityRole="button"
+              accessibilityLabel={`Select ${model.label}`}
+              style={[
+                styles.providerBrowserModelRow,
+                isActive && { borderColor: rowAccent + '80', backgroundColor: rowAccent + '14' },
+                !ready && { opacity: 0.42 },
+                ...(Platform.OS === 'web' ? [{ cursor: ready ? 'pointer' : 'not-allowed', transition: 'all 0.15s ease' } as any] : []),
+              ]}
+            >
+              <View style={[styles.providerBrowserModelIcon, { backgroundColor: rowAccent + '20' }]}>
+                <Text style={[styles.providerBrowserModelIconText, { color: rowAccent }]}>{model.icon || icon}</Text>
+              </View>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={[styles.providerBrowserModelName, isActive && { color: rowAccent }]} numberOfLines={1}>
+                  {model.label}
+                </Text>
+                <Text style={styles.providerBrowserModelMeta} numberOfLines={1}>
+                  {[model.description, contextLabel, model.id.replace(/^[^/]+\//, '')].filter(Boolean).join(' | ')}
+                </Text>
+              </View>
+              {isActive ? <View style={[styles.dropdownActiveDot, { backgroundColor: rowAccent }]} /> : null}
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+}
+
 function EnhancedInput({
   circleId: composerCircleId,
   input,
@@ -8204,7 +8447,9 @@ function EnhancedInput({
   const [showModePicker, setShowModePicker] = useState(false);
   const [showControlAdvanced, setShowControlAdvanced] = useState(false);
   const [showAddModel, setShowAddModel] = useState(false);
+  const [activeModelBrowserKey, setActiveModelBrowserKey] = useState<string | null>(null);
   const [customModels, setCustomModels] = useState<any[]>([]);
+  const [popularModels, setPopularModels] = useState<ChatPickerModel[]>(POPULAR_OPENROUTER_MODELS);
   const [hoveredModel, setHoveredModel] = useState<string | null>(null);
   const [hoveredAction, setHoveredAction] = useState<number | null>(null);
   const [expandedActionSections, setExpandedActionSections] = useState<Record<string, boolean>>({
@@ -8225,6 +8470,7 @@ function EnhancedInput({
   });
   const [highlightedSlashIndex, setHighlightedSlashIndex] = useState(0);
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const popularRankingsLoadedRef = useRef(false);
 
   // Load custom models on mount
   React.useEffect(() => {
@@ -8235,10 +8481,32 @@ function EnhancedInput({
     }).catch(() => {});
   }, []);
 
+  React.useEffect(() => {
+    if (!showModelPicker || popularRankingsLoadedRef.current) return;
+    popularRankingsLoadedRef.current = true;
+    let cancelled = false;
+
+    supabase.functions.invoke('openrouter-rankings', { body: { limit: 20 } })
+      .then(({ data, error }) => {
+        if (error) throw error;
+        const rankedModels = Array.isArray((data as any)?.models) ? (data as any).models : [];
+        if (!cancelled && rankedModels.length > 0) {
+          setPopularModels(rankedModels.map(popularRankingToChatModel));
+        }
+      })
+      .catch((error) => {
+        console.warn('[ChatTab] OpenRouter popular ranking refresh failed; using seeded list.', error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showModelPicker]);
+
   // Marketplace catalog comes from the parent (ChatTab) so the picker
   // here and the send-time auto-resolution in the parent agree on
   // which providers are connected.
-  const marketplaceModelGroups: Array<import('../../../lib/integrations/modelProviderRegistry').ModelGroup> = marketplaceModelGroupsProp || [];
+  const marketplaceModelGroups: ModelGroup[] = marketplaceModelGroupsProp || [];
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
@@ -8325,8 +8593,98 @@ function EnhancedInput({
     }
   }, [applySlashCommand, highlightedSlashIndex, input, onSend, showSlashCommands, slashCommands, chatMode, onModeChange]);
 
-  const allModels = [...CHAT_MODELS, ...customModels];
-  const currentModel = allModels.find(m => m.id === selectedModel) || CHAT_MODELS[0];
+  const allModels = [...CHAT_MODELS, ...popularModels, ...customModels];
+  const marketplaceModelOptions = useMemo(() => {
+    return marketplaceModelGroups.flatMap((group) =>
+      group.models.map((model) => ({
+        ...model,
+        groupLabel: group.label,
+        groupConnected: group.connected,
+      })),
+    );
+  }, [marketplaceModelGroups]);
+  const selectedMarketplaceModel = marketplaceModelOptions.find((model) => model.id === selectedModel);
+  const currentModel = allModels.find(m => m.id === selectedModel) || (selectedMarketplaceModel ? {
+    id: selectedMarketplaceModel.id,
+    label: selectedMarketplaceModel.label,
+    desc: selectedMarketplaceModel.description || selectedMarketplaceModel.groupLabel,
+    group: 'marketplace',
+    icon: modelPickerProviderIcon(selectedMarketplaceModel.provider),
+    color: modelPickerProviderColor(selectedMarketplaceModel.provider, selectedMarketplaceModel.groupConnected),
+  } : CHAT_MODELS[0]);
+  const browseableBaseModelSections: ModelBrowserSection[] = useMemo(() => {
+    return MODEL_GROUPS.slice(1).map((group) => {
+      const groupModels = group.key === 'popular'
+        ? popularModels
+        : CHAT_MODELS.filter((model: ChatPickerModel) => model.group === group.key);
+      return {
+        key: `base:${group.key}`,
+        label: group.label,
+        color: group.color,
+        icon: group.label.slice(0, 2).replace(/\s/g, '') || 'M',
+        connected: true,
+        sourceLabel: group.key === 'popular' ? 'live OpenRouter weekly rankings' : 'built-in model shortlist',
+        models: groupModels
+          .map((model: ChatPickerModel) => ({
+            id: model.id,
+            label: model.label,
+            description: model.desc,
+            ready: true,
+            color: model.color,
+            icon: model.icon,
+            contextWindow: model.contextWindow,
+          })),
+      };
+    });
+  }, [popularModels]);
+  const marketplaceModelBrowserSections: ModelBrowserSection[] = useMemo(() => {
+    return marketplaceModelGroups
+      .map((group) => {
+        const provider = group.provider as string;
+        const color = modelPickerProviderColor(provider, group.connected);
+        return {
+          key: `marketplace:${provider}`,
+          label: group.label,
+          color,
+          icon: modelPickerProviderIcon(provider),
+          connected: group.connected,
+          sourceLabel: provider === 'openrouter' && group.connected ? 'the live OpenRouter catalog' : 'Marketplace Models',
+          models: group.models.map((model) => ({
+            id: model.id,
+            label: model.label,
+            description: model.description,
+            contextWindow: model.contextWindow,
+            ready: model.ready,
+            provider: model.provider,
+            color,
+            icon: modelPickerProviderIcon(provider),
+          })),
+        };
+      });
+  }, [marketplaceModelGroups]);
+  const modelBrowserSections = useMemo(() => {
+    return [...browseableBaseModelSections, ...marketplaceModelBrowserSections];
+  }, [browseableBaseModelSections, marketplaceModelBrowserSections]);
+  const activeModelBrowserSection = activeModelBrowserKey
+    ? modelBrowserSections.find((section) => section.key === activeModelBrowserKey) || null
+    : null;
+  const huggingFaceMarketplaceGroup = marketplaceModelGroups.find((group) => group.provider === 'hugging_face');
+  const primaryBuiltInModelGroups = MODEL_GROUPS.slice(0, 1);
+  const popularBuiltInModelGroup = MODEL_GROUPS.find((group) => group.key === 'popular');
+  const secondaryBuiltInModelGroups = MODEL_GROUPS.slice(2);
+  const visibleMarketplaceModelGroups = useMemo(() => {
+    return [...marketplaceModelGroups]
+      .filter((group) => group.provider !== 'hugging_face')
+      .sort((a, b) => {
+        if (a.connected !== b.connected) return a.connected ? -1 : 1;
+        if (a.provider === 'anthropic') return -1;
+        if (b.provider === 'anthropic') return 1;
+        return a.label.localeCompare(b.label);
+      });
+  }, [marketplaceModelGroups]);
+  const anthropicMarketplaceGroup = visibleMarketplaceModelGroups.find((group) => group.provider === 'anthropic');
+  const connectedMarketplaceModelGroups = visibleMarketplaceModelGroups.filter((group) => group.connected && group.provider !== 'anthropic');
+  const disconnectedMarketplaceModelGroups = visibleMarketplaceModelGroups.filter((group) => !group.connected && group.provider !== 'anthropic');
 
   // Connected provider set — drives Auto's bias toward the team's BYOK
   // keys. When OpenRouter is connected, Auto routes through OR-prefixed
@@ -8336,7 +8694,7 @@ function EnhancedInput({
     return new Set(
       marketplaceModelGroups
         .filter((g) => g.connected)
-        .map((g) => g.provider as string),
+        .map((g) => normalizeConnectedProviderKey(g.provider as string)),
     );
   }, [marketplaceModelGroups]);
 
@@ -8389,6 +8747,177 @@ function EnhancedInput({
     { key: 'wallet', category: PROMPT_CATEGORIES[3] },
   ];
 
+  const renderExpandedBuiltInModelGroup = (group: typeof MODEL_GROUPS[number]) => {
+    const groupModels = group.key === 'popular'
+      ? popularModels
+      : CHAT_MODELS.filter((m: ChatPickerModel) => m.group === group.key);
+    if (groupModels.length === 0) return null;
+    return (
+      <View key={group.key}>
+        <Text style={[styles.dropdownCategoryTitle, { color: group.color }]}>{group.label}</Text>
+        {groupModels.map((model: any) => {
+          const isActive = model.id === selectedModel;
+          const isHovered = hoveredModel === model.id;
+          const isAuto = model.id === 'auto';
+          const autoExtra = isAuto && autoResolvedShortLabel
+            ? ` · resolves to ${autoResolvedShortLabel}${input.trim() ? ' for this prompt' : ' by default'}`
+            : '';
+          return (
+            <Pressable
+              key={model.id}
+              onPress={() => { onModelChange(model.id); setShowModelPicker(false); }}
+              onHoverIn={() => setHoveredModel(model.id)}
+              onHoverOut={() => setHoveredModel(null)}
+              accessibilityRole="button"
+              style={[
+                styles.dropdownItem,
+                isActive && { backgroundColor: model.color + '18', borderColor: model.color + '40' },
+                isHovered && !isActive && { backgroundColor: '#1a1a28' },
+                isAuto && !isActive && { borderColor: model.color + '40' },
+                ...(Platform.OS === 'web' ? [{ transition: 'all 0.15s ease', cursor: 'pointer' } as any] : []),
+              ]}
+            >
+              <View style={[styles.dropdownItemIcon, { backgroundColor: model.color + '20' }]}>
+                <Text style={[styles.dropdownItemIconText, { color: model.color }]}>{model.icon}</Text>
+              </View>
+              <View style={styles.dropdownItemText}>
+                <Text style={[styles.dropdownItemLabel, isActive && { color: model.color }]}>
+                  {model.label}
+                  {isAuto && autoResolvedShortLabel ? (
+                    <Text style={{ color: model.color, fontWeight: '600', fontSize: 11 }}>{`  →  ${autoResolvedShortLabel}`}</Text>
+                  ) : null}
+                </Text>
+                <Text style={styles.dropdownItemDesc}>{model.desc}{autoExtra}</Text>
+                {(model as any).tags && (
+                  <View style={{ flexDirection: 'row', gap: 3, marginTop: 2, flexWrap: 'wrap' }}>
+                    {((model as any).tags as string[]).map((tag: string) => {
+                      const tagColors: Record<string, string> = { images: '#84cc16', vision: '#22d3ee', code: '#a855f7', text: '#606075', web: '#f59e0b', reason: '#ec4899' };
+                      return (
+                        <View key={tag} style={{ backgroundColor: (tagColors[tag] || '#606075') + '15', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 2 }}>
+                          <Text style={{ color: tagColors[tag] || '#606075', fontSize: 7, fontWeight: '700', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>{toTitleCaseWords(tag)}</Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                )}
+              </View>
+              {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: model.color }]} />}
+            </Pressable>
+          );
+        })}
+      </View>
+    );
+  };
+
+  const renderBrowseBuiltInModelGroup = (group: typeof MODEL_GROUPS[number]) => {
+    const groupModels = group.key === 'popular'
+      ? popularModels
+      : CHAT_MODELS.filter((m: ChatPickerModel) => m.group === group.key);
+    if (groupModels.length === 0) return null;
+    const browserKey = `base:${group.key}`;
+    return (
+      <View key={group.key}>
+        <Text style={[styles.dropdownCategoryTitle, { color: group.color }]}>{group.label}</Text>
+        <Pressable
+          onPress={() => {
+            setActiveModelBrowserKey(browserKey);
+            setShowAddModel(false);
+          }}
+          accessibilityRole="button"
+          style={[
+            styles.dropdownItem,
+            { borderWidth: 1, borderColor: group.color + '35', backgroundColor: group.color + '10' },
+            ...(Platform.OS === 'web' ? [{ cursor: 'pointer' } as any] : []),
+          ]}
+        >
+          <View style={[styles.dropdownItemIcon, { backgroundColor: group.color + '20' }]}>
+            <Text style={[styles.dropdownItemIconText, { color: group.color }]}>
+              {group.label.slice(0, 2).replace(/\s/g, '')}
+            </Text>
+          </View>
+          <View style={styles.dropdownItemText}>
+            <Text style={[styles.dropdownItemLabel, { color: group.color }]}>{group.label}</Text>
+            <Text style={styles.dropdownItemDesc}>
+              {group.key === 'popular'
+                ? `Show the current top ${groupModels.length} OpenRouter models`
+                : `Show all ${groupModels.length} models with search`}
+            </Text>
+          </View>
+          <Text style={[styles.modelChevron, { color: group.color }]}>{'>'}</Text>
+        </Pressable>
+      </View>
+    );
+  };
+
+  const renderMarketplaceModelGroup = (group: ModelGroup) => {
+    const provider = group.provider as string;
+    const providerColor = modelPickerProviderColor(provider, group.connected);
+    // Group key includes the label because two groups now share
+    // provider='hugging_face' (BlackSwan + plain Hugging Face). React
+    // would collapse them on duplicate keys and one wouldn't render.
+    const groupKey = `mkt-${provider}-${(group.label || '').replace(/\s+/g, '_').toLowerCase()}`;
+    const browserKey = `marketplace:${provider}:${(group.label || '').toLowerCase()}`;
+    return (
+      <View key={groupKey}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 4 }}>
+          <Text style={[styles.dropdownCategoryTitle, { color: providerColor, paddingHorizontal: 0, paddingVertical: 0 }]}>
+            {group.label}
+          </Text>
+          {!group.connected ? (
+            <Text style={{ color: '#475569', fontSize: 8, fontStyle: 'italic' }}>not connected</Text>
+          ) : null}
+        </View>
+        <Pressable
+          onPress={() => {
+            setActiveModelBrowserKey(browserKey);
+            setShowAddModel(false);
+          }}
+          accessibilityRole="button"
+          style={[
+            styles.dropdownItem,
+            { borderWidth: 1, borderColor: providerColor + '35', backgroundColor: providerColor + '10' },
+            ...(Platform.OS === 'web' ? [{ cursor: 'pointer' } as any] : []),
+          ]}
+        >
+          <View style={[styles.dropdownItemIcon, { backgroundColor: providerColor + '20' }]}>
+            <Text style={[styles.dropdownItemIconText, { color: providerColor }]}>{modelPickerProviderIcon(provider)}</Text>
+          </View>
+          <View style={styles.dropdownItemText}>
+            <Text style={[styles.dropdownItemLabel, { color: providerColor }]}>{group.label}</Text>
+            <Text style={styles.dropdownItemDesc}>
+              Show all {group.models.length || 'available'} models with search
+            </Text>
+          </View>
+          <Text style={[styles.modelChevron, { color: providerColor }]}>{'>'}</Text>
+        </Pressable>
+      </View>
+    );
+  };
+
+  const renderAddHFHubModelAction = () => (
+    <Pressable
+      key="add-hf-hub-model"
+      onPress={() => {
+        setShowAddModel(true);
+        setActiveModelBrowserKey(null);
+      }}
+      accessibilityRole="button"
+      style={[
+        styles.dropdownItem,
+        { borderWidth: 1, borderColor: accentColor + '35', backgroundColor: accentColor + '10' },
+        ...(Platform.OS === 'web' ? [{ cursor: 'pointer' } as any] : []),
+      ]}
+    >
+      <View style={[styles.dropdownItemIcon, { backgroundColor: accentColor + '20' }]}>
+        <Text style={[styles.dropdownItemIconText, { color: accentColor }]}>+</Text>
+      </View>
+      <View style={styles.dropdownItemText}>
+        <Text style={[styles.dropdownItemLabel, { color: accentColor }]}>Add HF Hub Model</Text>
+        <Text style={styles.dropdownItemDesc}>Register a custom Hugging Face repo model</Text>
+      </View>
+    </Pressable>
+  );
+
   const inputStyle = Platform.OS === 'web' ? {
     backdropFilter: 'blur(10px)',
     borderColor: focused ? accentColor + '60' : accentColor + '30',
@@ -8405,7 +8934,15 @@ function EnhancedInput({
         {/* Model Selector Button */}
         <View style={{ position: 'relative' as const }}>
           <Pressable
-            onPress={() => { setShowModelPicker(!showModelPicker); setShowQuickActions(false); }}
+            onPress={() => {
+              const next = !showModelPicker;
+              setShowModelPicker(next);
+              setShowQuickActions(false);
+              if (!next) {
+                setShowAddModel(false);
+                setActiveModelBrowserKey(null);
+              }
+            }}
             onHoverIn={() => setHoveredModel('_btn')}
             onHoverOut={() => setHoveredModel(null)}
             accessibilityRole="button"
@@ -8430,185 +8967,32 @@ function EnhancedInput({
           </Pressable>
 
           {/* Model Dropdown */}
-          {showModelPicker && !showAddModel && (
+          {showModelPicker && !showAddModel && !activeModelBrowserKey && (
             <AnimatedPopup style={[styles.dropdownPanel, { maxHeight: 480, width: 320, left: 0, right: 'auto' }, ...(Platform.OS === 'web' ? [{ boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)', overflowY: 'auto' } as any] : [])]}>
-              {MODEL_GROUPS.map(group => {
-                const groupModels = CHAT_MODELS.filter((m: any) => m.group === group.key);
-                if (groupModels.length === 0) return null;
-                return (
-                  <View key={group.key}>
-                    <Text style={[styles.dropdownCategoryTitle, { color: group.color }]}>{group.label}</Text>
-                    {groupModels.map((model: any) => {
-                      const isActive = model.id === selectedModel;
-                      const isHovered = hoveredModel === model.id;
-                      // Auto entry gets the live resolution preview
-                      // appended to the description so users see what
-                      // it WOULD route to right now without having to
-                      // expand a tooltip.
-                      const isAuto = model.id === 'auto';
-                      const autoExtra = isAuto && autoResolvedShortLabel
-                        ? ` · resolves to ${autoResolvedShortLabel}${input.trim() ? ' for this prompt' : ' by default'}`
-                        : '';
-                      return (
-                        <Pressable
-                          key={model.id}
-                          onPress={() => { onModelChange(model.id); setShowModelPicker(false); }}
-                          onHoverIn={() => setHoveredModel(model.id)}
-                          onHoverOut={() => setHoveredModel(null)}
-                          accessibilityRole="button"
-                          style={[
-                            styles.dropdownItem,
-                            isActive && { backgroundColor: model.color + '18', borderColor: model.color + '40' },
-                            isHovered && !isActive && { backgroundColor: '#1a1a28' },
-                            // Auto gets a permanent accent border so it
-                            // reads as "the recommended default" even
-                            // when another model is currently picked.
-                            isAuto && !isActive && { borderColor: model.color + '40' },
-                            ...(Platform.OS === 'web' ? [{ transition: 'all 0.15s ease', cursor: 'pointer' } as any] : []),
-                          ]}
-                        >
-                          <View style={[styles.dropdownItemIcon, { backgroundColor: model.color + '20' }]}>
-                            <Text style={[styles.dropdownItemIconText, { color: model.color }]}>{model.icon}</Text>
-                          </View>
-                          <View style={styles.dropdownItemText}>
-                            <Text style={[styles.dropdownItemLabel, isActive && { color: model.color }]}>
-                              {model.label}
-                              {isAuto && autoResolvedShortLabel ? (
-                                <Text style={{ color: model.color, fontWeight: '600', fontSize: 11 }}>{`  →  ${autoResolvedShortLabel}`}</Text>
-                              ) : null}
-                            </Text>
-                            <Text style={styles.dropdownItemDesc}>{model.desc}{autoExtra}</Text>
-                            {(model as any).tags && (
-                              <View style={{ flexDirection: 'row', gap: 3, marginTop: 2, flexWrap: 'wrap' }}>
-                                {((model as any).tags as string[]).map((tag: string) => {
-                                  const tagColors: Record<string, string> = { images: '#84cc16', vision: '#22d3ee', code: '#a855f7', text: '#606075', web: '#f59e0b', reason: '#ec4899' };
-                                  return (
-                                    <View key={tag} style={{ backgroundColor: (tagColors[tag] || '#606075') + '15', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 2 }}>
-                                      <Text style={{ color: tagColors[tag] || '#606075', fontSize: 7, fontWeight: '700', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>{tag.toUpperCase()}</Text>
-                                    </View>
-                                  );
-                                })}
-                              </View>
-                            )}
-                          </View>
-                          {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: model.color }]} />}
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                );
-              })}
+              {primaryBuiltInModelGroups.map(renderExpandedBuiltInModelGroup)}
+              {popularBuiltInModelGroup ? renderBrowseBuiltInModelGroup(popularBuiltInModelGroup) : null}
+              {anthropicMarketplaceGroup ? renderMarketplaceModelGroup(anthropicMarketplaceGroup) : null}
+              <Text style={[styles.dropdownCategoryTitle, { color: '#ffbd45' }]}>Hugging Face</Text>
+              {renderAddHFHubModelAction()}
+              {connectedMarketplaceModelGroups.map(renderMarketplaceModelGroup)}
+              {secondaryBuiltInModelGroups.map(renderBrowseBuiltInModelGroup)}
+              {disconnectedMarketplaceModelGroups.map(renderMarketplaceModelGroup)}
+            </AnimatedPopup>
+          )}
 
-              {/* Marketplace integrations — connected providers
-                  surface their models here, disconnected ones show a
-                  tiny "connect to use" hint. Same source as the room
-                  chat picker so a key entered in Marketplace lights
-                  up everywhere at once. */}
-              {marketplaceModelGroups
-                .filter((g) => g.provider !== 'anthropic')
-                .map((group) => {
-                  const providerColor = group.connected ? '#a78bfa' : '#475569';
-                  return (
-                    <View key={`mkt-${group.provider}`}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 4 }}>
-                        <Text style={[styles.dropdownCategoryTitle, { color: providerColor, paddingHorizontal: 0, paddingVertical: 0 }]}>
-                          {group.label.toUpperCase()}
-                        </Text>
-                        {!group.connected ? (
-                          <Text style={{ color: '#475569', fontSize: 8, fontStyle: 'italic' }}>not connected</Text>
-                        ) : null}
-                      </View>
-                      {group.models.slice(0, group.connected ? 25 : 4).map((opt) => {
-                        const isActive = opt.id === selectedModel;
-                        const isHovered = hoveredModel === opt.id;
-                        return (
-                          <Pressable
-                            key={opt.id}
-                            onPress={() => {
-                              if (!opt.ready) return;
-                              onModelChange(opt.id);
-                              setShowModelPicker(false);
-                            }}
-                            disabled={!opt.ready}
-                            onHoverIn={() => setHoveredModel(opt.id)}
-                            onHoverOut={() => setHoveredModel(null)}
-                            accessibilityRole="button"
-                            style={[
-                              styles.dropdownItem,
-                              isActive && { backgroundColor: providerColor + '18', borderColor: providerColor + '40' },
-                              isHovered && opt.ready && !isActive && { backgroundColor: '#1a1a28' },
-                              !opt.ready && { opacity: 0.35 },
-                              ...(Platform.OS === 'web' ? [{ cursor: opt.ready ? 'pointer' : 'not-allowed' } as any] : []),
-                            ]}
-                          >
-                            <View style={[styles.dropdownItemIcon, { backgroundColor: providerColor + '20' }]}>
-                              <Text style={[styles.dropdownItemIconText, { color: providerColor }]}>{opt.label.charAt(0)}</Text>
-                            </View>
-                            <View style={styles.dropdownItemText}>
-                              <Text style={[styles.dropdownItemLabel, isActive && { color: providerColor }]} numberOfLines={1}>{opt.label}</Text>
-                              {opt.description ? (
-                                <Text style={styles.dropdownItemDesc} numberOfLines={1}>{opt.description}</Text>
-                              ) : null}
-                            </View>
-                            {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: providerColor }]} />}
-                          </Pressable>
-                        );
-                      })}
-                      {!group.connected && group.hint ? (
-                        <Text style={{ color: '#475569', fontSize: 9, paddingHorizontal: 12, paddingBottom: 6, lineHeight: 13, fontStyle: 'italic' }}>
-                          {group.hint}
-                        </Text>
-                      ) : null}
-                      {group.connected && group.models.length > 25 ? (
-                        <Text style={{ color: '#475569', fontSize: 9, paddingHorizontal: 12, paddingBottom: 6, fontStyle: 'italic' }}>
-                          +{group.models.length - 25} more — pick from the room chat ⋯ menu for the full list.
-                        </Text>
-                      ) : null}
-                    </View>
-                  );
-                })}
-
-              {/* Custom HF models */}
-              {customModels.length > 0 && (
-                <View>
-                  <Text style={[styles.dropdownCategoryTitle, { color: '#f472b6' }]}>YOUR MODELS (HF)</Text>
-                  {customModels.map((model: any) => {
-                    const isActive = model.id === selectedModel;
-                    return (
-                      <Pressable
-                        key={model.id}
-                        onPress={() => { onModelChange(model.id); setShowModelPicker(false); }}
-                        accessibilityRole="button"
-                        style={[styles.dropdownItem, isActive && { backgroundColor: (model.color || '#f472b6') + '18' }, ...(Platform.OS === 'web' ? [{ cursor: 'pointer' } as any] : [])]}
-                      >
-                        <View style={[styles.dropdownItemIcon, { backgroundColor: (model.color || '#f472b6') + '20' }]}>
-                          <Text style={[styles.dropdownItemIconText, { color: model.color || '#f472b6' }]}>{model.icon}</Text>
-                        </View>
-                        <View style={styles.dropdownItemText}>
-                          <Text style={[styles.dropdownItemLabel, isActive && { color: model.color || '#f472b6' }]}>{model.label}</Text>
-                          <Text style={styles.dropdownItemDesc}>{model.desc}</Text>
-                        </View>
-                        {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: model.color || '#f472b6' }]} />}
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              )}
-
-              <View style={styles.dropdownDivider} />
-              <Pressable
-                onPress={() => setShowAddModel(true)}
-                accessibilityRole="button"
-                style={[styles.dropdownItem, ...(Platform.OS === 'web' ? [{ cursor: 'pointer' } as any] : [])]}
-              >
-                <View style={[styles.dropdownItemIcon, { backgroundColor: accentColor + '20' }]}>
-                  <Text style={[styles.dropdownItemIconText, { color: accentColor }]}>+</Text>
-                </View>
-                <View style={styles.dropdownItemText}>
-                  <Text style={[styles.dropdownItemLabel, { color: accentColor }]}>Browse Hugging Face</Text>
-                  <Text style={styles.dropdownItemDesc}>Add any model from HF Hub</Text>
-                </View>
-              </Pressable>
+          {/* Model Section Browser */}
+          {showModelPicker && activeModelBrowserKey && (
+            <AnimatedPopup style={[styles.dropdownPanel, styles.providerBrowserDropdown, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)' } as any] : [])]}>
+              <ModelSectionBrowserPanel
+                section={activeModelBrowserSection}
+                selectedModel={selectedModel}
+                onSelect={(modelId) => {
+                  onModelChange(modelId);
+                  setActiveModelBrowserKey(null);
+                  setShowModelPicker(false);
+                }}
+                onClose={() => setActiveModelBrowserKey(null)}
+              />
             </AnimatedPopup>
           )}
 
@@ -8619,11 +9003,19 @@ function EnhancedInput({
                 accentColor={accentColor}
                 onModelAdded={(model) => {
                   import('../../../lib/customModels').then(({ customModelToChatModel }) => {
-                    setCustomModels(prev => [...prev, customModelToChatModel(model)]);
+                    const chatModel = customModelToChatModel(model);
+                    setCustomModels(prev => {
+                      if (prev.some((item: any) => item.id === chatModel.id)) return prev;
+                      return [...prev, chatModel];
+                    });
+                    onModelChange(chatModel.id);
+                    setShowAddModel(false);
+                    setShowModelPicker(false);
                   });
-                  setShowAddModel(false);
                 }}
                 onClose={() => setShowAddModel(false)}
+                marketplaceConnected={!!huggingFaceMarketplaceGroup?.connected}
+                marketplaceHint={huggingFaceMarketplaceGroup?.hint}
               />
             </AnimatedPopup>
           )}
@@ -8637,7 +9029,12 @@ function EnhancedInput({
         {/* Quick Actions Button */}
         <View style={{ position: 'relative' as const }}>
           <Pressable
-            onPress={() => { setShowQuickActions(!showQuickActions); setShowModelPicker(false); }}
+            onPress={() => {
+              setShowQuickActions(!showQuickActions);
+              setShowModelPicker(false);
+              setShowAddModel(false);
+              setActiveModelBrowserKey(null);
+            }}
             onHoverIn={() => setHoveredAction(-1)}
             onHoverOut={() => setHoveredAction(null)}
             accessibilityRole="button"
@@ -10275,6 +10672,127 @@ const styles = StyleSheet.create({
   dropdownPanelWide: {
     width: 300,
     maxHeight: 500,
+  },
+  providerBrowserDropdown: {
+    width: 440,
+    maxHeight: 560,
+    paddingVertical: 0,
+  },
+  providerBrowserPanel: {
+    padding: 12,
+    gap: 10,
+  },
+  providerBrowserHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  providerBrowserTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  providerBrowserSubtitle: {
+    color: '#64748b',
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: 2,
+  },
+  providerBrowserClose: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    backgroundColor: '#0f172a',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  providerBrowserCloseText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '900',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  providerBrowserNotice: {
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: '#0f172a',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  providerBrowserNoticeText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  providerBrowserSearchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    backgroundColor: '#020617',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  providerBrowserSearchIcon: {
+    fontSize: 12,
+    fontWeight: '900',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  providerBrowserSearchInput: {
+    flex: 1,
+    color: '#e2e8f0',
+    fontSize: 13,
+    padding: 0,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+  },
+  providerBrowserList: {
+    maxHeight: 400,
+  },
+  providerBrowserEmpty: {
+    color: '#64748b',
+    fontSize: 12,
+    paddingVertical: 18,
+    textAlign: 'center',
+  },
+  providerBrowserModelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderWidth: 1,
+    borderColor: '#111827',
+    backgroundColor: '#020617',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    marginBottom: 6,
+  },
+  providerBrowserModelIcon: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  providerBrowserModelIconText: {
+    fontSize: 10,
+    fontWeight: '900',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  providerBrowserModelName: {
+    color: '#e2e8f0',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  providerBrowserModelMeta: {
+    color: '#64748b',
+    fontSize: 11,
+    marginTop: 2,
   },
   dropdownPanelControlCenter: {
     width: 380,

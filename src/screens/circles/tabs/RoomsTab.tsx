@@ -3838,8 +3838,11 @@ function ChatPanel({ roomId, accentColor, circleId, activeFile }: {
                   // the user is searching, not browsing, so empty headers
                   // are noise.
                   if (filterQ.length > 0 && filteredModels.length === 0) return null;
+                  // Key includes label because BlackSwan + Hugging Face
+                  // both use provider='hugging_face'; without this React
+                  // collapses them and only one group renders.
                   return (
-                    <View key={group.provider} style={{ marginTop: 4 }}>
+                    <View key={`${group.provider}-${(group.label || '').replace(/\s+/g, '_').toLowerCase()}`} style={{ marginTop: 4 }}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 8, paddingVertical: 4 }}>
                         <Text style={{ color: '#475569', fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: MONO }}>
                           {group.label.toUpperCase()}
