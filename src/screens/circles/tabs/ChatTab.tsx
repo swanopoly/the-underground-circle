@@ -4719,7 +4719,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
         addBotMessage(
           "**Desktop Bridge paired.** The agent can now inspect and control your Mac when you approve each sensitive action.\n\n" +
-          "Available tools include app launch/focus, typing, key combos, running apps, browser tabs, window state, screenshots, clipboard read/write, mouse click/move/drag/scroll, window management, and macOS Shortcuts.\n\n" +
+          "Available tools include app launch/focus, typing, key combos, running apps, browser tabs, window state, screenshots, clipboard read/write, mouse click/move/drag/scroll, window management, local file list/read/write/search, and macOS Shortcuts.\n\n" +
           "**First keystroke:** macOS will prompt for Accessibility permission for whichever Terminal/iTerm is running the bridge. Grant it in System Settings → Privacy & Security → Accessibility.\n\n" +
           "**First browser-tab read:** macOS may prompt for Automation permission so the bridge can read tab titles and URLs from Chrome/Safari.",
           undefined,
@@ -7958,6 +7958,12 @@ const CHAT_MODELS: ChatPickerModel[] = [
   // Picks the cheapest model that meets the bar so the per-turn cost
   // stays sane while one-off heavy turns still get the headroom.
   { id: 'auto', label: 'Auto', desc: 'Smart route by intent — Haiku for chat, Sonnet for code, Opus for research', color: '#22c55e', icon: 'A', group: 'smart', tags: ['text', 'code', 'reason'] },
+  // BlackSwan — our circle's own fine-tune. Routed via the dedicated
+  // HF Inference Endpoint when the BlackSwan integration is connected
+  // in Marketplace; otherwise the edge function falls through to
+  // platform Sonnet with a routing_fallback chip explaining why. Sits
+  // right after Auto so it's the second pick in the picker.
+  { id: 'huggingface_endpoint/cswan801/BlackSwan-v5', label: 'BlackSwan v5', desc: 'Our custom fine-tune · trained on app data', color: '#22d3ee', icon: 'B', group: 'smart', tags: ['text', 'code'] },
 
   // ── Coding & Engineering ──
   { id: 'claude-opus-4-6', label: 'Opus 4.6', desc: 'Best coder alive. Complex architecture.', color: '#a855f7', icon: 'O', group: 'code', tags: ['code', 'text', 'web'] },

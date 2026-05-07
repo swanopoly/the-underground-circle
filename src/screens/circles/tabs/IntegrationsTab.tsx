@@ -69,6 +69,7 @@ const GENERIC_MARKETPLACE_PROVIDERS: GenericMarketplaceProvider[] = [
   'browserless',
   'browserstack',
   'firecrawl',
+  'brave',
   'apify',
   'steel',
   'hyperbrowser',
@@ -127,7 +128,117 @@ const GENERIC_MARKETPLACE_PROVIDERS: GenericMarketplaceProvider[] = [
   'qdrant',
   'ngrok',
   'trigger_dev',
+  // Native model providers. These need to use the same detail form as
+  // other marketplace apps so selecting a Models card exposes API-key input.
+  'anthropic',
+  'openai',
+  'google_ai',
+  'groq',
+  'mistral_ai',
+  'cohere',
+  'perplexity',
+  'together_ai',
+  'fireworks_ai',
+  'deepseek',
+  'z_ai',
+  'minimax',
+  'ollama',
+  // Custom team model — shares the same detail form as the rest so
+  // the Inference Endpoint URL + HF token fields render properly.
+  'blackswan',
 ];
+
+const MODEL_USER_API_PROVIDER_BY_MARKETPLACE_PROVIDER: Partial<Record<GenericMarketplaceProvider, string>> = {
+  anthropic: 'anthropic',
+  openai: 'openai',
+  openrouter: 'openrouter',
+  groq: 'groq',
+  hugging_face: 'huggingface',
+  replicate: 'replicate',
+  google_ai: 'google_ai',
+  mistral_ai: 'mistral_ai',
+  cohere: 'cohere',
+  perplexity: 'perplexity',
+  brave: 'brave',
+  together_ai: 'together_ai',
+  fireworks_ai: 'fireworks_ai',
+  deepseek: 'deepseek',
+  z_ai: 'zai',
+  minimax: 'minimax',
+  ollama: 'ollama',
+};
+
+const MODEL_PROVIDER_PRIMARY_SECRET_KEY: Partial<Record<GenericMarketplaceProvider, string>> = {
+  anthropic: 'api_key',
+  openai: 'api_key',
+  openrouter: 'api_key',
+  groq: 'api_key',
+  hugging_face: 'api_token',
+  replicate: 'api_token',
+  google_ai: 'api_key',
+  mistral_ai: 'api_key',
+  cohere: 'api_key',
+  perplexity: 'api_key',
+  brave: 'api_key',
+  together_ai: 'api_key',
+  fireworks_ai: 'api_key',
+  deepseek: 'api_key',
+  z_ai: 'api_key',
+  minimax: 'api_key',
+  ollama: 'api_key',
+};
+
+const CHAT_READY_MODEL_USER_API_PROVIDERS = new Set([
+  'anthropic',
+  'openai',
+  'openrouter',
+  'groq',
+  'huggingface',
+  'zai',
+  'minimax',
+  'ollama',
+  'google_ai',
+  'mistral_ai',
+  'cohere',
+  'perplexity',
+  'brave',
+  'together_ai',
+  'fireworks_ai',
+  'deepseek',
+]);
+
+function marketplaceProviderToUserApiProvider(provider: GenericMarketplaceProvider): string | null {
+  return MODEL_USER_API_PROVIDER_BY_MARKETPLACE_PROVIDER[provider] || null;
+}
+
+function isMarketplaceModelProvider(provider: GenericMarketplaceProvider): boolean {
+  return !!marketplaceProviderToUserApiProvider(provider);
+}
+
+function primarySecretKeyForMarketplaceProvider(provider: GenericMarketplaceProvider): string | null {
+  return MODEL_PROVIDER_PRIMARY_SECRET_KEY[provider] || null;
+}
+
+function getMarketplaceProviderEndpoint(
+  provider: GenericMarketplaceProvider,
+  metadata: Record<string, string>,
+): string | null {
+  if (provider === 'ollama') return metadata.baseUrl?.trim() || null;
+  return null;
+}
+
+function isStaleUserApiProviderConstraintError(message?: string | null): boolean {
+  return /user_api_keys_provider_check/i.test(message || '');
+}
+
+function getMarketplaceProviderUserApiSecret(
+  provider: GenericMarketplaceProvider,
+  secrets: Record<string, string>,
+): string {
+  const primarySecretKey = primarySecretKeyForMarketplaceProvider(provider);
+  if (!primarySecretKey) return '';
+  return secrets[primarySecretKey]?.trim() || '';
+}
 
 function createEmptyStatuses(): Record<CircleIntegrationPlatformKey, PlatformStatus> {
   return CIRCLE_INTEGRATION_CATALOG.reduce((acc, item) => {
@@ -168,7 +279,6 @@ function PlatformCard({
   const [hovered, setHovered] = useState(false);
   const clickable = !!onPress;
   const connected = !!status?.connected;
-  const availabilityLabel = connected ? 'Active' : 'Ready';
 
   return (
     <Pressable
@@ -199,22 +309,17 @@ function PlatformCard({
               <Text style={styles.newBadgeText}>New</Text>
             </View>
           ) : null}
-          <View style={[
-            styles.statusBadge,
-            connected && { backgroundColor: '#22c55e15', borderColor: '#22c55e30' },
-          ]}>
+          {connected ? (
             <View style={[
-            styles.statusDot,
-            connected ? { backgroundColor: '#22c55e' } : { backgroundColor: item.color },
-          ]} />
-            <Text style={[
-              styles.statusLabel,
-              connected && { color: '#22c55e' },
-              !connected && { color: item.color },
+              styles.statusBadge,
+              { backgroundColor: '#22c55e15', borderColor: '#22c55e30' },
             ]}>
-              {availabilityLabel}
-            </Text>
-          </View>
+              <View style={[styles.statusDot, { backgroundColor: '#22c55e' }]} />
+              <Text style={[styles.statusLabel, { color: '#22c55e' }]}>
+                Connected
+              </Text>
+            </View>
+          ) : null}
           <View style={styles.scopeBadge}>
             <Text style={styles.scopeBadgeText}>{item.scopeLabel}</Text>
           </View>
@@ -436,6 +541,7 @@ function GenericIntegrationManager({
       : definition?.provider === 'browserless' ? '#f97316'
       : definition?.provider === 'browserstack' ? '#f59e0b'
       : definition?.provider === 'firecrawl' ? '#ef4444'
+      : definition?.provider === 'brave' ? '#FB542B'
       : definition?.provider === 'apify' ? '#22c55e'
       : definition?.provider === 'steel' ? '#94a3b8'
       : definition?.provider === 'hyperbrowser' ? '#38bdf8'
@@ -455,6 +561,9 @@ function GenericIntegrationManager({
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [preflight, setPreflight] = useState<{ ok: boolean; missingCapabilities: string[]; missingConnectors: string[] } | null>(null);
+  const userApiProvider = marketplaceProviderToUserApiProvider(provider);
+  const isModelProvider = isMarketplaceModelProvider(provider);
+  const modelProviderChatReady = userApiProvider ? CHAT_READY_MODEL_USER_API_PROVIDERS.has(userApiProvider) : false;
 
   useEffect(() => {
     setDisplayName(status?.name || definition.label);
@@ -482,19 +591,55 @@ function GenericIntegrationManager({
 
   const handleSave = async () => {
     setSaving(true);
-    const integration = await connectGenericCircleIntegration({
-      circleId,
-      provider,
-      displayName,
-      metadata,
-      secrets,
-    });
-    setSaving(false);
-    if (integration) {
-      setMessage(`${definition.label} connected for this circle.`);
-      onRefresh();
-    } else {
-      setMessage(`Failed to save ${definition.label} integration.`);
+    setMessage('');
+    try {
+      const integration = await connectGenericCircleIntegration({
+        circleId,
+        provider,
+        displayName,
+        metadata,
+        secrets,
+      });
+      if (integration) {
+        let modelKeyMessage = '';
+        if (userApiProvider) {
+          const apiKey = getMarketplaceProviderUserApiSecret(provider, secrets);
+          const endpoint = getMarketplaceProviderEndpoint(provider, metadata);
+          if (apiKey || endpoint) {
+            const { error } = await supabase.rpc('store_user_api_key', {
+              p_provider: userApiProvider,
+              p_api_key: apiKey || `${userApiProvider}-local`,
+              p_label: 'default',
+              p_endpoint: endpoint || null,
+            });
+            if (error) {
+              if (isStaleUserApiProviderConstraintError(error.message)) {
+                modelKeyMessage = ' Circle integration saved, but key vault sync is blocked by an outdated database provider constraint. Apply the latest Supabase migration, then save again to sync this key to chat and agents.';
+              } else {
+                modelKeyMessage = ` Circle integration saved, but encrypted key database sync failed: ${error.message}`;
+              }
+            } else if (modelProviderChatReady) {
+              modelKeyMessage = provider === 'brave'
+                ? ' API key also saved to your encrypted key vault for chat web search and research tools.'
+                : ' API key also saved to your encrypted model key vault for chat and agents.';
+            } else if (userApiProvider === 'replicate') {
+              modelKeyMessage = ' API token also saved to your encrypted model key vault for image and model tools.';
+            } else {
+              modelKeyMessage = ' API key also saved to your encrypted model key vault; direct chat routing for this provider still needs backend routing.';
+            }
+          } else if (definition.requiredSecretKeys.length > 0) {
+            modelKeyMessage = ' Add the API key above to save it for chat, agents, and automations.';
+          }
+        }
+        setMessage(`${definition.label} connected for this circle.${modelKeyMessage}`);
+        onRefresh();
+      } else {
+        setMessage(`Failed to save ${definition.label} integration.`);
+      }
+    } catch (err: any) {
+      setMessage(`Failed to save ${definition.label}: ${err?.message || err || 'unknown error'}`);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -504,6 +649,26 @@ function GenericIntegrationManager({
         <Text style={styles.detailTitle}>{definition.label}</Text>
         <Text style={styles.detailText}>{definition.description}</Text>
       </View>
+
+      {isModelProvider ? (
+        <View style={styles.modelKeyNoticeCard}>
+          <Text style={styles.detailSummaryLabel}>{provider === 'brave' ? 'CHAT SEARCH API KEY' : 'MODEL API KEY'}</Text>
+          <Text style={styles.detailSummaryText}>
+            {provider === 'brave'
+              ? 'Enter the Brave Search API key here. Saving writes the circle integration and syncs the key into your encrypted user key vault so chat can run current web searches server-side.'
+              : 'Enter the provider key in this setup form. Saving writes the circle integration and encrypted secrets to the database, then syncs the key into your encrypted user model key vault.'}
+          </Text>
+          <Text style={styles.detailSummaryText}>
+            {provider === 'brave'
+              ? 'This provider is wired for direct chat search and research tool usage.'
+              : modelProviderChatReady
+              ? 'This provider is wired for direct chat and agent usage.'
+              : userApiProvider === 'replicate'
+                ? 'Replicate keys are used by image and hosted-model tools.'
+                : 'This provider is stored now for marketplace workflows while direct chat routing is finished.'}
+          </Text>
+        </View>
+      ) : null}
 
       <View style={styles.detailSummaryCard}>
         <Text style={styles.detailSummaryLabel}>CAPABILITIES</Text>
@@ -673,7 +838,7 @@ export default function MarketplaceTab({
   const loadStatuses = async () => {
     setLoading(true);
     try {
-      const [slackConfig, teamsConfig, discordConfig, ghConns, heliusKey, wpCreds, circleIntegrations] = await Promise.all([
+      const [slackConfig, teamsConfig, discordConfig, ghConns, userApiKeys, wpCreds, circleIntegrations] = await Promise.all([
         getSlackConfig(circleId).catch(() => null),
         getTeamsConfig(circleId).catch(() => null),
         getCircleDiscordConfig(circleId).catch(() => ({ guild_id: null, bot_token: null, webhook_url: null, connected_at: null })),
@@ -684,10 +849,7 @@ export default function MarketplaceTab({
           .eq('is_active', true)
           .then(r => r.data, () => null),
         supabase.rpc('list_user_api_keys')
-          .then(r => {
-            const keys = r.data || [];
-            return keys.find((k: any) => k.provider === 'helius' && k.is_active) || null;
-          }, () => null),
+          .then(r => r.data || [], () => []),
         loadCircleSiteCredentials(circleId, 'wordpress')
           .then(rows => rows.length > 0 ? rows : loadSiteCredentials('wordpress'))
           .catch(() => loadSiteCredentials('wordpress')),
@@ -696,16 +858,28 @@ export default function MarketplaceTab({
 
       const integrationByProvider = new Map<string, CircleIntegrationRecord>();
       for (const integration of circleIntegrations) integrationByProvider.set(integration.provider, integration);
+      const activeUserApiProviders = new Set(
+        (userApiKeys || [])
+          .filter((key: any) => key?.is_active)
+          .map((key: any) => String(key.provider)),
+      );
+      const heliusKey = (userApiKeys || []).find((key: any) => key?.provider === 'helius' && key?.is_active) || null;
 
       const genericStatusEntries = await Promise.all(
         GENERIC_MARKETPLACE_PROVIDERS.map(async (provider) => {
           const integration = integrationByProvider.get(provider);
+          const definitionLabel = INTEGRATION_DEFINITIONS[provider]?.label || provider;
+          const userApiProvider = marketplaceProviderToUserApiProvider(provider);
+          const hasUserModelKey = userApiProvider ? activeUserApiProviders.has(userApiProvider) : false;
           if (!integration) {
             return [
               provider,
               {
-                connected: false,
-                hint: `Connect ${INTEGRATION_DEFINITIONS[provider]?.label || provider} for circle-wide workflows.`,
+                connected: hasUserModelKey,
+                name: hasUserModelKey ? (provider === 'brave' ? 'Search API key active' : 'Model API key active') : undefined,
+                hint: hasUserModelKey
+                  ? `${definitionLabel} is saved in your encrypted user key vault. Open Setup & connect to add circle workflow metadata.`
+                  : `Connect ${definitionLabel} for circle-wide workflows.`,
               } satisfies PlatformStatus,
             ] as const;
           }
@@ -725,9 +899,11 @@ export default function MarketplaceTab({
             provider,
             {
               connected: true,
-              name: integration.display_name || INTEGRATION_DEFINITIONS[provider]?.label || provider,
+              name: integration.display_name || definitionLabel,
               hint: validation?.ok
-                ? `${INTEGRATION_DEFINITIONS[provider]?.label || provider} is installed for this circle.`
+                ? hasUserModelKey
+                  ? `${definitionLabel} is installed and its API key is saved in your encrypted user key vault.`
+                  : `${definitionLabel} is installed for this circle.`
                 : `Setup incomplete: ${missing.join(', ')}`,
               integrationId: integration.id,
               secretKeys,
@@ -1012,13 +1188,11 @@ export default function MarketplaceTab({
             </View>
           </View>
 
-          {/* LLM providers (OpenRouter, Hugging Face, Replicate, Modal)
-              live in the generic marketplace card grid below — there
-              used to be a separate LlmProviderMarketplace panel here
-              that wrote per-user keys to a different table; that
-              created two places to enter the same credential. Removed
-              so the chat picker has a single source of truth via
-              circle_integration_secrets. */}
+          {/* Model providers live in the marketplace card grid below.
+              Select a Models card, open Setup & connect, and save the
+              provider key there. Model keys are also synced to
+              user_api_keys so chat and agents can use the user's own
+              billing account instead of platform keys. */}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
             {([
               { key: 'all', label: 'All' },
@@ -1049,10 +1223,7 @@ export default function MarketplaceTab({
             >
               <Text style={[styles.filterChipText, activeGroupFilter === 'all' && styles.filterChipTextActive]}>All Categories</Text>
             </Pressable>
-            {/* Models — narrow shortcut to the LLM marketplaces the chat
-                picker actually routes through (OpenRouter / Hugging Face
-                / Replicate / Modal). Sits up front so users wiring up
-                model keys don't have to scan past every group. */}
+            {/* Models shortcut for native BYOK providers and model marketplaces. */}
             <Pressable
               onPress={() => setActiveGroupFilter('models')}
               style={[styles.filterChip, activeGroupFilter === 'models' && styles.filterChipActive]}
@@ -1072,6 +1243,14 @@ export default function MarketplaceTab({
               );
             })}
           </ScrollView>
+          {activeGroupFilter === 'models' ? (
+            <View style={styles.modelsKeyHint}>
+              <Text style={styles.modelsKeyHintTitle}>Model API keys save to the database</Text>
+              <Text style={styles.modelsKeyHintText}>
+                Select a provider card, open Setup & connect, and paste its API key. Saving creates the circle integration, stores encrypted integration secrets, and syncs supported providers into your user model key vault for chat and agents.
+              </Text>
+            </View>
+          ) : null}
           {/* Sort row — applies to whatever the filters above produced.
               Default is `popular` (curated rank) so anthropic / openai
               / openrouter sit up front and replicate falls to the
@@ -1314,6 +1493,27 @@ const styles = StyleSheet.create({
   },
   filterChipTextActive: {
     color: '#dbeafe',
+  },
+  modelsKeyHint: {
+    backgroundColor: '#07110d',
+    borderWidth: 1,
+    borderColor: '#14532d',
+    borderRadius: 12,
+    padding: 12,
+    gap: 6,
+  },
+  modelsKeyHintTitle: {
+    color: '#86efac',
+    fontSize: 12,
+    fontWeight: '900',
+    fontFamily: 'monospace',
+    letterSpacing: 0.6,
+  },
+  modelsKeyHintText: {
+    color: '#bbf7d0',
+    fontSize: 11,
+    lineHeight: 17,
+    fontFamily: 'monospace',
   },
   statusBar: {
     flexDirection: 'row',
@@ -1764,6 +1964,14 @@ const styles = StyleSheet.create({
     borderColor: '#1f2937',
     padding: 14,
     gap: 5,
+  },
+  modelKeyNoticeCard: {
+    backgroundColor: '#07110d',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#14532d',
+    padding: 14,
+    gap: 7,
   },
   detailSummaryLabel: {
     color: '#7d8798',
