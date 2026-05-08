@@ -132,14 +132,44 @@ export function resolveModelForSoul(
   //   - light / chat     → OpenAI GPT-5 mini (cheap + fast)
   //   - long context     → Google Gemini 2.5 Pro
   const orConnected = !!connectedProviders?.has('openrouter');
+  const openaiConnected = !!connectedProviders?.has('openai');
   const directFast =
     connectedProviders?.has('groq') ? 'groq/llama-3.3-70b-versatile'
-    : connectedProviders?.has('openai') ? 'openai/gpt-4.1-mini'
+    : openaiConnected ? 'openai/gpt-4.1-mini'
     : null;
+  // Cheapest / nano tier — used for casual + status intents that don't
+  // need real reasoning. Prefer the explicit nano variants over mini
+  // when they're available, otherwise reuse the same fast pick.
+  const directNano =
+    openaiConnected ? 'openai/gpt-4.1-nano'
+    : directFast;
+  // Strong general-purpose — for question intents that escalated past
+  // light, or when Auto needs real reasoning but isn't research/architect.
   const directStrong =
-    connectedProviders?.has('openai') ? 'openai/gpt-4.1'
+    openaiConnected ? 'openai/gpt-5.4'
     : connectedProviders?.has('google_ai') ? 'google_ai/gemini-2.5-pro'
     : connectedProviders?.has('deepseek') ? 'deepseek/deepseek-reasoner'
+    : null;
+  // Code-heavy specialist — GPT-5 Codex variants are tuned for diff
+  // generation and multi-file refactors. Falls back to gpt-5.4 then
+  // the standard strong pick.
+  const directCode =
+    openaiConnected ? 'openai/gpt-5.2-codex'
+    : directStrong;
+  // Pure reasoning — o-series for math / theoretical work and the
+  // architect intent. o3 is the current frontier reasoner; falls back
+  // to directStrong when openai isn't wired.
+  const directReasoner =
+    openaiConnected ? 'openai/o3'
+    : directStrong;
+  // Browser / computer-use — OpenAI ships `computer-use-preview` as a
+  // dedicated model for the screenshot-action loop (the one behind
+  // their Operator product). It outperforms generic vision models on
+  // arbitrary web UIs, so we route browser intent through it whenever
+  // OpenAI is connected. Falls back to GPT-4o (multimodal flagship)
+  // then to Sonnet (the only Anthropic model with computer use today).
+  const directBrowser =
+    openaiConnected ? 'openai/computer-use-preview'
     : null;
   const directLong =
     connectedProviders?.has('google_ai') ? 'google_ai/gemini-2.5-pro'
@@ -164,10 +194,13 @@ export function resolveModelForSoul(
     const isLight = complexity === 'trivial' || complexity === 'simple';
     const isHeavy = complexity === 'complex';
 
-    // Always-Haiku intents regardless of complexity — low signal, low cost.
+    // Always-Haiku-class intents regardless of complexity — low
+    // signal, low cost. When OpenAI is connected we lean on the
+    // nano tier (gpt-4.1-nano) which is even cheaper than Haiku on
+    // a per-token basis.
     if (intent === 'casual' || intent === 'social' || intent === 'status' || intent === 'memory') {
       if (blackSwanConnected && shouldUseBlackSwanForAuto(intent, complexity)) return BLACKSWAN_ENDPOINT_MODEL_ID;
-      return orConnected ? OR_FAST : (directFast || HAIKU);
+      return orConnected ? OR_FAST : (directNano || directFast || HAIKU);
     }
 
     // Questions: Haiku is the new default. Only escalate when the
@@ -186,23 +219,24 @@ export function resolveModelForSoul(
     // Research + architect still ALWAYS reach for Opus — these are
     // the scenarios where Auto explicitly accepts the cost trade
     // because the model has to hold multiple threads in its head.
-    // Long-form research benefits from Gemini's 2M context when the
-    // team has it routed through OR.
+    // OpenAI's o3 wins on math / theoretical reasoning when wired;
+    // Gemini's 2M context wins on long-form research via OR.
     if (intent === 'research') {
-      return orConnected ? OR_LONG : (directLong || OPUS);
+      return orConnected ? OR_LONG : (directLong || directReasoner || OPUS);
     }
     if (intent === 'architect') {
-      return orConnected ? OR_OPUS : (directStrong || OPUS);
+      return orConnected ? OR_OPUS : (directReasoner || directStrong || OPUS);
     }
 
-    // Coding intents — Haiku by default, escalate only when the
-    // message itself signals heavy complexity. Used to default to
-    // Sonnet which made every "fix this typo" + "rename var" turn
-    // cost ~5x more than necessary.
+    // Coding intents — Haiku by default, escalate to a code
+    // specialist when the message itself signals heavy complexity.
+    // GPT-5 Codex variants are tuned for diff generation + multi-file
+    // refactors, so they outperform generic frontier models on heavy
+    // builds when OpenAI is wired.
     if (intent === 'build' || intent === 'debug' || intent === 'review') {
       if (isHeavy) {
         if (orConnected) return OR_OPUS;
-        return directStrong || OPUS;
+        return directCode || OPUS;
       }
       if (orConnected) return OR_FAST;
       return directFast || HAIKU;
@@ -215,9 +249,20 @@ export function resolveModelForSoul(
       return directFast || HAIKU;
     }
 
-    // Task management / support / browser — Haiku across the board.
-    // These flows are mostly state lookups or routing, not reasoning.
-    if (intent === 'task_mgmt' || intent === 'support' || intent === 'browser') {
+    // Browser / computer-use — needs vision. OpenAI ships a dedicated
+    // computer-use-preview model (the one behind Operator) that
+    // outperforms generic vision models on arbitrary web UIs. When
+    // OpenAI is wired we route here. Otherwise fall back to Anthropic
+    // Sonnet which is the only Claude tier with computer use today.
+    if (intent === 'browser') {
+      if (directBrowser) return directBrowser;
+      if (orConnected) return OR_SONNET; // OR routes through Anthropic Sonnet for computer use
+      return SONNET;
+    }
+
+    // Task management / support — Haiku across the board. These are
+    // mostly state lookups or routing, not reasoning.
+    if (intent === 'task_mgmt' || intent === 'support') {
       if (blackSwanConnected && shouldUseBlackSwanForAuto(intent, complexity)) return BLACKSWAN_ENDPOINT_MODEL_ID;
       if (orConnected) return OR_FAST;
       return directFast || HAIKU;

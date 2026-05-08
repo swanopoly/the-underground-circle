@@ -498,6 +498,8 @@ function mapPersistedRowsToChatMessages(
       memoriesUsed: metadata?.memoriesUsed,
       memoryRefs: metadata?.memoryRefs,
       memoryRecommendations: metadata?.memoryRecommendations,
+      source: metadata?.source,
+      usage: metadata?.usage || undefined,
       executionStream: metadata?.executionStream,
       browserPlans: metadata?.browserPlans,
       browserPlanEvents: metadata?.browserPlanEvents,
@@ -511,18 +513,21 @@ function mapPersistedRowsToChatMessages(
 function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], agentName: string): ChatMessage[] {
   return records.map((record) => {
     const timestampMs = Date.parse(record.createdAt);
+    const isBot = record.isBot !== false;
     return {
       id: record.localMessageId,
       content: record.content || '',
-      isBot: true,
-      isUser: false,
+      isBot,
+      isUser: !isBot,
       userName: record.userName || agentName,
       timestamp: Number.isFinite(timestampMs) ? new Date(timestampMs) : new Date(),
-      reactions: {},
-      replyTo: null,
+      reactions: record.reactions || {},
+      replyTo: record.replyTo || null,
       artifacts: record.artifacts as SwanBotStructuredArtifact[] | undefined,
       wikiRefs: record.wikiRefs as WikiArticleReference[] | undefined,
       researchRefs: record.researchRefs as ResearchDocumentReference[] | undefined,
+      source: record.source as ChatMessageSource | undefined,
+      usage: record.usage as SwanBotStructuredResponse['usage'] | undefined,
       memoriesUsed: record.memoriesUsed,
       memoryRefs: record.memoryRefs as PromptMemoryReference[] | undefined,
       memoryRecommendations: record.memoryRecommendations as OpenSwanMemoryRecommendation[] | undefined,
@@ -564,7 +569,7 @@ async function mapLoadedThreadMessages(
 ): Promise<ChatMessage[]> {
   const persistedMessages = mapPersistedRowsToChatMessages(rows, currentUserId, agentName, fallbackUserName);
   try {
-    await reconcilePendingBotMessages(threadId, rows.map((row: any) => row.content));
+    await reconcilePendingBotMessages(threadId, rows);
     const pendingRecords = await loadPendingBotMessages(threadId);
     return mergeRecoveredChatMessages(
       persistedMessages,
@@ -577,6 +582,14 @@ async function mapLoadedThreadMessages(
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
+
+type ChatMessageSource = {
+  actor?: string;
+  surface?: string;
+  selectedModel?: string | null;
+  effectiveModel?: string | null;
+  provider?: string | null;
+};
 
 type ChatMessage = {
   id: string;
@@ -598,6 +611,8 @@ type ChatMessage = {
   memoriesUsed?: string[];    // titles of memories that informed this response
   memoryRefs?: PromptMemoryReference[];
   memoryRecommendations?: OpenSwanMemoryRecommendation[];
+  source?: ChatMessageSource;
+  usage?: SwanBotStructuredResponse['usage'];
   executionStream?: OpenSwanExecutionContract[];
   browserPlans?: BrowserPlanCardData[];
   browserPlanEvents?: BrowserPlanEvent[];
@@ -629,6 +644,34 @@ type ChatMessage = {
   isPending?: boolean;
 };
 
+type ChatBotMessageExtra = {
+  delegatedTo?: string;
+  delegatedSubagents?: string[];
+  memoriesUsed?: string[];
+  memoryRefs?: PromptMemoryReference[];
+  memoryRecommendations?: OpenSwanMemoryRecommendation[];
+  executionStream?: OpenSwanExecutionContract[];
+  browserPlans?: BrowserPlanCardData[];
+  browserPlanEvents?: BrowserPlanEvent[];
+  browserSessions?: BrowserSessionRecord[];
+  localOnly?: boolean;
+  runId?: string | null;
+  taskPlan?: OpenSwanTaskPlan;
+  toolEvents?: OpenSwanToolEvent[];
+  verificationResults?: OpenSwanVerificationResult[];
+  wikiRefs?: WikiArticleReference[];
+  researchRefs?: ResearchDocumentReference[];
+  automationProposal?: AutomationProposal;
+  searchResults?: { query: string; rows: SearchResultRow[] };
+  commandsHelp?: boolean;
+  assignPickerAgents?: AssignPickerAgent[];
+  bridgeDiagResults?: BridgeProbeResult[];
+  showRunTrace?: boolean;
+  routing?: SwanBotStructuredResponse['routing'];
+  source?: ChatMessageSource;
+  usage?: SwanBotStructuredResponse['usage'] | null;
+};
+
 function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRecord {
   return {
     localMessageId: message.id,
@@ -636,7 +679,13 @@ function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRe
     createdAt: message.timestamp instanceof Date
       ? message.timestamp.toISOString()
       : new Date().toISOString(),
+    isBot: message.isBot,
+    isUser: message.isUser,
     userName: message.userName,
+    replyTo: message.replyTo || null,
+    reactions: message.reactions,
+    source: message.source,
+    usage: message.usage,
     runId: message.runId,
     delegatedTo: message.delegatedTo,
     delegatedSubagents: message.delegatedSubagents,
@@ -655,6 +704,13 @@ function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRe
     verificationResults: message.verificationResults,
     routing: message.routing,
   };
+}
+
+function saveRecoverableChatMessage(threadId: string | null | undefined, message: ChatMessage): void {
+  if (!threadId || message.dbId) return;
+  void savePendingBotMessage(threadId, buildPendingBotMessageRecord(message)).catch((error) => {
+    console.warn('[ChatTab] Could not cache pending chat message:', error);
+  });
 }
 
 // ─── Animation Components ────────────────────────────────────────────────────
@@ -2537,6 +2593,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         // Skip messages we sent ourselves — BUT allow bot messages from FloatingChat
         const isBotFromPopout = isPersistedChatBotMessage(newMsg.content, newMsg.is_bot === true);
         if (newMsg.user_id === currentUserId && !isBotFromPopout) return;
+        const botMetadata = isBotFromPopout ? readPersistedChatBotMetadata(newMsg.content) : null;
+        if (botMetadata?.localMessageId) {
+          void removePendingBotMessage(activeThreadId, botMetadata.localMessageId).catch(() => {});
+        }
 
         const msg: ChatMessage = {
           ...shapePersistedChatMessage(newMsg, {
@@ -2546,12 +2606,19 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           }),
           reactions: newMsg.reactions || {},
           replyTo: null,
-          artifacts: isBotFromPopout ? (readPersistedChatBotMetadata(newMsg.content)?.artifacts || undefined) : undefined,
-          wikiRefs: isBotFromPopout ? (readPersistedChatBotMetadata(newMsg.content)?.wikiRefs || undefined) : undefined,
-          researchRefs: isBotFromPopout ? (readPersistedChatBotMetadata(newMsg.content)?.researchRefs || undefined) : undefined,
-          memoryRefs: isBotFromPopout ? (readPersistedChatBotMetadata(newMsg.content)?.memoryRefs || undefined) : undefined,
-          memoriesUsed: isBotFromPopout ? (readPersistedChatBotMetadata(newMsg.content)?.memoriesUsed || undefined) : undefined,
-          executionStream: isBotFromPopout ? (readPersistedChatBotMetadata(newMsg.content)?.executionStream || undefined) : undefined,
+          artifacts: botMetadata?.artifacts || undefined,
+          wikiRefs: botMetadata?.wikiRefs || undefined,
+          researchRefs: botMetadata?.researchRefs || undefined,
+          memoryRefs: botMetadata?.memoryRefs || undefined,
+          memoriesUsed: botMetadata?.memoriesUsed || undefined,
+          memoryRecommendations: botMetadata?.memoryRecommendations || undefined,
+          executionStream: botMetadata?.executionStream || undefined,
+          browserPlans: botMetadata?.browserPlans || undefined,
+          browserPlanEvents: botMetadata?.browserPlanEvents || undefined,
+          browserSessions: botMetadata?.browserSessions || undefined,
+          source: botMetadata?.source,
+          usage: botMetadata?.usage || undefined,
+          routing: botMetadata?.routing || undefined,
           ...deriveChatActivityFlags(newMsg.content),
         };
 
@@ -2661,6 +2728,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const addUserMessage = (content: string): ChatMessage => {
     const isCheckIn = content.toLowerCase().includes('check') || content.toLowerCase().includes('done');
     const isAchievement = content.toLowerCase().includes('achievement') || content.toLowerCase().includes('unlocked');
+    const messageThreadId = activeThreadId;
+    const replyToId = replyTo?.dbId || null;
     
     const msg: ChatMessage = {
       id: `user-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -2673,6 +2742,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       replyTo: replyTo ? { name: replyTo.userName || '', content: replyTo.content.slice(0, 50) } : null,
       isCheckIn,
       isAchievement,
+      source: { actor: 'user', surface: 'main_chat' },
     };
 
     setMessages(prev => [...prev, msg]);
@@ -2684,19 +2754,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
 
     // Persist to Supabase with retry
-    if (currentUserId) {
+    if (messageThreadId) {
+      saveRecoverableChatMessage(messageThreadId, msg);
+    }
+    if (currentUserId && messageThreadId) {
       const persistMessage = async (attempt = 0) => {
         try {
           const dbId = await persistChatMessage({
             circleId,
             userId: currentUserId,
             content,
-            threadId: activeThreadId,
-            replyToId: replyTo?.dbId || null,
+            threadId: messageThreadId,
+            replyToId,
             isBot: false,
             reactions: {},
           });
           if (dbId) {
+            void removePendingBotMessage(messageThreadId, msg.id).catch(() => {});
             setMessages(prev => prev.map(m => m.id === msg.id ? { ...m, dbId } : m));
           }
         } catch (e) {
@@ -2714,8 +2788,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return msg;
   };
 
-  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: { delegatedTo?: string; delegatedSubagents?: string[]; memoriesUsed?: string[]; memoryRefs?: PromptMemoryReference[]; memoryRecommendations?: OpenSwanMemoryRecommendation[]; executionStream?: OpenSwanExecutionContract[]; browserPlans?: BrowserPlanCardData[]; browserPlanEvents?: BrowserPlanEvent[]; browserSessions?: BrowserSessionRecord[]; localOnly?: boolean; runId?: string | null; taskPlan?: OpenSwanTaskPlan; toolEvents?: OpenSwanToolEvent[]; verificationResults?: OpenSwanVerificationResult[]; wikiRefs?: WikiArticleReference[]; researchRefs?: ResearchDocumentReference[]; automationProposal?: AutomationProposal; searchResults?: { query: string; rows: SearchResultRow[] }; commandsHelp?: boolean; assignPickerAgents?: AssignPickerAgent[]; bridgeDiagResults?: BridgeProbeResult[]; showRunTrace?: boolean }) => {
+  const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: ChatBotMessageExtra) => {
     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const messageThreadId = activeThreadId;
+    const messageSource: ChatMessageSource = extra?.source || {
+      actor: agentName,
+      surface: extra?.localOnly ? 'main_chat_local' : 'main_chat',
+      selectedModel: selectedModel || null,
+    };
     const msg: ChatMessage = {
       id: msgId,
       content,
@@ -2727,6 +2807,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       artifacts,
       wikiRefs: extra?.wikiRefs,
       researchRefs: extra?.researchRefs,
+      source: messageSource,
+      usage: extra?.usage || undefined,
       delegatedTo: extra?.delegatedTo,
       delegatedSubagents: extra?.delegatedSubagents,
       runId: extra?.runId,
@@ -2740,6 +2822,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       taskPlan: extra?.taskPlan,
       toolEvents: extra?.toolEvents,
       verificationResults: extra?.verificationResults,
+      routing: extra?.routing,
       automationProposal: extra?.automationProposal,
       searchResults: extra?.searchResults,
       commandsHelp: extra?.commandsHelp,
@@ -2771,14 +2854,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       })();
     }
 
-    // Persist bot message with retry (skip for local-only slash command responses)
-    if (currentUserId && activeThreadId && !extra?.localOnly) {
+    // Persist every visible bot message. `localOnly` now only describes
+    // UI behavior; refresh recovery still keeps the transcript intact.
+    if (messageThreadId) {
+      saveRecoverableChatMessage(messageThreadId, msg);
+    }
+    if (currentUserId && messageThreadId) {
       persistMainChatBotMessageWithRetry({
         circleId,
         userId: currentUserId,
         agentName,
         content,
-        threadId: activeThreadId,
+        threadId: messageThreadId,
+        localMessageId: msgId,
+        source: messageSource,
+        usage: extra?.usage || null,
         artifacts,
         wikiRefs: extra?.wikiRefs,
         researchRefs: extra?.researchRefs,
@@ -2789,10 +2879,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         browserPlans: extra?.browserPlans,
         browserPlanEvents: extra?.browserPlanEvents,
         browserSessions: extra?.browserSessions,
+        routing: extra?.routing,
         onError: (error) => {
           console.error('[ChatTab] Unexpected error persisting bot msg:', error);
         },
         onPersisted: (dbId) => {
+          void removePendingBotMessage(messageThreadId, msgId).catch(() => {});
           setMessages(prev => prev.map((message) => (
             message.id === msgId ? { ...message, dbId } : message
           )));
@@ -2819,10 +2911,18 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       toolEvents: [],
       verificationResults: [],
       executionStream: [],
+      source: {
+        actor: agentName,
+        surface: 'main_chat_pending',
+        selectedModel: selectedModel || null,
+      },
       isPending: true,
     };
     setMessages(prev => [...prev, msg]);
     animateNewMessage(msg.id);
+    if (activeThreadId && content.trim()) {
+      saveRecoverableChatMessage(activeThreadId, msg);
+    }
     return msg;
   };
 
@@ -2969,7 +3069,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   const updateBotMessage = (
     messageId: string,
-    patch: Partial<Pick<ChatMessage, 'content' | 'artifacts' | 'wikiRefs' | 'researchRefs' | 'runId' | 'taskPlan' | 'toolEvents' | 'verificationResults' | 'executionStream' | 'browserPlans' | 'browserPlanEvents' | 'browserSessions' | 'isPending' | 'memoriesUsed' | 'memoryRefs' | 'memoryRecommendations' | 'delegatedSubagents' | 'routing'>>,
+    patch: Partial<Pick<ChatMessage, 'content' | 'artifacts' | 'wikiRefs' | 'researchRefs' | 'runId' | 'taskPlan' | 'toolEvents' | 'verificationResults' | 'executionStream' | 'browserPlans' | 'browserPlanEvents' | 'browserSessions' | 'isPending' | 'memoriesUsed' | 'memoryRefs' | 'memoryRecommendations' | 'delegatedSubagents' | 'routing' | 'source' | 'usage'>>,
   ) => {
     let nextMessageToPersist: ChatMessage | null = null;
     setMessages(prev => prev.map((message) => {
@@ -2981,6 +3081,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       };
       return nextMessageToPersist;
     }));
+    if (activeThreadId && nextMessageToPersist?.isBot && !nextMessageToPersist.dbId && (nextMessageToPersist.content || '').trim()) {
+      saveRecoverableChatMessage(activeThreadId, nextMessageToPersist);
+    }
     syncSessionArchiveMessage(nextMessageToPersist);
   };
 
@@ -3000,6 +3103,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       browserPlans: message.browserPlans,
       browserPlanEvents: message.browserPlanEvents,
       browserSessions: message.browserSessions,
+      source: message.source,
+      usage: message.usage,
       routing: message.routing,
       onError: (error) => {
         console.error('[ChatTab] Unexpected error updating bot msg:', error);
@@ -4495,6 +4600,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 const pendingMsg = addPendingBotMessage('');
                 setRunStatus('running');
                 let accumulated = '';
+                let streamingUsage: SwanBotStructuredResponse['usage'] | undefined;
+                const streamSource: ChatMessageSource = {
+                  actor: agentName,
+                  surface: 'main_chat_stream',
+                  selectedModel,
+                  effectiveModel: streamModel,
+                };
                 await new Promise<void>((resolve, reject) => {
                   const handle = streamChatResponse({
                     messages: [
@@ -4507,7 +4619,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                       accumulated += text;
                       updateBotMessage(pendingMsg.id, { content: accumulated, isPending: false });
                     },
-                    onUsage: (_usage) => {},
+                    onUsage: (usage) => {
+                      streamingUsage = usage;
+                    },
                     onDone: () => resolve(),
                     onError: (msg) => reject(new Error(msg)),
                   });
@@ -4515,6 +4629,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   streamingBuildCleanupRef.current = handle.cancel;
                 });
                 streamingBuildCleanupRef.current = null;
+                updateBotMessage(pendingMsg.id, {
+                  content: accumulated,
+                  isPending: false,
+                  source: streamSource,
+                  usage: streamingUsage,
+                });
                 // Post-stream: run memory extraction in background
                 if (accumulated.length > 20) {
                   void (async () => {
@@ -4527,6 +4647,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     } catch {}
                   })();
                 }
+                if (activeThreadId) {
+                  saveRecoverableChatMessage(activeThreadId, {
+                    ...pendingMsg,
+                    content: accumulated,
+                    source: streamSource,
+                    usage: streamingUsage,
+                    isPending: false,
+                    timestamp: new Date(),
+                  });
+                }
                 if (currentUserId && activeThreadId) {
                   persistMainChatBotMessageWithRetry({
                     circleId,
@@ -4534,7 +4664,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     agentName,
                     content: accumulated,
                     threadId: activeThreadId,
+                    localMessageId: pendingMsg.id,
+                    source: streamSource,
+                    usage: streamingUsage || null,
                     onError: (error) => console.error('[ChatTab] persist streaming msg:', error),
+                    onPersisted: (dbId) => {
+                      void removePendingBotMessage(activeThreadId, pendingMsg.id).catch(() => {});
+                      setMessages(prev => prev.map((message) => (
+                        message.id === pendingMsg.id ? { ...message, dbId } : message
+                      )));
+                    },
                   });
                 }
                 setRunStatus('idle');
@@ -4628,6 +4767,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               toolEvents: runtimeToolEvents,
               verificationResults: structured.verificationResults,
             });
+            const structuredSource: ChatMessageSource = {
+              actor: agentName,
+              surface: 'main_chat_openswan',
+              selectedModel,
+              effectiveModel: structured.usage?.model || sendModel || null,
+              provider: structured.routing?.provider_routed || null,
+            };
             updateBotMessage(pendingMessage.id, {
               content: botResponse,
               artifacts: structured.artifacts,
@@ -4645,11 +4791,38 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               verificationResults: structured.verificationResults,
               delegatedSubagents: structured.delegatedSubagents,
               routing: structured.routing,
+              source: structuredSource,
+              usage: structured.usage,
               isPending: false,
             });
             if (profileRef.current) {
               profileRef.current = updateProfileFromMessage(profileRef.current, botResponse, false);
               saveUserProfile(profileRef.current).catch(() => {});
+            }
+            if (activeThreadId) {
+              saveRecoverableChatMessage(activeThreadId, {
+                ...pendingMessage,
+                content: botResponse,
+                artifacts: structured.artifacts,
+                wikiRefs,
+                researchRefs,
+                memoriesUsed: structured.memoriesUsed,
+                memoryRefs: structured.memoryReferences,
+                memoryRecommendations: structured.memoryRecommendations,
+                executionStream,
+                browserPlans: structured.browserPlans,
+                browserPlanEvents: structured.browserPlanEvents,
+                runId: structured.runId,
+                taskPlan: structured.taskPlan,
+                toolEvents: runtimeToolEvents,
+                verificationResults: structured.verificationResults,
+                delegatedSubagents: structured.delegatedSubagents,
+                routing: structured.routing,
+                source: structuredSource,
+                usage: structured.usage,
+                isPending: false,
+                timestamp: new Date(),
+              });
             }
             if (currentUserId && activeThreadId) {
               persistMainChatBotMessageWithRetry({
@@ -4658,6 +4831,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 agentName,
                 content: botResponse,
                 threadId: activeThreadId,
+                localMessageId: pendingMessage.id,
+                source: structuredSource,
+                usage: structured.usage || null,
                 artifacts: structured.artifacts,
                 wikiRefs,
                 researchRefs,
@@ -4672,6 +4848,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   console.error('[ChatTab] Unexpected error persisting bot msg:', error);
                 },
                 onPersisted: (dbId) => {
+                  void removePendingBotMessage(activeThreadId, pendingMessage.id).catch(() => {});
                   setMessages(prev => prev.map((message) => (
                     message.id === pendingMessage.id ? { ...message, dbId } : message
                   )));
@@ -6950,7 +7127,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           setMessages([]);
           addBotMessage(`Mind reset. ${cleared > 0 ? `Cleared ${cleared} memories. ` : ''}Starting fresh.`);
         }}
-        onLocalBotMessage={(md: string) => addBotMessage(md, undefined, { localOnly: true })}
+        onLocalBotMessage={(md: string) => addBotMessage(md)}
       />
       </KeyboardAvoidingView>
     </View>
@@ -8966,9 +9143,7 @@ function EnhancedInput({
           <View style={styles.dropdownItemText}>
             <Text style={[styles.dropdownItemLabel, { color: group.color }]}>{group.label}</Text>
             <Text style={styles.dropdownItemDesc}>
-              {group.key === 'popular'
-                ? `Show the current top ${groupModels.length} OpenRouter models`
-                : `Show all ${groupModels.length} models with search`}
+              {`${groupModels.length} model${groupModels.length === 1 ? '' : 's'}`}
             </Text>
           </View>
           <Text style={[styles.modelChevron, { color: group.color }]}>{'>'}</Text>
@@ -8984,7 +9159,30 @@ function EnhancedInput({
     // provider='hugging_face' (BlackSwan + plain Hugging Face). React
     // would collapse them on duplicate keys and one wouldn't render.
     const groupKey = `mkt-${provider}-${(group.label || '').replace(/\s+/g, '_').toLowerCase()}`;
-    const browserKey = `marketplace:${provider}:${(group.label || '').toLowerCase()}`;
+    if (!group.models || group.models.length === 0) {
+      return (
+        <View key={groupKey}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 4 }}>
+            <Text style={[styles.dropdownCategoryTitle, { color: providerColor, paddingHorizontal: 0, paddingVertical: 0 }]}>
+              {group.label}
+            </Text>
+            {!group.connected ? (
+              <Text style={{ color: '#475569', fontSize: 8, fontStyle: 'italic' }}>not connected</Text>
+            ) : null}
+          </View>
+          {group.hint ? (
+            <Text style={{ color: '#475569', fontSize: 10, paddingHorizontal: 12, paddingVertical: 4, lineHeight: 14 }}>
+              {group.hint}
+            </Text>
+          ) : null}
+        </View>
+      );
+    }
+    // Connected: show first 12 models inline. Disconnected: show
+    // first 4 greyed out with the connect-this hint underneath.
+    // No "Show all N models" affordance — the user explicitly asked
+    // for inline-only.
+    const visibleModels = group.models.slice(0, group.connected ? 12 : 4);
     return (
       <View key={groupKey}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 4 }}>
@@ -8995,29 +9193,47 @@ function EnhancedInput({
             <Text style={{ color: '#475569', fontSize: 8, fontStyle: 'italic' }}>not connected</Text>
           ) : null}
         </View>
-        <Pressable
-          onPress={() => {
-            setActiveModelBrowserKey(browserKey);
-            setShowAddModel(false);
-          }}
-          accessibilityRole="button"
-          style={[
-            styles.dropdownItem,
-            { borderWidth: 1, borderColor: providerColor + '35', backgroundColor: providerColor + '10' },
-            ...(Platform.OS === 'web' ? [{ cursor: 'pointer' } as any] : []),
-          ]}
-        >
-          <View style={[styles.dropdownItemIcon, { backgroundColor: providerColor + '20' }]}>
-            <Text style={[styles.dropdownItemIconText, { color: providerColor }]}>{modelPickerProviderIcon(provider)}</Text>
-          </View>
-          <View style={styles.dropdownItemText}>
-            <Text style={[styles.dropdownItemLabel, { color: providerColor }]}>{group.label}</Text>
-            <Text style={styles.dropdownItemDesc}>
-              Show all {group.models.length || 'available'} models with search
-            </Text>
-          </View>
-          <Text style={[styles.modelChevron, { color: providerColor }]}>{'>'}</Text>
-        </Pressable>
+        {visibleModels.map((opt) => {
+          const isActive = opt.id === selectedModel;
+          const isHovered = hoveredModel === opt.id;
+          return (
+            <Pressable
+              key={opt.id}
+              onPress={() => {
+                if (!opt.ready) return;
+                onModelChange(opt.id);
+                setShowModelPicker(false);
+              }}
+              disabled={!opt.ready}
+              onHoverIn={() => setHoveredModel(opt.id)}
+              onHoverOut={() => setHoveredModel(null)}
+              accessibilityRole="button"
+              style={[
+                styles.dropdownItem,
+                isActive && { backgroundColor: providerColor + '18', borderColor: providerColor + '40' },
+                isHovered && opt.ready && !isActive && { backgroundColor: '#1a1a28' },
+                !opt.ready && { opacity: 0.35 },
+                ...(Platform.OS === 'web' ? [{ cursor: opt.ready ? 'pointer' : 'not-allowed' } as any] : []),
+              ]}
+            >
+              <View style={[styles.dropdownItemIcon, { backgroundColor: providerColor + '20' }]}>
+                <Text style={[styles.dropdownItemIconText, { color: providerColor }]}>{(opt.label || '').charAt(0)}</Text>
+              </View>
+              <View style={styles.dropdownItemText}>
+                <Text style={[styles.dropdownItemLabel, isActive && { color: providerColor }]} numberOfLines={1}>{opt.label}</Text>
+                {opt.description ? (
+                  <Text style={styles.dropdownItemDesc} numberOfLines={1}>{opt.description}</Text>
+                ) : null}
+              </View>
+              {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: providerColor }]} />}
+            </Pressable>
+          );
+        })}
+        {!group.connected && group.hint ? (
+          <Text style={{ color: '#475569', fontSize: 10, paddingHorizontal: 12, paddingVertical: 4, lineHeight: 14, fontStyle: 'italic' }}>
+            {group.hint}
+          </Text>
+        ) : null}
       </View>
     );
   };
