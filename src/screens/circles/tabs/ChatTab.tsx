@@ -3081,8 +3081,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       };
       return nextMessageToPersist;
     }));
-    if (activeThreadId && nextMessageToPersist?.isBot && !nextMessageToPersist.dbId && (nextMessageToPersist.content || '').trim()) {
-      saveRecoverableChatMessage(activeThreadId, nextMessageToPersist);
+    const recoverableMessage = nextMessageToPersist as ChatMessage | null;
+    if (activeThreadId && recoverableMessage?.isBot && !recoverableMessage.dbId && (recoverableMessage.content || '').trim()) {
+      saveRecoverableChatMessage(activeThreadId, recoverableMessage);
     }
     syncSessionArchiveMessage(nextMessageToPersist);
   };
@@ -8548,16 +8549,44 @@ function normalizeConnectedProviderKey(provider: string): string {
 
 function modelPickerProviderColor(provider?: string, connected = true): string {
   if (!connected) return '#475569';
-  if (provider === 'openrouter') return '#a78bfa';
+  if (provider === 'anthropic') return '#d97706';     // Anthropic amber
+  if (provider === 'openai') return '#10a37f';        // OpenAI teal
+  if (provider === 'openrouter') return '#a78bfa';    // OpenRouter purple
+  if (provider === 'blackswan') return '#22d3ee';     // BlackSwan cyan
   if (provider === 'hugging_face' || provider === 'huggingface') return '#f59e0b';
   if (provider === 'replicate') return '#38bdf8';
+  if (provider === 'groq') return '#f97316';
+  if (provider === 'google_ai') return '#4285f4';
+  if (provider === 'mistral_ai') return '#fa520f';
+  if (provider === 'cohere') return '#39594d';
+  if (provider === 'perplexity') return '#1fb8cd';
+  if (provider === 'together_ai') return '#0f6fff';
+  if (provider === 'fireworks_ai') return '#5b36bd';
+  if (provider === 'deepseek') return '#1a6fe0';
+  if (provider === 'z_ai') return '#0ea5e9';
+  if (provider === 'minimax') return '#ec4899';
+  if (provider === 'ollama') return '#5b21b6';
   return '#22d3ee';
 }
 
 function modelPickerProviderIcon(provider?: string): string {
+  if (provider === 'anthropic') return 'A';
+  if (provider === 'openai') return 'O';
   if (provider === 'openrouter') return 'OR';
+  if (provider === 'blackswan') return '🦢';
   if (provider === 'hugging_face' || provider === 'huggingface') return 'HF';
   if (provider === 'replicate') return 'R';
+  if (provider === 'groq') return 'GQ';
+  if (provider === 'google_ai') return 'G';
+  if (provider === 'mistral_ai') return 'MS';
+  if (provider === 'cohere') return 'CH';
+  if (provider === 'perplexity') return 'PX';
+  if (provider === 'together_ai') return 'TG';
+  if (provider === 'fireworks_ai') return 'FW';
+  if (provider === 'deepseek') return 'DS';
+  if (provider === 'z_ai') return 'Z';
+  if (provider === 'minimax') return 'MX';
+  if (provider === 'ollama') return 'OL';
   return 'AI';
 }
 
@@ -9155,47 +9184,44 @@ function EnhancedInput({
   const renderMarketplaceModelGroup = (group: ModelGroup) => {
     const provider = group.provider as string;
     const providerColor = modelPickerProviderColor(provider, group.connected);
+    const providerIconText = modelPickerProviderIcon(provider);
     // Group key includes the label because two groups now share
     // provider='hugging_face' (BlackSwan + plain Hugging Face). React
     // would collapse them on duplicate keys and one wouldn't render.
     const groupKey = `mkt-${provider}-${(group.label || '').replace(/\s+/g, '_').toLowerCase()}`;
-    if (!group.models || group.models.length === 0) {
-      return (
-        <View key={groupKey}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 4 }}>
-            <Text style={[styles.dropdownCategoryTitle, { color: providerColor, paddingHorizontal: 0, paddingVertical: 0 }]}>
-              {group.label}
-            </Text>
-            {!group.connected ? (
-              <Text style={{ color: '#475569', fontSize: 8, fontStyle: 'italic' }}>not connected</Text>
-            ) : null}
-          </View>
-          {group.hint ? (
-            <Text style={{ color: '#475569', fontSize: 10, paddingHorizontal: 12, paddingVertical: 4, lineHeight: 14 }}>
-              {group.hint}
-            </Text>
-          ) : null}
-        </View>
-      );
-    }
-    // Connected: show first 12 models inline. Disconnected: show
-    // first 4 greyed out with the connect-this hint underneath.
-    // No "Show all N models" affordance — the user explicitly asked
-    // for inline-only.
-    const visibleModels = group.models.slice(0, group.connected ? 12 : 4);
+    // Visual parity with renderExpandedBuiltInModelGroup — same
+    // dropdownCategoryTitle, same dropdownItem layout (icon box +
+    // label/desc/tags + active dot), same hover treatment. The only
+    // marketplace-specific bit is the "not connected" pill in the
+    // header and the disconnected hint at the bottom.
+    const visibleModels = !group.models
+      ? []
+      : group.models.slice(0, group.connected ? 12 : 4);
     return (
       <View key={groupKey}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingTop: 8, paddingBottom: 4 }}>
-          <Text style={[styles.dropdownCategoryTitle, { color: providerColor, paddingHorizontal: 0, paddingVertical: 0 }]}>
-            {group.label}
-          </Text>
+        <Text style={[styles.dropdownCategoryTitle, { color: providerColor }]}>
+          {group.label.toUpperCase()}
           {!group.connected ? (
-            <Text style={{ color: '#475569', fontSize: 8, fontStyle: 'italic' }}>not connected</Text>
+            <Text style={{ color: '#475569', fontSize: 9, fontWeight: '500', fontStyle: 'italic' }}>{'  · not connected'}</Text>
           ) : null}
-        </View>
+        </Text>
         {visibleModels.map((opt) => {
           const isActive = opt.id === selectedModel;
           const isHovered = hoveredModel === opt.id;
+          // Tags are derived from the model id / description so the
+          // chips read the same as built-in groups (text/code/web/
+          // vision/reason/images). Best-effort heuristic — keeps the
+          // visual rhythm without requiring marketplace integrations
+          // to hand-tag every model.
+          const tagSeed = `${opt.id} ${opt.description || ''}`.toLowerCase();
+          const tags: string[] = [];
+          if (/code|codex/.test(tagSeed)) tags.push('code');
+          if (/vision|gpt-4o|gpt-5|gemini|computer-use/.test(tagSeed)) tags.push('vision');
+          if (/o3|o4|reason|deepseek-r/.test(tagSeed)) tags.push('reason');
+          if (/flash|nano|mini|haiku|fast/.test(tagSeed)) tags.push('text');
+          if (/image|flux|stable-diff|sd-/.test(tagSeed)) tags.push('images');
+          if (/sonar|search|web/.test(tagSeed)) tags.push('web');
+          if (tags.length === 0) tags.push('text');
           return (
             <Pressable
               key={opt.id}
@@ -9213,16 +9239,28 @@ function EnhancedInput({
                 isActive && { backgroundColor: providerColor + '18', borderColor: providerColor + '40' },
                 isHovered && opt.ready && !isActive && { backgroundColor: '#1a1a28' },
                 !opt.ready && { opacity: 0.35 },
-                ...(Platform.OS === 'web' ? [{ cursor: opt.ready ? 'pointer' : 'not-allowed' } as any] : []),
+                ...(Platform.OS === 'web' ? [{ transition: 'all 0.15s ease', cursor: opt.ready ? 'pointer' : 'not-allowed' } as any] : []),
               ]}
             >
               <View style={[styles.dropdownItemIcon, { backgroundColor: providerColor + '20' }]}>
-                <Text style={[styles.dropdownItemIconText, { color: providerColor }]}>{(opt.label || '').charAt(0)}</Text>
+                <Text style={[styles.dropdownItemIconText, { color: providerColor }]}>{providerIconText}</Text>
               </View>
               <View style={styles.dropdownItemText}>
                 <Text style={[styles.dropdownItemLabel, isActive && { color: providerColor }]} numberOfLines={1}>{opt.label}</Text>
                 {opt.description ? (
                   <Text style={styles.dropdownItemDesc} numberOfLines={1}>{opt.description}</Text>
+                ) : null}
+                {tags.length > 0 ? (
+                  <View style={{ flexDirection: 'row', gap: 3, marginTop: 2, flexWrap: 'wrap' }}>
+                    {tags.map((tag: string) => {
+                      const tagColors: Record<string, string> = { images: '#84cc16', vision: '#22d3ee', code: '#a855f7', text: '#606075', web: '#f59e0b', reason: '#ec4899' };
+                      return (
+                        <View key={tag} style={{ backgroundColor: (tagColors[tag] || '#606075') + '15', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 2 }}>
+                          <Text style={{ color: tagColors[tag] || '#606075', fontSize: 7, fontWeight: '700', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>{tag.toUpperCase()}</Text>
+                        </View>
+                      );
+                    })}
+                  </View>
                 ) : null}
               </View>
               {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: providerColor }]} />}
@@ -9231,6 +9269,11 @@ function EnhancedInput({
         })}
         {!group.connected && group.hint ? (
           <Text style={{ color: '#475569', fontSize: 10, paddingHorizontal: 12, paddingVertical: 4, lineHeight: 14, fontStyle: 'italic' }}>
+            {group.hint}
+          </Text>
+        ) : null}
+        {visibleModels.length === 0 && group.hint ? (
+          <Text style={{ color: '#475569', fontSize: 10, paddingHorizontal: 12, paddingVertical: 4, lineHeight: 14 }}>
             {group.hint}
           </Text>
         ) : null}
