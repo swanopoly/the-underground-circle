@@ -8,6 +8,10 @@
  */
 
 import type { SessionCodingProfile } from './chatSessionProfile';
+import {
+  BLACKSWAN_ENDPOINT_MODEL_ID,
+  shouldUseBlackSwanForAuto,
+} from './blackswanRouting';
 
 export const PROFILE_SOUL_MAP: Record<SessionCodingProfile, string> = {
   auto:      'sr-engineer',
@@ -33,12 +37,13 @@ export function resolveModelForProfile(
   userModelPick: string | null | undefined,
   intent?: import('./agenticCodingProfile').MessageIntent,
   connectedProviders?: ConnectedProviderSet,
+  complexity?: import('./agenticCodingProfile').MessageComplexity,
 ): string {
   return resolveModelForSoul(
     spiritIdForProfile(profile),
     userModelPick,
     intent,
-    /* complexity */ undefined,
+    complexity,
     /* buildConverging */ undefined,
     /* buildExploring */ undefined,
     connectedProviders,
@@ -47,17 +52,23 @@ export function resolveModelForProfile(
 
 // Per-SOUL model preferences. User's explicit model pick always wins;
 // this is the fallback when the user has "auto" selected.
-// Canonical short IDs only (no date suffixes) — matches the rest of the app.
+//
+// Defaults to Haiku across the board — the explicit-architect /
+// explicit-research / heavy-complexity branches in the intent table
+// below escalate to Opus / Sonnet on their own when the message
+// actually needs more reasoning. Pinning Sonnet as the SOUL default
+// meant chris was paying Sonnet rates for "thanks" and "got it" turns
+// just because he's signed in as the sr-engineer SOUL.
 const SOUL_MODEL_DEFAULTS: Record<string, string> = {
-  'sr-engineer':  'claude-sonnet-4-6',
+  'sr-engineer':   'claude-haiku-4-5',
   'code-reviewer': 'claude-haiku-4-5',
-  architect:      'claude-sonnet-4-6',
-  'civil-engineer': 'claude-sonnet-4-6',
-  debugger:       'claude-sonnet-4-6',
-  designer:       'claude-sonnet-4-6',
-  writer:         'claude-sonnet-4-6',
-  'ml-engineer':  'claude-sonnet-4-6',
-  'ai-researcher':'claude-sonnet-4-6',
+  architect:       'claude-haiku-4-5',
+  'civil-engineer':'claude-haiku-4-5',
+  debugger:        'claude-haiku-4-5',
+  designer:        'claude-haiku-4-5',
+  writer:          'claude-haiku-4-5',
+  'ml-engineer':   'claude-haiku-4-5',
+  'ai-researcher': 'claude-haiku-4-5',
 };
 
 const DEFAULT_MODEL = 'claude-haiku-4-5';
@@ -78,11 +89,10 @@ const DEFAULT_MODEL = 'claude-haiku-4-5';
  * so Anthropic spend doesn't balloon.
  */
 /**
- * Connected marketplace providers used to bias the Auto router. Today
- * only the OpenRouter route is fully wired in the edge function; when
- * the rest of the Wave 2 native providers (OpenAI / Google AI / Groq /
- * etc.) get their own edge-function handlers, this set will widen and
- * the routing table below can prefer them directly.
+ * Connected marketplace providers used to bias the Auto router. OpenRouter
+ * still gets first preference when present because it can route across
+ * multiple vendors. Direct BYOK providers then let Auto use each user's own
+ * stored key through llm-proxy instead of falling back to platform keys.
  */
 export type ConnectedProviderSet = ReadonlySet<string>;
 
@@ -109,6 +119,7 @@ export function resolveModelForSoul(
   const HAIKU = 'claude-haiku-4-5';
   const SONNET = 'claude-sonnet-4-6';
   const OPUS = 'claude-opus-4-7';
+  const blackSwanConnected = !!connectedProviders?.has('blackswan');
 
   // OpenRouter routing — when the team has the OR key wired, prefer
   // routing Auto through OR so the spend lands on their account. We
@@ -121,6 +132,18 @@ export function resolveModelForSoul(
   //   - light / chat     → OpenAI GPT-5 mini (cheap + fast)
   //   - long context     → Google Gemini 2.5 Pro
   const orConnected = !!connectedProviders?.has('openrouter');
+  const directFast =
+    connectedProviders?.has('groq') ? 'groq/llama-3.3-70b-versatile'
+    : connectedProviders?.has('openai') ? 'openai/gpt-4.1-mini'
+    : null;
+  const directStrong =
+    connectedProviders?.has('openai') ? 'openai/gpt-4.1'
+    : connectedProviders?.has('google_ai') ? 'google_ai/gemini-2.5-pro'
+    : connectedProviders?.has('deepseek') ? 'deepseek/deepseek-reasoner'
+    : null;
+  const directLong =
+    connectedProviders?.has('google_ai') ? 'google_ai/gemini-2.5-pro'
+    : directStrong;
 
   const OR_OPUS = 'openrouter/anthropic/claude-opus-4';
   const OR_SONNET = 'openrouter/anthropic/claude-sonnet-4';
@@ -131,11 +154,11 @@ export function resolveModelForSoul(
   // faster than Sonnet. User-visible latency drops hard here because
   // discovery turns are the most latency-sensitive part of the flow
   // (each one gates the next user action).
-  if (buildExploring) return orConnected ? OR_FAST : HAIKU;
+  if (buildExploring) return blackSwanConnected ? BLACKSWAN_ENDPOINT_MODEL_ID : (orConnected ? OR_FAST : (directFast || HAIKU));
 
   // Build-converging phase always gets Opus — the model is about to commit
   // to a brief, and this is where reasoning depth matters most.
-  if (buildConverging) return orConnected ? OR_OPUS : OPUS;
+  if (buildConverging) return orConnected ? OR_OPUS : (directStrong || OPUS);
 
   if (intent) {
     const isLight = complexity === 'trivial' || complexity === 'simple';
@@ -143,41 +166,61 @@ export function resolveModelForSoul(
 
     // Always-Haiku intents regardless of complexity — low signal, low cost.
     if (intent === 'casual' || intent === 'social' || intent === 'status' || intent === 'memory') {
-      return orConnected ? OR_FAST : HAIKU;
+      if (blackSwanConnected && shouldUseBlackSwanForAuto(intent, complexity)) return BLACKSWAN_ENDPOINT_MODEL_ID;
+      return orConnected ? OR_FAST : (directFast || HAIKU);
     }
 
-    // Questions: Haiku for simple factual, Sonnet when they ask "compare" /
-    // "tradeoffs" / "which is better" (caught as moderate+ complexity).
+    // Questions: Haiku is the new default. Only escalate when the
+    // question is heavy (compare / tradeoffs / which-is-better caught
+    // as `complex`) — and even then, only Sonnet, not Opus.
     if (intent === 'question') {
-      if (orConnected) return isLight ? OR_FAST : OR_SONNET;
-      return isLight ? HAIKU : SONNET;
+      if (blackSwanConnected && shouldUseBlackSwanForAuto(intent, complexity)) return BLACKSWAN_ENDPOINT_MODEL_ID;
+      if (isHeavy) {
+        if (orConnected) return OR_SONNET;
+        return directStrong || SONNET;
+      }
+      if (orConnected) return OR_FAST;
+      return directFast || HAIKU;
     }
 
-    // Research + architect ALWAYS reach for Opus. These are the scenarios
-    // where the model has to hold multiple threads in its head. Long-form
-    // research benefits from Gemini's 2M context when the team has it
-    // routed through OR.
+    // Research + architect still ALWAYS reach for Opus — these are
+    // the scenarios where Auto explicitly accepts the cost trade
+    // because the model has to hold multiple threads in its head.
+    // Long-form research benefits from Gemini's 2M context when the
+    // team has it routed through OR.
     if (intent === 'research') {
-      return orConnected ? OR_LONG : OPUS;
+      return orConnected ? OR_LONG : (directLong || OPUS);
     }
     if (intent === 'architect') {
-      return orConnected ? OR_OPUS : OPUS;
+      return orConnected ? OR_OPUS : (directStrong || OPUS);
     }
 
-    // Coding intents scale with complexity.
+    // Coding intents — Haiku by default, escalate only when the
+    // message itself signals heavy complexity. Used to default to
+    // Sonnet which made every "fix this typo" + "rename var" turn
+    // cost ~5x more than necessary.
     if (intent === 'build' || intent === 'debug' || intent === 'review') {
-      if (orConnected) return isHeavy ? OR_OPUS : OR_SONNET;
-      if (isHeavy) return OPUS;
-      return SONNET;
+      if (isHeavy) {
+        if (orConnected) return OR_OPUS;
+        return directStrong || OPUS;
+      }
+      if (orConnected) return OR_FAST;
+      return directFast || HAIKU;
     }
 
-    // Remaining intents (task_mgmt, creative, design, support, browser).
+    // Design / creative — Haiku by default; one-shot variations and
+    // edits don't need a frontier model to pull off.
     if (intent === 'design' || intent === 'creative') {
-      return orConnected ? OR_SONNET : SONNET;
+      if (orConnected) return OR_FAST;
+      return directFast || HAIKU;
     }
+
+    // Task management / support / browser — Haiku across the board.
+    // These flows are mostly state lookups or routing, not reasoning.
     if (intent === 'task_mgmt' || intent === 'support' || intent === 'browser') {
-      if (orConnected) return isLight ? OR_FAST : OR_SONNET;
-      return isLight ? HAIKU : SONNET;
+      if (blackSwanConnected && shouldUseBlackSwanForAuto(intent, complexity)) return BLACKSWAN_ENDPOINT_MODEL_ID;
+      if (orConnected) return OR_FAST;
+      return directFast || HAIKU;
     }
   }
 
@@ -188,6 +231,7 @@ export function resolveModelForSoul(
 // BlackSwan failover chain: if primary model fails (rate limit,
 // billing, auth), automatically try the next model in the chain.
 const MODEL_FAILOVER: Record<string, string[]> = {
+  [BLACKSWAN_ENDPOINT_MODEL_ID]:     ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
   'claude-sonnet-4-6':          ['claude-haiku-4-5-20251001', 'gemini-2.5-flash'],
   'claude-opus-4-6':            ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
   'claude-haiku-4-5-20251001':  ['gemini-2.5-flash'],
