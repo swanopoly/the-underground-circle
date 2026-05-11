@@ -12,7 +12,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.95.3';
 import { byokMissingMessage, errResponse, getAuthenticatedUser, jsonResponse, resolveUserModelApiKey } from '../_shared/edge.ts';
 import { callClaude as callClaudeShared, logClaudeUsage, checkCircleClaudeBudget } from '../_claude/anthropic.ts';
 
-const ROOM_TASK_MODEL = 'claude-sonnet-4-6';
+const ROOM_TASK_MODEL = 'claude-haiku-4-5';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -35,8 +35,8 @@ const LANG_TO_EXT: Record<string, string> = {
  * Thin wrapper around the shared `callClaude()` — keeps the legacy 2-arg
  * signature so the 10 call sites below stay unchanged. Internally routes
  * through the central pricing/cache helper and fires a `claude_api_usage`
- * log so room-task spend shows up in the cost dashboard (previously zero
- * telemetry despite using expensive Sonnet).
+ * log so room-task spend shows up in the cost dashboard. Room tasks default
+ * to Haiku; callers can still use stronger chat/build paths when needed.
  *
  * circleId in telemetry is null for now — pending a lookup via `project_rooms`
  * to map room_id → circle_id. Roadmap Phase 1d note.
@@ -45,7 +45,7 @@ async function callClaude(systemPrompt: string, userMessage: string, apiKey: str
   const result = await callClaudeShared({
     apiKey,
     model: ROOM_TASK_MODEL,
-    maxTokens: 4096,
+    maxTokens: 2048,
     system: systemPrompt,
     messages: [{ role: 'user', content: userMessage }],
   });
@@ -317,13 +317,26 @@ async function handleApiCall(supabase: any, body: any): Promise<{ ok: boolean; r
 
 // ─── Main Handler ─────────────────────────────────────────────────────────────
 
+function isAutonomousAiPaused(): boolean {
+  const raw = (Deno.env.get("AUTONOMOUS_AI_PAUSED") || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
 
   if (req.method === 'GET') {
-    return jsonResponse({ status: 'ok', service: 'room-task-executor' });
+    return jsonResponse({ status: 'ok', service: 'room-task-executor', paused: isAutonomousAiPaused() });
+  }
+
+  // Global kill switch — room-task-executor runs autonomous agent
+  // dispatches from cron sweepers when room_tasks are pending. Gate
+  // here so pause stops the queue from draining tokens.
+  if (isAutonomousAiPaused()) {
+    console.warn('[room-task-executor] AUTONOMOUS_AI_PAUSED — skipping.');
+    return jsonResponse({ skipped: true, reason: 'autonomous_ai_paused' });
   }
 
   try {

@@ -1173,13 +1173,32 @@ interface AutomationRequest {
 const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 30_000; // 30 seconds
 
+// Global kill switch for cron-fired / trigger-fired Claude traffic.
+// Set AUTONOMOUS_AI_PAUSED=1 in Supabase Edge Functions secrets to stop
+// every autonomous run without redeploying. Interactive chat is
+// unaffected — only this scheduler-fed executor checks the flag.
+function isAutonomousAiPaused(): boolean {
+  const raw = (Deno.env.get("AUTONOMOUS_AI_PAUSED") || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
   if (req.method === "GET") {
-    return jsonResponse({ status: "ok", service: "automation-executor" });
+    return jsonResponse({ status: "ok", service: "automation-executor", paused: isAutonomousAiPaused() });
+  }
+
+  // FIRST gate — refuse autonomous AI traffic when the kill switch is
+  // set. Manual frontend triggers still come through (they include a
+  // user JWT and pay per-message rates against the UI flow), but
+  // pg_cron + DB-trigger fires (service-role) get short-circuited here
+  // so they don't burn tokens.
+  if (isAutonomousAiPaused()) {
+    console.warn("[automation-executor] AUTONOMOUS_AI_PAUSED — skipping run.");
+    return jsonResponse({ skipped: true, reason: "autonomous_ai_paused" });
   }
 
   const isServiceCaller = isServiceRoleRequest(req);

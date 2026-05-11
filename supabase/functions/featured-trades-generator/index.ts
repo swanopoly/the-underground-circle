@@ -59,9 +59,24 @@ OUTPUT FORMAT: For each trade idea provide:
 
 // ─── Main Handler ───────────────────────────────────────────────────────────
 
+function isAutonomousAiPaused(): boolean {
+  const raw = (Deno.env.get("AUTONOMOUS_AI_PAUSED") || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
+  }
+
+  // Global kill switch (see _shared rationale). Trade-suggestion
+  // generation is always autonomous, so the whole function is gated.
+  if (isAutonomousAiPaused()) {
+    console.warn("[featured-trades-generator] AUTONOMOUS_AI_PAUSED — skipping.");
+    return new Response(JSON.stringify({ skipped: true, reason: "autonomous_ai_paused" }), {
+      status: 200,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   }
 
   try {

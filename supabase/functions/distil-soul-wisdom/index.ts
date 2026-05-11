@@ -230,10 +230,21 @@ async function listStaleTargets(supabase: any, force: boolean): Promise<Array<{ 
 
 // ── Handler ─────────────────────────────────────────────────────────────────
 
+function isAutonomousAiPaused(): boolean {
+  const raw = (Deno.env.get("AUTONOMOUS_AI_PAUSED") || "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method === "GET") {
-    return jsonResponse({ service: "distil-soul-wisdom", status: "ok" });
+    return jsonResponse({ service: "distil-soul-wisdom", status: "ok", paused: isAutonomousAiPaused() });
+  }
+
+  // Global kill switch — see _shared/edge.ts for rationale.
+  if (isAutonomousAiPaused()) {
+    console.warn("[distil-soul-wisdom] AUTONOMOUS_AI_PAUSED — skipping.");
+    return jsonResponse({ skipped: true, reason: "autonomous_ai_paused" });
   }
 
   try {
