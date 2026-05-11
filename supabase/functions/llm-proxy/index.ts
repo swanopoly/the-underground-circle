@@ -1,13 +1,13 @@
 // llm-proxy — Unified LLM Proxy Edge Function
 //
 // Routes requests to any LLM provider using user-stored API keys.
-// Supports: OpenAI, Anthropic, OpenRouter, Groq, Ollama, GitHub Models, Hugging Face
+// Supports marketplace BYOK providers surfaced by the chat model picker.
 // All keys are stored encrypted in user_api_keys table.
 //
 // Deploy: npx supabase functions deploy llm-proxy
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
-import { computeCostUsd, type UsageBreakdown } from "../_claude/anthropic.ts";
+import { computeCostUsd, logClaudeUsage, type UsageBreakdown } from "../_claude/anthropic.ts";
 import { byokMissingMessage, resolveUserModelApiKey } from "../_shared/edge.ts";
 
 const corsHeaders = {
@@ -43,7 +43,25 @@ function mapUpstreamError(message: string): Response {
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-type Provider = "openai" | "anthropic" | "openrouter" | "groq" | "ollama" | "github-models" | "huggingface" | "zai" | "minimax" | "openai-embed";
+type Provider =
+  | "openai"
+  | "openai_compatible"
+  | "anthropic"
+  | "openrouter"
+  | "groq"
+  | "ollama"
+  | "github-models"
+  | "huggingface"
+  | "zai"
+  | "minimax"
+  | "google_ai"
+  | "mistral_ai"
+  | "cohere"
+  | "perplexity"
+  | "together_ai"
+  | "fireworks_ai"
+  | "deepseek"
+  | "openai-embed";
 
 interface LLMProxyRequest {
   provider: Provider;
@@ -56,6 +74,8 @@ interface LLMProxyRequest {
   thinkingLevel?: "fast" | "balanced" | "deep";
   // Optional caller-supplied key for one-off testing before saving.
   api_key?: string;
+  // Optional caller-supplied endpoint for one-off OpenAI-compatible key tests.
+  endpoint?: string;
   // Embedding-mode input (only used when provider === 'openai-embed').
   // Accepts either a single string or a batch; batches are more efficient.
   input?: string | string[];
@@ -92,11 +112,56 @@ const PROVIDER_ENDPOINTS: Record<string, string> = {
   "github-models": "https://models.inference.ai.azure.com/chat/completions",
   huggingface: "https://router.huggingface.co/v1/chat/completions",
   zai: "https://api.z.ai/api/paas/v4/chat/completions",
-  minimax: "https://api.minimax.io/v1/text/chatcompletion_v2",
+  minimax: "https://api.minimax.io/v1/chat/completions",
+  google_ai: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+  mistral_ai: "https://api.mistral.ai/v1/chat/completions",
+  cohere: "https://api.cohere.ai/compatibility/v1/chat/completions",
+  perplexity: "https://api.perplexity.ai/chat/completions",
+  together_ai: "https://api.together.xyz/v1/chat/completions",
+  fireworks_ai: "https://api.fireworks.ai/inference/v1/chat/completions",
+  deepseek: "https://api.deepseek.com/chat/completions",
 };
 
 // OpenAI-compatible providers (same request/response format)
-const OPENAI_COMPATIBLE: Provider[] = ["openai", "openrouter", "groq", "ollama", "github-models", "huggingface", "zai", "minimax"];
+const OPENAI_COMPATIBLE: Provider[] = [
+  "openai",
+  "openai_compatible",
+  "openrouter",
+  "groq",
+  "ollama",
+  "github-models",
+  "huggingface",
+  "zai",
+  "minimax",
+  "google_ai",
+  "mistral_ai",
+  "cohere",
+  "perplexity",
+  "together_ai",
+  "fireworks_ai",
+  "deepseek",
+];
+
+function normalizeOpenAICompatibleEndpoint(endpoint: string): string {
+  const trimmed = endpoint.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  if (/\/chat\/completions(?:\?|$)/i.test(trimmed)) return endpoint.trim();
+  if (/\/v1$/i.test(trimmed)) return `${trimmed}/chat/completions`;
+  return `${trimmed}/v1/chat/completions`;
+}
+
+function normalizeProviderModel(provider: Provider, model: string): string {
+  if (provider === "openrouter" && model === "openrouter/auto") return model;
+  const prefixes = provider === "huggingface"
+    ? ["huggingface_endpoint/", "huggingface/", "hugging_face/"]
+    : provider === "zai"
+      ? ["zai/", "z_ai/"]
+      : [`${provider}/`];
+  for (const prefix of prefixes) {
+    if (model.startsWith(prefix)) return model.slice(prefix.length);
+  }
+  return model;
+}
 
 // ─── Cost estimation ────────────────────────────────────────────────────────
 
@@ -449,7 +514,10 @@ Deno.serve(async (req: Request) => {
       tools?: Array<Record<string, unknown>>;
       plugins?: Array<Record<string, unknown>>;
     } = await req.json();
-    const { provider, model, messages, circleId, thinkingLevel } = body;
+    const { provider, model: rawModel, messages, circleId, thinkingLevel } = body;
+    const model = rawModel && provider !== "openai-embed"
+      ? normalizeProviderModel(provider, rawModel)
+      : rawModel;
 
     // Embedding requests use a completely different request shape — validate
     // and dispatch early so the chat-path guards don't reject `!messages`.
@@ -560,7 +628,7 @@ Deno.serve(async (req: Request) => {
       return errResponse(400, "key_missing", byokMissingMessage(provider));
     }
     apiKey = keyData.apiKey;
-    customEndpoint = keyData.endpoint || undefined;
+    customEndpoint = body.endpoint || keyData.endpoint || undefined;
 
     // Apply thinking level config
     const thinkConfig = THINKING_LEVELS[thinkingLevel || "balanced"];
@@ -605,6 +673,11 @@ Deno.serve(async (req: Request) => {
       let endpoint: string;
       if (provider === "ollama") {
         endpoint = (customEndpoint || "http://localhost:11434") + "/v1/chat/completions";
+      } else if (provider === "openai_compatible") {
+        endpoint = customEndpoint ? normalizeOpenAICompatibleEndpoint(customEndpoint) : "";
+        if (!endpoint) {
+          return errResponse(400, "validation", "OpenAI-compatible provider requires a saved endpoint URL.");
+        }
       } else {
         endpoint = PROVIDER_ENDPOINTS[provider];
       }
@@ -622,9 +695,10 @@ Deno.serve(async (req: Request) => {
       return errResponse(400, "unsupported_provider", `Unsupported provider: ${provider}`);
     }
 
-    // Track usage in user_ai_usage if available
-    try {
-      await supabase.from("user_ai_usage").insert({
+    // Track usage in both ledgers. Keep these independent so a missing legacy
+    // table cannot suppress the canonical Anthropic cost row.
+    const usageLogs: Promise<unknown>[] = [
+      Promise.resolve(supabase.from("user_ai_usage").insert({
         user_id: userId,
         circle_id: circleId || null,
         model: result.usage.model,
@@ -635,10 +709,26 @@ Deno.serve(async (req: Request) => {
         cache_read_tokens: result.usage.cache_read_tokens,
         estimated_cost: result.usage.estimated_cost,
         source: "llm-proxy",
-      });
-    } catch {
-      // Non-critical — don't fail if tracking table doesn't exist
+      })),
+    ];
+    if (provider === "anthropic") {
+      usageLogs.push(
+        logClaudeUsage(supabase, {
+          userId,
+          circleId: circleId || null,
+          source: "llm-proxy",
+          model: result.usage.model,
+          usage: {
+            uncachedIn:  result.usage.input_tokens || 0,
+            output:      result.usage.output_tokens || 0,
+            cacheCreate: result.usage.cache_creation_tokens || 0,
+            cacheRead:   result.usage.cache_read_tokens || 0,
+          },
+          metadata: { proxy: true },
+        }),
+      );
     }
+    await Promise.allSettled(usageLogs);
 
     return jsonResponse(result);
   } catch (err: any) {

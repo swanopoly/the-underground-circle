@@ -13,7 +13,15 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { exec } = require('child_process');
+const crypto = require('crypto');
+const { exec, spawn } = require('child_process');
+const {
+  isAllowedPairOrigin,
+  loadManagedTerminalSessions,
+  makeTerminalTitle,
+  saveManagedTerminalSession,
+  sendToTerminalByTitle,
+} = require('./terminal-launch-utils');
 
 const PORT = 7779;
 const SCAN_INTERVAL = 5000;
@@ -23,7 +31,7 @@ const IDLE_THRESHOLD = 1800_000;    // 30min → idle (Codex writes less frequen
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token',
   // Private Network Access (Chrome 116+) — required for the live HTTPS
   // app at app.chrisswanson.xyz to talk to localhost without silent
   // browser blocking.
@@ -31,8 +39,312 @@ const CORS = {
   'Content-Type': 'application/json',
 };
 
+const TOKEN_FILE = path.join(os.homedir(), '.uc-desktop-token');
+const MAX_LAUNCH_COUNT = 20;
+const LAUNCHED_SESSION_TTL = 12 * 60 * 60_000;
+
 let cachedSessions = [];
 let lastScanTime = '';
+
+// ── Shared desktop bridge token ─────────────────────────────────────────────
+// The browser app pairs once and then sends this token to all local bridges.
+
+function getOrCreateBridgeToken() {
+  try {
+    if (fs.existsSync(TOKEN_FILE)) {
+      const existing = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+      if (existing.length >= 32) return existing;
+    }
+  } catch {}
+
+  const token = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.writeFileSync(TOKEN_FILE, `${token}\n`, { mode: 0o600 });
+  } catch {}
+  return token;
+}
+
+function hasBridgeAuth(req) {
+  const token = getOrCreateBridgeToken();
+  const supplied = req.headers['x-uc-desktop-token'];
+  return typeof supplied === 'string' && supplied === token;
+}
+
+function writeJson(res, status, body) {
+  res.writeHead(status, CORS);
+  res.end(JSON.stringify(body));
+}
+
+function requireBridgeAuth(req, res) {
+  if (hasBridgeAuth(req)) return true;
+  writeJson(res, 401, { ok: false, error: 'Missing or invalid desktop bridge token' });
+  return false;
+}
+
+function readJsonBody(req, maxBytes = 512 * 1024) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > maxBytes) {
+        reject(new Error('Request body too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      if (!body.trim()) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(body));
+      } catch {
+        reject(new Error('Invalid JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function shellQuote(value) {
+  return `'${String(value ?? '').replace(/'/g, `'\\''`)}'`;
+}
+
+function shellTextArg(value) {
+  const encoded = Buffer.from(String(value ?? ''), 'utf8').toString('base64');
+  const decoder = "process.stdout.write(Buffer.from(process.argv[1], 'base64').toString('utf8'))";
+  return `"$(node -e ${shellQuote(decoder)} ${shellQuote(encoded)})"`;
+}
+
+function appleScriptString(value) {
+  return `"${String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, '\\n')}"`;
+}
+
+function clampLaunchCount(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 1;
+  return Math.max(1, Math.min(MAX_LAUNCH_COUNT, Math.floor(n)));
+}
+
+function normalizeCliPrompt(value) {
+  return String(value || '').replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function promptPreview(value, max = 180) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function safeProjectDir(input) {
+  const candidate = input ? path.resolve(String(input)) : process.cwd();
+  try {
+    const stat = fs.statSync(candidate);
+    if (stat.isDirectory()) return candidate;
+  } catch {}
+  return process.cwd();
+}
+
+function buildManagedCodexPrompt({ sessionId, displayName, index, count, prompt }) {
+  const cleanPrompt = normalizeCliPrompt(prompt) || `Stand by for delegated work from The Underground Circle. You are session ${index + 1} of ${count}.`;
+  return [
+    `[UC-CODEX:${sessionId}]`,
+    `You are ${displayName}, a managed Codex terminal session launched from The Underground Circle.`,
+    `Session ${index + 1} of ${count}. Work independently and keep notes in your terminal output.`,
+    'Do not mention the UC-CODEX launcher marker unless the user asks about orchestration metadata.',
+    '',
+    'User task:',
+    cleanPrompt,
+  ].join('\n');
+}
+
+function buildCodexCommand({ cwd, prompt, model, fullAuto = false, search = false }) {
+  const parts = [
+    'codex',
+    '--no-alt-screen',
+    '-C',
+    shellQuote(cwd),
+  ];
+  if (model) parts.push('-m', shellQuote(model));
+  if (search) parts.push('--search');
+  if (fullAuto) parts.push('--full-auto');
+  if (prompt) parts.push(shellTextArg(prompt));
+  return `cd ${shellQuote(cwd)} && ${parts.join(' ')}`;
+}
+
+function spawnDetached(command, args) {
+  return new Promise((resolve) => {
+    let settled = false;
+    try {
+      const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+      child.once('error', (err) => {
+        if (settled) return;
+        settled = true;
+        resolve({ ok: false, error: err.message });
+      });
+      child.once('spawn', () => {
+        if (settled) return;
+        settled = true;
+        child.unref();
+        resolve({ ok: true, pid: child.pid });
+      });
+    } catch (err) {
+      resolve({ ok: false, error: err.message || String(err) });
+    }
+  });
+}
+
+async function openTerminal(command, title) {
+  if (process.platform === 'darwin') {
+    const terminalTitle = String(title || 'UC Codex');
+    return {
+      terminal: 'Terminal.app',
+      terminalTitle,
+      ...(await spawnDetached('osascript', [
+        '-e', 'tell application "Terminal"',
+        '-e', 'activate',
+        '-e', `set ucTab to do script ${appleScriptString(command)}`,
+        '-e', `set custom title of ucTab to ${appleScriptString(terminalTitle)}`,
+        '-e', 'end tell',
+      ])),
+    };
+  }
+
+  if (process.platform === 'linux') {
+    const holdCommand = `${command}; printf '\\n[The Underground Circle] Codex session exited. Press Ctrl-D to close.\\n'; exec ${process.env.SHELL || 'bash'}`;
+    const candidates = [
+      { terminal: 'gnome-terminal', command: 'gnome-terminal', args: ['--title', title, '--', 'bash', '-lc', holdCommand] },
+      { terminal: 'x-terminal-emulator', command: 'x-terminal-emulator', args: ['-e', `bash -lc ${shellQuote(holdCommand)}`] },
+      { terminal: 'konsole', command: 'konsole', args: ['--new-tab', '-p', `tabtitle=${title}`, '-e', 'bash', '-lc', holdCommand] },
+    ];
+    for (const candidate of candidates) {
+      const result = await spawnDetached(candidate.command, candidate.args);
+      if (result.ok) return { terminal: candidate.terminal, ...result };
+    }
+    return { ok: false, terminal: 'linux-terminal', error: 'No supported Linux terminal launcher found' };
+  }
+
+  return { ok: false, terminal: process.platform, error: 'Native terminal launch is not supported on this platform yet' };
+}
+
+function makeLaunchId() {
+  return `codex-launch-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+}
+
+async function launchCodexSessions(data) {
+  const prompts = Array.isArray(data.prompts)
+    ? data.prompts.map((p) => normalizeCliPrompt(p)).filter(Boolean)
+    : [];
+  const count = clampLaunchCount(data.count || prompts.length || 1);
+  const cwd = safeProjectDir(data.cwd || data.projectDir);
+  const launchId = data.launchId || makeLaunchId();
+  const model = data.model ? String(data.model).trim() : '';
+  const fullAuto = Boolean(data.fullAuto);
+  const search = Boolean(data.search);
+  const basePrompt = normalizeCliPrompt(data.prompt || data.task || '');
+  const sessions = [];
+  const failed = [];
+
+  for (let i = 0; i < count; i++) {
+    const sessionId = `${launchId}-${i + 1}`;
+    const displayName = Array.isArray(data.names) && data.names[i]
+      ? String(data.names[i])
+      : `Codex #${i + 1}`;
+    const cleanPrompt = prompts[i] || basePrompt || `Stand by as ${displayName}. Wait for a delegated task from The Underground Circle.`;
+    const cliPrompt = buildManagedCodexPrompt({ sessionId, displayName, index: i, count, prompt: cleanPrompt });
+    const command = buildCodexCommand({ cwd, prompt: cliPrompt, model, fullAuto, search });
+    const launchedAt = new Date().toISOString();
+    const terminalTitle = makeTerminalTitle('Codex', displayName, sessionId);
+    const terminalResult = await openTerminal(command, terminalTitle);
+    const session = registerSession({
+      sessionId,
+      projectDir: cwd,
+      model: model || 'codex',
+      status: terminalResult.ok ? 'active' : 'idle',
+      task: promptPreview(cleanPrompt, 240),
+      displayName,
+      prompt: cleanPrompt,
+      launchId,
+      launchedAt,
+      terminal: terminalResult.terminal,
+      terminalPid: terminalResult.pid,
+      terminalTitle: terminalResult.terminalTitle || terminalTitle,
+      launchError: terminalResult.ok ? undefined : terminalResult.error,
+      recentActions: [
+        terminalResult.ok
+          ? `Launched in ${terminalResult.terminal || 'terminal'}`
+          : `Launch failed: ${terminalResult.error || 'unknown error'}`,
+        `Prompt: ${promptPreview(cleanPrompt, 160)}`,
+      ],
+    });
+    sessions.push(session);
+    if (!terminalResult.ok) failed.push({ sessionId, displayName, error: terminalResult.error || 'Launch failed' });
+  }
+
+  return {
+    ok: failed.length === 0,
+    launchId,
+    sessions,
+    launched: sessions.length - failed.length,
+    failed,
+    projectDir: cwd,
+  };
+}
+
+function findManagedSession(sessionId) {
+  const key = String(sessionId || '').trim().toLowerCase();
+  if (!key) return null;
+  return cachedSessions.find((s) =>
+    String(s.sessionId || '').toLowerCase() === key
+    || String(s.displayName || '').toLowerCase() === key
+    || String(s.sessionId || '').toLowerCase().startsWith(key)
+  ) || null;
+}
+
+function buildCodexFollowupPrompt(message) {
+  return [
+    '[UC-CODEX-CONTROL]',
+    'Follow-up instruction from The Underground Circle chat:',
+    normalizeCliPrompt(message),
+  ].join('\n');
+}
+
+async function sendToManagedCodexSession(data) {
+  const session = findManagedSession(data.sessionId || data.target || data.displayName);
+  if (!session) return { ok: false, error: 'Codex session not found.' };
+  if (!session.terminalTitle) {
+    return {
+      ok: false,
+      error: 'This Codex session was detected but was not launched by The Underground Circle, so it cannot be safely targeted from chat. Launch a managed Codex session from chat first.',
+      session,
+    };
+  }
+  const message = normalizeCliPrompt(data.message || data.command || data.prompt || '');
+  if (!message) return { ok: false, error: 'Missing message.' };
+  const result = await sendToTerminalByTitle(session.terminalTitle, buildCodexFollowupPrompt(message));
+  if (!result.ok) return { ok: false, error: result.error || 'Terminal send failed.', session };
+
+  const updated = registerSession({
+    ...session,
+    status: 'active',
+    task: promptPreview(message, 240),
+    prompt: message,
+    lastActivity: new Date().toISOString(),
+    messageCount: (session.messageCount || 0) + 1,
+    recentActions: [
+      ...(session.recentActions || []).slice(-4),
+      `Chat sent: ${promptPreview(message, 120)}`,
+    ],
+  });
+  await scan();
+  return {
+    ok: true,
+    provider: 'codex',
+    sessionId: updated.sessionId,
+    displayName: updated.displayName,
+    message: `Sent to ${updated.displayName || updated.sessionId}.`,
+    session: updated,
+  };
+}
 
 // ── Scan for Codex processes ─────────────────────────────────────────────────
 
@@ -52,6 +364,7 @@ function scanCodexProcesses() {
       // Filter out bridge process and node scripts to avoid self-detection
       const lines = stdout.trim().split('\n').filter(l =>
         l.includes('codex') &&
+        !l.includes('[UC-CODEX:') &&
         !l.includes('codex-bridge') &&
         !l.includes('node scripts') &&
         !l.includes('node /')  // Exclude node process running the bridge
@@ -172,7 +485,7 @@ function scanCodexFiles() {
 // ── Manual session registration ──────────────────────────────────────────────
 // POST /register to manually register a Codex session
 
-let manualSessions = [];
+let manualSessions = loadManagedTerminalSessions('codex');
 
 function registerSession(data) {
   const session = {
@@ -188,6 +501,15 @@ function registerSession(data) {
     recentActions: data.recentActions || [],
     filesRead: data.filesRead || 0,
     filesWritten: data.filesWritten || 0,
+    displayName: data.displayName,
+    prompt: data.prompt,
+    launchId: data.launchId,
+    launchedAt: data.launchedAt,
+    terminal: data.terminal,
+    terminalPid: data.terminalPid,
+    launchError: data.launchError,
+    terminalTitle: data.terminalTitle,
+    manageable: Boolean(data.terminalTitle),
   };
 
   // Update existing or add new
@@ -197,6 +519,7 @@ function registerSession(data) {
   } else {
     manualSessions.push(session);
   }
+  if (session.terminalTitle) saveManagedTerminalSession('codex', session);
 
   return session;
 }
@@ -207,10 +530,15 @@ async function scan() {
   const processSessions = await scanCodexProcesses();
   const fileSessions = scanCodexFiles();
 
-  // Expire stale manual sessions
+  // Expire stale manual sessions. Launched sessions stay visible long
+  // enough to manage from the Office even before Codex writes session files.
   manualSessions = manualSessions.filter(s => {
     const age = Date.now() - new Date(s.lastActivity).getTime();
-    return age < IDLE_THRESHOLD * 2;
+    const ttl = s.launchId ? LAUNCHED_SESSION_TTL : IDLE_THRESHOLD * 2;
+    return age < ttl;
+  }).map(s => {
+    const age = Date.now() - new Date(s.lastActivity).getTime();
+    return { ...s, status: age < ACTIVE_THRESHOLD ? s.status : 'idle' };
   });
 
   // Merge all sources, dedup by sessionId
@@ -233,6 +561,11 @@ function extractPid(line) {
 // ── HTTP Server ──────────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
+  const pathname = (() => {
+    try { return new URL(req.url, `http://localhost:${PORT}`).pathname; }
+    catch { return req.url; }
+  })();
+
   // CORS preflight
   if (req.method === 'OPTIONS') {
     res.writeHead(204, CORS);
@@ -240,63 +573,92 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.url === '/health') {
-    res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: true, bridge: 'codex', version: '1.0.0' }));
+  if (pathname === '/health') {
+    writeJson(res, 200, {
+      ok: true,
+      bridge: 'codex',
+      version: '1.1.0',
+      sessions: cachedSessions.length,
+      capabilities: ['sessions', 'register', 'update', 'launch', 'terminal-send'],
+    });
     return;
   }
 
-  if (req.url === '/sessions') {
-    res.writeHead(200, CORS);
-    res.end(JSON.stringify({
+  if (pathname === '/pair' && req.method === 'POST') {
+    if (!isAllowedPairOrigin(req)) {
+      writeJson(res, 403, { ok: false, error: 'Pairing origin not allowlisted.' });
+      return;
+    }
+    writeJson(res, 200, { ok: true, token: getOrCreateBridgeToken(), bridge: 'codex' });
+    return;
+  }
+
+  if (pathname === '/sessions') {
+    if (!requireBridgeAuth(req, res)) return;
+    writeJson(res, 200, {
       sessions: cachedSessions,
       lastScan: lastScanTime,
       sessionCount: cachedSessions.length,
-    }));
-    return;
-  }
-
-  if (req.url === '/register' && req.method === 'POST') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
-      try {
-        const data = JSON.parse(body);
-        const session = registerSession(data);
-        res.writeHead(200, CORS);
-        res.end(JSON.stringify({ ok: true, session }));
-      } catch (e) {
-        res.writeHead(400, CORS);
-        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
-      }
     });
     return;
   }
 
-  if (req.url === '/update' && req.method === 'POST') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
-      try {
-        const data = JSON.parse(body);
-        if (!data.sessionId) {
-          res.writeHead(400, CORS);
-          res.end(JSON.stringify({ ok: false, error: 'sessionId required' }));
-          return;
-        }
-        const session = registerSession(data);
-        res.writeHead(200, CORS);
-        res.end(JSON.stringify({ ok: true, session }));
-      } catch (e) {
-        res.writeHead(400, CORS);
-        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
-      }
-    });
+  if (pathname === '/register' && req.method === 'POST') {
+    if (!requireBridgeAuth(req, res)) return;
+    try {
+      const data = await readJsonBody(req);
+      const session = registerSession(data);
+      await scan();
+      writeJson(res, 200, { ok: true, session });
+    } catch (e) {
+      writeJson(res, 400, { ok: false, error: e.message || 'Invalid JSON' });
+    }
     return;
   }
 
-  res.writeHead(404, CORS);
-  res.end(JSON.stringify({ error: 'Not found' }));
+  if (pathname === '/update' && req.method === 'POST') {
+    if (!requireBridgeAuth(req, res)) return;
+    try {
+      const data = await readJsonBody(req);
+      if (!data.sessionId) {
+        writeJson(res, 400, { ok: false, error: 'sessionId required' });
+        return;
+      }
+      const session = registerSession(data);
+      await scan();
+      writeJson(res, 200, { ok: true, session });
+    } catch (e) {
+      writeJson(res, 400, { ok: false, error: e.message || 'Invalid JSON' });
+    }
+    return;
+  }
+
+  if (pathname === '/launch' && req.method === 'POST') {
+    if (!requireBridgeAuth(req, res)) return;
+    try {
+      const data = await readJsonBody(req);
+      const result = await launchCodexSessions(data);
+      await scan();
+      writeJson(res, result.ok ? 200 : 207, result);
+    } catch (e) {
+      writeJson(res, 400, { ok: false, error: e.message || 'Launch failed' });
+    }
+    return;
+  }
+
+  if (pathname === '/terminal/send' && req.method === 'POST') {
+    if (!requireBridgeAuth(req, res)) return;
+    try {
+      const data = await readJsonBody(req);
+      const result = await sendToManagedCodexSession(data);
+      writeJson(res, result.ok ? 200 : 409, result);
+    } catch (e) {
+      writeJson(res, 400, { ok: false, error: e.message || 'Send failed' });
+    }
+    return;
+  }
+
+  writeJson(res, 404, { error: 'Not found' });
 });
 
 // ── Start ────────────────────────────────────────────────────────────────────
@@ -307,9 +669,12 @@ setInterval(scan, SCAN_INTERVAL);
 server.listen(PORT, () => {
   console.log(`\n🧠 Codex Bridge running on http://localhost:${PORT}`);
   console.log(`   Health:   http://localhost:${PORT}/health`);
+  console.log(`   Pair:     POST http://localhost:${PORT}/pair`);
   console.log(`   Sessions: http://localhost:${PORT}/sessions`);
   console.log(`   Register: POST http://localhost:${PORT}/register`);
   console.log(`   Update:   POST http://localhost:${PORT}/update`);
+  console.log(`   Launch:   POST http://localhost:${PORT}/launch`);
+  console.log(`   Send:     POST http://localhost:${PORT}/terminal/send`);
   console.log(`\n   The Underground Circle will auto-detect this bridge.`);
   console.log(`   Your Codex agent will appear in the Office.\n`);
 });

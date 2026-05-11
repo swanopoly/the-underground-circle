@@ -92,7 +92,7 @@ export function useComputerUseTask(circleId: string, userId?: string) {
 
   const run = useCallback(async (
     task: string,
-    options?: { sessionId?: string },
+    options?: { sessionId?: string; model?: string | null },
   ): Promise<{ started: boolean; reason?: string }> => {
     if (!task.trim()) return { started: false, reason: 'Empty task.' };
     if (handleRef.current) return { started: false, reason: 'Another task is already running.' };
@@ -108,6 +108,7 @@ export function useComputerUseTask(circleId: string, userId?: string) {
       task,
       circleId,
       userId,
+      model: options?.model || undefined,
       sessionId: options?.sessionId,
       browserbase: credsResult.creds.browserbase,
       onRunStarted: ({ runId }) => {

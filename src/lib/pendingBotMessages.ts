@@ -5,7 +5,13 @@ export type PendingBotMessageRecord = {
   localMessageId: string;
   content: string;
   createdAt: string;
+  isBot?: boolean;
+  isUser?: boolean;
   userName?: string;
+  replyTo?: { name: string; content: string } | null;
+  reactions?: Record<string, string[]>;
+  source?: unknown;
+  usage?: unknown;
   runId?: string | null;
   delegatedTo?: string;
   delegatedSubagents?: string[];
@@ -25,7 +31,37 @@ export type PendingBotMessageRecord = {
   taskPlan?: unknown;
   toolEvents?: unknown[];
   verificationResults?: unknown[];
+  routing?: unknown;
 };
+
+type PersistedMessageSnapshot = {
+  content: string | null;
+  createdAt?: string | null;
+  isBot?: boolean | null;
+};
+
+function normalizePersistedMessageSnapshot(
+  value: string | null | undefined | { content?: string | null; created_at?: string | null; createdAt?: string | null; is_bot?: boolean | null; isBot?: boolean | null },
+): PersistedMessageSnapshot {
+  if (typeof value === 'string' || value == null) {
+    return { content: value || null };
+  }
+  return {
+    content: value.content || null,
+    createdAt: value.created_at || value.createdAt || null,
+    isBot: value.is_bot ?? value.isBot ?? null,
+  };
+}
+
+function looksLikePersistedUserMessage(entry: PendingBotMessageRecord, persisted: PersistedMessageSnapshot): boolean {
+  const entryIsBot = entry.isBot !== false;
+  if (entryIsBot || persisted.isBot !== false) return false;
+  if ((entry.content || '').trim() !== (persisted.content || '').trim()) return false;
+  const entryTime = Date.parse(entry.createdAt || '');
+  const persistedTime = Date.parse(persisted.createdAt || '');
+  if (!Number.isFinite(entryTime) || !Number.isFinite(persistedTime)) return true;
+  return Math.abs(entryTime - persistedTime) < 120000;
+}
 
 function pendingBotMessagesKey(threadId: string): string {
   return `uc_pending_bot_messages_${threadId}`;
@@ -72,17 +108,20 @@ export async function removePendingBotMessage(
 
 export async function reconcilePendingBotMessages(
   threadId: string | null | undefined,
-  persistedContents: Array<string | null | undefined>,
+  persistedContents: Array<string | null | undefined | { content?: string | null; created_at?: string | null; createdAt?: string | null; is_bot?: boolean | null; isBot?: boolean | null }>,
 ): Promise<void> {
   if (!threadId) return;
+  const persisted = persistedContents.map(normalizePersistedMessageSnapshot);
   const seenIds = new Set(
-    persistedContents
-      .map((content) => readPersistedChatBotMetadata(content)?.localMessageId || null)
+    persisted
+      .map((message) => readPersistedChatBotMetadata(message.content)?.localMessageId || null)
       .filter((value): value is string => typeof value === 'string' && value.length > 0),
   );
-  if (seenIds.size === 0) return;
   const existing = await loadPendingBotMessages(threadId);
-  const next = existing.filter((entry) => !seenIds.has(entry.localMessageId));
+  const next = existing.filter((entry) => (
+    !seenIds.has(entry.localMessageId)
+    && !persisted.some((message) => looksLikePersistedUserMessage(entry, message))
+  ));
   if (next.length === existing.length) return;
   if (next.length === 0) {
     await storage.removeItem(pendingBotMessagesKey(threadId));

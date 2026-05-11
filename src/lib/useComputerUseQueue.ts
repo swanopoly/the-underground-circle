@@ -59,7 +59,7 @@ export function useComputerUseQueue(circleId: string, userId?: string) {
   /** Kick off a new task. Returns the slot id (or null if we refused). */
   const start = useCallback(async (
     task: string,
-    options?: { sessionId?: string },
+    options?: { sessionId?: string; model?: string | null },
   ): Promise<{ id: string | null; reason?: string }> => {
     const trimmed = task.trim();
     if (!trimmed) return { id: null, reason: 'Empty task.' };
@@ -77,6 +77,7 @@ export function useComputerUseQueue(circleId: string, userId?: string) {
       task: trimmed,
       circleId,
       userId,
+      model: options?.model || undefined,
       sessionId: options?.sessionId,
       browserbase: creds.creds.browserbase,
       onRunStarted: ({ runId }) => mutate(id, { runId }),

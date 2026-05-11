@@ -497,6 +497,35 @@ async function handleFill(req, res, CORS) {
   }
 }
 
+async function handleSelect(req, res, CORS) {
+  const { body, err } = await readJsonBody(req);
+  if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
+  const role = String(body.role || 'combobox').trim();
+  const value = typeof body.value === 'string' ? body.value.trim() : '';
+  if (!value) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'value required' })); return; }
+  const launched = await ensureContext();
+  if (!launched.ok) { res.writeHead(503, CORS); res.end(JSON.stringify({ ok: false, error: launched.error })); return; }
+  try {
+    const timeout = Math.max(500, Math.min(30000, Number(body.timeoutMs) || 5000));
+    const locator = resolveLocator(launched.page, role, body);
+    try {
+      await locator.selectOption(value, { timeout });
+    } catch (valueErr) {
+      try {
+        await locator.selectOption({ label: value }, { timeout });
+      } catch (labelErr) {
+        await locator.click({ timeout });
+        await launched.page.getByRole('option', { name: value }).click({ timeout });
+      }
+    }
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: true, value }));
+  } catch (e) {
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: false, error: (e && e.message) || 'select failed' }));
+  }
+}
+
 async function handlePress(req, res, CORS) {
   const { body, err } = await readJsonBody(req);
   if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
@@ -556,6 +585,7 @@ module.exports = {
   handleDomSnapshot,
   handleClickRole,
   handleFill,
+  handleSelect,
   handlePress,
   handleScreenshot,
   handleClose,

@@ -7,6 +7,8 @@
  */
 
 import { analyzeBrowserTask } from '../src/lib/browserTaskIntent';
+import { chooseBrowserAutomationBackendPreference } from '../src/lib/browserAutomationBackend';
+import { buildFallbackBrowserActions } from '../src/lib/browserActionFallback';
 import { classifyBrowserbaseWorkflow } from '../src/lib/browserbaseWorkflowIntent';
 import { detectComputerUseIntent } from '../src/lib/computerUseIntent';
 import { planComputerTaskPreview } from '../src/lib/computerTaskPlanner';
@@ -51,10 +53,26 @@ function main() {
   const dataIntent = analyzeBrowserTask(dataTask);
   assert(dataIntent.mode === 'extract', 'browser intent: data retrieval mode is extract');
   assert(dataIntent.browserbaseWorkflow.kind === 'web_data_retrieval', 'browser intent: carries Browserbase workflow');
+  assert(
+    chooseBrowserAutomationBackendPreference(dataIntent).backend === 'local_browser_bridge',
+    'backend optimizer: simple data retrieval stays local for cost control',
+  );
+  const dataFallback = buildFallbackBrowserActions(dataTask, dataIntent);
+  assert(dataFallback.some((action) => action.type === 'extract'), 'fallback planner: data retrieval includes extract action');
 
   const formIntent = analyzeBrowserTask(formTask);
   assert(formIntent.mode === 'transactional', 'browser intent: form submission is transactional');
   assert(formIntent.hasSideEffects, 'browser intent: form submission has side effects');
+  assert(
+    chooseBrowserAutomationBackendPreference(formIntent).backend === 'browserbase_stagehand',
+    'backend optimizer: form submission uses Browserbase/Stagehand when available',
+  );
+
+  const stagehandIntent = analyzeBrowserTask(stagehandTask);
+  assert(
+    chooseBrowserAutomationBackendPreference(stagehandIntent).backend === 'browserbase_stagehand',
+    'backend optimizer: explicit Stagehand uses Browserbase/Stagehand when available',
+  );
 
   const preview = planComputerTaskPreview(stagehandTask);
   assert(preview.kind === 'browser_task', 'computer planner: Stagehand is browser task');

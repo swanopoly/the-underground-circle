@@ -57,7 +57,13 @@ import MessageCitations from './chat/MessageCitations';
 import QuickActionDock from './chat/QuickActionDock';
 import AutomationProposalCard from './chat/AutomationProposalCard';
 import { parseAutomationRequest, type AutomationProposal } from '../../../lib/automationChatBuilder';
-import { parseMultiAgentRequest, makeAliasResolver, BLACKSWAN_ALIASES } from '../../../lib/multiAgentDispatch';
+import {
+  buildMultiAgentDispatchPrompt,
+  formatMultiAgentHelp,
+  formatMultiAgentRunSummary,
+  formatMultiAgentStrategyLabel,
+  parseMultiAgentOrchestrationRequest,
+} from '../../../lib/multiAgentDispatch';
 import SearchResultsCard, { type SearchResultRow } from './chat/SearchResultsCard';
 import CommandsHelpCard from './chat/CommandsHelpCard';
 import AssignPickerCard, { type AssignPickerAgent } from './chat/AssignPickerCard';
@@ -73,7 +79,7 @@ import { createStagedFile, revokeStagedPreviews, uploadAttachment, type StagedFi
 import { soulKeyForProfile, resolveModelForProfile } from '../../../lib/serviceProfileSouls';
 import { BLACKSWAN_ENDPOINT_MODEL_ID, canUseAnthropicChatStream } from '../../../lib/blackswanRouting';
 import { analyzeMessageRouting } from '../../../lib/messageRouting';
-import { dispatchBridgeTask, wakeAndAssignTask } from '../../../lib/bridgeTaskDispatcher';
+import { dispatchBridgeTask, sendTerminalAgentSessionMessage, wakeAndAssignTask } from '../../../lib/bridgeTaskDispatcher';
 import SpawnAgentPanel from '../../../components/SpawnAgentPanel';
 import { storage } from '../../../lib/storage';
 import ProposalCard from '../../../components/ProposalCard';
@@ -157,6 +163,8 @@ import {
   updateMainChatBotMessageWithRetry,
 } from '../../../lib/chatAgentService';
 import { buildChatAutomationPlan, type ChatAutomationPlan } from '../../../lib/chatAutomationPlanner';
+import { executeTerminalAgentLaunchFromChat } from '../../../lib/terminalAgentSessionLauncher';
+import { executeTerminalAgentControlFromChat } from '../../../lib/terminalAgentControl';
 import { looksLikeLocalComputerAwarenessRequest } from '../../../lib/localComputerAwarenessIntent';
 import { dispatchChatAutomationPlan } from '../../../lib/runChatAutomationPlan';
 import { attachPlanDecisionToRun } from '../../../lib/runChatAutomationPlanObserver';
@@ -188,7 +196,7 @@ import {
 } from '../../../lib/chatActions';
 import { detectAgenticCodingProfile } from '../../../lib/agenticCodingProfile';
 import { getSpiritById } from '../../../lib/agentSpirits';
-import { getAgentIdentityKey, loadAgentIdentities } from '../../../lib/agentIdentity';
+import { getAgentIdentityKey, loadAgentIdentities, type TerminalAgentOfficeConfig } from '../../../lib/agentIdentity';
 import { loadConnections } from '../../../lib/connectionManager';
 import { DEFAULT_AGENT, sessionsToAgents, type OfficeAgent } from '../../../lib/officeAgents';
 import { loadCircleOfficeAgents, type CircleOfficeAgent } from '../../../lib/circleOffice';
@@ -237,6 +245,12 @@ import { getMainChatSessionActions } from '../../../lib/sessionPromptCatalog';
 import { auditComputerCapabilities } from '../../../lib/computerCapabilityRegistry';
 import { prepareComputerTaskExecution } from '../../../lib/computerTaskExecution';
 import { executeComputerTaskWithAgent } from '../../../lib/computerTaskRuntime';
+import { listApiKeys } from '../../../lib/llmProviders';
+import {
+  buildImplicitBusinessModelProfiles,
+  loadCircleBusinessModelProfiles,
+  planBusinessModelForComputerTask,
+} from '../../../lib/businessModelProfiles';
 import { deriveGrantedScopesFromBrowserPermission, grantComputerTaskScopes, loadComputerTaskGrantIds } from '../../../lib/computerTaskGrantMemory';
 import { buildComputerTaskStateSteps, clearComputerTaskState, loadComputerTaskState, saveComputerTaskState, type ComputerTaskStateRecord } from '../../../lib/computerTaskState';
 import {
@@ -287,7 +301,19 @@ type AssignableAgent = {
   model?: string | null;
   sessionKey?: string | null;
   source?: 'db' | 'openswan-session' | 'bridge-session' | 'default';
+  terminalConfig?: TerminalAgentOfficeConfig | null;
 };
+
+function applyTerminalProfileToTask(task: string, config?: TerminalAgentOfficeConfig | null): string {
+  const instructions = config?.defaultPrompt?.trim();
+  if (!instructions) return task;
+  return [
+    instructions,
+    '',
+    'Task from The Underground Circle chat:',
+    task,
+  ].join('\n');
+}
 
 function parseAgentExtendedConfig(raw: string | null | undefined): Record<string, any> | null {
   if (!raw) return null;
@@ -1042,6 +1068,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [showAssignPanel, setShowAssignPanel] = useState(false);
   const [showSpawnPanel, setShowSpawnPanel] = useState(false);
   const [liveAgents, setLiveAgents] = useState<AssignableAgent[]>([]);
+  const refreshAssignableAgentsRef = useRef<(() => Promise<void>) | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<AssignableAgent | null>(null);
   const [activeSpiritId, setActiveSpiritId] = useState<string | null>(null);
   const [soulLearningRefs, setSoulLearningRefs] = useState<ResearchDocumentReference[]>([]);
@@ -1229,7 +1256,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (!trimmed) return;
     const audit = await auditComputerCapabilities(circleId).catch(() => null);
     const grantedIds = await loadComputerTaskGrantIds(circleId).catch(() => []);
-    const execution = prepareComputerTaskExecution({ task: trimmed, audit, grantedIds });
+    const previewExecution = prepareComputerTaskExecution({ task: trimmed, audit, grantedIds });
+    const [businessProfiles, providerKeys] = await Promise.all([
+      loadCircleBusinessModelProfiles(circleId).catch(() => []),
+      listApiKeys().catch(() => []),
+    ]);
+    const businessModelPlan = planBusinessModelForComputerTask({
+      task: trimmed,
+      preview: previewExecution.preview,
+      profiles: [...businessProfiles, ...buildImplicitBusinessModelProfiles(providerKeys)],
+      providerKeys,
+    });
+    const execution = prepareComputerTaskExecution({ task: trimmed, audit, grantedIds, businessModelPlan });
+    const businessModelPickerId = businessModelPlan.routeProvider && businessModelPlan.routeModel
+      ? `${businessModelPlan.routeProvider}/${businessModelPlan.routeModel}`
+      : null;
+    const computerTaskModel = selectedModel !== 'auto'
+      ? selectedModel
+      : (businessModelPickerId || resolveSendModel(trimmed) || undefined);
     await persistComputerTaskState({
       task: trimmed,
       taskKind: execution.preview.kind,
@@ -1255,6 +1299,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         entrypoint: execution.entrypoint,
         capabilityProfile: execution.capabilityProfile,
         recommendedMode: execution.recommendedMode,
+        businessModel: businessModelPlan.selectedProfile
+          ? {
+              id: businessModelPlan.selectedProfile.id,
+              provider: businessModelPlan.routeProvider,
+              model: businessModelPlan.routeModel,
+              surface: businessModelPlan.matchedSurface,
+            }
+          : null,
       },
     });
 
@@ -1282,7 +1334,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           circleId,
           userId: currentUserId || 'anonymous',
           threadId: activeThreadId || undefined,
-          model: selectedModel !== 'auto' ? selectedModel : null,
+          model: computerTaskModel || null,
           chatMode: planActMode,
           extras: {
             audit,
@@ -1291,7 +1343,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         handlers: {
           run_computer_task: async () => {
             if (execution.entrypoint === 'browser_runtime') {
-              const plan = await describeComputerUsePlan({ task: trimmed, circleId, agentName });
+              const plan = await describeComputerUsePlan({
+                task: trimmed,
+                circleId,
+                agentName,
+                userId: currentUserId || undefined,
+                model: computerTaskModel,
+              });
               const planCard = toBrowserPlanCardData(plan);
               return {
                 executionKind: 'run_computer_task',
@@ -1307,6 +1365,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   grantSummary: execution.grants.summary,
                   approvalSummary: execution.grants.approvalSummary,
                   grantIds: execution.grants.outstanding.map((grant) => grant.id),
+                  businessModel: businessModelPlan.selectedProfile
+                    ? {
+                        label: businessModelPlan.selectedProfile.label,
+                        provider: businessModelPlan.routeProvider,
+                        model: businessModelPlan.routeModel,
+                        approvalRequired: businessModelPlan.approvalRequired,
+                      }
+                    : null,
                   browserPlan: planCard,
                   browserActions: plan.actions,
                 },
@@ -1318,9 +1384,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               circleId,
               userId: currentUserId || 'anonymous',
               userName: currentUserName,
-              model: selectedModel !== 'auto' ? selectedModel : undefined,
+              model: computerTaskModel,
               audit,
               grantedIds,
+              businessModelPlan,
               chatHistory: messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n'),
               sessionArchiveContext: await loadSessionArchiveContext() || undefined,
               replyTo: replyTo?.content,
@@ -2170,13 +2237,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // sessions, and bridge-detected Claude Code sessions.
   useEffect(() => {
     if (!circleId) return;
+    let disposed = false;
     const loadAgents = async () => {
       try {
+        if (disposed) return;
         const [officeResult, identities, connections] = await Promise.all([
           loadCircleOfficeAgents(circleId),
           loadAgentIdentities(),
           loadConnections(),
         ]);
+        if (disposed) return;
 
         const assignable = new Map<string, AssignableAgent>();
         const pushAgent = (agent: AssignableAgent | null | undefined) => {
@@ -2193,7 +2263,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             model: agent.model || existing.model,
             spirit: agent.spirit || existing.spirit,
             color: agent.color || existing.color,
+            owner_display_name: agent.owner_display_name || existing.owner_display_name,
             current_task: agent.current_task || existing.current_task,
+            sessionKey: agent.sessionKey || existing.sessionKey,
+            source: agent.source || existing.source,
+            terminalConfig: agent.terminalConfig || existing.terminalConfig,
           });
         };
 
@@ -2235,33 +2309,46 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }));
 
         try {
-          const claudeBridgeUrl = getBridgeUrl(7778);
-          if (claudeBridgeUrl) {
-            const bridgeToken = await ensureBridgeToken();
-            const res = await fetch(`${claudeBridgeUrl}/sessions`, {
+          const bridgeProviders = [
+            { provider: 'claude-code', label: 'Claude Code', port: 7778, color: '#22d3ee' },
+            { provider: 'codex', label: 'Codex', port: 7779, color: '#10a37f' },
+            { provider: 'gemini', label: 'Gemini CLI', port: 7780, color: '#4285f4' },
+            { provider: 'cursor', label: 'Cursor', port: 7781, color: '#8b5cf6' },
+          ];
+          const bridgeToken = await ensureBridgeToken();
+          await Promise.all(bridgeProviders.map(async (bridge) => {
+            const bridgeUrl = getBridgeUrl(bridge.port);
+            if (!bridgeUrl) return;
+            const res = await fetch(`${bridgeUrl}/sessions`, {
               signal: AbortSignal.timeout(3000),
               headers: bridgeAuthHeaders(bridgeToken),
             });
-            if (res.ok) {
-              const { sessions } = await res.json();
-              for (const s of sessions || []) {
-                const name = s.slug || s.sessionId?.slice(0, 12) || 'Claude Code';
-                pushAgent({
-                  id: `bridge::${s.sessionId}`,
-                  name,
-                  status: s.status === 'active' ? 'building' : 'idle',
-                  provider: 'claude-code',
-                  color: '#22d3ee',
-                  owner_display_name: 'Bridge',
-                  current_task: s.cwd || null,
-                  circle_id: circleId,
-                  model: s.model || null,
-                  sessionKey: s.sessionId || null,
-                  source: 'bridge-session',
-                });
-              }
+            if (!res.ok) return;
+            const { sessions } = await res.json();
+            const list = Array.isArray(sessions) ? sessions : [];
+            for (let i = 0; i < list.length; i++) {
+              const s = list[i];
+              const identityKey = String(s.sessionId || '');
+              const identity = identityKey ? identities.get(identityKey) : null;
+              const terminalConfig = identity?.terminalConfig || null;
+              const name = identity?.customName || s.displayName || s.slug || (list.length > 1 ? `${bridge.label} #${i + 1}` : bridge.label);
+              pushAgent({
+                id: `bridge::${bridge.provider}::${s.sessionId}`,
+                name,
+                status: s.status === 'active' ? 'building' : 'idle',
+                provider: bridge.provider,
+                color: identity?.customColor || bridge.color,
+                owner_display_name: s.manageable || s.terminalTitle ? 'Managed terminal' : 'Observed bridge',
+                current_task: s.task || s.lastUserMessage || s.cwd || s.projectDir || null,
+                circle_id: circleId,
+                spirit: identity?.spiritId || null,
+                model: terminalConfig?.defaultModel || identity?.boundModel || s.model || null,
+                sessionKey: s.sessionId || null,
+                source: 'bridge-session',
+                terminalConfig,
+              });
             }
-          }
+          }));
         } catch {}
 
         const ranked = Array.from(assignable.values()).sort((a, b) => {
@@ -2279,16 +2366,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           return (a.name || '').localeCompare(b.name || '');
         });
 
-        setLiveAgents(ranked);
+        if (!disposed) setLiveAgents(ranked);
       } catch {
-        setLiveAgents([]);
+        if (!disposed) setLiveAgents([]);
       }
     };
+    refreshAssignableAgentsRef.current = loadAgents;
     void loadAgents();
+    const refreshTimer = setInterval(() => void loadAgents(), 15000);
     const ch = supabase.channel(`chat_agents_${circleId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'circle_office_agents' }, () => void loadAgents())
       .subscribe();
-    return () => { supabase.removeChannel(ch); };
+    return () => {
+      disposed = true;
+      clearInterval(refreshTimer);
+      supabase.removeChannel(ch);
+      if (refreshAssignableAgentsRef.current === loadAgents) refreshAssignableAgentsRef.current = null;
+    };
   }, [circleId]);
 
   useEffect(() => {
@@ -2309,7 +2403,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   const dispatchAssignedAgentTask = useCallback(async (agent: AssignableAgent, task: string): Promise<string> => {
     const normalizedProvider = (agent.provider || '').toLowerCase().replace(/\s+/g, '-');
-    const preferredModel = agent.model && agent.model !== 'auto' ? agent.model : undefined;
+    const terminalConfig = agent.terminalConfig || null;
+    const preferredModel = (terminalConfig?.defaultModel || agent.model) && (terminalConfig?.defaultModel || agent.model) !== 'auto'
+      ? (terminalConfig?.defaultModel || agent.model || undefined)
+      : undefined;
+    const profiledTask = ['claude-code', 'codex', 'gemini', 'gemini-cli', 'cursor'].includes(normalizedProvider)
+      ? applyTerminalProfileToTask(task, terminalConfig)
+      : task;
 
     if (normalizedProvider === 'openswan') {
       const config = await resolveOpenSwanConnection();
@@ -2336,14 +2436,26 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
     const bridgeProviders = ['claude-code', 'codex', 'gemini', 'gemini-cli', 'cursor'];
     if (bridgeProviders.includes(normalizedProvider)) {
+      if (agent.sessionKey && agent.source === 'bridge-session' && normalizedProvider !== 'cursor') {
+        const sendResult = await sendTerminalAgentSessionMessage(normalizedProvider, agent.sessionKey, profiledTask);
+        if (sendResult.ok) {
+          return `**${agent.name}** [managed terminal session ${agent.sessionKey.slice(0, 12)}]:\n\n${sendResult.response || 'Message sent.'}`;
+        }
+      }
+
       const dbId = agent.id?.startsWith('bridge::') ? undefined : agent.id;
       const result = await wakeAndAssignTask(
         normalizedProvider,
         agent.name,
-        task,
+        profiledTask,
         circleId,
         dbId,
-        { model: preferredModel },
+        {
+          model: preferredModel,
+          workdir: terminalConfig?.defaultCwd || undefined,
+          launchMode: terminalConfig?.launchMode,
+          sessionName: agent.name,
+        },
       );
       if (result.ok) {
         return `**${agent.name}** [executed via ${normalizedProvider}${preferredModel ? ` · ${preferredModel}` : ''}]:\n\n${result.response || 'Done'}`;
@@ -3584,6 +3696,41 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       recordChatActivity(circleId, 'slash').catch(() => {});
     }
 
+    // ─── Terminal agent control ────────────────────────────────────────────
+    // Handles "/agents", "/agent Codex #1 ...", and natural language like
+    // "tell Codex #1 to check the auth flow" before broader automation
+    // routing has a chance to spawn a new task.
+    try {
+      const terminalAgentControl = await executeTerminalAgentControlFromChat(content);
+      if (terminalAgentControl) {
+        addBotMessage(terminalAgentControl.message, undefined, { localOnly: true });
+        return;
+      }
+    } catch (err: any) {
+      addBotMessage(`Terminal agent control error: ${err?.message || 'unknown error'}`, undefined, { localOnly: true });
+      return;
+    }
+
+    // ─── Terminal agent launcher ───────────────────────────────────────────
+    // Handles natural language like "start 10 separate Claude Code sessions"
+    // before the generic computer-use planner treats it as a terminal task.
+    try {
+      const terminalAgentLaunch = await executeTerminalAgentLaunchFromChat(content, {
+        circleId,
+        userId: currentUserId || undefined,
+      });
+      if (terminalAgentLaunch) {
+        addBotMessage(terminalAgentLaunch.message, undefined, { localOnly: true });
+        setTimeout(() => {
+          void refreshAssignableAgentsRef.current?.();
+        }, 1500);
+        return;
+      }
+    } catch (err: any) {
+      addBotMessage(`Terminal agent launch error: ${err?.message || 'unknown error'}`, undefined, { localOnly: true });
+      return;
+    }
+
     // ─── Automation builder intercept ──────────────────────────────────────
     // Detect "every X at Y do Z" / "when X happens do Y" — present an
     // AutomationProposalCard the user can confirm. Falls through to LLM
@@ -3602,52 +3749,193 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
 
     // ─── Multi-agent dispatch intercept ────────────────────────────────────
-    // Detect "@a @b prompt" with 2+ distinct agents at the start of the
-    // message — fan out the prompt to each in parallel, then post each
-    // agent's reply as its own bot message. Single-agent and non-agent
-    // messages fall through to the normal flow unchanged.
-    if (!content.startsWith('/') && liveAgents.length > 0) {
-      const aliases: Record<string, string> = {};
-      for (const a of liveAgents) {
-        if (a.name) aliases[a.name.toLowerCase()] = a.name;
+    // Supports /multi, /roundtable, leading @mentions, and natural
+    // "ask all Codex agents to..." fan-outs across OpenSwan + bridge agents.
+    const multiAgentPlan = parseMultiAgentOrchestrationRequest(content, liveAgents);
+    if (multiAgentPlan) {
+      if (multiAgentPlan.kind === 'help') {
+        addBotMessage(formatMultiAgentHelp(liveAgents, multiAgentPlan.reason), undefined, {
+          localOnly: true,
+          source: {
+            actor: 'OpenSwan',
+            surface: 'multi_agent_help',
+            selectedModel: selectedModel || null,
+          },
+        });
+        return;
       }
-      for (const alias of BLACKSWAN_ALIASES) {
-        if (!aliases[alias]) aliases[alias] = 'BlackSwan';
+
+      const targets = multiAgentPlan.targetIds
+        .map(id => liveAgents.find(agent => agent.id === id))
+        .filter((agent): agent is AssignableAgent => !!agent);
+      if (targets.length < 2) {
+        addBotMessage(formatMultiAgentHelp(liveAgents, 'Need at least two available agents for a multi-agent run.'), undefined, {
+          localOnly: true,
+          source: {
+            actor: 'OpenSwan',
+            surface: 'multi_agent_help',
+            selectedModel: selectedModel || null,
+          },
+        });
+        return;
       }
-      const multi = parseMultiAgentRequest(content, makeAliasResolver(aliases));
-      if (multi) {
-        const targets = multi.agents
-          .map(ref => liveAgents.find(a => a.name.toLowerCase() === ref.resolvedName.toLowerCase()))
-          .filter((a): a is AssignableAgent => !!a);
-        if (targets.length >= 2) {
-          addBotMessage(
-            `Dispatching to ${targets.length} agents in parallel: ${targets.map(t => '@' + t.name).join(' ')}`,
-            undefined,
-            { localOnly: true },
-          );
-          setBotTyping(true);
-          Promise.allSettled(
-            targets.map(async (agent) => {
-              try {
-                const reply = await dispatchAssignedAgentTask(agent, multi.cleanedPrompt);
-                return { agent, ok: true, reply };
-              } catch (err: any) {
-                return { agent, ok: false, reply: `**${agent.name}** error: ${err?.message || 'unknown'}` };
-              }
-            }),
-          ).then((settled) => {
-            setBotTyping(false);
-            for (const s of settled) {
-              if (s.status === 'fulfilled') {
-                addBotMessage(s.value.reply);
-              } else {
-                addBotMessage(`Multi-agent dispatch error: ${String(s.reason)}`, undefined, { localOnly: true });
-              }
+
+      const strategySurface = multiAgentPlan.strategy === 'roundtable'
+        ? 'multi_agent_roundtable'
+        : multiAgentPlan.strategy === 'sequential'
+          ? 'multi_agent_chain'
+          : multiAgentPlan.strategy === 'debate'
+            ? 'multi_agent_debate'
+            : 'multi_agent_dispatch';
+      const strategyLabel = formatMultiAgentStrategyLabel(multiAgentPlan.strategy);
+      const startVerb = multiAgentPlan.strategy === 'roundtable'
+        ? 'Starting agent roundtable'
+        : multiAgentPlan.strategy === 'sequential'
+          ? 'Starting agent chain'
+          : multiAgentPlan.strategy === 'debate'
+            ? 'Starting agent debate'
+            : 'Dispatching multi-agent run';
+      const skipped = multiAgentPlan.truncatedCount > 0
+        ? ` (${multiAgentPlan.truncatedCount} more skipped to stay within the safety cap)`
+        : '';
+      addBotMessage(
+        `${startVerb} to ${targets.length} agents: ${targets.map(t => '@' + t.name).join(' ')}${skipped}`,
+        undefined,
+        {
+          localOnly: true,
+          source: {
+            actor: 'OpenSwan',
+            surface: strategySurface,
+            selectedModel: selectedModel || null,
+          },
+        },
+      );
+      setBotTyping(true);
+
+      type MultiAgentChatResult = { agent: AssignableAgent; ok: boolean; reply: string };
+      const addMultiAgentReply = (result: MultiAgentChatResult) => {
+        addBotMessage(result.reply, undefined, {
+          source: {
+            actor: result.agent.name,
+            surface: `${strategySurface}_reply`,
+            selectedModel: result.agent.model || selectedModel || null,
+            provider: result.agent.provider || null,
+          },
+        });
+      };
+      const addMultiAgentCompletion = (results: MultiAgentChatResult[]) => {
+        addBotMessage(
+          formatMultiAgentRunSummary(multiAgentPlan, results.map(result => ({
+            agentName: result.agent.name,
+            provider: result.agent.provider,
+            ok: result.ok,
+            replyPreview: result.reply,
+          }))),
+          undefined,
+          {
+            localOnly: true,
+            source: {
+              actor: 'OpenSwan',
+              surface: `${strategySurface}_complete`,
+              selectedModel: selectedModel || null,
+            },
+          },
+        );
+      };
+
+      if (multiAgentPlan.strategy === 'sequential') {
+        (async () => {
+          const results: MultiAgentChatResult[] = [];
+          let priorContext = '';
+          for (let index = 0; index < targets.length; index += 1) {
+            const agent = targets[index];
+            try {
+              const task = buildMultiAgentDispatchPrompt(multiAgentPlan, agent, index, priorContext);
+              const reply = await dispatchAssignedAgentTask(agent, task);
+              const result = { agent, ok: true, reply };
+              results.push(result);
+              addMultiAgentReply(result);
+              priorContext = [
+                priorContext,
+                `Agent: ${agent.name}`,
+                reply.slice(0, 3000),
+              ].filter(Boolean).join('\n\n');
+            } catch (err: any) {
+              const result = { agent, ok: false, reply: `**${agent.name}** error: ${err?.message || 'unknown'}` };
+              results.push(result);
+              addMultiAgentReply(result);
+              priorContext = [
+                priorContext,
+                `Agent: ${agent.name}`,
+                `Blocked: ${err?.message || 'unknown error'}`,
+              ].filter(Boolean).join('\n\n');
             }
+          }
+          setBotTyping(false);
+          addMultiAgentCompletion(results);
+        })().catch((err: any) => {
+          setBotTyping(false);
+          addBotMessage(`Multi-agent ${strategyLabel} failed: ${err?.message || 'unknown error'}`, undefined, {
+            localOnly: true,
+            source: {
+              actor: 'OpenSwan',
+              surface: `${strategySurface}_error`,
+              selectedModel: selectedModel || null,
+            },
           });
-          return;
-        }
+        });
+        return;
       }
+
+      Promise.allSettled(
+        targets.map(async (agent, index) => {
+          try {
+            const task = buildMultiAgentDispatchPrompt(multiAgentPlan, agent, index);
+            const reply = await dispatchAssignedAgentTask(agent, task);
+            return { agent, ok: true, reply };
+          } catch (err: any) {
+            return { agent, ok: false, reply: `**${agent.name}** error: ${err?.message || 'unknown'}` };
+          }
+        }),
+      ).then((settled) => {
+        setBotTyping(false);
+        const results: MultiAgentChatResult[] = [];
+        for (let index = 0; index < settled.length; index += 1) {
+          const s = settled[index];
+          if (s.status === 'fulfilled') {
+            results.push(s.value);
+            addMultiAgentReply(s.value);
+          } else {
+            const agent = targets[index];
+            if (agent) {
+              const result = { agent, ok: false, reply: `**${agent.name}** error: ${String(s.reason)}` };
+              results.push(result);
+              addMultiAgentReply(result);
+            } else {
+              addBotMessage(`Multi-agent ${strategyLabel} error: ${String(s.reason)}`, undefined, {
+                localOnly: true,
+                source: {
+                  actor: 'OpenSwan',
+                  surface: `${strategySurface}_error`,
+                  selectedModel: selectedModel || null,
+                },
+              });
+            }
+          }
+        }
+        addMultiAgentCompletion(results);
+      }).catch((err: any) => {
+        setBotTyping(false);
+        addBotMessage(`Multi-agent ${strategyLabel} failed: ${err?.message || 'unknown error'}`, undefined, {
+          localOnly: true,
+          source: {
+            actor: 'OpenSwan',
+            surface: `${strategySurface}_error`,
+            selectedModel: selectedModel || null,
+          },
+        });
+      });
+      return;
     }
 
     // ─── Slash intercepts (pure lib calls, no planner) ──────────────────────
@@ -4382,7 +4670,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             content: m.content,
           }));
           const fallback = await invokeAnyChat({
-            modelId: selectedModel || 'claude-sonnet-4-6',
+            modelId: resolveSendModel(content) || 'claude-haiku-4-5',
             messages: [
               { role: 'system', content: 'Web search is unavailable for this turn. Answer from training knowledge and clearly note when information may be out of date.' },
               ...recent,
@@ -4502,6 +4790,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           userName: currentUserName,
           model: sendModel || undefined,
           sessionArchiveContext: sessionArchiveContext || undefined,
+          connectedProviders: connectedProviderSet,
         };
 
         // Inject recent chat context so the AI can reference prior messages
@@ -4530,6 +4819,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             prompt: fullPrompt,
             model: sendModel || undefined,
             mode: chatMode as any,
+            connectedProviders: connectedProviderSet,
             context: {
               chatHistory,
               sessionArchiveContext: sessionArchiveContext || undefined,
@@ -4570,7 +4860,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // exposes. Forcing them off the streaming fast-path lets
             // BlackSwan actually call rooms.create / circle.update_* /
             // missions.* instead of replying "I can't do that."
-            const streamCandidateModel = resolveSendModel(cleanContent) || 'claude-sonnet-4-6';
+            const streamCandidateModel = resolveSendModel(cleanContent) || 'claude-haiku-4-5';
             const canStream = sessionDelegationMode !== 'parallel'
               && !isFigmaBuildRequest
               && !isCodingGenerationRequest(cleanContent, sessionProfile)
@@ -4700,6 +4990,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             const structured = await runOpenSwanSessionTurn({
               message: augmentedPrompt,
             context,
+            connectedProviders: connectedProviderSet,
             surface: 'main_chat',
             chatSessionId: activeThreadId,
             mode: 'talk',
@@ -6923,7 +7214,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               await runLocalBrowserPlan(planToRun, permission, originToRun);
               return;
             }
-            const started = await computerUseTask.run(taskToRun);
+            const started = await computerUseTask.run(taskToRun, {
+              model: resolveSendModel(taskToRun) || undefined,
+            });
             if (!started.started) {
               addBotMessage(`**Computer Use** could not start: ${started.reason || 'unknown error'}`);
               return;
@@ -8590,6 +8883,15 @@ function modelPickerProviderIcon(provider?: string): string {
   return 'AI';
 }
 
+function modelBrowserKeyForMarketplaceGroup(group: ModelGroup): string {
+  const provider = String(group.provider || 'provider');
+  const label = String(group.label || provider)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  return `marketplace:${provider}:${label || 'models'}`;
+}
+
 function formatContextWindow(contextWindow?: number): string | null {
   if (!contextWindow || contextWindow <= 0) return null;
   if (contextWindow >= 1_000_000) return `${(contextWindow / 1_000_000).toFixed(1)}M ctx`;
@@ -8943,7 +9245,7 @@ function EnhancedInput({
     color: modelPickerProviderColor(selectedMarketplaceModel.provider, selectedMarketplaceModel.groupConnected),
   } : CHAT_MODELS[0]);
   const browseableBaseModelSections: ModelBrowserSection[] = useMemo(() => {
-    return MODEL_GROUPS.slice(1).map((group) => {
+    return MODEL_GROUPS.map((group) => {
       const groupModels = group.key === 'popular'
         ? popularModels
         : CHAT_MODELS.filter((model: ChatPickerModel) => model.group === group.key);
@@ -8973,7 +9275,7 @@ function EnhancedInput({
         const provider = group.provider as string;
         const color = modelPickerProviderColor(provider, group.connected);
         return {
-          key: `marketplace:${provider}`,
+          key: modelBrowserKeyForMarketplaceGroup(group),
           label: group.label,
           color,
           icon: modelPickerProviderIcon(provider),
@@ -8992,29 +9294,51 @@ function EnhancedInput({
         };
       });
   }, [marketplaceModelGroups]);
+  const customModelBrowserSections: ModelBrowserSection[] = useMemo(() => {
+    if (customModels.length === 0) return [];
+    return [{
+      key: 'custom:hf-hub',
+      label: 'Custom HF Hub Models',
+      color: '#f59e0b',
+      icon: 'HF',
+      connected: true,
+      sourceLabel: 'your saved Hugging Face Hub models',
+      models: customModels.map((model: ChatPickerModel) => ({
+        id: model.id,
+        label: model.label,
+        description: model.desc,
+        ready: true,
+        color: model.color || '#f59e0b',
+        icon: model.icon || 'HF',
+        contextWindow: model.contextWindow,
+      })),
+    }];
+  }, [customModels]);
   const modelBrowserSections = useMemo(() => {
-    return [...browseableBaseModelSections, ...marketplaceModelBrowserSections];
-  }, [browseableBaseModelSections, marketplaceModelBrowserSections]);
+    return [...browseableBaseModelSections, ...marketplaceModelBrowserSections, ...customModelBrowserSections];
+  }, [browseableBaseModelSections, marketplaceModelBrowserSections, customModelBrowserSections]);
   const activeModelBrowserSection = activeModelBrowserKey
     ? modelBrowserSections.find((section) => section.key === activeModelBrowserKey) || null
     : null;
   const huggingFaceMarketplaceGroup = marketplaceModelGroups.find((group) => group.provider === 'hugging_face');
-  const primaryBuiltInModelGroups = MODEL_GROUPS.slice(0, 1);
+  const smartBuiltInModelGroup = MODEL_GROUPS.find((group) => group.key === 'smart');
   const popularBuiltInModelGroup = MODEL_GROUPS.find((group) => group.key === 'popular');
-  const secondaryBuiltInModelGroups = MODEL_GROUPS.slice(2);
+  const secondaryBuiltInModelGroups = MODEL_GROUPS.filter((group) => group.key !== 'smart' && group.key !== 'popular');
   const visibleMarketplaceModelGroups = useMemo(() => {
     return [...marketplaceModelGroups]
-      .filter((group) => group.provider !== 'hugging_face')
       .sort((a, b) => {
         if (a.connected !== b.connected) return a.connected ? -1 : 1;
         if (a.provider === 'anthropic') return -1;
         if (b.provider === 'anthropic') return 1;
+        if (a.provider === 'hugging_face') return -1;
+        if (b.provider === 'hugging_face') return 1;
         return a.label.localeCompare(b.label);
       });
   }, [marketplaceModelGroups]);
   const anthropicMarketplaceGroup = visibleMarketplaceModelGroups.find((group) => group.provider === 'anthropic');
-  const connectedMarketplaceModelGroups = visibleMarketplaceModelGroups.filter((group) => group.connected && group.provider !== 'anthropic');
-  const disconnectedMarketplaceModelGroups = visibleMarketplaceModelGroups.filter((group) => !group.connected && group.provider !== 'anthropic');
+  const huggingFaceMarketplaceGroups = visibleMarketplaceModelGroups.filter((group) => group.provider === 'hugging_face');
+  const connectedMarketplaceModelGroups = visibleMarketplaceModelGroups.filter((group) => group.connected && group.provider !== 'anthropic' && group.provider !== 'hugging_face');
+  const disconnectedMarketplaceModelGroups = visibleMarketplaceModelGroups.filter((group) => !group.connected && group.provider !== 'anthropic' && group.provider !== 'hugging_face');
 
   // Connected provider set — drives Auto's bias toward the team's BYOK
   // keys. When OpenRouter is connected, Auto routes through OR-prefixed
@@ -9185,98 +9509,76 @@ function EnhancedInput({
     const provider = group.provider as string;
     const providerColor = modelPickerProviderColor(provider, group.connected);
     const providerIconText = modelPickerProviderIcon(provider);
-    // Group key includes the label because two groups now share
-    // provider='hugging_face' (BlackSwan + plain Hugging Face). React
-    // would collapse them on duplicate keys and one wouldn't render.
-    const groupKey = `mkt-${provider}-${(group.label || '').replace(/\s+/g, '_').toLowerCase()}`;
-    // Visual parity with renderExpandedBuiltInModelGroup — same
-    // dropdownCategoryTitle, same dropdownItem layout (icon box +
-    // label/desc/tags + active dot), same hover treatment. The only
-    // marketplace-specific bit is the "not connected" pill in the
-    // header and the disconnected hint at the bottom.
-    const visibleModels = !group.models
-      ? []
-      : group.models.slice(0, group.connected ? 12 : 4);
+    const browserKey = modelBrowserKeyForMarketplaceGroup(group);
+    const groupKey = `mkt-${provider}-${browserKey}`;
+    const modelCount = group.models?.length || 0;
     return (
       <View key={groupKey}>
         <Text style={[styles.dropdownCategoryTitle, { color: providerColor }]}>
-          {group.label.toUpperCase()}
+          {group.label}
           {!group.connected ? (
             <Text style={{ color: '#475569', fontSize: 9, fontWeight: '500', fontStyle: 'italic' }}>{'  · not connected'}</Text>
           ) : null}
         </Text>
-        {visibleModels.map((opt) => {
-          const isActive = opt.id === selectedModel;
-          const isHovered = hoveredModel === opt.id;
-          // Tags are derived from the model id / description so the
-          // chips read the same as built-in groups (text/code/web/
-          // vision/reason/images). Best-effort heuristic — keeps the
-          // visual rhythm without requiring marketplace integrations
-          // to hand-tag every model.
-          const tagSeed = `${opt.id} ${opt.description || ''}`.toLowerCase();
-          const tags: string[] = [];
-          if (/code|codex/.test(tagSeed)) tags.push('code');
-          if (/vision|gpt-4o|gpt-5|gemini|computer-use/.test(tagSeed)) tags.push('vision');
-          if (/o3|o4|reason|deepseek-r/.test(tagSeed)) tags.push('reason');
-          if (/flash|nano|mini|haiku|fast/.test(tagSeed)) tags.push('text');
-          if (/image|flux|stable-diff|sd-/.test(tagSeed)) tags.push('images');
-          if (/sonar|search|web/.test(tagSeed)) tags.push('web');
-          if (tags.length === 0) tags.push('text');
-          return (
-            <Pressable
-              key={opt.id}
-              onPress={() => {
-                if (!opt.ready) return;
-                onModelChange(opt.id);
-                setShowModelPicker(false);
-              }}
-              disabled={!opt.ready}
-              onHoverIn={() => setHoveredModel(opt.id)}
-              onHoverOut={() => setHoveredModel(null)}
-              accessibilityRole="button"
-              style={[
-                styles.dropdownItem,
-                isActive && { backgroundColor: providerColor + '18', borderColor: providerColor + '40' },
-                isHovered && opt.ready && !isActive && { backgroundColor: '#1a1a28' },
-                !opt.ready && { opacity: 0.35 },
-                ...(Platform.OS === 'web' ? [{ transition: 'all 0.15s ease', cursor: opt.ready ? 'pointer' : 'not-allowed' } as any] : []),
-              ]}
-            >
-              <View style={[styles.dropdownItemIcon, { backgroundColor: providerColor + '20' }]}>
-                <Text style={[styles.dropdownItemIconText, { color: providerColor }]}>{providerIconText}</Text>
-              </View>
-              <View style={styles.dropdownItemText}>
-                <Text style={[styles.dropdownItemLabel, isActive && { color: providerColor }]} numberOfLines={1}>{opt.label}</Text>
-                {opt.description ? (
-                  <Text style={styles.dropdownItemDesc} numberOfLines={1}>{opt.description}</Text>
-                ) : null}
-                {tags.length > 0 ? (
-                  <View style={{ flexDirection: 'row', gap: 3, marginTop: 2, flexWrap: 'wrap' }}>
-                    {tags.map((tag: string) => {
-                      const tagColors: Record<string, string> = { images: '#84cc16', vision: '#22d3ee', code: '#a855f7', text: '#606075', web: '#f59e0b', reason: '#ec4899' };
-                      return (
-                        <View key={tag} style={{ backgroundColor: (tagColors[tag] || '#606075') + '15', paddingHorizontal: 4, paddingVertical: 1, borderRadius: 2 }}>
-                          <Text style={{ color: tagColors[tag] || '#606075', fontSize: 7, fontWeight: '700', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' }}>{tag.toUpperCase()}</Text>
-                        </View>
-                      );
-                    })}
-                  </View>
-                ) : null}
-              </View>
-              {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: providerColor }]} />}
-            </Pressable>
-          );
-        })}
-        {!group.connected && group.hint ? (
-          <Text style={{ color: '#475569', fontSize: 10, paddingHorizontal: 12, paddingVertical: 4, lineHeight: 14, fontStyle: 'italic' }}>
-            {group.hint}
-          </Text>
-        ) : null}
-        {visibleModels.length === 0 && group.hint ? (
-          <Text style={{ color: '#475569', fontSize: 10, paddingHorizontal: 12, paddingVertical: 4, lineHeight: 14 }}>
-            {group.hint}
-          </Text>
-        ) : null}
+        <Pressable
+          onPress={() => {
+            setActiveModelBrowserKey(browserKey);
+            setShowAddModel(false);
+          }}
+          accessibilityRole="button"
+          style={[
+            styles.dropdownItem,
+            { borderWidth: 1, borderColor: providerColor + '35', backgroundColor: providerColor + '10' },
+            ...(Platform.OS === 'web' ? [{ cursor: 'pointer' } as any] : []),
+          ]}
+        >
+          <View style={[styles.dropdownItemIcon, { backgroundColor: providerColor + '20' }]}>
+            <Text style={[styles.dropdownItemIconText, { color: providerColor }]}>{providerIconText}</Text>
+          </View>
+          <View style={styles.dropdownItemText}>
+            <Text style={[styles.dropdownItemLabel, { color: providerColor }]}>{group.label}</Text>
+            <Text style={styles.dropdownItemDesc} numberOfLines={1}>
+              {modelCount > 0
+                ? `${modelCount} model${modelCount === 1 ? '' : 's'}${group.connected ? '' : ' · connect to run'}`
+                : group.hint || 'No models loaded yet'}
+            </Text>
+          </View>
+          <Text style={[styles.modelChevron, { color: providerColor }]}>{'>'}</Text>
+        </Pressable>
+      </View>
+    );
+  };
+
+  const renderCustomModelGroup = () => {
+    if (customModels.length === 0) return null;
+    const section = customModelBrowserSections[0];
+    if (!section) return null;
+    return (
+      <View key="custom-hf-hub-models">
+        <Text style={[styles.dropdownCategoryTitle, { color: section.color }]}>{section.label}</Text>
+        <Pressable
+          onPress={() => {
+            setActiveModelBrowserKey(section.key);
+            setShowAddModel(false);
+          }}
+          accessibilityRole="button"
+          style={[
+            styles.dropdownItem,
+            { borderWidth: 1, borderColor: section.color + '35', backgroundColor: section.color + '10' },
+            ...(Platform.OS === 'web' ? [{ cursor: 'pointer' } as any] : []),
+          ]}
+        >
+          <View style={[styles.dropdownItemIcon, { backgroundColor: section.color + '20' }]}>
+            <Text style={[styles.dropdownItemIconText, { color: section.color }]}>{section.icon}</Text>
+          </View>
+          <View style={styles.dropdownItemText}>
+            <Text style={[styles.dropdownItemLabel, { color: section.color }]}>{section.label}</Text>
+            <Text style={styles.dropdownItemDesc}>
+              {`${section.models.length} saved model${section.models.length === 1 ? '' : 's'}`}
+            </Text>
+          </View>
+          <Text style={[styles.modelChevron, { color: section.color }]}>{'>'}</Text>
+        </Pressable>
       </View>
     );
   };
@@ -9356,11 +9658,13 @@ function EnhancedInput({
           {/* Model Dropdown */}
           {showModelPicker && !showAddModel && !activeModelBrowserKey && (
             <AnimatedPopup style={[styles.dropdownPanel, { maxHeight: 480, width: 320, left: 0, right: 'auto' }, ...(Platform.OS === 'web' ? [{ boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)', overflowY: 'auto' } as any] : [])]}>
-              {primaryBuiltInModelGroups.map(renderExpandedBuiltInModelGroup)}
+              {smartBuiltInModelGroup ? renderBrowseBuiltInModelGroup(smartBuiltInModelGroup) : null}
               {popularBuiltInModelGroup ? renderBrowseBuiltInModelGroup(popularBuiltInModelGroup) : null}
               {anthropicMarketplaceGroup ? renderMarketplaceModelGroup(anthropicMarketplaceGroup) : null}
               <Text style={[styles.dropdownCategoryTitle, { color: '#ffbd45' }]}>Hugging Face</Text>
               {renderAddHFHubModelAction()}
+              {huggingFaceMarketplaceGroups.map(renderMarketplaceModelGroup)}
+              {renderCustomModelGroup()}
               {connectedMarketplaceModelGroups.map(renderMarketplaceModelGroup)}
               {secondaryBuiltInModelGroups.map(renderBrowseBuiltInModelGroup)}
               {disconnectedMarketplaceModelGroups.map(renderMarketplaceModelGroup)}

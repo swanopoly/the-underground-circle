@@ -36,6 +36,8 @@ interface ComputerUsePanelProps {
 
 const ACTION_ICONS: Record<string, string> = {
   navigate: '>',
+  observe: 'O',
+  extract: 'X',
   click: '*',
   fill: 'E',
   screenshot: '#',
@@ -384,6 +386,11 @@ function ActionRow({
             {action.error}
           </Text>
         )}
+        {action.output ? (
+          <Text style={styles.actionOutput} numberOfLines={4}>
+            {action.output}
+          </Text>
+        ) : null}
         {action.approvalReason ? (
           <Text style={styles.actionApprovalNote} numberOfLines={2}>
             APPROVAL: {action.approvalReason}
@@ -705,6 +712,11 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
     fontSize: 9,
     color: '#ef4444',
+  },
+  actionOutput: {
+    fontFamily: 'monospace',
+    fontSize: 9,
+    color: '#a7f3d0',
   },
   actionApprovalNote: {
     fontFamily: 'monospace',

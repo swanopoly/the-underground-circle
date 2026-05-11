@@ -11,6 +11,21 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { exec, execSync, execFile, execFileSync } = require('child_process');
+const {
+  clampLaunchCount,
+  loadManagedTerminalSessions,
+  makeLaunchId,
+  makeTerminalTitle,
+  normalizeCliPrompt,
+  openTerminal,
+  promptPreview,
+  readJsonBody: readJsonBodyPromise,
+  safeProjectDir,
+  saveManagedTerminalSession,
+  sendToTerminalByTitle,
+  shellQuote,
+  shellTextArg,
+} = require('./terminal-launch-utils');
 
 // UC-3: Playwright-backed /browser/* surface. Lazy-loaded so the
 // bridge still boots on machines without playwright installed (we log
@@ -38,6 +53,7 @@ const ACTIVE_THRESHOLD = 120_000;    // 2min → active (was 30s — too aggress
 const IDLE_THRESHOLD = 3_600_000;    // 1h → still show session (was 5min — missed live sessions)
 const TAIL_BYTES = 2 * 1024 * 1024; // Read last 2MB of each JSONL (was 16KB — way too small for token counting)
 const SCAN_INTERVAL = 5000;        // Scan filesystem every 5s
+const LAUNCHED_SESSION_TTL = 12 * 60 * 60_000;
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -61,8 +77,54 @@ const CORS = {
   'Content-Type': 'application/json',
 };
 
+function configuredBridgeOrigins() {
+  return String(process.env.UC_BRIDGE_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function isBridgeOriginAllowed(req) {
+  const origin = String(req.headers.origin || '').trim();
+  if (!origin) return true;
+  if (configuredBridgeOrigins().includes(origin)) return true;
+  try {
+    const parsed = new URL(origin);
+    const host = parsed.hostname.toLowerCase();
+    const isLocalhost = (
+      host === 'localhost'
+      || host === '127.0.0.1'
+      || host === '::1'
+      || host === '[::1]'
+    );
+    if ((parsed.protocol === 'http:' || parsed.protocol === 'https:') && isLocalhost) return true;
+    if (parsed.protocol === 'https:' && (host === 'app.chrisswanson.xyz' || host.endsWith('.chrisswanson.xyz'))) return true;
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function isDesktopTokenValid(req) {
+  const sentToken = req.headers['x-uc-desktop-token'];
+  return !!sentToken && sentToken === getOrCreateDesktopToken();
+}
+
+function buildCorsHeaders(req) {
+  const origin = String(req.headers.origin || '').trim();
+  const originAllowed = isBridgeOriginAllowed(req);
+  return {
+    ...CORS,
+    'Access-Control-Allow-Origin': origin
+      ? (originAllowed ? origin : 'null')
+      : '*',
+    'Vary': 'Origin',
+  };
+}
+
 let cachedSessions = [];
 let lastScanTime = '';
+let launchedSessions = loadManagedTerminalSessions('claude-code');
 
 // ── Device discovery cache (10s TTL) ────────────────────────────────────────
 const deviceCache = { data: null, timestamp: 0 };
@@ -295,7 +357,21 @@ function scanSessions() {
     const scanned = scanDirectory(claudeDir);
     sessions.push(...scanned);
   }
-  return sessions;
+
+  launchedSessions = launchedSessions.filter((s) => {
+    const age = Date.now() - new Date(s.lastActivity).getTime();
+    return age < LAUNCHED_SESSION_TTL;
+  }).map((s) => {
+    const age = Date.now() - new Date(s.lastActivity).getTime();
+    return { ...s, status: age < ACTIVE_THRESHOLD ? s.status : 'idle' };
+  });
+
+  const seen = new Set();
+  return [...launchedSessions, ...sessions].filter((s) => {
+    if (seen.has(s.sessionId)) return false;
+    seen.add(s.sessionId);
+    return true;
+  });
 }
 
 function scanDirectory(claudeDir) {
@@ -463,6 +539,185 @@ function scanDirectory(claudeDir) {
   return sessions;
 }
 
+function buildClaudeManagedPrompt({ sessionId, displayName, index, count, prompt }) {
+  const cleanPrompt = normalizeCliPrompt(prompt) || `Stand by for delegated work from The Underground Circle. You are session ${index + 1} of ${count}.`;
+  return [
+    `[UC-CLAUDE-CODE:${sessionId}]`,
+    `You are ${displayName}, a managed Claude Code terminal session launched from The Underground Circle.`,
+    `Session ${index + 1} of ${count}. Work independently and keep concise terminal notes.`,
+    '',
+    'User task:',
+    cleanPrompt,
+  ].join('\n');
+}
+
+function registerLaunchedClaudeSession(data) {
+  const session = {
+    sessionId: data.sessionId,
+    projectDir: data.projectDir || process.cwd(),
+    projectHash: data.projectHash || 'manual-launch',
+    model: data.model || 'claude-code',
+    status: data.status || 'active',
+    kind: 'main',
+    parentSessionId: null,
+    slug: data.slug || data.displayName || data.sessionId,
+    displayName: data.displayName,
+    task: data.task || 'Claude Code terminal session',
+    lastActivity: data.lastActivity || new Date().toISOString(),
+    version: data.version || '',
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    cachedTokens: 0,
+    newTokens: 0,
+    messageCount: 0,
+    recentActions: data.recentActions || [],
+    subagentCount: 0,
+    lastUserMessage: data.prompt || data.task || '',
+    lastAssistantText: '',
+    recentToolCalls: [],
+    activeFiles: [],
+    currentToolName: '',
+    currentToolFile: '',
+    prompt: data.prompt,
+    launchId: data.launchId,
+    launchedAt: data.launchedAt,
+    terminal: data.terminal,
+    terminalPid: data.terminalPid,
+    launchError: data.launchError,
+    terminalTitle: data.terminalTitle,
+    manageable: Boolean(data.terminalTitle),
+  };
+  const idx = launchedSessions.findIndex((s) => s.sessionId === session.sessionId);
+  if (idx >= 0) launchedSessions[idx] = session;
+  else launchedSessions.push(session);
+  if (session.terminalTitle) saveManagedTerminalSession('claude-code', session);
+  return session;
+}
+
+function buildClaudeLaunchCommand({ cwd, prompt, model, permissionMode, displayName }) {
+  const parts = ['claude'];
+  if (displayName) parts.push('-n', shellQuote(displayName));
+  if (model) parts.push('--model', shellQuote(model));
+  if (permissionMode) parts.push('--permission-mode', shellQuote(permissionMode));
+  parts.push(shellTextArg(prompt));
+  return `cd ${shellQuote(cwd)} && ${parts.join(' ')}`;
+}
+
+async function launchClaudeCodeSessions(data) {
+  const prompts = Array.isArray(data.prompts)
+    ? data.prompts.map((p) => normalizeCliPrompt(p)).filter(Boolean)
+    : [];
+  const count = clampLaunchCount(data.count || prompts.length || 1);
+  const cwd = safeProjectDir(data.cwd || data.projectDir);
+  const launchId = data.launchId || makeLaunchId('claude-code-launch');
+  const model = data.model ? String(data.model).trim() : '';
+  const permissionMode = data.permissionMode ? String(data.permissionMode).trim() : '';
+  const basePrompt = normalizeCliPrompt(data.prompt || data.task || '');
+  const sessions = [];
+  const failed = [];
+
+  for (let i = 0; i < count; i++) {
+    const sessionId = `${launchId}-${i + 1}`;
+    const displayName = Array.isArray(data.names) && data.names[i] ? String(data.names[i]) : `Claude Code #${i + 1}`;
+    const cleanPrompt = prompts[i] || basePrompt || `Stand by as ${displayName}. Wait for a delegated task from The Underground Circle.`;
+    const cliPrompt = buildClaudeManagedPrompt({ sessionId, displayName, index: i, count, prompt: cleanPrompt });
+    const command = buildClaudeLaunchCommand({ cwd, prompt: cliPrompt, model, permissionMode, displayName });
+    const launchedAt = new Date().toISOString();
+    const terminalTitle = makeTerminalTitle('Claude Code', displayName, sessionId);
+    const terminalResult = await openTerminal(command, terminalTitle);
+    const session = registerLaunchedClaudeSession({
+      sessionId,
+      projectDir: cwd,
+      model: model || 'claude-code',
+      status: terminalResult.ok ? 'active' : 'idle',
+      displayName,
+      slug: displayName,
+      task: promptPreview(cleanPrompt, 240),
+      prompt: cleanPrompt,
+      launchId,
+      launchedAt,
+      lastActivity: launchedAt,
+      terminal: terminalResult.terminal,
+      terminalPid: terminalResult.pid,
+      terminalTitle: terminalResult.terminalTitle || terminalTitle,
+      launchError: terminalResult.ok ? undefined : terminalResult.error,
+      recentActions: [
+        terminalResult.ok
+          ? `Launched in ${terminalResult.terminal || 'terminal'}`
+          : `Launch failed: ${terminalResult.error || 'unknown error'}`,
+        `Prompt: ${promptPreview(cleanPrompt, 160)}`,
+      ],
+    });
+    sessions.push(session);
+    if (!terminalResult.ok) failed.push({ sessionId, displayName, error: terminalResult.error || 'Launch failed' });
+  }
+
+  return {
+    ok: failed.length === 0,
+    launchId,
+    sessions,
+    launched: sessions.length - failed.length,
+    failed,
+    projectDir: cwd,
+  };
+}
+
+function findLaunchedClaudeSession(sessionId) {
+  const key = String(sessionId || '').trim().toLowerCase();
+  if (!key) return null;
+  return cachedSessions.find((s) =>
+    String(s.sessionId || '').toLowerCase() === key
+    || String(s.displayName || s.slug || '').toLowerCase() === key
+    || String(s.sessionId || '').toLowerCase().startsWith(key)
+  ) || null;
+}
+
+function buildClaudeFollowupPrompt(message) {
+  return [
+    '[UC-CLAUDE-CODE-CONTROL]',
+    'Follow-up instruction from The Underground Circle chat:',
+    normalizeCliPrompt(message),
+  ].join('\n');
+}
+
+async function sendToLaunchedClaudeSession(data) {
+  const session = findLaunchedClaudeSession(data.sessionId || data.target || data.displayName);
+  if (!session) return { ok: false, error: 'Claude Code session not found.' };
+  if (!session.terminalTitle) {
+    return {
+      ok: false,
+      error: 'This Claude Code session was detected but was not launched by The Underground Circle, so it cannot be safely targeted from chat. Launch a managed Claude Code session from chat first.',
+      session,
+    };
+  }
+  const message = normalizeCliPrompt(data.message || data.command || data.prompt || '');
+  if (!message) return { ok: false, error: 'Missing message.' };
+  const result = await sendToTerminalByTitle(session.terminalTitle, buildClaudeFollowupPrompt(message));
+  if (!result.ok) return { ok: false, error: result.error || 'Terminal send failed.', session };
+
+  const updated = registerLaunchedClaudeSession({
+    ...session,
+    status: 'active',
+    task: promptPreview(message, 240),
+    prompt: message,
+    lastActivity: new Date().toISOString(),
+    messageCount: (session.messageCount || 0) + 1,
+    recentActions: [
+      ...(session.recentActions || []).slice(-4),
+      `Chat sent: ${promptPreview(message, 120)}`,
+    ],
+  });
+  doScan();
+  return {
+    ok: true,
+    provider: 'claude-code',
+    sessionId: updated.sessionId,
+    displayName: updated.displayName || updated.slug,
+    message: `Sent to ${updated.displayName || updated.slug || updated.sessionId}.`,
+    session: updated,
+  };
+}
+
 // ── Periodic scan ───────────────────────────────────────────────────────────
 
 function doScan() {
@@ -479,7 +734,9 @@ setInterval(doScan, SCAN_INTERVAL);
 
 // ── HTTP server ─────────────────────────────────────────────────────────────
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
+  const CORS = buildCorsHeaders(req);
+
   if (req.method === 'OPTIONS') {
     res.writeHead(200, CORS);
     res.end();
@@ -488,15 +745,64 @@ const server = http.createServer((req, res) => {
 
   const url = req.url.split('?')[0];
 
+  if (!isBridgeOriginAllowed(req)) {
+    res.writeHead(403, CORS);
+    res.end(JSON.stringify({ ok: false, error: 'Origin blocked by bridge allowlist.' }));
+    return;
+  }
+
   if (url === '/health') {
     res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: true, version: '1.0.0', sessions: cachedSessions.length }));
+    res.end(JSON.stringify({
+      ok: true,
+      bridge: 'claude-code',
+      version: '1.1.0',
+      sessions: cachedSessions.length,
+      capabilities: ['sessions', 'exec', 'desktop', 'browser', 'launch', 'spawn', 'terminal-send'],
+    }));
     return;
   }
 
   if (url === '/sessions') {
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ sessions: cachedSessions, timestamp: lastScanTime }));
+    return;
+  }
+
+  if (url === '/launch' && req.method === 'POST') {
+    if (!isDesktopTokenValid(req)) {
+      res.writeHead(401, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop token. Pair first via POST /desktop/pair.' }));
+      return;
+    }
+    try {
+      const data = await readJsonBodyPromise(req);
+      const result = await launchClaudeCodeSessions(data);
+      doScan();
+      res.writeHead(result.ok ? 200 : 207, CORS);
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      res.writeHead(400, CORS);
+      res.end(JSON.stringify({ ok: false, error: e.message || 'Launch failed' }));
+    }
+    return;
+  }
+
+  if (url === '/terminal/send' && req.method === 'POST') {
+    if (!isDesktopTokenValid(req)) {
+      res.writeHead(401, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop token. Pair first via POST /desktop/pair.' }));
+      return;
+    }
+    try {
+      const data = await readJsonBodyPromise(req);
+      const result = await sendToLaunchedClaudeSession(data);
+      res.writeHead(result.ok ? 200 : 409, CORS);
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      res.writeHead(400, CORS);
+      res.end(JSON.stringify({ ok: false, error: e.message || 'Send failed' }));
+    }
     return;
   }
 
@@ -1313,6 +1619,17 @@ const server = http.createServer((req, res) => {
         return;
       }
 
+      const publicMcpMethods = new Set(['initialize', 'tools/list', 'resources/list']);
+      if (!publicMcpMethods.has(method) && !isDesktopTokenValid(req)) {
+        res.writeHead(401, CORS);
+        res.end(JSON.stringify({
+          jsonrpc: '2.0',
+          id,
+          error: { code: -32001, message: 'Missing or invalid desktop token. Pair first via POST /desktop/pair.' },
+        }));
+        return;
+      }
+
       // MCP tool definitions
       const MCP_TOOLS = [
         {
@@ -1768,13 +2085,16 @@ const server = http.createServer((req, res) => {
       platform: process.platform,
       supported: process.platform === 'darwin',
       tools: process.platform === 'darwin'
-        ? ['launch', 'focus', 'type', 'keys', 'running_apps', 'screenshot', 'wait_for_app', 'open_url', 'open_path', 'click_at', 'screen_size',
+        ? ['launch', 'focus', 'type', 'keys', 'running_apps', 'browser_tabs', 'window_state', 'clipboard', 'clipboard_write', 'clipboard_clear',
+           'file_list', 'file_read', 'file_search', 'shortcuts_list', 'shortcuts_run', 'window_manage', 'mouse_move', 'mouse_click', 'mouse_drag', 'mouse_scroll',
+           'screenshot', 'wait_for_app', 'open_url', 'open_path', 'click_at', 'screen_size',
            ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper')) ? ['a11y_tree', 'click_element'] : [])]
         : [],
       // Surface whether the more-reliable click backend is available
       // so clients can decide whether to attempt `click_at` at all.
       optional: {
         cliclick: desktopToolsHas('cliclick'),
+        input_helper: fs.existsSync(path.join(__dirname, 'bin', 'uc-input-helper')),
         ax_helper: fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper')),
       },
     }));
@@ -1796,20 +2116,6 @@ const server = http.createServer((req, res) => {
     // Still local-only (bridge binds to localhost by default) so only
     // a same-machine request reaches this handler.
     if (url === '/desktop/pair' && req.method === 'POST') {
-      // Require an explicit `Origin` header hint that we recognise to
-      // stop random arbitrary-origin websites from issuing the pair
-      // call in the background. Browsers send Origin on cross-origin
-      // POSTs; CLI tools can send the header explicitly.
-      const origin = String(req.headers.origin || '');
-      const originAllowed = origin === ''
-        || origin.startsWith('http://localhost')
-        || origin.startsWith('http://127.0.0.1')
-        || origin === 'https://app.chrisswanson.xyz';
-      if (!originAllowed) {
-        res.writeHead(403, CORS);
-        res.end(JSON.stringify({ ok: false, error: 'Pairing origin not allowlisted.' }));
-        return;
-      }
       res.writeHead(200, CORS);
       res.end(JSON.stringify({ ok: true, token, tokenFile: '~/.uc-desktop-token' }));
       return;
@@ -1835,6 +2141,319 @@ const server = http.createServer((req, res) => {
           .filter(Boolean);
         res.writeHead(200, CORS);
         res.end(JSON.stringify({ ok: true, apps }));
+      });
+      return;
+    }
+
+    if (url === '/desktop/browser_tabs' && req.method === 'GET') {
+      const parsed = new URL(req.url, 'http://localhost');
+      const requested = String(parsed.searchParams.get('browsers') || '')
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+      readBrowserTabs(requested, (result) => {
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: true, ...result }));
+      });
+      return;
+    }
+
+    if (url === '/desktop/window_state' && req.method === 'GET') {
+      readWindowState((err, state) => {
+        if (err) {
+          res.writeHead(500, CORS);
+          res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+          return;
+        }
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: true, ...state }));
+      });
+      return;
+    }
+
+    if (url === '/desktop/clipboard' && req.method === 'GET') {
+      execFile('pbpaste', [], { timeout: 3000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+        if (err) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+          return;
+        }
+        const text = String(stdout || '');
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: true, text, chars: text.length, truncated: false }));
+      });
+      return;
+    }
+
+    if (url === '/desktop/clipboard_write' && req.method === 'POST') {
+      readJsonBody(req, 8192, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const text = String(parsed?.text ?? '');
+        if (text.length > 4000) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'text too long (max 4000 chars per call)' })); return; }
+        exec(`printf %s ${shellSingleQuote(text)} | pbcopy`, { timeout: 3000 }, (err) => {
+          if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err.message })); return; }
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, chars: text.length }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/clipboard_clear' && req.method === 'POST') {
+      exec(`printf '' | pbcopy`, { timeout: 3000 }, (err) => {
+        if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err.message })); return; }
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: true }));
+      });
+      return;
+    }
+
+    if (url === '/desktop/file_list' && req.method === 'GET') {
+      const parsed = new URL(req.url, 'http://localhost');
+      const validated = validateDesktopPathServer(parsed.searchParams.get('path') || '');
+      if (!validated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: validated.error })); return; }
+      try {
+        const dir = expandDesktopPath(validated.path);
+        const entries = fs.readdirSync(dir, { withFileTypes: true }).slice(0, 250).map((entry) => {
+          const full = path.join(dir, entry.name);
+          let size = null;
+          let modifiedAt = null;
+          try {
+            const stat = fs.statSync(full);
+            size = stat.size;
+            modifiedAt = stat.mtime.toISOString();
+          } catch {}
+          return { name: entry.name, path: full, kind: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other', size, modifiedAt };
+        });
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: true, path: dir, entries, truncated: entries.length >= 250 }));
+      } catch (err) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+      }
+      return;
+    }
+
+    if (url === '/desktop/file_read' && req.method === 'GET') {
+      const parsed = new URL(req.url, 'http://localhost');
+      const validated = validateDesktopPathServer(parsed.searchParams.get('path') || '');
+      if (!validated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: validated.error })); return; }
+      try {
+        const filePath = expandDesktopPath(validated.path);
+        const stat = fs.statSync(filePath);
+        if (!stat.isFile()) throw new Error('path is not a file');
+        const maxBytes = Math.max(1024, Math.min(256 * 1024, Number(parsed.searchParams.get('maxBytes') || 128 * 1024)));
+        const fd = fs.openSync(filePath, 'r');
+        const length = Math.min(stat.size, maxBytes);
+        const buffer = Buffer.alloc(length);
+        fs.readSync(fd, buffer, 0, length, 0);
+        fs.closeSync(fd);
+        const content = buffer.toString('utf8');
+        if (content.includes('\u0000')) throw new Error('binary file preview refused');
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: true, path: filePath, content, size: stat.size, truncated: stat.size > maxBytes }));
+      } catch (err) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+      }
+      return;
+    }
+
+    if (url === '/desktop/file_search' && req.method === 'GET') {
+      const parsed = new URL(req.url, 'http://localhost');
+      const rootValidated = validateDesktopPathServer(parsed.searchParams.get('rootPath') || '');
+      const query = String(parsed.searchParams.get('query') || '').trim();
+      if (!rootValidated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: rootValidated.error })); return; }
+      if (!query || query.length > 120) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'query is required and must be <= 120 chars' })); return; }
+      try {
+        const rootPath = expandDesktopPath(rootValidated.path);
+        const result = searchFiles(rootPath, query);
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: true, rootPath, query, ...result }));
+      } catch (err) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+      }
+      return;
+    }
+
+    if (url === '/desktop/shortcuts/list' && req.method === 'GET') {
+      execFile('shortcuts', ['list'], { timeout: 5000, maxBuffer: 512 * 1024 }, (err, stdout) => {
+        if (err) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: err.message || 'shortcuts CLI unavailable' }));
+          return;
+        }
+        const shortcuts = String(stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ok: true, shortcuts }));
+      });
+      return;
+    }
+
+    if (url === '/desktop/shortcuts/run' && req.method === 'POST') {
+      readJsonBody(req, 2048, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const name = String(parsed?.name || '').trim();
+        if (!name || name.length > 120 || /[\x00-\x1f]/.test(name)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'shortcut name is required and must be <= 120 chars' }));
+          return;
+        }
+        execFile('shortcuts', ['run', name], { timeout: 60_000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'shortcut failed').toString().slice(0, 500) }));
+            return;
+          }
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, name, output: String(stdout || '').slice(0, 4000) }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/window_manage' && req.method === 'POST') {
+      readJsonBody(req, 2048, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const action = String(parsed?.action || '').trim().toLowerCase();
+        const appName = String(parsed?.appName || '').trim();
+        const width = Number(parsed?.width || 0);
+        const height = Number(parsed?.height || 0);
+        const script = buildWindowManageScript({ action, appName, width, height });
+        if (!script) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'invalid window action. Use focus, raise, minimize, unminimize, zoom, or resize.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 5000 }, (err) => {
+          if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err.message })); return; }
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, action, appName: appName || null, width: width || null, height: height || null }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/mouse_move' && req.method === 'POST') {
+      readJsonBody(req, 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const x = Number(parsed?.x);
+        const y = Number(parsed?.y);
+        if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x > 20000 || y > 20000) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'x and y must be non-negative integers <= 20000' }));
+          return;
+        }
+        const helperPath = path.join(__dirname, 'bin', 'uc-input-helper');
+        if (!fs.existsSync(helperPath)) {
+          res.writeHead(503, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'uc-input-helper not found. Build or install the helper before using mouse move.' }));
+          return;
+        }
+        execFile(helperPath, ['move', '--x', String(x), '--y', String(y)], { timeout: 3000 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'move failed').toString().slice(0, 300) }));
+            return;
+          }
+          res.writeHead(200, CORS);
+          res.end(stdout.toString().trim() || JSON.stringify({ ok: true, x, y }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/mouse_click' && req.method === 'POST') {
+      readJsonBody(req, 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const x = Number(parsed?.x);
+        const y = Number(parsed?.y);
+        const button = String(parsed?.button || 'left').toLowerCase();
+        const count = Math.max(1, Math.min(3, Number(parsed?.count || 1)));
+        if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x > 20000 || y > 20000) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'x and y must be non-negative integers <= 20000' }));
+          return;
+        }
+        if (button !== 'left' && button !== 'right') {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'button must be left or right' }));
+          return;
+        }
+        const helperPath = path.join(__dirname, 'bin', 'uc-input-helper');
+        if (!fs.existsSync(helperPath)) {
+          res.writeHead(503, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'uc-input-helper not found. Build or install the helper before using mouse click.' }));
+          return;
+        }
+        execFile(helperPath, ['click', '--x', String(x), '--y', String(y), '--button', button, '--count', String(count)], { timeout: 5000 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'click failed').toString().slice(0, 300) }));
+            return;
+          }
+          res.writeHead(200, CORS);
+          res.end(stdout.toString().trim() || JSON.stringify({ ok: true, x, y, button, count }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/mouse_drag' && req.method === 'POST') {
+      readJsonBody(req, 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const fromX = Number(parsed?.fromX);
+        const fromY = Number(parsed?.fromY);
+        const toX = Number(parsed?.toX);
+        const toY = Number(parsed?.toY);
+        const durationMs = Math.max(50, Math.min(5000, Number(parsed?.durationMs || 450)));
+        if (![fromX, fromY, toX, toY].every((value) => Number.isInteger(value) && value >= 0 && value <= 20000)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'fromX/fromY/toX/toY must be non-negative integers <= 20000' }));
+          return;
+        }
+        const helperPath = path.join(__dirname, 'bin', 'uc-input-helper');
+        if (!fs.existsSync(helperPath)) {
+          res.writeHead(503, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'uc-input-helper not found. Build or install the helper before using mouse drag.' }));
+          return;
+        }
+        execFile(helperPath, ['drag', '--from-x', String(fromX), '--from-y', String(fromY), '--to-x', String(toX), '--to-y', String(toY), '--duration-ms', String(durationMs)], { timeout: 8000 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'drag failed').toString().slice(0, 300) }));
+            return;
+          }
+          res.writeHead(200, CORS);
+          res.end(stdout.toString().trim() || JSON.stringify({ ok: true, fromX, fromY, toX, toY, durationMs }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/mouse_scroll' && req.method === 'POST') {
+      readJsonBody(req, 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const deltaY = Math.max(-5000, Math.min(5000, Number(parsed?.deltaY ?? -600)));
+        const deltaX = Math.max(-5000, Math.min(5000, Number(parsed?.deltaX ?? 0)));
+        const x = Math.max(0, Math.min(20000, Number(parsed?.x ?? 0)));
+        const y = Math.max(0, Math.min(20000, Number(parsed?.y ?? 0)));
+        const helperPath = path.join(__dirname, 'bin', 'uc-input-helper');
+        if (!fs.existsSync(helperPath)) {
+          res.writeHead(503, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'uc-input-helper not found. Build or install the helper before using mouse scroll.' }));
+          return;
+        }
+        execFile(helperPath, ['scroll', '--x', String(x), '--y', String(y), '--delta-x', String(deltaX), '--delta-y', String(deltaY)], { timeout: 3000 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'scroll failed').toString().slice(0, 300) }));
+            return;
+          }
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, x, y, deltaX, deltaY, output: String(stdout || '').slice(0, 500) }));
+        });
       });
       return;
     }
@@ -2241,6 +2860,7 @@ const server = http.createServer((req, res) => {
       if (p === '/browser/dom_snapshot' && req.method === 'GET') return browserBridge.handleDomSnapshot(req, res, CORS, parsedUrl);
       if (p === '/browser/click_role' && req.method === 'POST') return browserBridge.handleClickRole(req, res, CORS);
       if (p === '/browser/fill' && req.method === 'POST') return browserBridge.handleFill(req, res, CORS);
+      if (p === '/browser/select' && req.method === 'POST') return browserBridge.handleSelect(req, res, CORS);
       if (p === '/browser/press' && req.method === 'POST') return browserBridge.handlePress(req, res, CORS);
       if (p === '/browser/screenshot' && req.method === 'POST') return browserBridge.handleScreenshot(req, res, CORS);
       if (p === '/browser/close' && req.method === 'POST') return browserBridge.handleClose(req, res, CORS);
@@ -2380,6 +3000,207 @@ function validateDesktopPathServer(raw) {
   return { ok: true, path: trimmed };
 }
 
+function expandDesktopPath(raw) {
+  const trimmed = String(raw || '').trim();
+  const home = os.homedir();
+  const aliases = {
+    downloads: path.join(home, 'Downloads'),
+    download: path.join(home, 'Downloads'),
+    documents: path.join(home, 'Documents'),
+    document: path.join(home, 'Documents'),
+    desktop: path.join(home, 'Desktop'),
+    home: home,
+    'home folder': home,
+    'home directory': home,
+  };
+  const lower = trimmed.toLowerCase();
+  if (aliases[lower]) return aliases[lower];
+  if (trimmed === '~') return home;
+  if (trimmed.startsWith('~/')) return path.join(home, trimmed.slice(2));
+  if (trimmed.startsWith('./') || trimmed.startsWith('../')) return path.resolve(process.cwd(), trimmed);
+  if (!path.isAbsolute(trimmed) && /^[A-Za-z0-9 ._-]+$/.test(trimmed)) return path.join(home, trimmed);
+  return trimmed;
+}
+
+const BROWSER_TAB_APPS = {
+  chrome: { label: 'Chrome', app: 'Google Chrome', mode: 'chromium' },
+  'google chrome': { label: 'Chrome', app: 'Google Chrome', mode: 'chromium' },
+  safari: { label: 'Safari', app: 'Safari', mode: 'safari' },
+  brave: { label: 'Brave', app: 'Brave Browser', mode: 'chromium' },
+  'brave browser': { label: 'Brave', app: 'Brave Browser', mode: 'chromium' },
+  edge: { label: 'Edge', app: 'Microsoft Edge', mode: 'chromium' },
+  'microsoft edge': { label: 'Edge', app: 'Microsoft Edge', mode: 'chromium' },
+  arc: { label: 'Arc', app: 'Arc', mode: 'chromium' },
+  opera: { label: 'Opera', app: 'Opera', mode: 'chromium' },
+  vivaldi: { label: 'Vivaldi', app: 'Vivaldi', mode: 'chromium' },
+};
+
+function browserTabScript(appName, mode) {
+  const tabTitle = mode === 'safari' ? 'name of t' : 'title of t';
+  return `
+if application "${appName}" is running then
+  tell application "${appName}"
+    set outText to ""
+    repeat with w in windows
+      repeat with t in tabs of w
+        try
+          set outText to outText & (${tabTitle} as text) & tab & (URL of t as text) & linefeed
+        end try
+      end repeat
+    end repeat
+    return outText
+  end tell
+end if
+return ""
+`;
+}
+
+function readBrowserTabs(requested, callback) {
+  const selected = requested.length
+    ? requested.map((key) => BROWSER_TAB_APPS[key]).filter(Boolean)
+    : [BROWSER_TAB_APPS.chrome, BROWSER_TAB_APPS.safari, BROWSER_TAB_APPS.brave, BROWSER_TAB_APPS.edge, BROWSER_TAB_APPS.arc];
+  const unique = Array.from(new Map(selected.map((item) => [item.app, item])).values());
+  let remaining = unique.length;
+  const tabs = [];
+  const errors = [];
+  if (remaining === 0) {
+    callback({ tabs, errors: ['No supported browser requested.'] });
+    return;
+  }
+  unique.forEach((browser) => {
+    const script = browserTabScript(browser.app, browser.mode);
+    exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 5000, maxBuffer: 512 * 1024 }, (err, stdout) => {
+      if (err) {
+        errors.push(`${browser.label}: ${err.message}`);
+      } else {
+        String(stdout || '').split(/\r?\n/).forEach((line) => {
+          const [title, url] = line.split('\t');
+          if (url) tabs.push({ browser: browser.label, title: (title || '').trim(), url: url.trim() });
+        });
+      }
+      remaining -= 1;
+      if (remaining === 0) callback({ tabs, errors });
+    });
+  });
+}
+
+function readWindowState(callback) {
+  const script = `
+tell application "System Events"
+  set frontProc to first application process whose frontmost is true
+  set frontApp to name of frontProc
+  set titleText to ""
+  set boundsText to ""
+  set windowsText to ""
+  tell frontProc
+    if (count of windows) > 0 then
+      try
+        set titleText to name of window 1
+      end try
+      try
+        set p to position of window 1
+        set s to size of window 1
+        set boundsText to (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
+      end try
+      repeat with w in windows
+        try
+          set windowsText to windowsText & (name of w as text) & linefeed
+        end try
+      end repeat
+    end if
+  end tell
+  return frontApp & linefeed & titleText & linefeed & boundsText & linefeed & windowsText
+end tell
+`;
+  exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 5000, maxBuffer: 256 * 1024 }, (err, stdout) => {
+    if (err) { callback(err); return; }
+    const lines = String(stdout || '').split(/\r?\n/);
+    const boundsParts = String(lines[2] || '').split(',').map((part) => Number(part.trim()));
+    const bounds = boundsParts.length === 4 && boundsParts.every((n) => Number.isFinite(n))
+      ? { x: boundsParts[0], y: boundsParts[1], width: boundsParts[2], height: boundsParts[3] }
+      : null;
+    callback(null, {
+      frontmostApp: (lines[0] || '').trim(),
+      activeWindowTitle: (lines[1] || '').trim(),
+      activeWindowBounds: bounds,
+      windows: lines.slice(3).map((line) => line.trim()).filter(Boolean).slice(0, 80),
+    });
+  });
+}
+
+function searchFiles(rootPath, query) {
+  const lower = query.toLowerCase();
+  const matches = [];
+  let visited = 0;
+  let truncated = false;
+  const maxVisited = 2500;
+  const maxMatches = 100;
+  function visit(current, depth) {
+    if (visited >= maxVisited || matches.length >= maxMatches || depth > 5) {
+      truncated = true;
+      return;
+    }
+    visited += 1;
+    let stat;
+    try { stat = fs.statSync(current); } catch { return; }
+    const base = path.basename(current);
+    if (base.startsWith('.') && depth > 0) return;
+    if (stat.isDirectory()) {
+      let entries = [];
+      try { entries = fs.readdirSync(current); } catch { return; }
+      for (const entry of entries) visit(path.join(current, entry), depth + 1);
+      return;
+    }
+    if (!stat.isFile()) return;
+    let reason = '';
+    let snippet = '';
+    if (base.toLowerCase().includes(lower)) {
+      reason = 'name';
+    } else if (stat.size <= 512 * 1024) {
+      try {
+        const text = fs.readFileSync(current, 'utf8');
+        if (!text.includes('\u0000')) {
+          const idx = text.toLowerCase().indexOf(lower);
+          if (idx >= 0) {
+            reason = 'content';
+            snippet = text.slice(Math.max(0, idx - 80), Math.min(text.length, idx + lower.length + 160)).replace(/\s+/g, ' ').trim();
+          }
+        }
+      } catch {}
+    }
+    if (reason) matches.push({ path: current, name: base, reason, size: stat.size, modifiedAt: stat.mtime.toISOString(), snippet });
+  }
+  visit(rootPath, 0);
+  return { matches, visited, truncated };
+}
+
+function buildWindowManageScript({ action, appName, width, height }) {
+  const allowed = new Set(['focus', 'raise', 'minimize', 'unminimize', 'zoom', 'resize']);
+  if (!allowed.has(action)) return null;
+  if (appName && !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) return null;
+  if (action === 'resize' && (!Number.isInteger(width) || !Number.isInteger(height) || width < 100 || height < 100 || width > 10000 || height > 10000)) return null;
+  const target = appName
+    ? `set targetProc to first application process whose name contains "${appName.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+    : `set targetProc to first application process whose frontmost is true`;
+  const actionScript = action === 'minimize'
+    ? 'set value of attribute "AXMinimized" of window 1 of targetProc to true'
+    : action === 'unminimize'
+      ? 'set value of attribute "AXMinimized" of window 1 of targetProc to false'
+      : action === 'resize'
+        ? `set size of window 1 of targetProc to {${width}, ${height}}`
+        : action === 'zoom'
+          ? 'perform action "AXZoomWindow" of window 1 of targetProc'
+          : 'perform action "AXRaise" of window 1 of targetProc';
+  return `
+tell application "System Events"
+  ${target}
+  set frontmost of targetProc to true
+  if (count of windows of targetProc) is 0 then error "target app has no windows"
+  ${actionScript}
+end tell
+`;
+}
+
 function getOrCreateDesktopToken() {
   const tokenPath = path.join(os.homedir(), '.uc-desktop-token');
   try {
@@ -2441,6 +3262,29 @@ function ensureAxHelper() {
 }
 ensureAxHelper();
 
+function ensureInputHelper() {
+  if (process.platform !== 'darwin') return;
+  const src = path.join(__dirname, 'bin', 'uc-input-helper.swift');
+  const bin = path.join(__dirname, 'bin', 'uc-input-helper');
+  if (!fs.existsSync(src)) return;
+  try {
+    const srcStat = fs.statSync(src);
+    const binStat = fs.existsSync(bin) ? fs.statSync(bin) : null;
+    if (binStat && binStat.mtimeMs >= srcStat.mtimeMs) return;
+  } catch {}
+  try {
+    console.log('[bridge] Compiling uc-input-helper (one-time, ~2s)…');
+    execFileSync('swiftc', ['-O', '-o', bin, src], { stdio: 'pipe', timeout: 30_000 });
+    fs.chmodSync(bin, 0o755);
+    console.log('[bridge] ✓ uc-input-helper ready at', bin);
+  } catch (err) {
+    console.warn('[bridge] Could not compile uc-input-helper:', err.message);
+    console.warn('[bridge] /desktop/mouse_scroll will return 503 until the helper is built.');
+    console.warn('[bridge] Install Xcode command-line tools: xcode-select --install');
+  }
+}
+ensureInputHelper();
+
 server.listen(PORT, () => {
   console.log(`\n  Claude Code Bridge`);
   console.log(`  Serving on http://localhost:${PORT}`);
@@ -2450,6 +3294,8 @@ server.listen(PORT, () => {
   console.log(`    GET  /health              — Bridge status`);
   console.log(`    GET  /sessions            — Active Claude Code sessions`);
   console.log(`    POST /exec                — Run a shell command
+    POST /launch              — Launch visible Claude Code terminal sessions
+    POST /terminal/send       — Send a chat instruction to a managed terminal session
     POST /spawn               — Spawn a new Claude Code session with a task`);
   console.log(`    GET  /devices             — Discover all connected devices`);
   console.log(`    GET  /devices/printers    — List printers with status`);

@@ -15,9 +15,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../../lib/supabase';
 import type { CircleIntegrationGroupKey } from '../../lib/circleIntegrationCatalog';
-import FloatingChat from '../../components/FloatingChat';
 import TutorialController from '../../components/onboarding/TutorialController';
-import SearchModal from '../../components/SearchModal';
 
 import { Circle } from '../../types';
 import ErrorBoundary from '../../components/ErrorBoundary';
@@ -51,6 +49,8 @@ const AnalyticsTab = React.lazy(() => import('./tabs/AnalyticsTab'));
 const MarketplaceTab = React.lazy(() => import('./tabs/IntegrationsTab'));
 const BackpackTab = React.lazy(() => import('./tabs/BackpackTab'));
 const SiteCredentialVaultPanel = React.lazy(() => import('../../components/vault/SiteCredentialVaultPanel'));
+const FloatingChat = React.lazy(() => import('../../components/FloatingChat'));
+const SearchModal = React.lazy(() => import('../../components/SearchModal'));
 
 // Tabs lazy-mount on first visit and now lazy-load their code chunks too.
 
@@ -458,12 +458,14 @@ export default function CircleDetailScreen({ route, navigation }: any) {
 
       {/* Floating Chat — persists across all tabs when popped out */}
       {chatPopout && (
-        <FloatingChat
-          circleId={circleId}
-          circleName={circleName || circle?.name || 'Circle'}
-          accentColor={accentColor}
-          onClose={() => { setChatPopout(false); setChatMountKey(k => k + 1); }}
-        />
+        <React.Suspense fallback={null}>
+          <FloatingChat
+            circleId={circleId}
+            circleName={circleName || circle?.name || 'Circle'}
+            accentColor={accentColor}
+            onClose={() => { setChatPopout(false); setChatMountKey(k => k + 1); }}
+          />
+        </React.Suspense>
       )}
 
       {/* Onboarding Tutorial — floating guide for new users */}
@@ -471,11 +473,15 @@ export default function CircleDetailScreen({ route, navigation }: any) {
 
       {/* Global search (⌘K) — fires deeplinks that FeedTab / MissionsTab
           consume on their next render. */}
-      <SearchModal
-        circleId={circleId}
-        visible={searchOpen}
-        onClose={() => setSearchOpen(false)}
-      />
+      {searchOpen && (
+        <React.Suspense fallback={null}>
+          <SearchModal
+            circleId={circleId}
+            visible={searchOpen}
+            onClose={() => setSearchOpen(false)}
+          />
+        </React.Suspense>
+      )}
     </View>
   );
 }

@@ -7,7 +7,7 @@ import type { OpenSwanObservedEvalSummary } from './openswanObservedEvals';
 import { persistChatMessage, updateChatMessageContent } from './chatService';
 import type { ResearchDocumentReference } from './researchControl';
 import { getResearchDocumentReferences } from './researchControl';
-import type { SwanBotStructuredArtifact } from './swanbot';
+import type { SwanBotStructuredArtifact, SwanBotStructuredResponse } from './swanbot';
 import { getWikiArticleReferences, type WikiArticleReference } from './wikiData';
 
 export async function buildChatInfluenceReferences(params: {
@@ -42,8 +42,16 @@ export function persistMainChatBotMessageWithRetry(params: {
   userId: string;
   agentName: string;
   content: string;
-  threadId: string;
+  threadId: string | null | undefined;
   localMessageId?: string;
+  source?: {
+    actor?: string;
+    surface?: string;
+    selectedModel?: string | null;
+    effectiveModel?: string | null;
+    provider?: string | null;
+  };
+  usage?: SwanBotStructuredResponse['usage'] | null;
   commandDecisions?: ChatCommandDecision[];
   artifacts?: SwanBotStructuredArtifact[];
   wikiRefs?: WikiArticleReference[];
@@ -61,6 +69,7 @@ export function persistMainChatBotMessageWithRetry(params: {
     blockers?: string[];
   };
   observedEval?: OpenSwanObservedEvalSummary | null;
+  routing?: SwanBotStructuredResponse['routing'] | null;
   maxAttempts?: number;
   onError?: (error: unknown) => void;
   onPersisted?: (messageId: string) => void;
@@ -72,6 +81,8 @@ export function persistMainChatBotMessageWithRetry(params: {
     content,
     threadId,
     localMessageId,
+    source,
+    usage,
     commandDecisions,
     artifacts,
     wikiRefs,
@@ -85,6 +96,7 @@ export function persistMainChatBotMessageWithRetry(params: {
     browserSessions,
     modeOutcomeSummary,
     observedEval,
+    routing,
     maxAttempts = 3,
     onError,
     onPersisted,
@@ -97,6 +109,8 @@ export function persistMainChatBotMessageWithRetry(params: {
         userId,
         content: formatPersistedChatBotMessage(agentName, content, {
           localMessageId,
+          source,
+          usage,
           commandDecisions,
           artifacts,
           wikiRefs,
@@ -110,6 +124,7 @@ export function persistMainChatBotMessageWithRetry(params: {
           browserSessions,
           modeOutcomeSummary,
           observedEval,
+          routing,
         }),
         threadId,
         isBot: true,
@@ -134,6 +149,14 @@ export function updateMainChatBotMessageWithRetry(params: {
   agentName: string;
   content: string;
   localMessageId?: string;
+  source?: {
+    actor?: string;
+    surface?: string;
+    selectedModel?: string | null;
+    effectiveModel?: string | null;
+    provider?: string | null;
+  };
+  usage?: SwanBotStructuredResponse['usage'] | null;
   commandDecisions?: ChatCommandDecision[];
   artifacts?: SwanBotStructuredArtifact[];
   wikiRefs?: WikiArticleReference[];
@@ -151,6 +174,7 @@ export function updateMainChatBotMessageWithRetry(params: {
     blockers?: string[];
   };
   observedEval?: OpenSwanObservedEvalSummary | null;
+  routing?: SwanBotStructuredResponse['routing'] | null;
   maxAttempts?: number;
   onError?: (error: unknown) => void;
 }): void {
@@ -159,6 +183,8 @@ export function updateMainChatBotMessageWithRetry(params: {
     agentName,
     content,
     localMessageId,
+    source,
+    usage,
     commandDecisions,
     artifacts,
     wikiRefs,
@@ -172,6 +198,7 @@ export function updateMainChatBotMessageWithRetry(params: {
     browserSessions,
     modeOutcomeSummary,
     observedEval,
+    routing,
     maxAttempts = 3,
     onError,
   } = params;
@@ -180,6 +207,8 @@ export function updateMainChatBotMessageWithRetry(params: {
     try {
       await updateChatMessageContent(messageId, formatPersistedChatBotMessage(agentName, content, {
         localMessageId,
+        source,
+        usage,
         commandDecisions,
         artifacts,
         wikiRefs,
@@ -193,6 +222,7 @@ export function updateMainChatBotMessageWithRetry(params: {
         browserSessions,
         modeOutcomeSummary,
         observedEval,
+        routing,
       }));
     } catch (error) {
       onError?.(error);

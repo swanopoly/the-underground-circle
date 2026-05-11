@@ -232,7 +232,7 @@ export async function executeConversationalIntent(
       try {
         const { publishAgentToCircle, PROVIDER_DISPLAY } = await import('./circleOffice');
 
-        const modelName = intent.modelName || 'claude-sonnet-4-6';
+        const modelName = intent.modelName || 'claude-haiku-4-5';
         const provider = modelName.startsWith('claude-') ? 'anthropic' : 'generic-agent';
         const providerDisplay = PROVIDER_DISPLAY[provider] || PROVIDER_DISPLAY['generic-agent'];
 

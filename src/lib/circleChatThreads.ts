@@ -113,7 +113,7 @@ export async function createPrivateThread(
   const { data: threadId, error: rpcError } = await supabase.rpc('create_private_chat_thread', {
     p_circle_id: circleId,
     p_title: trimmedTitle,
-    p_default_model: 'claude-sonnet-4-6',
+    p_default_model: 'auto',
   });
 
   if (!rpcError && threadId) {
@@ -130,7 +130,7 @@ export async function createPrivateThread(
       created_by: auth.user.id,
       title: trimmedTitle,
       visibility: 'private',
-      default_model: 'claude-sonnet-4-6',
+      default_model: 'auto',
     })
     .select('*')
     .single();
@@ -150,7 +150,7 @@ export async function renameThread(threadId: string, title: string): Promise<voi
 }
 
 export async function updateThreadDefaultModel(threadId: string, defaultModel: string | null): Promise<void> {
-  const nextModel = defaultModel?.trim() || 'claude-sonnet-4-6';
+  const nextModel = defaultModel?.trim() || 'auto';
   const { error } = await supabase
     .from('circle_chat_threads')
     .update({ default_model: nextModel, updated_at: new Date().toISOString() })

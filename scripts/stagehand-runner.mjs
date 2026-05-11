@@ -26,6 +26,46 @@ async function pageUrl(page) {
   return undefined;
 }
 
+function stringifyOutput(value) {
+  if (typeof value === 'string') return value;
+  if (value == null) return '';
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+async function fallbackPageText(page, maxChars = 20000) {
+  try {
+    return await page.evaluate((limit) => {
+      const title = document.title || '';
+      const url = window.location.href;
+      const text = (document.body?.innerText || document.documentElement?.innerText || '')
+        .replace(/\s+\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+      return [`URL: ${url}`, `Title: ${title}`, '', text].join('\n').slice(0, limit);
+    }, maxChars);
+  } catch {
+    return '';
+  }
+}
+
+async function callSemanticMethod(owner, methodName, instruction) {
+  const fn = owner && owner[methodName];
+  if (typeof fn !== 'function') return undefined;
+  try {
+    return await fn.call(owner, instruction);
+  } catch (firstError) {
+    try {
+      return await fn.call(owner, { instruction });
+    } catch {
+      throw firstError;
+    }
+  }
+}
+
 async function run() {
   const payload = decodePayload(process.argv[2]);
   const { Stagehand } = await import('@browserbasehq/stagehand');
@@ -74,10 +114,29 @@ async function run() {
   }
 
   const action = payload.action || {};
+  let output = null;
   switch (action.type) {
     case 'navigate':
       await page.goto(action.target || '');
       break;
+    case 'observe': {
+      const instruction = action.description || action.target || 'Observe the current page and identify relevant controls, content, and next steps.';
+      output = await callSemanticMethod(stagehand, 'observe', instruction)
+        || await callSemanticMethod(page, 'observe', instruction);
+      if (!output) {
+        output = await fallbackPageText(page, 12000);
+      }
+      break;
+    }
+    case 'extract': {
+      const instruction = action.description || action.target || 'Extract the requested information from the current page.';
+      output = await callSemanticMethod(stagehand, 'extract', instruction)
+        || await callSemanticMethod(page, 'extract', instruction);
+      if (!output) {
+        output = await fallbackPageText(page, 20000);
+      }
+      break;
+    }
     case 'click':
       await stagehand.act(action.description || `Click ${action.target || 'the target element'}`);
       break;
@@ -112,6 +171,7 @@ async function run() {
     ok: true,
     sessionId: stagehand.sessionId || payload.sessionId || null,
     currentUrl: await pageUrl(page),
+    output: output == null ? null : stringifyOutput(output).slice(0, 30000),
   }));
 }
 

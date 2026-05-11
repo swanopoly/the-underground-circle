@@ -35,7 +35,7 @@ import {
   getAutoConnectConnections,
   getAutoConnectSessions,
   subscribeAutoConnect,
-} from '../../lib/agentAutoConnect';
+} from '../../lib/agentAutoConnectState';
 import {
   type AgentIdentity,
   loadAgentIdentities,

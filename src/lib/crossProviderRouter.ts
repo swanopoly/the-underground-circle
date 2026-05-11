@@ -41,12 +41,23 @@ export interface ProviderModelAliases {
   openrouter?: string;
   /** OpenAI native id (when the model is OpenAI's). */
   openai?: string;
+  /** Business/self-hosted OpenAI-compatible route id. */
+  openai_compatible?: string;
   /** Anthropic native id (when the model is Anthropic's). */
   anthropic?: string;
   /** Groq id (Llama / Mixtral / Mistral). */
   groq?: string;
   /** Google AI Studio direct (when wired). */
-  google?: string;
+  google_ai?: string;
+  mistral_ai?: string;
+  cohere?: string;
+  perplexity?: string;
+  together_ai?: string;
+  fireworks_ai?: string;
+  deepseek?: string;
+  zai?: string;
+  minimax?: string;
+  ollama?: string;
   /** OpenSwan agent / runtime id when this maps to a local agent. */
   openswan?: string;
   /** Free-tier marker — when set, the router will use this id for
@@ -74,6 +85,7 @@ export const MODEL_ALIASES: Record<string, ProviderModelAliases> = {
   'mistral-large': {
     huggingface: 'mistralai/Mistral-Large-2411',
     openrouter: 'mistralai/mistral-large-2411',
+    mistral_ai: 'mistral-large-latest',
   },
   // ── Mistral Small (free tier on OR + Mistral 7B free on HF) ──────
   'mistral-small-free': {
@@ -84,11 +96,13 @@ export const MODEL_ALIASES: Record<string, ProviderModelAliases> = {
   'qwen-3-235b': {
     huggingface: 'Qwen/Qwen3-235B-A22B',
     openrouter: 'qwen/qwen3-235b-a22b',
+    together_ai: 'Qwen/Qwen3-235B-A22B-fp8-tput',
   },
   // ── DeepSeek R1 ─ HF + OR ─────────────────────────────────────────
   'deepseek-r1': {
     huggingface: 'deepseek-ai/DeepSeek-R1',
     openrouter: 'deepseek/deepseek-r1',
+    fireworks_ai: 'accounts/fireworks/models/deepseek-r1',
   },
   // ── Claude Sonnet 4.6 ─ Anthropic native + OR passthrough ─────────
   'claude-sonnet-4-6': {
@@ -113,14 +127,28 @@ export const MODEL_ALIASES: Record<string, ProviderModelAliases> = {
   // ── Gemini 2.5 Pro ─ OR-only today (no native Google in llm-proxy) ─
   'gemini-2.5-pro': {
     openrouter: 'google/gemini-2.5-pro',
+    google_ai: 'gemini-2.5-pro',
   },
   // ── Gemini 2.5 Flash (cheap) ──────────────────────────────────────
   'gemini-2.5-flash': {
     openrouter: 'google/gemini-2.5-flash',
+    google_ai: 'gemini-2.5-flash',
+  },
+  'deepseek-reasoner': {
+    deepseek: 'deepseek-reasoner',
+    openrouter: 'deepseek/deepseek-r1',
+    fireworks_ai: 'accounts/fireworks/models/deepseek-r1',
+  },
+  'command-r-plus': {
+    cohere: 'command-r-plus',
+    openrouter: 'cohere/command-r-plus',
   },
   // ── OpenRouter auto-router (OR-only by definition) ────────────────
   'openrouter-auto': {
     openrouter: 'openrouter/auto',
+  },
+  'business-default': {
+    openai_compatible: 'business-default',
   },
 };
 
@@ -164,10 +192,9 @@ export interface ProviderRoute {
 export interface RouteResolutionOptions {
   /** Set of providers the user has connected. Routes to providers
    *  not in this set are skipped (we'd just 401 anyway). */
-  available: Set<'openrouter' | 'huggingface' | 'anthropic' | 'openai' | 'groq' | 'openswan'>;
-  /** Preferred provider order. Defaults to a sensible cost / quality
-   *  tradeoff: native first (cheaper passthrough), then OR (broad
-   *  fallback), then HF (free tier). */
+  available: Set<LLMProvider | 'anthropic' | 'openswan'>;
+  /** Preferred provider order. Defaults to low/surprise-cost routing:
+   *  free/local and cheap connected providers before direct Anthropic. */
   prefer?: Array<ProviderRoute['provider']>;
   /** When true, prefer the free-tier identifier over the paid one
    *  even when both are available. Useful for free-tier users. */
@@ -175,13 +202,50 @@ export interface RouteResolutionOptions {
 }
 
 const DEFAULT_PREFERENCE: Array<ProviderRoute['provider']> = [
-  'anthropic-direct',
-  'openai',
+  'ollama',
+  'openai_compatible',
+  'huggingface',
   'groq',
   'openrouter',
-  'huggingface',
+  'deepseek',
+  'google_ai',
+  'mistral_ai',
+  'anthropic-direct',
+  'openai',
+  'together_ai',
+  'fireworks_ai',
+  'zai',
+  'minimax',
+  'cohere',
+  'perplexity',
   'openswan',
 ];
+
+function providerFromModelPrefix(modelId: string): LLMProvider | null {
+  const slashIdx = modelId.indexOf('/');
+  if (slashIdx <= 0) return null;
+  const head = modelId.slice(0, slashIdx);
+  if (head === 'huggingface' || head === 'huggingface_endpoint') return 'huggingface';
+  if (head === 'z_ai') return 'zai';
+  if ([
+    'openai',
+    'openai_compatible',
+    'openrouter',
+    'groq',
+    'google_ai',
+    'mistral_ai',
+    'cohere',
+    'perplexity',
+    'together_ai',
+    'fireworks_ai',
+    'deepseek',
+    'zai',
+    'minimax',
+    'ollama',
+    'github-models',
+  ].includes(head)) return head as LLMProvider;
+  return null;
+}
 
 /**
  * Build an ordered fallback chain for a logical model id. Caller
@@ -208,6 +272,11 @@ export function resolveProviderRoutes(
   // the caller passed a provider-native id and try OR as a hopeful
   // fallback (it routes most things).
   if (!aliases) {
+    const directProvider = providerFromModelPrefix(modelId);
+    if (directProvider && opts.available.has(directProvider)) {
+      routes.push({ provider: directProvider, modelId, label: `${directProvider}:${modelId}` });
+      return routes;
+    }
     if (opts.available.has('openrouter')) {
       routes.push({ provider: 'openrouter', modelId, label: `openrouter:${modelId}` });
     }
@@ -219,8 +288,30 @@ export function resolveProviderRoutes(
       routes.push({ provider: 'anthropic-direct', modelId: aliases.anthropic, label: `anthropic:${aliases.anthropic}` });
     } else if (provider === 'openai' && aliases.openai && opts.available.has('openai')) {
       routes.push({ provider: 'openai', modelId: aliases.openai, label: `openai:${aliases.openai}` });
+    } else if (provider === 'openai_compatible' && aliases.openai_compatible && opts.available.has('openai_compatible')) {
+      routes.push({ provider: 'openai_compatible', modelId: aliases.openai_compatible, label: `openai_compatible:${aliases.openai_compatible}` });
     } else if (provider === 'groq' && aliases.groq && opts.available.has('groq')) {
       routes.push({ provider: 'groq', modelId: aliases.groq, label: `groq:${aliases.groq}` });
+    } else if (provider === 'google_ai' && aliases.google_ai && opts.available.has('google_ai')) {
+      routes.push({ provider: 'google_ai', modelId: aliases.google_ai, label: `google_ai:${aliases.google_ai}` });
+    } else if (provider === 'mistral_ai' && aliases.mistral_ai && opts.available.has('mistral_ai')) {
+      routes.push({ provider: 'mistral_ai', modelId: aliases.mistral_ai, label: `mistral_ai:${aliases.mistral_ai}` });
+    } else if (provider === 'cohere' && aliases.cohere && opts.available.has('cohere')) {
+      routes.push({ provider: 'cohere', modelId: aliases.cohere, label: `cohere:${aliases.cohere}` });
+    } else if (provider === 'perplexity' && aliases.perplexity && opts.available.has('perplexity')) {
+      routes.push({ provider: 'perplexity', modelId: aliases.perplexity, label: `perplexity:${aliases.perplexity}` });
+    } else if (provider === 'together_ai' && aliases.together_ai && opts.available.has('together_ai')) {
+      routes.push({ provider: 'together_ai', modelId: aliases.together_ai, label: `together_ai:${aliases.together_ai}` });
+    } else if (provider === 'fireworks_ai' && aliases.fireworks_ai && opts.available.has('fireworks_ai')) {
+      routes.push({ provider: 'fireworks_ai', modelId: aliases.fireworks_ai, label: `fireworks_ai:${aliases.fireworks_ai}` });
+    } else if (provider === 'deepseek' && aliases.deepseek && opts.available.has('deepseek')) {
+      routes.push({ provider: 'deepseek', modelId: aliases.deepseek, label: `deepseek:${aliases.deepseek}` });
+    } else if (provider === 'zai' && aliases.zai && opts.available.has('zai')) {
+      routes.push({ provider: 'zai', modelId: aliases.zai, label: `zai:${aliases.zai}` });
+    } else if (provider === 'minimax' && aliases.minimax && opts.available.has('minimax')) {
+      routes.push({ provider: 'minimax', modelId: aliases.minimax, label: `minimax:${aliases.minimax}` });
+    } else if (provider === 'ollama' && aliases.ollama && opts.available.has('ollama')) {
+      routes.push({ provider: 'ollama', modelId: aliases.ollama, label: `ollama:${aliases.ollama}` });
     } else if (provider === 'openrouter' && opts.available.has('openrouter')) {
       // Prefer free variant when the caller asks for it.
       if (opts.preferFree && aliases.openrouterFree) {

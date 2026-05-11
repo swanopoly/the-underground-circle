@@ -79,14 +79,13 @@ const DEFAULT_MODEL = 'claude-haiku-4-5';
  * Priority:
  *   1. User's explicit dropdown pick (when not `auto`) — always wins.
  *   2. Intent × complexity table below — routes between Haiku, Sonnet,
- *      and Opus 4.7 based on how much reasoning the message needs.
+ *      and stronger non-Anthropic connected providers based on how much
+ *      reasoning the message needs.
  *   3. SOUL defaults.
  *   4. Haiku fallback.
  *
- * Adding Opus 4.7 to the ladder (was Haiku/Sonnet only) means complex
- * planning, architecture, and converging build conversations get the
- * reasoning depth they actually need. Lightweight chat stays on Haiku
- * so Anthropic spend doesn't balloon.
+ * Opus is intentionally not part of Auto. It remains available as an
+ * explicit user pick, but Auto should not create surprise Opus spend.
  */
 /**
  * Connected marketplace providers used to bias the Auto router. OpenRouter
@@ -96,13 +95,31 @@ const DEFAULT_MODEL = 'claude-haiku-4-5';
  */
 export type ConnectedProviderSet = ReadonlySet<string>;
 
+function hasProvider(providers: ConnectedProviderSet | undefined, provider: string): boolean {
+  if (!providers) return false;
+  if (providers.has(provider)) return true;
+  if (provider === 'huggingface') return providers.has('hugging_face');
+  if (provider === 'zai') return providers.has('z_ai');
+  return false;
+}
+
+function firstConnected(
+  providers: ConnectedProviderSet | undefined,
+  candidates: Array<[provider: string, model: string | null]>,
+): string | null {
+  for (const [provider, model] of candidates) {
+    if (model && hasProvider(providers, provider)) return model;
+  }
+  return null;
+}
+
 export function resolveModelForSoul(
   spiritId: string | null | undefined,
   userModelPick: string | null | undefined,
   intent?: import('./agenticCodingProfile').MessageIntent,
   complexity?: import('./agenticCodingProfile').MessageComplexity,
-  /** When true (the Phase-1 `converging` state), bump to Opus regardless
-   *  of complexity — the bot needs to reason well to propose a brief. */
+  /** When true (the Phase-1 `converging` state), use a stronger model
+   *  than Haiku, but do not auto-escalate to Opus. */
   buildConverging?: boolean,
   /** When true, the current message is in the `exploring` phase — the bot
    *  is just asking the next clarifying question. Haiku handles this at a
@@ -118,77 +135,103 @@ export function resolveModelForSoul(
 
   const HAIKU = 'claude-haiku-4-5';
   const SONNET = 'claude-sonnet-4-6';
-  const OPUS = 'claude-opus-4-7';
-  const blackSwanConnected = !!connectedProviders?.has('blackswan');
+  const blackSwanConnected = hasProvider(connectedProviders, 'blackswan');
 
-  // OpenRouter routing — when the team has the OR key wired, prefer
-  // routing Auto through OR so the spend lands on their account. We
-  // map the same intent ladder to OR-prefixed slugs that the edge
-  // function knows how to dispatch (see callMarketplaceProvider in
-  // swanbot-ai). Different intents map to different upstream providers
-  // since OR aggregates them all behind one key:
-  //   - heavy reasoning  → Anthropic Opus 4
-  //   - code / general   → Anthropic Sonnet 4
-  //   - light / chat     → OpenAI GPT-5 mini (cheap + fast)
-  //   - long context     → Google Gemini 2.5 Pro
-  const orConnected = !!connectedProviders?.has('openrouter');
-  const openaiConnected = !!connectedProviders?.has('openai');
-  const directFast =
-    connectedProviders?.has('groq') ? 'groq/llama-3.3-70b-versatile'
-    : openaiConnected ? 'openai/gpt-4.1-mini'
-    : null;
-  // Cheapest / nano tier — used for casual + status intents that don't
-  // need real reasoning. Prefer the explicit nano variants over mini
-  // when they're available, otherwise reuse the same fast pick.
-  const directNano =
-    openaiConnected ? 'openai/gpt-4.1-nano'
-    : directFast;
-  // Strong general-purpose — for question intents that escalated past
-  // light, or when Auto needs real reasoning but isn't research/architect.
-  const directStrong =
-    openaiConnected ? 'openai/gpt-5.4'
-    : connectedProviders?.has('google_ai') ? 'google_ai/gemini-2.5-pro'
-    : connectedProviders?.has('deepseek') ? 'deepseek/deepseek-reasoner'
-    : null;
-  // Code-heavy specialist — GPT-5 Codex variants are tuned for diff
-  // generation and multi-file refactors. Falls back to gpt-5.4 then
-  // the standard strong pick.
-  const directCode =
-    openaiConnected ? 'openai/gpt-5.2-codex'
-    : directStrong;
-  // Pure reasoning — o-series for math / theoretical work and the
-  // architect intent. o3 is the current frontier reasoner; falls back
-  // to directStrong when openai isn't wired.
-  const directReasoner =
-    openaiConnected ? 'openai/o3'
-    : directStrong;
-  // Browser / computer-use — OpenAI ships `computer-use-preview` as a
-  // dedicated model for the screenshot-action loop (the one behind
-  // their Operator product). It outperforms generic vision models on
-  // arbitrary web UIs, so we route browser intent through it whenever
-  // OpenAI is connected. Falls back to GPT-4o (multimodal flagship)
-  // then to Sonnet (the only Anthropic model with computer use today).
-  const directBrowser =
-    openaiConnected ? 'openai/computer-use-preview'
-    : null;
-  const directLong =
-    connectedProviders?.has('google_ai') ? 'google_ai/gemini-2.5-pro'
-    : directStrong;
+  // Auto should prefer user-connected BYOK providers first, not the
+  // platform Claude key. The ladders below model provider strengths:
+  // cheap/local for low-value turns, search-grounded for research,
+  // long-context for large reads, code-specialists for builds, and
+  // browser-safe chat models for Stagehand/browser planning.
+  const orConnected = hasProvider(connectedProviders, 'openrouter');
+  const anthropicConnected = hasProvider(connectedProviders, 'anthropic');
 
-  const OR_OPUS = 'openrouter/anthropic/claude-opus-4';
+  const directNano = firstConnected(connectedProviders, [
+    ['ollama', 'ollama/llama3.2'],
+    ['openai', 'openai/gpt-4.1-nano'],
+    ['groq', 'groq/llama-3.3-70b-versatile'],
+    ['google_ai', 'google_ai/gemini-2.5-flash'],
+    ['deepseek', 'deepseek/deepseek-chat'],
+    ['mistral_ai', 'mistral_ai/mistral-small-latest'],
+    ['zai', 'zai/glm-4-flash'],
+    ['minimax', 'minimax/MiniMax-Text-01'],
+  ]);
+  const directFast = firstConnected(connectedProviders, [
+    ['groq', 'groq/llama-3.3-70b-versatile'],
+    ['google_ai', 'google_ai/gemini-2.5-flash'],
+    ['openai', 'openai/gpt-4.1-mini'],
+    ['deepseek', 'deepseek/deepseek-chat'],
+    ['mistral_ai', 'mistral_ai/mistral-small-latest'],
+    ['together_ai', 'together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo'],
+    ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/llama-v3p1-405b-instruct'],
+    ['huggingface', 'huggingface/Qwen/Qwen3-32B'],
+    ['zai', 'zai/glm-4-air'],
+    ['minimax', 'minimax/MiniMax-Text-01'],
+  ]);
+  const directStrong = firstConnected(connectedProviders, [
+    ['openai', 'openai/gpt-5.4'],
+    ['google_ai', 'google_ai/gemini-2.5-pro'],
+    ['deepseek', 'deepseek/deepseek-reasoner'],
+    ['mistral_ai', 'mistral_ai/mistral-large-latest'],
+    ['cohere', 'cohere/command-r-plus'],
+    ['together_ai', 'together_ai/Qwen/Qwen3-235B-A22B-fp8-tput'],
+    ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/deepseek-r1'],
+    ['zai', 'zai/glm-5'],
+    ['minimax', 'minimax/MiniMax-M1'],
+    ['huggingface', 'huggingface/Qwen/Qwen3-235B-A22B'],
+  ]);
+  const directCode = firstConnected(connectedProviders, [
+    ['openai', 'openai/gpt-5.4'],
+    ['mistral_ai', 'mistral_ai/codestral-latest'],
+    ['deepseek', 'deepseek/deepseek-chat'],
+    ['together_ai', 'together_ai/Qwen/Qwen3-235B-A22B-fp8-tput'],
+    ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/deepseek-r1'],
+    ['zai', 'zai/glm-5'],
+    ['huggingface', 'huggingface/Qwen/Qwen3-235B-A22B'],
+  ]) || directStrong;
+  const directReasoner = firstConnected(connectedProviders, [
+    ['openai', 'openai/o3'],
+    ['deepseek', 'deepseek/deepseek-reasoner'],
+    ['google_ai', 'google_ai/gemini-2.5-pro'],
+    ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/deepseek-r1'],
+    ['together_ai', 'together_ai/Qwen/Qwen3-235B-A22B-fp8-tput'],
+  ]) || directStrong;
+  const directResearch = firstConnected(connectedProviders, [
+    ['perplexity', 'perplexity/sonar-pro'],
+    ['google_ai', 'google_ai/gemini-2.5-pro'],
+    ['openai', 'openai/gpt-5.4'],
+    ['cohere', 'cohere/command-r-plus'],
+    ['deepseek', 'deepseek/deepseek-reasoner'],
+  ]) || directReasoner || directStrong;
+  const directBrowser = firstConnected(connectedProviders, [
+    ['google_ai', 'google_ai/gemini-2.5-flash'],
+    ['openai', 'openai/gpt-4.1'],
+    ['anthropic', SONNET],
+    ['mistral_ai', 'mistral_ai/mistral-large-latest'],
+    ['deepseek', 'deepseek/deepseek-chat'],
+  ]) || directFast || directStrong;
+  const directLong = firstConnected(connectedProviders, [
+    ['google_ai', 'google_ai/gemini-2.5-pro'],
+    ['minimax', 'minimax/MiniMax-M1'],
+    ['cohere', 'cohere/command-r-plus'],
+    ['openai', 'openai/gpt-5.4'],
+  ]) || directStrong;
+
   const OR_SONNET = 'openrouter/anthropic/claude-sonnet-4';
+  const OR_REASONER = 'openrouter/deepseek/deepseek-r1';
   const OR_FAST = 'openrouter/openai/gpt-5-mini';
   const OR_LONG = 'openrouter/google/gemini-2.5-pro';
+  const OR_BROWSER = 'openrouter/google/gemini-2.5-flash';
 
   // Exploring phase: ask one focused question — Haiku is plenty, ~2-3x
   // faster than Sonnet. User-visible latency drops hard here because
   // discovery turns are the most latency-sensitive part of the flow
   // (each one gates the next user action).
-  if (buildExploring) return blackSwanConnected ? BLACKSWAN_ENDPOINT_MODEL_ID : (orConnected ? OR_FAST : (directFast || HAIKU));
+  if (buildExploring) return blackSwanConnected ? BLACKSWAN_ENDPOINT_MODEL_ID : (directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? HAIKU : DEFAULT_MODEL));
 
-  // Build-converging phase always gets Opus — the model is about to commit
-  // to a brief, and this is where reasoning depth matters most.
-  if (buildConverging) return orConnected ? OR_OPUS : (directStrong || OPUS);
+  // Build-converging needs more reasoning than a clarifying question, but
+  // Sonnet / connected reasoners are enough for the first brief. Opus stays
+  // opt-in so Auto cannot create high-cost surprises.
+  if (buildConverging) return directStrong || (orConnected ? OR_REASONER : null) || (anthropicConnected ? SONNET : DEFAULT_MODEL);
 
   if (intent) {
     const isLight = complexity === 'trivial' || complexity === 'simple';
@@ -200,7 +243,7 @@ export function resolveModelForSoul(
     // a per-token basis.
     if (intent === 'casual' || intent === 'social' || intent === 'status' || intent === 'memory') {
       if (blackSwanConnected && shouldUseBlackSwanForAuto(intent, complexity)) return BLACKSWAN_ENDPOINT_MODEL_ID;
-      return orConnected ? OR_FAST : (directNano || directFast || HAIKU);
+      return directNano || directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? HAIKU : DEFAULT_MODEL);
     }
 
     // Questions: Haiku is the new default. Only escalate when the
@@ -209,23 +252,18 @@ export function resolveModelForSoul(
     if (intent === 'question') {
       if (blackSwanConnected && shouldUseBlackSwanForAuto(intent, complexity)) return BLACKSWAN_ENDPOINT_MODEL_ID;
       if (isHeavy) {
-        if (orConnected) return OR_SONNET;
-        return directStrong || SONNET;
+        return directStrong || (orConnected ? OR_SONNET : null) || (anthropicConnected ? SONNET : DEFAULT_MODEL);
       }
-      if (orConnected) return OR_FAST;
-      return directFast || HAIKU;
+      return directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? HAIKU : DEFAULT_MODEL);
     }
 
-    // Research + architect still ALWAYS reach for Opus — these are
-    // the scenarios where Auto explicitly accepts the cost trade
-    // because the model has to hold multiple threads in its head.
-    // OpenAI's o3 wins on math / theoretical reasoning when wired;
-    // Gemini's 2M context wins on long-form research via OR.
+    // Research + architect use strong connected providers first and only
+    // fall back to Sonnet on Anthropic. Opus is explicit-pick only.
     if (intent === 'research') {
-      return orConnected ? OR_LONG : (directLong || directReasoner || OPUS);
+      return directResearch || directLong || (orConnected ? OR_LONG : null) || (anthropicConnected ? SONNET : DEFAULT_MODEL);
     }
     if (intent === 'architect') {
-      return orConnected ? OR_OPUS : (directReasoner || directStrong || OPUS);
+      return directReasoner || directStrong || (orConnected ? OR_REASONER : null) || (anthropicConnected ? SONNET : DEFAULT_MODEL);
     }
 
     // Coding intents — Haiku by default, escalate to a code
@@ -235,52 +273,46 @@ export function resolveModelForSoul(
     // builds when OpenAI is wired.
     if (intent === 'build' || intent === 'debug' || intent === 'review') {
       if (isHeavy) {
-        if (orConnected) return OR_OPUS;
-        return directCode || OPUS;
+        return directCode || (orConnected ? OR_REASONER : null) || (anthropicConnected ? SONNET : DEFAULT_MODEL);
       }
-      if (orConnected) return OR_FAST;
-      return directFast || HAIKU;
+      return directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? HAIKU : DEFAULT_MODEL);
     }
 
     // Design / creative — Haiku by default; one-shot variations and
     // edits don't need a frontier model to pull off.
     if (intent === 'design' || intent === 'creative') {
-      if (orConnected) return OR_FAST;
-      return directFast || HAIKU;
+      return directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? HAIKU : DEFAULT_MODEL);
     }
 
-    // Browser / computer-use — needs vision. OpenAI ships a dedicated
-    // computer-use-preview model (the one behind Operator) that
-    // outperforms generic vision models on arbitrary web UIs. When
-    // OpenAI is wired we route here. Otherwise fall back to Anthropic
-    // Sonnet which is the only Claude tier with computer use today.
+    // Browser / computer-use planning should use chat-compatible models.
+    // Dedicated CUA models are invoked by the browser/computer runtime,
+    // not by the normal chat-completions path.
     if (intent === 'browser') {
       if (directBrowser) return directBrowser;
-      if (orConnected) return OR_SONNET; // OR routes through Anthropic Sonnet for computer use
-      return SONNET;
+      if (orConnected) return OR_BROWSER;
+      return anthropicConnected ? SONNET : DEFAULT_MODEL;
     }
 
     // Task management / support — Haiku across the board. These are
     // mostly state lookups or routing, not reasoning.
     if (intent === 'task_mgmt' || intent === 'support') {
       if (blackSwanConnected && shouldUseBlackSwanForAuto(intent, complexity)) return BLACKSWAN_ENDPOINT_MODEL_ID;
-      if (orConnected) return OR_FAST;
-      return directFast || HAIKU;
+      return directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? HAIKU : DEFAULT_MODEL);
     }
   }
 
-  if (!spiritId) return DEFAULT_MODEL;
-  return SOUL_MODEL_DEFAULTS[spiritId] || DEFAULT_MODEL;
+  const soulDefault = spiritId ? (SOUL_MODEL_DEFAULTS[spiritId] || DEFAULT_MODEL) : DEFAULT_MODEL;
+  return directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? soulDefault : DEFAULT_MODEL);
 }
 
 // BlackSwan failover chain: if primary model fails (rate limit,
 // billing, auth), automatically try the next model in the chain.
 const MODEL_FAILOVER: Record<string, string[]> = {
-  [BLACKSWAN_ENDPOINT_MODEL_ID]:     ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
+  [BLACKSWAN_ENDPOINT_MODEL_ID]:     ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6'],
   'claude-sonnet-4-6':          ['claude-haiku-4-5-20251001', 'gemini-2.5-flash'],
   'claude-opus-4-6':            ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
   'claude-haiku-4-5-20251001':  ['gemini-2.5-flash'],
-  'gemini-2.5-pro':             ['claude-sonnet-4-6'],
+  'gemini-2.5-pro':             ['claude-haiku-4-5-20251001'],
   'gemini-2.5-flash':           ['claude-haiku-4-5-20251001'],
 };
 

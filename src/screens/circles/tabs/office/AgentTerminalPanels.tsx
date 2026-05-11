@@ -1,7 +1,19 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
 import { MONO } from './AgentPanelShared';
+import { OfficeAgent } from '../../../../lib/officeAgents';
+import {
+  getAgentIdentityKey,
+  loadAgentIdentities,
+  updateAgentIdentity,
+  type TerminalAgentOfficeConfig,
+  type TerminalLaunchMode,
+} from '../../../../lib/agentIdentity';
+import { launchClaudeCodeSessions } from '../../../../lib/claudeCodeDetector';
+import { launchCodexSessions } from '../../../../lib/codexDetector';
+import { launchGeminiCliSessions } from '../../../../lib/geminiCliDetector';
+import { sendTerminalAgentSessionMessage } from '../../../../lib/bridgeTaskDispatcher';
 
 const QUICK_COMMANDS = [
   { label: 'pwd', cmd: 'pwd', icon: '>' },
@@ -15,6 +27,20 @@ const QUICK_COMMANDS = [
 ];
 
 const COMMAND_TIMEOUT_MS = 30_000;
+
+function normalizeTerminalProvider(provider: string | null | undefined): 'claude-code' | 'codex' | 'gemini' | null {
+  const normalized = String(provider || '').toLowerCase().replace(/\s+/g, '-');
+  if (normalized === 'claude-code') return 'claude-code';
+  if (normalized === 'codex') return 'codex';
+  if (normalized === 'gemini' || normalized === 'gemini-cli') return 'gemini';
+  return null;
+}
+
+function modeLabel(mode: TerminalLaunchMode): string {
+  if (mode === 'full-auto') return 'Full Auto';
+  if (mode === 'auto') return 'Auto Edit';
+  return 'Safe';
+}
 
 export function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string) => Promise<{ ok: boolean; stdout?: string; stderr?: string }> }) {
   const [cmdInput, setCmdInput] = useState('');
@@ -186,7 +212,248 @@ export function AgentRemoteShell({ onRunCommand }: { onRunCommand: (cmd: string)
   );
 }
 
-export function AgentQuickTerminal({ agentName, agentId, circleId }: { agentName: string; agentId: string; circleId: string }) {
+export function AgentTerminalProfilePanel({
+  agent,
+  circleId,
+  userId,
+  onRenameAgent,
+  onIdentityChange,
+}: {
+  agent: OfficeAgent;
+  circleId?: string;
+  userId?: string | null;
+  onRenameAgent?: (agent: OfficeAgent, newName: string) => Promise<void> | void;
+  onIdentityChange?: () => void;
+}) {
+  const identityKey = getAgentIdentityKey(agent);
+  const provider = normalizeTerminalProvider(agent.providerType);
+  const [displayName, setDisplayName] = useState(agent.name);
+  const [config, setConfig] = useState<TerminalAgentOfficeConfig>({
+    defaultCwd: agent.projectDir || '',
+    defaultModel: agent.model && agent.model !== 'unknown' ? agent.model : '',
+    defaultPrompt: '',
+    launchMode: 'safe',
+    autoSaveMemory: true,
+  });
+  const [saving, setSaving] = useState(false);
+  const [launching, setLaunching] = useState(false);
+  const [result, setResult] = useState<string>('');
+
+  useEffect(() => {
+    let cancelled = false;
+    loadAgentIdentities().then((identities) => {
+      if (cancelled) return;
+      const identity = identities.get(identityKey);
+      setDisplayName(identity?.customName || agent.name);
+      setConfig({
+        defaultCwd: identity?.terminalConfig?.defaultCwd ?? agent.projectDir ?? '',
+        defaultModel: identity?.terminalConfig?.defaultModel ?? identity?.boundModel ?? (agent.model && agent.model !== 'unknown' ? agent.model : ''),
+        defaultPrompt: identity?.terminalConfig?.defaultPrompt ?? '',
+        launchMode: identity?.terminalConfig?.launchMode ?? 'safe',
+        autoSaveMemory: identity?.terminalConfig?.autoSaveMemory ?? true,
+      });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [agent.id, agent.model, agent.name, agent.projectDir, identityKey]);
+
+  const patchConfig = (patch: Partial<TerminalAgentOfficeConfig>) => {
+    setConfig(prev => ({ ...prev, ...patch }));
+  };
+
+  const saveProfile = async () => {
+    if (!identityKey) return;
+    setSaving(true);
+    setResult('');
+    try {
+      const cleanName = displayName.trim();
+      if (cleanName && cleanName !== agent.name && onRenameAgent) {
+        await onRenameAgent(agent, cleanName);
+      }
+      await updateAgentIdentity(identityKey, {
+        customName: cleanName || undefined,
+        boundAiProvider: agent.providerType,
+        boundModel: config.defaultModel?.trim() || agent.model,
+        terminalConfig: {
+          defaultCwd: config.defaultCwd?.trim() || undefined,
+          defaultModel: config.defaultModel?.trim() || undefined,
+          defaultPrompt: config.defaultPrompt?.trim() || undefined,
+          launchMode: config.launchMode || 'safe',
+          autoSaveMemory: config.autoSaveMemory !== false,
+        },
+        isCustomized: true,
+      });
+      onIdentityChange?.();
+      setResult('Saved terminal profile. Chat assignments will use this profile.');
+    } catch (err: any) {
+      setResult(`Save failed: ${err?.message || 'unknown error'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const launchFromProfile = async () => {
+    if (!provider) {
+      setResult('This agent does not support managed terminal launches yet.');
+      return;
+    }
+    setLaunching(true);
+    setResult('');
+    try {
+      await saveProfile();
+      const prompt = config.defaultPrompt?.trim()
+        || `Stand by as ${displayName.trim() || agent.name}. Wait for delegated tasks from The Underground Circle.`;
+      const input = {
+        count: 1,
+        prompts: [prompt],
+        names: [displayName.trim() || agent.name],
+        model: config.defaultModel?.trim() || undefined,
+        projectDir: config.defaultCwd?.trim() || undefined,
+        cwd: config.defaultCwd?.trim() || undefined,
+        circleId,
+        userId: userId || undefined,
+      };
+
+      const launchResult = provider === 'claude-code'
+        ? await launchClaudeCodeSessions({
+            ...input,
+            permissionMode: config.launchMode === 'full-auto'
+              ? 'bypassPermissions'
+              : config.launchMode === 'auto'
+                ? 'acceptEdits'
+                : 'default',
+          })
+        : provider === 'codex'
+          ? await launchCodexSessions({ ...input, fullAuto: config.launchMode === 'full-auto' })
+          : await launchGeminiCliSessions({ ...input, yolo: config.launchMode === 'full-auto' });
+
+      if (launchResult.ok && launchResult.launched > 0) {
+        setResult(`Launched ${launchResult.launched} managed ${provider === 'gemini' ? 'Gemini CLI' : provider} session from this Office profile.`);
+      } else {
+        setResult(`Launch failed: ${launchResult.error || launchResult.failed?.[0]?.error || 'unknown error'}`);
+      }
+    } catch (err: any) {
+      setResult(`Launch failed: ${err?.message || 'unknown error'}`);
+    } finally {
+      setLaunching(false);
+    }
+  };
+
+  const inputStyle = {
+    backgroundColor: '#05050a',
+    borderWidth: 1,
+    borderColor: '#1a1a28',
+    borderRadius: 2,
+    color: '#e8e8f8',
+    fontSize: 12,
+    fontFamily: MONO,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
+  } as any;
+
+  return (
+    <View style={{ paddingHorizontal: 8, marginBottom: 12 }} nativeID="section-agent-terminal-profile">
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6 }}>
+        <View style={{ width: 18, height: 18, borderRadius: 2, backgroundColor: '#38bdf815', borderWidth: 1, borderColor: '#38bdf830', justifyContent: 'center', alignItems: 'center' }}>
+          <Text style={{ color: '#38bdf8', fontSize: 11, fontWeight: '800', fontFamily: MONO }}>#</Text>
+        </View>
+        <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>OFFICE TERMINAL PROFILE</Text>
+        <Text style={{ color: provider ? '#22c55e' : '#f59e0b', fontSize: 11, marginLeft: 'auto' as any, fontFamily: MONO }}>
+          {provider ? 'MANAGED' : 'OBSERVE'}
+        </Text>
+      </View>
+
+      <View style={{ gap: 8 }}>
+        <Text style={{ color: '#707086', fontSize: 12, fontFamily: MONO }}>
+          Saved here, used in Chat assignments, Office launches, and managed terminal follow-ups.
+        </Text>
+
+        <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' as any }}>
+          <View style={{ flex: 1, minWidth: 180 }}>
+            <Text style={{ color: '#808090', fontSize: 11, fontWeight: '800', marginBottom: 4, fontFamily: MONO }}>DISPLAY NAME</Text>
+            <TextInput value={displayName} onChangeText={setDisplayName} placeholder="Agent name" placeholderTextColor="#3b3b5b" style={inputStyle} />
+          </View>
+          <View style={{ flex: 1, minWidth: 180 }}>
+            <Text style={{ color: '#808090', fontSize: 11, fontWeight: '800', marginBottom: 4, fontFamily: MONO }}>MODEL</Text>
+            <TextInput value={config.defaultModel || ''} onChangeText={text => patchConfig({ defaultModel: text })} placeholder="default / provider model" placeholderTextColor="#3b3b5b" style={inputStyle} autoCapitalize="none" />
+          </View>
+        </View>
+
+        <View>
+          <Text style={{ color: '#808090', fontSize: 11, fontWeight: '800', marginBottom: 4, fontFamily: MONO }}>WORKING DIRECTORY</Text>
+          <TextInput value={config.defaultCwd || ''} onChangeText={text => patchConfig({ defaultCwd: text })} placeholder="/Users/cswanson/the-underground-circle" placeholderTextColor="#3b3b5b" style={inputStyle} autoCapitalize="none" />
+        </View>
+
+        <View>
+          <Text style={{ color: '#808090', fontSize: 11, fontWeight: '800', marginBottom: 4, fontFamily: MONO }}>DEFAULT INSTRUCTIONS</Text>
+          <TextInput
+            value={config.defaultPrompt || ''}
+            onChangeText={text => patchConfig({ defaultPrompt: text })}
+            placeholder="Persistent instructions Chat should prepend when assigning this terminal agent work..."
+            placeholderTextColor="#3b3b5b"
+            style={[inputStyle, { minHeight: 84, textAlignVertical: 'top' }]}
+            multiline
+          />
+        </View>
+
+        <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' as any }}>
+          {(['safe', 'auto', 'full-auto'] as TerminalLaunchMode[]).map(mode => {
+            const active = (config.launchMode || 'safe') === mode;
+            return (
+              <Pressable
+                key={mode}
+                onPress={() => patchConfig({ launchMode: mode })}
+                style={[
+                  { borderRadius: 2, borderWidth: 1, borderColor: active ? '#38bdf8' : '#1a1a28', backgroundColor: active ? '#38bdf8' : '#080812', paddingHorizontal: 10, paddingVertical: 7 },
+                  Platform.OS === 'web' && { cursor: 'pointer' } as any,
+                ]}
+              >
+                <Text style={{ color: active ? '#050508' : '#9ca3af', fontSize: 12, fontWeight: '800', fontFamily: MONO }}>{modeLabel(mode)}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+
+        <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' as any }}>
+          <Pressable
+            onPress={saveProfile}
+            disabled={saving}
+            style={[{ backgroundColor: '#22c55e', borderRadius: 2, paddingHorizontal: 12, paddingVertical: 8, opacity: saving ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: 'pointer' } as any]}
+          >
+            <Text style={{ color: '#050508', fontSize: 12, fontWeight: '900', fontFamily: MONO }}>{saving ? 'SAVING...' : 'SAVE PROFILE'}</Text>
+          </Pressable>
+          <Pressable
+            onPress={launchFromProfile}
+            disabled={launching || !provider}
+            style={[{ backgroundColor: provider ? '#38bdf8' : '#252536', borderRadius: 2, paddingHorizontal: 12, paddingVertical: 8, opacity: launching ? 0.55 : 1 }, Platform.OS === 'web' && { cursor: provider ? 'pointer' : 'not-allowed' } as any]}
+          >
+            <Text style={{ color: '#050508', fontSize: 12, fontWeight: '900', fontFamily: MONO }}>{launching ? 'LAUNCHING...' : 'LAUNCH FROM PROFILE'}</Text>
+          </Pressable>
+        </View>
+
+        {!!result && (
+          <Text style={{ color: result.toLowerCase().includes('failed') ? '#ef4444' : '#22c55e', fontSize: 12, fontFamily: MONO }}>
+            {result}
+          </Text>
+        )}
+      </View>
+    </View>
+  );
+}
+
+export function AgentQuickTerminal({
+  agentName,
+  agentId,
+  circleId,
+  providerType,
+  sessionKey,
+}: {
+  agentName: string;
+  agentId: string;
+  circleId: string;
+  providerType?: string;
+  sessionKey?: string;
+}) {
   const [input, setInput] = useState('');
   const [history, setHistory] = useState<{ role: 'user' | 'agent' | 'error'; text: string }[]>([]);
   const [sending, setSending] = useState(false);
@@ -194,6 +461,8 @@ export function AgentQuickTerminal({ agentName, agentId, circleId }: { agentName
   const scrollRef = useRef<ScrollView>(null);
   const dragStartY = useRef(0);
   const dragStartH = useRef(0);
+  const terminalProvider = normalizeTerminalProvider(providerType);
+  const isManagedTerminal = Boolean(terminalProvider && sessionKey);
 
   const handleSend = async () => {
     if (!input.trim() || sending) return;
@@ -203,14 +472,20 @@ export function AgentQuickTerminal({ agentName, agentId, circleId }: { agentName
     setSending(true);
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
     try {
-      const { getSwanBotResponse } = await import('../../../../lib/swanbot');
-      const response = await getSwanBotResponse(`@${agentName}: ${message}`, {
-        userId: (await supabase.auth.getUser()).data.user?.id || '',
-        circleId,
-        agentId,
-        agentName,
-      });
-      setHistory(prev => [...prev, { role: 'agent', text: response }]);
+      if (isManagedTerminal && terminalProvider && sessionKey) {
+        const result = await sendTerminalAgentSessionMessage(terminalProvider, sessionKey, message);
+        if (!result.ok) throw new Error(result.error || 'Terminal send failed');
+        setHistory(prev => [...prev, { role: 'agent', text: result.response || 'Message sent to managed terminal session.' }]);
+      } else {
+        const { getSwanBotResponse } = await import('../../../../lib/swanbot');
+        const response = await getSwanBotResponse(`@${agentName}: ${message}`, {
+          userId: (await supabase.auth.getUser()).data.user?.id || '',
+          circleId,
+          agentId,
+          agentName,
+        });
+        setHistory(prev => [...prev, { role: 'agent', text: response }]);
+      }
     } catch (e: any) {
       setHistory(prev => [...prev, { role: 'error', text: e.message || 'Failed' }]);
     }
@@ -232,11 +507,11 @@ export function AgentQuickTerminal({ agentName, agentId, circleId }: { agentName
     <View style={{ flex: 1, paddingHorizontal: 8 }} nativeID="section-agent-quick-terminal">
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6 }}>
         <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: sending ? '#f59e0b' : '#22c55e' }} />
-        <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>{agentName.toUpperCase()} TERMINAL</Text>
+        <Text style={{ color: '#909098', fontSize: 12, fontWeight: '700', letterSpacing: 1, fontFamily: MONO }}>{agentName.toUpperCase()} {isManagedTerminal ? 'MANAGED TERMINAL' : 'TERMINAL'}</Text>
         <Text style={{ color: '#808090', fontSize: 12, marginLeft: 'auto' as any }}>{history.length} msg</Text>
       </View>
       <ScrollView ref={scrollRef} style={{ height: outputHeight, backgroundColor: '#05050a', borderWidth: 1, borderColor: '#1a1a2e', borderRadius: 2, padding: 12 }} nestedScrollEnabled showsVerticalScrollIndicator>
-        {history.length === 0 && <Text style={{ color: '#808090', fontSize: 14, fontFamily: MONO, fontStyle: 'italic' }}>Type a command to talk to {agentName}...</Text>}
+        {history.length === 0 && <Text style={{ color: '#808090', fontSize: 14, fontFamily: MONO, fontStyle: 'italic' }}>{isManagedTerminal ? `Send a follow-up directly into ${agentName}'s Terminal tab...` : `Type a command to talk to ${agentName}...`}</Text>}
         {history.map((entry, index) => (
           <View key={index} style={{ marginBottom: 10 }}>
             <Text style={{ color: entry.role === 'user' ? '#8b5cf6' : entry.role === 'error' ? '#ef4444' : '#22c55e', fontSize: 12, fontWeight: '700', fontFamily: MONO, marginBottom: 2 }}>

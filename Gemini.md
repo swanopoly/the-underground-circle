@@ -1,53 +1,55 @@
-# Gemini.md — The Underground Circle
+# Gemini.md - The Underground Circle
 
-> Project context and engineering standards for Gemini CLI.
-> Derived from CLAUDE.md (v3).
+> Gemini CLI notes.
+> Last reviewed: 2026-05-09
 
-## Project Overview
-**The Underground Circle** is a social accountability platform for AI-agent builders. It features real-time agent tracking, shared offices (pixel art), and gamified accountability rituals.
+Start with `AGENTS.md`, then `docs/AGENTS_ROADMAP.md`. This file is only the
+Gemini-specific quick sheet.
 
-## Tech Stack
-- **Frontend:** React Native + Expo 54 (Web/iOS/Android), TypeScript, React 19.
-- **Backend:** Supabase (Auth, Postgres, Realtime, Edge Functions).
-- **AI:** OpenSwan, Claude (via Anthropic API), Gemini (API key supported).
-- **Crypto:** ethers.js, @solana/web3.js.
-- **Proxy:** `openswan-proxy.js` (port 18790).
+## Project Snapshot
 
-## Core Dev Commands
-- `npm run web`: Start web development server (localhost:8081).
-- `npm run start`: Start Expo dev server for all platforms.
-- `npm run build`: Production web build.
-- `npm run dev`: Custom development script.
-- `npm run proxy`: Start CORS/WS proxy.
-- `npm run generate-sprites`: Generate pixel art PNGs.
+- Frontend: Expo 54, React Native 0.81.5, React 19, TypeScript.
+- Backend: Supabase Auth, Postgres, Realtime, Edge Functions.
+- AI/runtime: BlackSwan, OpenSwan, Claude Code/Codex bridges, provider
+  marketplace, Browserbase Computer Use, local desktop bridge tools.
+- LLM providers: Anthropic, OpenAI, OpenRouter, Hugging Face, Groq, Google AI,
+  Mistral, Cohere, Perplexity, Together, Fireworks, DeepSeek, z.ai, MiniMax,
+  Ollama, GitHub Models, and related marketplace integrations.
+- Web deploy: Netlify. Local app dev server: `http://localhost:8081`.
 
-## Engineering Standards & Critical Guarantees
+## Read Before Editing
 
-### Web Stability (CRITICAL)
-- **Animation Patch:** `src/lib/animationPatch.ts` MUST be the first import in `App.tsx`. It disables `Animated.loop` and forces `useNativeDriver: false` on web to prevent infinite re-render crashes.
-- **Supabase Singleton:** Access the Supabase client via `globalThis.__supabaseClient` (defined in `supabase.ts`) to avoid duplicate client warnings during HMR.
-- **Auth Safety:** ALL `supabase.auth.getUser()` and `getSession()` calls MUST include a `.catch()` handler to prevent `AbortError` crashes.
-- **Supabase Web Lock:** Use the no-op lock configuration in `supabase.ts` for web to avoid `navigator.locks` issues.
+- `docs/AGENTS_ROADMAP.md` - ownership, phase status, SQL checklist, rules.
+- `docs/UC_APP_STACK_REFERENCE.md` - current app map.
+- `CLAUDE.md` - current product and architecture context.
+- `MEMORY.md` - persistent gotchas.
 
-### UI & Animation
-- **Pixel Agent Breathing:** Use `scaleX` for breathing animations. DO NOT use `scaleY` as it causes vertical jitter (legs pushing down).
-- **Pointer Events:** On RN Web, use `el.addEventListener('pointerdown')` within a `useEffect` instead of the `onPointerDown` React prop.
-- **Grid Snapping:** Office furniture uses a 16px grid.
+## Non-Negotiables
 
-### TypeScript & Schema Gotchas
-- **Profiles:** When joining `profiles`, select `display_name` and `username`. The `profiles` table does NOT have an `email` column (use `auth.users`).
-- **XP Table:** `user_xp` primary key is `user_id`, NOT `id`.
-- **Agents Table:** `circle_office_agents` has no `model` column. The owner foreign key is `owner_id`.
-- **Message Types:** `room_messages.message_type` must be one of: `chat | agent_output | edit_event | system | playground`.
-- **Safe-to-ignore TS Errors:** Known issues exist in `ProfileScreen.tsx`, `OfficeChat.tsx`, `PhotonProofCheck.tsx`, and `CostDashboard.tsx`.
+- `src/lib/animationPatch.ts` stays first in `App.tsx`.
+- Use `src/lib/supabase.ts`; do not create another Supabase client on the
+  frontend.
+- Prefer `safeGetUser`, `safeGetSession`, and `getFreshAccessToken`.
+- Do not add new unguarded `supabase.auth.getUser()` / `getSession()` calls.
+- On React Native Web, prefer native DOM pointer listeners when React pointer
+  props are unreliable.
+- Office furniture and draggable office placement stay on the 16px grid.
+- Do not assume `profiles.email`, `circle_office_agents.model`, or
+  `user_xp.id` exist.
 
-## Key Directory Structure
-- `src/screens/`: Auth, Circles (Chat, Office, Rooms, Proof, Leaderboard).
-- `src/components/`: PixelOfficeCanvas, AgentActivityFeed, HITL banners.
-- `src/lib/`: `supabase.ts`, `gamification.ts`, `animationPatch.ts`.
-- `supabase/migrations/`: SQL schema updates (Check CLAUDE.md for "NOT YET RUN" status).
+## Validation
 
-## Workflow Guidelines
-- **Research first:** Check `CLAUDE.md` and `MEMORY.md` for recent architectural shifts.
-- **Validation:** Always verify changes against the web platform's unique constraints (animations, auth locks).
-- **Environment:** Ensure `.env` contains `EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY`, and `EXPO_PUBLIC_GEMINI_API_KEY`.
+Run `npm run typecheck` after TypeScript-heavy changes.
+
+For focused runtime work, prefer the matching smoke script in `package.json`;
+examples:
+
+```bash
+npm run smoke:chat-planner
+npm run smoke:computer-task-runtime
+npm run smoke:cross-provider-router
+npm run smoke:agent-runtime
+```
+
+Do not rely on old ignored-TypeScript-error guidance. The current baseline
+typecheck is expected to be clean.

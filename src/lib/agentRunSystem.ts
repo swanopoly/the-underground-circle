@@ -596,16 +596,73 @@ export async function saveMemory(opts: {
     'circle_shared'
   );
 
+  const payload = {
+    ...basePayload,
+    visibility,
+  };
+
+  const canDedupSessionMemory = opts.scope === 'session' && Boolean(opts.circleId && opts.title);
+  const findExistingSessionMemory = async () => {
+    if (!canDedupSessionMemory) return null;
+    let query = supabase
+      .from('memory_entries')
+      .select('*')
+      .eq('scope', 'session')
+      .eq('circle_id', opts.circleId as string)
+      .eq('title', opts.title)
+      .eq('is_active', true)
+      .limit(1);
+
+    query = opts.sourceSurface ? query.eq('source_surface', opts.sourceSurface) : query.is('source_surface', null);
+    query = opts.userId ? query.eq('user_id', opts.userId) : query.is('user_id', null);
+
+    const { data: existing, error: existingError } = await query.maybeSingle();
+    if (existingError) {
+      devLog.trace('[AgentRunSystem] saveMemory session dedup lookup skipped:', existingError.message);
+      return null;
+    }
+    return existing;
+  };
+
+  const updateExistingSessionMemory = async (id: string, fallback: any): Promise<MemoryEntry | null> => {
+    const { data: updated, error: updateError } = await supabase
+      .from('memory_entries')
+      .update({
+        ...payload,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateError) {
+      devLog.trace('[AgentRunSystem] saveMemory session dedup update skipped:', updateError.message);
+      return fallback ? mapMemory(fallback) : null;
+    }
+    devLog.trace('[AgentRunSystem] saveMemory session dedup updated:', opts.title?.slice(0, 50));
+    return mapMemory(updated);
+  };
+
+  const existingSessionMemory = await findExistingSessionMemory();
+  if (existingSessionMemory?.id) {
+    return updateExistingSessionMemory(existingSessionMemory.id, existingSessionMemory);
+  }
+
   let { data, error } = await supabase
     .from('memory_entries')
-    .insert({
-      ...basePayload,
-      visibility,
-    })
+    .insert(payload)
     .select()
     .single();
 
   if (error) {
+    if (error.code === '23505' && error.message?.includes('idx_memory_session_dedup')) {
+      const duplicateSessionMemory = await findExistingSessionMemory();
+      if (duplicateSessionMemory?.id) {
+        return updateExistingSessionMemory(duplicateSessionMemory.id, duplicateSessionMemory);
+      }
+      devLog.trace('[AgentRunSystem] saveMemory session duplicate ignored:', opts.title?.slice(0, 50));
+      return null;
+    }
     console.error('[AgentRunSystem] saveMemory FAILED:', error.message, '| code:', error.code, '| hint:', error.hint, '| details:', error.details);
     console.error('[AgentRunSystem] saveMemory params: scope=', opts.scope, 'circleId=', opts.circleId, 'userId=', opts.userId, 'kind=', opts.memoryKind);
     return null;
@@ -688,7 +745,7 @@ export async function loadMemories(opts: {
       .eq('user_id', opts.userId)
       .eq('scope', 'user')
       .eq('is_active', true)
-      .order('created_at', { ascending: false })
+      .order('updated_at', { ascending: false })
       .limit(20);
 
     if (data) results.push(...data.map(mapMemory));
@@ -715,7 +772,9 @@ export async function loadMemories(opts: {
   }
 
   // Sort combined results by recency and cap
-  results.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  results.sort((a, b) =>
+    new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime()
+  );
   return results.slice(0, opts.limit || 50);
 }
 

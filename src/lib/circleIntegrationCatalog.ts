@@ -87,6 +87,7 @@ export type CircleIntegrationPlatformKey =
   // ── Wave 2: native LLM providers (BYOK) ──
   | 'anthropic'
   | 'openai'
+  | 'openai_compatible'
   | 'google_ai'
   | 'groq'
   | 'mistral_ai'
@@ -1097,6 +1098,21 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     platformKey: 'openai',
     recentlyAdded: true,
     popularityRank: 2,
+  },
+  {
+    id: 'openai-compatible',
+    label: 'Business Models',
+    icon: 'BM',
+    color: '#14B8A6',
+    group: 'ai_agents_services',
+    description: 'Private, self-hosted, or company-tuned OpenAI-compatible model endpoints. Use your business model for chat, browser planning, desktop orchestration, and tool routing.',
+    relationships: ['Private model endpoint', 'BYOK', 'OpenAI-compatible'],
+    capabilityLabel: 'Business model gateway',
+    scopeLabel: 'User-owned',
+    availability: 'available',
+    platformKey: 'openai_compatible',
+    recentlyAdded: true,
+    popularityRank: 3,
   },
   {
     id: 'google-ai',

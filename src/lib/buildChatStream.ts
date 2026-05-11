@@ -37,9 +37,10 @@ export function streamBuildChat(opts: BuildChatStreamOpts): StreamHandle {
 
   const system = buildSystemAddendum(buildState);
 
-  // Pair exploring with Haiku for speed; converging with Opus for reasoning
-  // depth. Matches the non-streaming adaptive router in serviceProfileSouls.
-  const model = buildState === 'converging' ? 'claude-opus-4-7' : 'claude-haiku-4-5';
+  // Pair exploring with Haiku for speed; converging with Sonnet for enough
+  // reasoning without Opus-class daily spend. Users can still explicitly
+  // select Opus elsewhere when the quality/cost tradeoff is intentional.
+  const model = buildState === 'converging' ? 'claude-sonnet-4-6' : 'claude-haiku-4-5';
 
   // Keep the last 6 turns only — the directive carries all the behavior
   // rules. Extra history is just token bloat that slows prefill.

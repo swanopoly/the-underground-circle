@@ -20,6 +20,7 @@
  */
 import type { DesktopResult } from './desktopBridgeProtocol';
 import { getBridgeUrl } from './bridgeEnvironment';
+import { ensureDesktopBridgePaired } from './desktopBridge';
 
 const BRIDGE_PORT = 7778;
 const TOKEN_KEY = 'uc_desktop_bridge_token_v1';
@@ -79,7 +80,14 @@ async function callBrowser<T = unknown>(method: 'GET' | 'POST', pathname: string
   if (!base) {
     return { ok: false, error: 'Browser bridge unavailable in this environment.', errorCode: 'bridge_offline' };
   }
-  const token = readToken();
+  let token = readToken();
+  if (!token) {
+    const paired = await ensureDesktopBridgePaired();
+    if (!paired.ok) {
+      return { ok: false, error: paired.error || 'Desktop bridge not paired. Pair first via `/desktop diag`.', errorCode: paired.errorCode || 'not_paired' };
+    }
+    token = paired.data?.token || null;
+  }
   if (!token) {
     return { ok: false, error: 'Desktop bridge not paired. Pair first via `/desktop diag`.', errorCode: 'not_paired' };
   }
@@ -200,6 +208,21 @@ export async function fillField(args: {
     return { ok: false, error: 'text too long (max 4000)', errorCode: 'invalid_input' };
   }
   return callBrowser('POST', '/browser/fill', args);
+}
+
+/** Select an option in a native select/combobox field. */
+export async function selectOption(args: {
+  role?: string;
+  name?: string;
+  selector?: string;
+  value: string;
+  exact?: boolean;
+  timeoutMs?: number;
+}): Promise<DesktopResult<{ value: string }>> {
+  if (typeof args.value !== 'string' || !args.value.trim()) {
+    return { ok: false, error: 'value required', errorCode: 'invalid_input' };
+  }
+  return callBrowser('POST', '/browser/select', { role: args.role || 'combobox', ...args });
 }
 
 /** Press a single key or combo via Playwright's keyboard.press. */

@@ -1,6 +1,7 @@
 import { inferChatCommandExecution, matchesChatCommandRoute, type ChatCommandDecisionSource, type ChatCommandRouteId } from './chatCommandRegistry';
 import { planComputerTaskPreview } from './computerTaskPlanner';
 import { classifyBrowserbaseWorkflow } from './browserbaseWorkflowIntent';
+import { detectLocalComputerAwarenessIntent, getLocalComputerAwarenessRisk } from './localComputerAwarenessIntent';
 
 export type PlannerConversationalIntent =
   | { type: 'wordpress_publish'; title?: string; imageUrl?: string; status: 'draft' | 'publish' }
@@ -273,6 +274,31 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
       approval: buildApproval(routeId, risk),
       confidence: 0.85,
       notes: ['Matched conversational intent router.'],
+    };
+  }
+
+  const localComputerIntent = detectLocalComputerAwarenessIntent(normalized);
+  if (localComputerIntent.route) {
+    const localRisk = getLocalComputerAwarenessRisk(localComputerIntent);
+    const risk: ChatAutomationRisk = localRisk === 'external_side_effect'
+      ? 'external_side_effect'
+      : localRisk === 'review'
+        ? 'review'
+        : 'safe';
+    return {
+      source: 'plain_chat',
+      intent: { kind: 'direct_chat', message: normalized },
+      execution: {
+        kind: 'run_openswan',
+        routeId: null,
+        commandText: normalized,
+      },
+      risk,
+      approval: risk === 'safe'
+        ? { required: false, reason: null }
+        : { required: true, reason: `Local desktop ${localComputerIntent.kind || 'action'} requires user-visible bridge approval.` },
+      confidence: 0.92,
+      notes: [`Detected local desktop bridge intent: ${localComputerIntent.kind || localComputerIntent.reason}.`],
     };
   }
 

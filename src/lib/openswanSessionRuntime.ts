@@ -19,6 +19,7 @@ import { buildOpenSwanModeResponseContract, getOpenSwanModePolicy } from './open
 import type { BrowserPlanCardData, BrowserPlanEvent } from './computerUse';
 import { buildOpenSwanMemoryStores } from './openswanMemoryStores';
 import { OPENSWAN_RUNTIME_PLAN_VERSION } from './openswanRuntimePlan';
+import type { ConnectedProviderSet } from './serviceProfileSouls';
 
 export type OpenSwanRunStage =
   | 'booting'
@@ -51,6 +52,7 @@ export type OpenSwanDelegatedAgentDescriptor = {
 export type OpenSwanTurnOptions = {
   message: string;
   context: SwanBotContext;
+  connectedProviders?: ConnectedProviderSet | string[];
   surface: AgenticCodingSurface;
   runSurface?: RunSurface;
   taskId?: string;
@@ -65,6 +67,16 @@ export type OpenSwanTurnOptions = {
   metadata?: Record<string, unknown>;
   autoExecuteVerification?: boolean;
 } & OpenSwanRunCallbacks;
+
+function normalizeConnectedProviders(value?: ConnectedProviderSet | string[]): ConnectedProviderSet | undefined {
+  if (!value) return undefined;
+  const raw = Array.isArray(value) ? value : Array.from(value);
+  return new Set(raw.map((provider) => {
+    if (provider === 'hugging_face') return 'huggingface';
+    if (provider === 'z_ai') return 'zai';
+    return provider;
+  }));
+}
 
 export type OpenSwanToolEvent = {
   tool: string;
@@ -120,34 +132,34 @@ function getOpenSwanReasoningSettings(
     const hasPreview = taskPlan.verification.some((check) => check.kind === 'preview');
     return {
       thinkingLevel: complexity === 'complex' ? 'deep' : 'balanced',
-      maxTokens: hasPreview ? 12288 : complexity === 'complex' ? 10240 : 6144,
+      maxTokens: hasPreview ? 6144 : complexity === 'complex' ? 8192 : 4096,
     };
   }
 
   if (taskPlan.kind === 'architect' || taskPlan.kind === 'research') {
     return {
-      thinkingLevel: 'deep',
-      maxTokens: complexity === 'complex' ? 10240 : 8192,
+      thinkingLevel: complexity === 'complex' ? 'deep' : 'balanced',
+      maxTokens: complexity === 'complex' ? 8192 : 4096,
     };
   }
 
   if (taskPlan.kind === 'debug') {
     return {
       thinkingLevel: complexity === 'complex' ? 'deep' : 'balanced',
-      maxTokens: complexity === 'complex' ? 9216 : 6144,
+      maxTokens: complexity === 'complex' ? 6144 : 4096,
     };
   }
 
   if (taskPlan.kind === 'review') {
     return {
       thinkingLevel: complexity === 'complex' ? 'deep' : 'balanced',
-      maxTokens: complexity === 'complex' ? 8192 : 6144,
+      maxTokens: complexity === 'complex' ? 4096 : 3072,
     };
   }
 
   return {
     thinkingLevel: complexity === 'complex' ? 'balanced' : 'fast',
-    maxTokens: complexity === 'complex' ? 6144 : 4096,
+    maxTokens: complexity === 'complex' ? 3072 : 2048,
   };
 }
 
@@ -413,10 +425,13 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   const runtimeToolNames = selectRuntimeToolNames(taskPlan, opts.mode || null);
   const toolRoundBudget = getToolRoundBudget(taskPlan, opts.mode || null);
   const { resolveModelForProfile } = await import('./serviceProfileSouls');
+  const connectedProviders = normalizeConnectedProviders(opts.connectedProviders);
   const resolvedModel = resolveModelForProfile(
     profile as any,
     opts.context.model,
     runtimeRoute.intent,
+    connectedProviders,
+    runtimeRoute.complexity,
   );
   const toolBrief = buildOpenSwanToolBrief(
     opts.surface === 'main_chat' ? 'main_chat' : 'room_chat',
@@ -487,6 +502,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
           delegationMode: effectiveDelegationMode,
           verificationPlan: taskPlan.verification,
           recommendedTools: taskPlan.recommendedTools,
+          connectedProviders: connectedProviders ? Array.from(connectedProviders) : [],
           ...(opts.metadata || {}),
         },
       })
@@ -855,7 +871,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         circleId: opts.context.circleId!,
         userId: opts.context.userId,
         currentMessage: prompt,
-        model: opts.context.model,
+        model: resolvedModel || opts.context.model,
         userName: opts.context.userName,
         modeKey: opts.mode || 'talk',
         taskKind: taskPlan.kind,
@@ -872,7 +888,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       const toolLoopResult = await executeToolUseLoop({
         systemPrompt,
         userMessage: prompt,
-        model: resolvedModel || 'claude-sonnet-4-6',
+        model: resolvedModel || 'claude-haiku-4-5',
         circleId: opts.context.circleId!,
         userId: opts.context.userId,
         threadId: opts.chatSessionId || undefined,

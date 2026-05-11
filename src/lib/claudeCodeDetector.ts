@@ -12,14 +12,36 @@ import { supabase } from './supabase';
 import { getCircleSessionMemoryMode } from './agentRunSystem';
 import { promoteExternalAgentSessionKnowledge } from './memoryService';
 import { deriveSessionStatus, clampToDbStatus, type AgentStatus } from './officeAgents';
+import { saveAgentUserAccountMemories, type AgentSessionForMemory } from './agentSessionMemory';
 
-import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+import { cacheBridgeToken, ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
 
 const BRIDGE_PORT = 7778;
 
 function getClaudeBridgeUrl(): string | null {
   return getBridgeUrl(BRIDGE_PORT);
+}
+
+async function pairClaudeBridge(bridgeUrl: string): Promise<string | null> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch(`${bridgeUrl}/desktop/pair`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    const token = typeof data?.token === 'string' ? data.token : null;
+    if (token) cacheBridgeToken(token);
+    return token;
+  } catch {
+    return null;
+  }
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -49,6 +71,16 @@ export interface ClaudeCodeSession {
   activeFiles?: string[];
   currentToolName?: string;
   currentToolFile?: string;
+  displayName?: string;
+  task?: string;
+  prompt?: string;
+  launchId?: string;
+  launchedAt?: string;
+  terminal?: string;
+  terminalPid?: number;
+  terminalTitle?: string;
+  manageable?: boolean;
+  launchError?: string;
 }
 
 // Derive the strict office status for a Claude Code session. A subagent that
@@ -81,6 +113,7 @@ function taskLabelForStatus(
       const file = session.currentToolFile ? ` ${session.currentToolFile.split('/').pop()}` : '';
       return `Using ${session.currentToolName}${file}${sub}`;
     }
+    if (session.task) return `Active: ${session.task}${sub}`;
     return `Working on ${project}${sub}`;
   }
   // `building` used to produce "Building on <project>" — a transient
@@ -202,6 +235,7 @@ function inferBridgeStatus(s: ClaudeCodeSession): AgentStatus {
 }
 
 function inferBridgeActivity(s: ClaudeCodeSession): string {
+  if (s.task) return s.task;
   if (s.recentActions.length > 0) {
     return `Using ${s.recentActions[s.recentActions.length - 1]}`;
   }
@@ -213,6 +247,7 @@ function inferBridgeActivity(s: ClaudeCodeSession): string {
 }
 
 function friendlyName(s: ClaudeCodeSession): string {
+  if (s.displayName?.trim()) return s.displayName.trim();
   if (s.slug) {
     // Convert slug like "sequential-whistling-taco" to "Whistling Taco"
     const parts = s.slug.split('-');
@@ -297,6 +332,7 @@ export async function publishClaudeCodeAgent(
   const mainSessions = sessions?.filter(s => s.kind === 'main' || !s.kind) || [];
 
   if (mainSessions.length > 1) {
+    const { data: auth } = await supabase.auth.getUser();
     // Multiple sessions — each gets its own pixel agent
     for (let i = 0; i < mainSessions.length; i++) {
       const session = mainSessions[i];
@@ -315,7 +351,7 @@ export async function publishClaudeCodeAgent(
         isPublic: false,
       });
 
-      await supabase
+      let update = supabase
         .from('circle_office_agents')
         .update({
           status: clampToDbStatus(status),
@@ -325,6 +361,8 @@ export async function publishClaudeCodeAgent(
         })
         .eq('circle_id', circleId)
         .eq('name', name);
+      if (auth.user?.id) update = update.eq('owner_id', auth.user.id);
+      await update;
     }
     return { agentId: undefined };
   }
@@ -444,6 +482,109 @@ export async function updateClaudeCodeAgentStatus(
   }
 }
 
+// ── Launch local Claude Code terminal sessions ──────────────────────────────
+
+export interface ClaudeCodeLaunchRequest {
+  count: number;
+  prompts?: string[];
+  prompt?: string;
+  names?: string[];
+  cwd?: string;
+  projectDir?: string;
+  model?: string;
+  permissionMode?: 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'dontAsk' | 'plan' | string;
+  circleId?: string;
+  userId?: string;
+}
+
+export interface ClaudeCodeLaunchResult {
+  ok: boolean;
+  launchId?: string;
+  sessions: ClaudeCodeSession[];
+  launched: number;
+  failed: Array<{ sessionId?: string; displayName?: string; error: string }>;
+  projectDir?: string;
+  error?: string;
+}
+
+export async function launchClaudeCodeSessions(input: ClaudeCodeLaunchRequest): Promise<ClaudeCodeLaunchResult> {
+  const bridgeUrl = getClaudeBridgeUrl();
+  if (!bridgeUrl) {
+    return {
+      ok: false,
+      sessions: [],
+      launched: 0,
+      failed: [{ error: 'Claude Code bridge URL is unavailable in this runtime.' }],
+      error: 'Claude Code bridge URL is unavailable in this runtime.',
+    };
+  }
+
+  try {
+    const body = JSON.stringify({
+      count: input.count,
+      prompts: input.prompts,
+      prompt: input.prompt,
+      names: input.names,
+      cwd: input.cwd,
+      projectDir: input.projectDir,
+      model: input.model,
+      permissionMode: input.permissionMode,
+    });
+    const postLaunch = async (token: string | null) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 60_000);
+      try {
+        return await fetch(`${bridgeUrl}/launch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+          body,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
+
+    let token = await ensureBridgeToken();
+    let res = await postLaunch(token);
+    if (res.status === 401) {
+      token = await pairClaudeBridge(bridgeUrl);
+      if (token) res = await postLaunch(token);
+    }
+
+    const data = await res.json().catch(() => null) as Partial<ClaudeCodeLaunchResult> | null;
+    if (!res.ok || !data) {
+      const error = data?.error || `Claude Code bridge launch failed with HTTP ${res.status}`;
+      return { ok: false, sessions: [], launched: 0, failed: [{ error }], error };
+    }
+
+    const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    if (input.circleId && sessions.length > 0) {
+      await publishClaudeCodeAgent(input.circleId, sessions.length, sessions);
+      await updateClaudeCodeAgentStatus(input.circleId, sessions);
+      const userId = input.userId || (await supabase.auth.getUser()).data.user?.id;
+      if (userId) {
+        void saveSessionsToMemory(input.circleId, userId, sessions).catch(() => {});
+      }
+    }
+
+    return {
+      ok: data.ok !== false,
+      launchId: data.launchId,
+      sessions,
+      launched: typeof data.launched === 'number' ? data.launched : sessions.length,
+      failed: Array.isArray(data.failed) ? data.failed : [],
+      projectDir: data.projectDir,
+      error: data.error,
+    };
+  } catch (err) {
+    const message = err instanceof Error && err.name === 'AbortError'
+      ? 'Claude Code bridge launch timed out.'
+      : err instanceof Error ? err.message : String(err);
+    return { ok: false, sessions: [], launched: 0, failed: [{ error: message }], error: message };
+  }
+}
+
 /**
  * Mark the Claude Code agent as idle (not offline) when bridge disconnects.
  * The agent stays visible for 1 hour before transitioning to offline.
@@ -545,6 +686,10 @@ export async function saveSessionsToMemory(
     console.warn('[claudeCodeDetector] saveSessionsToMemory: no auth session, skipping');
     return { saved: 0, skipped: sessions.length };
   }
+  const ownerUserId = authCheck.user.id;
+  if (userId && userId !== ownerUserId) {
+    console.debug('[claudeCodeDetector] using authenticated user for Claude session memory');
+  }
 
   const mainSessions = sessions.filter(s => s.kind === 'main' || !s.kind);
   const sessionMode = await getCircleSessionMemoryMode(circleId);
@@ -573,7 +718,7 @@ export async function saveSessionsToMemory(
     const project = latest.projectDir.split('/').filter(Boolean).pop() || 'project';
     const bucketId = sessionMode === 'shared'
       ? `claude-project:shared:${projectKey}`
-      : `claude-project:private:${userId}:${projectKey}`;
+      : `claude-project:private:${ownerUserId}:${projectKey}`;
 
     const combinedUser = sortedSessions
       .map(s => s.lastUserMessage || '')
@@ -628,7 +773,7 @@ export async function saveSessionsToMemory(
 
       existingQuery = sessionMode === 'shared'
         ? existingQuery.is('user_id', null)
-        : existingQuery.eq('user_id', userId);
+        : existingQuery.eq('user_id', ownerUserId);
       const { data: existing, error: existingError } = await existingQuery.maybeSingle();
       if (existingError) throw existingError;
 
@@ -661,7 +806,7 @@ export async function saveSessionsToMemory(
         const savedMemory = await saveMemory({
           scope: 'session',
           circleId,
-          userId: sessionMode === 'shared' ? undefined : userId,
+          userId: sessionMode === 'shared' ? undefined : ownerUserId,
           memoryKind: 'context',
           title,
           content,
@@ -694,7 +839,7 @@ export async function saveSessionsToMemory(
 
       void promoteExternalAgentSessionKnowledge({
         circleId,
-        userId,
+        userId: ownerUserId,
         provider: 'claude-code',
         sessions: sortedSessions.map((session) => ({
           sessionId: session.sessionId,
@@ -718,6 +863,29 @@ export async function saveSessionsToMemory(
       console.warn('[claudeCodeDetector] Failed to save session context:', err);
       skipped++;
     }
+  }
+
+  try {
+    const userAccountSessions: AgentSessionForMemory[] = mainSessions.map((session) => ({
+      sessionId: session.sessionId,
+      projectDir: session.projectDir,
+      model: session.model,
+      status: session.status,
+      task: session.task || session.lastUserMessage,
+      lastActivity: session.lastActivity,
+      messageCount: session.messageCount,
+      totalInputTokens: session.totalInputTokens,
+      totalOutputTokens: session.totalOutputTokens,
+      recentActions: session.recentActions || [],
+      lastUserMessage: session.lastUserMessage,
+      lastAssistantText: session.lastAssistantText,
+      activeFiles: session.activeFiles,
+      currentToolName: session.currentToolName,
+    }));
+    const accountResult = await saveAgentUserAccountMemories('claude-code', circleId, ownerUserId, userAccountSessions);
+    saved += accountResult.saved;
+  } catch (err) {
+    console.warn('[claudeCodeDetector] Failed to save Claude user-account memories:', err);
   }
 
   return { saved, skipped };

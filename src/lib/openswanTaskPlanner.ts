@@ -1,5 +1,6 @@
 import type { AgenticCodingProfile } from './agenticCodingProfile';
 import { classifyBrowserbaseWorkflow } from './browserbaseWorkflowIntent';
+import { detectLocalComputerAwarenessIntent } from './localComputerAwarenessIntent';
 
 export type OpenSwanTaskKind = 'build' | 'review' | 'debug' | 'architect' | 'research' | 'automation' | 'general';
 export type OpenSwanVerificationKind = 'typecheck' | 'tests' | 'lint' | 'preview' | 'manual_review' | 'security_review' | 'performance_review' | 'integration_review';
@@ -8,6 +9,14 @@ export type OpenSwanToolName =
   | 'workspace.apply_artifacts'
   | 'workspace.open_preview'
   | 'browser.plan_task'
+  | 'browser.open_url'
+  | 'browser.dom_snapshot'
+  | 'browser.click_role'
+  | 'browser.fill_field'
+  | 'browser.select_option'
+  | 'browser.press_key'
+  | 'browser.screenshot'
+  | 'browser.close'
   | 'code.inspect'
   | 'code.generate'
   | 'code.review'
@@ -67,12 +76,29 @@ export type OpenSwanToolName =
   | 'desktop.type_text'
   | 'desktop.press_keys'
   | 'desktop.list_running_apps'
+  | 'desktop.list_browser_tabs'
+  | 'desktop.window_state'
+  | 'desktop.clipboard'
+  | 'desktop.clipboard_write'
+  | 'desktop.clipboard_clear'
+  | 'desktop.file_list'
+  | 'desktop.file_read'
+  | 'desktop.file_search'
+  | 'desktop.shortcuts_list'
+  | 'desktop.shortcuts_run'
+  | 'desktop.window_manage'
+  | 'desktop.mouse_move'
+  | 'desktop.mouse_click'
+  | 'desktop.mouse_drag'
+  | 'desktop.mouse_scroll'
   | 'desktop.wait_for_app'
   | 'desktop.screenshot'
   | 'desktop.open_url'
   | 'desktop.open_path'
   | 'desktop.click_at'
-  | 'desktop.screen_size';
+  | 'desktop.screen_size'
+  | 'desktop.read_a11y_tree'
+  | 'desktop.click_element';
 
 export type OpenSwanVerificationCheck = {
   id: string;
@@ -205,9 +231,104 @@ function buildVerification(
 
 function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities?: import('./messageEntityExtractor').MessageEntities): OpenSwanToolPlanItem[] {
   const browserbaseWorkflow = classifyBrowserbaseWorkflow(message);
+  const localComputerIntent = detectLocalComputerAwarenessIntent(message);
   const tools: OpenSwanToolPlanItem[] = [
     { tool: 'code.inspect', reason: 'Inspect surrounding code and current context before acting.', priority: 'high' },
   ];
+
+  if (localComputerIntent.route) {
+    switch (localComputerIntent.kind) {
+      case 'browser_tabs':
+        tools.push({ tool: 'desktop.list_browser_tabs', reason: 'Read local browser tab titles and URLs through the desktop bridge before using remote browser automation.', priority: 'high' });
+        break;
+      case 'running_apps':
+        tools.push({ tool: 'desktop.list_running_apps', reason: 'List foreground native apps through the local desktop bridge.', priority: 'high' });
+        break;
+      case 'window_state':
+      case 'screen_state':
+        tools.push({ tool: 'desktop.window_state', reason: 'Read the active window and visible desktop state before taking action.', priority: 'high' });
+        if (localComputerIntent.kind === 'screen_state') tools.push({ tool: 'desktop.screenshot', reason: 'Capture the screen when the user asks what is visible.', priority: 'medium' });
+        break;
+      case 'clipboard':
+        tools.push({ tool: 'desktop.clipboard', reason: 'Read the local clipboard through the desktop bridge.', priority: 'high' });
+        break;
+      case 'clipboard_write':
+        tools.push({ tool: 'desktop.clipboard_write', reason: 'Write the requested text to the local clipboard.', priority: 'high' });
+        break;
+      case 'clipboard_clear':
+        tools.push({ tool: 'desktop.clipboard_clear', reason: 'Clear the local clipboard when explicitly requested.', priority: 'high' });
+        break;
+      case 'launch_app':
+        tools.push({ tool: 'desktop.launch_app', reason: 'Launch the requested native app through the desktop bridge.', priority: 'high' });
+        tools.push({ tool: 'desktop.wait_for_app', reason: 'Wait for the launched app before follow-up actions.', priority: 'medium' });
+        break;
+      case 'focus_app':
+        tools.push({ tool: 'desktop.focus_app', reason: 'Focus the requested native app through the desktop bridge.', priority: 'high' });
+        break;
+      case 'open_url':
+        tools.push({ tool: 'desktop.open_url', reason: 'Open the requested URL in the user desktop browser instead of a remote Browserbase session.', priority: 'high' });
+        break;
+      case 'open_path':
+        tools.push({ tool: 'desktop.open_path', reason: 'Open the requested local file or folder.', priority: 'high' });
+        break;
+      case 'file_list':
+        tools.push({ tool: 'desktop.file_list', reason: 'List files from the requested local folder.', priority: 'high' });
+        break;
+      case 'file_read':
+        tools.push({ tool: 'desktop.file_read', reason: 'Read the requested local file.', priority: 'high' });
+        break;
+      case 'file_search':
+        tools.push({ tool: 'desktop.file_search', reason: 'Search local files under the requested folder.', priority: 'high' });
+        break;
+      case 'shortcuts_list':
+        tools.push({ tool: 'desktop.shortcuts_list', reason: 'List available Apple Shortcuts.', priority: 'high' });
+        break;
+      case 'shortcut_run':
+        tools.push({ tool: 'desktop.shortcuts_run', reason: 'Run the named Apple Shortcut after explicit user request.', priority: 'high' });
+        break;
+      case 'a11y_tree':
+        tools.push({ tool: 'desktop.read_a11y_tree', reason: 'Read clickable accessibility elements before choosing a UI target.', priority: 'high' });
+        tools.push({ tool: 'desktop.screenshot', reason: 'Capture visible app state before selecting UI elements.', priority: 'medium' });
+        break;
+      case 'window_manage':
+        tools.push({ tool: 'desktop.window_manage', reason: 'Move, resize, focus, minimize, or raise a desktop window as requested.', priority: 'high' });
+        break;
+      case 'mouse_move':
+        tools.push({ tool: 'desktop.mouse_move', reason: 'Move or hover the local mouse at explicit screen coordinates.', priority: 'high' });
+        break;
+      case 'mouse_click':
+        tools.push(
+          { tool: 'desktop.screen_size', reason: 'Read screen dimensions before coordinate-based clicking.', priority: 'medium' },
+          { tool: 'desktop.mouse_click', reason: 'Click the local mouse at explicit screen coordinates with the requested button/count.', priority: 'high' },
+        );
+        break;
+      case 'mouse_drag':
+        tools.push(
+          { tool: 'desktop.screen_size', reason: 'Read screen dimensions before coordinate-based dragging.', priority: 'medium' },
+          { tool: 'desktop.mouse_drag', reason: 'Drag the local mouse between explicit screen coordinates.', priority: 'high' },
+        );
+        break;
+      default:
+        break;
+    }
+  }
+
+  if (
+    /\b(active|frontmost|focused|current)\b[\s\S]{0,80}\b(?:window|app)s?\b/i.test(message) ||
+    /\b(?:window|app)s?\b[\s\S]{0,80}\b(active|frontmost|focused|current|open)\b/i.test(message) ||
+    /\b(open windows?|windows? (?:are|is) open|window state|screen state)\b/i.test(message)
+  ) {
+    tools.push({ tool: 'desktop.window_state', reason: 'Read active/frontmost window state from the local desktop bridge.', priority: 'high' });
+  }
+  if (/\b(?:list|show|what|which)\b[\s\S]{0,80}\b(?:apple\s+|macos\s+|mac\s+)?shortcuts?\b/i.test(message)) {
+    tools.push({ tool: 'desktop.shortcuts_list', reason: 'List available Apple Shortcuts.', priority: 'high' });
+  }
+  if (/\b(run|start|trigger|execute)\b[\s\S]{0,120}\bshortcut\b|\bshortcut\b[\s\S]{0,80}\b(run|start|trigger|execute)\b/i.test(message)) {
+    tools.push({ tool: 'desktop.shortcuts_run', reason: 'Run the named Apple Shortcut after explicit user request.', priority: 'high' });
+  }
+  if (/\b(minimi[sz]e|unminimi[sz]e|maximi[sz]e|zoom|raise|focus|resize)\b[\s\S]{0,80}\bwindow\b/i.test(message)) {
+    tools.push({ tool: 'desktop.window_manage', reason: 'Manage the requested desktop window action.', priority: 'high' });
+  }
 
   if (kind === 'build' || kind === 'debug' || kind === 'architect') {
     tools.push({ tool: 'code.generate', reason: 'Produce concrete code or file artifacts for implementation work.', priority: 'high' });
@@ -236,6 +357,27 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities
         : `Plan ${browserbaseWorkflow.label.toLowerCase()} with Browserbase readiness, output shape, and approval gates before touching a live site.`,
       priority: 'high',
     });
+    if (entities?.urls.length || /\bhttps?:\/\//i.test(message)) {
+      tools.push({ tool: 'browser.open_url', reason: 'Open the target page in the persistent local browser profile before semantic actions.', priority: 'high' });
+    }
+    if (/\b(read|inspect|see|show|find|extract|scrape|collect|data|table|list|links?|fields?|snapshot|dom)\b/i.test(message)) {
+      tools.push({ tool: 'browser.dom_snapshot', reason: 'Read a compact DOM/ARIA snapshot before choosing selectors or extracting page state.', priority: 'high' });
+    }
+    if (/\b(click|press button|button|link|tab)\b/i.test(message)) {
+      tools.push({ tool: 'browser.click_role', reason: 'Use Playwright role/name locators for semantic clicks instead of brittle coordinates.', priority: 'high' });
+    }
+    if (/\b(select|dropdown|drop down|choose option|combobox|picker)\b/i.test(message)) {
+      tools.push({ tool: 'browser.select_option', reason: 'Select browser dropdown values with Playwright locator auto-waiting.', priority: 'high' });
+    }
+    if (/\b(fill|form|input|textbox|type|enter|login|sign in|submit|data entry)\b/i.test(message)) {
+      tools.push({ tool: 'browser.fill_field', reason: 'Fill browser fields by role/name or selector in the persistent local browser profile.', priority: 'high' });
+    }
+    if (/\b(press|enter|return|tab|escape|keyboard|hotkey|shortcut)\b/i.test(message)) {
+      tools.push({ tool: 'browser.press_key', reason: 'Send browser keyboard input through Playwright when a web page has focus.', priority: 'medium' });
+    }
+    if (/\b(screenshot|screen shot|visual|verify|proof)\b/i.test(message)) {
+      tools.push({ tool: 'browser.screenshot', reason: 'Capture browser visual state after semantic navigation/actions for verification.', priority: 'medium' });
+    }
   }
   if (DESKTOP_RE.test(message)) {
     tools.push(
@@ -261,11 +403,23 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities
     if (/\b(file|folder|path|downloads|desktop|documents)\b/i.test(message) && /[~/][^\s]+/.test(message)) {
       tools.push({ tool: 'desktop.open_path', reason: 'Open a requested local file or folder through the desktop bridge.', priority: 'medium' });
     }
+    if (/\b(move|hover|position)\b[\s\S]{0,40}\b(mouse|cursor)\b/i.test(message)) {
+      tools.push({ tool: 'desktop.mouse_move', reason: 'Move or hover the cursor at explicit screen coordinates.', priority: 'high' });
+    }
+    if (/\bdrag\b[\s\S]{0,120}\b(?:to|into|onto)\b/i.test(message)) {
+      tools.push(
+        { tool: 'desktop.screen_size', reason: 'Read screen dimensions before coordinate-based dragging.', priority: 'medium' },
+        { tool: 'desktop.mouse_drag', reason: 'Drag between explicit local screen coordinates.', priority: 'high' },
+      );
+    }
     if (/\b(click|coordinate|coords?)\b/i.test(message)) {
       tools.push(
         { tool: 'desktop.screen_size', reason: 'Read screen dimensions before coordinate-based clicking.', priority: 'medium' },
-        { tool: 'desktop.click_at', reason: 'Click at explicit user-provided screen coordinates when keyboard/semantic actions are not enough.', priority: 'medium' },
+        { tool: 'desktop.mouse_click', reason: 'Click at explicit user-provided screen coordinates when keyboard/semantic actions are not enough.', priority: 'medium' },
       );
+    }
+    if (/\b(scroll|scroll down|scroll up|mouse wheel)\b/i.test(message)) {
+      tools.push({ tool: 'desktop.mouse_scroll', reason: 'Scroll the focused desktop window when the user asks for mouse-wheel style navigation.', priority: 'high' });
     }
   }
   if (VAULT_RE.test(message) || /\blog\s*in|sign\s*in|wordpress|shopify|cms|admin panel\b/i.test(message)) {

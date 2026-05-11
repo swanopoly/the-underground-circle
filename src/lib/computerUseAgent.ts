@@ -27,6 +27,7 @@ export interface ComputerUseAgentOpts {
   task: string;
   circleId: string;
   userId?: string;
+  model?: string | null;
   sessionId?: string;
   browserbase: { apiKey: string; projectId: string; region?: string };
   maxIterations?: number;
@@ -118,6 +119,7 @@ export function startComputerUseAgent(opts: ComputerUseAgentOpts): AgentHandle {
           task: opts.task,
           circleId: opts.circleId,
           userId: opts.userId,
+          model: opts.model,
           sessionId: opts.sessionId,
           browserbase: opts.browserbase,
           maxIterations: opts.maxIterations,

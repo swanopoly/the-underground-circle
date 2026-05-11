@@ -406,7 +406,7 @@ export default function CustomizePanel({
 
   const EMOJI_OPTIONS = ['🌟', '✨', '🔮', '💎', '🧠', '⚡', '🎯', '🛡️', '🌊', '🔥', '🌙', '🦊', '🐺', '🦅', '🐉', '👑', '🎭', '💀', '🤖', '🧙'];
 
-  const LLM_PROVIDERS: LLMProvider[] = ['openai', 'anthropic', 'openrouter', 'groq', 'ollama', 'replicate', 'github-models', 'huggingface', 'zai', 'minimax'];
+  const LLM_PROVIDERS: LLMProvider[] = ['openai_compatible', 'openai', 'anthropic', 'openrouter', 'groq', 'ollama', 'replicate', 'github-models', 'huggingface', 'zai', 'minimax'];
 
   const hasKeyForProvider = (p: LLMProvider) => providerKeys.some(k => k.provider === p && k.isActive);
   const getKeyForProvider = (p: LLMProvider) => providerKeys.find(k => k.provider === p && k.isActive);
@@ -433,7 +433,8 @@ export default function CustomizePanel({
     if (!key) return;
     setApiKeyTesting(prev => ({ ...prev, [provider]: true }));
     setApiKeyStatus(prev => ({ ...prev, [provider]: { ok: false, msg: '' } }));
-    const result = await testApiKey(provider, key);
+    const endpoint = apiKeyEndpoints[provider]?.trim() || undefined;
+    const result = await testApiKey(provider, key, endpoint);
     setApiKeyStatus(prev => ({
       ...prev,
       [provider]: result.success ? { ok: true, msg: 'Key works!' } : { ok: false, msg: result.error || 'Test failed' },

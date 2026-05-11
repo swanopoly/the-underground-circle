@@ -1526,7 +1526,7 @@ async function anthropicTurn(args: {
 
 // ─── Loop ───────────────────────────────────────────────────────────────────
 
-const MAX_ITERATIONS = 8;
+const MAX_ITERATIONS = 5;
 
 // ─── M2: client-delegated tool call return shape ────────────────────────────
 //

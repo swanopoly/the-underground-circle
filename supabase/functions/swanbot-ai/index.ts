@@ -2015,18 +2015,18 @@ type MarketplaceProviderKey =
   | "openrouter"
   | "hugging_face"
   | "replicate"
-  // Wave 2 native BYOK providers — most are OpenAI-compatible chat APIs
-  // dispatched through callMarketplaceProvider's switch below. Cohere
-  // and MiniMax use their own request shapes and aren't wired yet —
-  // user picks of those slugs will fall through to platform Sonnet.
+  // Wave 2 native BYOK providers — most expose OpenAI-compatible chat
+  // endpoints and are dispatched through callMarketplaceProvider below.
   | "groq"
   | "google_ai"
   | "mistral_ai"
+  | "cohere"
   | "perplexity"
   | "together_ai"
   | "fireworks_ai"
   | "deepseek"
   | "z_ai"
+  | "minimax"
   | "ollama";
 
 function userApiProviderForMarketplaceProvider(provider: MarketplaceProviderKey): string {
@@ -2300,6 +2300,9 @@ async function callMarketplaceProvider(opts: {
       case "mistral_ai":
         endpoint = "https://api.mistral.ai/v1/chat/completions";
         break;
+      case "cohere":
+        endpoint = "https://api.cohere.ai/compatibility/v1/chat/completions";
+        break;
       case "perplexity":
         endpoint = "https://api.perplexity.ai/chat/completions";
         break;
@@ -2316,6 +2319,9 @@ async function callMarketplaceProvider(opts: {
         // Zhipu / Z.AI's OpenAI-compatible endpoint at the Open
         // Platform — same auth shape, expects glm-* model ids in body.
         endpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+        break;
+      case "minimax":
+        endpoint = "https://api.minimax.io/v1/chat/completions";
         break;
       case "ollama":
         // Ollama runs locally on the team's machine. Base URL must be
@@ -2540,6 +2546,38 @@ async function callMarketplaceProviderWithTools(opts: {
         // exposed, so for the relay path we skip Replicate and let the
         // caller fall back to Anthropic.
         return { data: null, error: "replicate relay not yet wired" };
+      case "groq":
+        endpoint = "https://api.groq.com/openai/v1/chat/completions";
+        break;
+      case "google_ai":
+        endpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+        break;
+      case "mistral_ai":
+        endpoint = "https://api.mistral.ai/v1/chat/completions";
+        break;
+      case "cohere":
+        endpoint = "https://api.cohere.ai/compatibility/v1/chat/completions";
+        break;
+      case "perplexity":
+        endpoint = "https://api.perplexity.ai/chat/completions";
+        break;
+      case "together_ai":
+        endpoint = "https://api.together.xyz/v1/chat/completions";
+        break;
+      case "fireworks_ai":
+        endpoint = "https://api.fireworks.ai/inference/v1/chat/completions";
+        break;
+      case "deepseek":
+        endpoint = "https://api.deepseek.com/chat/completions";
+        break;
+      case "z_ai":
+        endpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+        break;
+      case "minimax":
+        endpoint = "https://api.minimax.io/v1/chat/completions";
+        break;
+      case "ollama":
+        return { data: null, error: "ollama relay requires baseUrl override" };
       default:
         return { data: null, error: `unsupported marketplace relay provider: ${provider}` };
     }
@@ -2619,13 +2657,14 @@ async function callClaude(frozenPrompt: string, volatilePrompt: string, userMess
     systemContent.push({ type: "text", text: volatilePrompt });
   }
 
-  // Configure max tokens based on thinking level
-  let maxTokens = 2048;
-  if (thinkingLevel === "deep") maxTokens = 8192;
-  else if (thinkingLevel === "balanced") maxTokens = 4096;
-  else if (thinkingLevel === "fast") maxTokens = 1024;
+  // Configure max tokens based on thinking level. Keep defaults tight;
+  // callers can still request more explicitly for long-form tasks.
+  let maxTokens = 1536;
+  if (thinkingLevel === "deep") maxTokens = 4096;
+  else if (thinkingLevel === "balanced") maxTokens = 2048;
+  else if (thinkingLevel === "fast") maxTokens = 768;
   if (typeof requestedMaxTokens === "number" && Number.isFinite(requestedMaxTokens) && requestedMaxTokens > 0) {
-    maxTokens = Math.max(maxTokens, Math.min(32000, Math.floor(requestedMaxTokens)));
+    maxTokens = Math.min(16000, Math.floor(requestedMaxTokens));
   }
 
   // Build request body
@@ -2652,7 +2691,7 @@ async function callClaude(frozenPrompt: string, volatilePrompt: string, userMess
     };
     requestBody.max_tokens = Math.max(
       requestBody.max_tokens,
-      thinkingLevel === "deep" ? 16000 : 8192,
+      thinkingLevel === "deep" ? 8192 : 4096,
     );
   }
 
@@ -2660,8 +2699,8 @@ async function callClaude(frozenPrompt: string, volatilePrompt: string, userMess
   let totalInput = 0, totalOutput = 0, totalCacheCreation = 0, totalCacheRead = 0;
   const toolActions: ToolAction[] = [];
   let finalText = "";
-  const MAX_ITERATIONS = 8;
-  const MAX_TOKENS_BUDGET = 50000; // Abort if cumulative tokens exceed this
+  const MAX_ITERATIONS = 5;
+  const MAX_TOKENS_BUDGET = 25000; // Abort if cumulative tokens exceed this
   const toolCallHistory: string[] = []; // For loop detection
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
@@ -3151,7 +3190,7 @@ Deno.serve(async (req: Request) => {
 
     const userId = user.id;
     const supabase = createServiceRoleClient();
-    const marketplaceRequested = !!model && /^(openai|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|perplexity|together_ai|fireworks_ai|deepseek|z_ai|ollama)\//.test(model);
+    const marketplaceRequested = !!model && /^(openai|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|cohere|perplexity|together_ai|fireworks_ai|deepseek|zai|z_ai|minimax|ollama)\//.test(model);
     // Umbrella Claude budget cap only applies before known-Claude routes.
     // Marketplace routes (BlackSwan/HF/OpenRouter/etc.) use their own provider
     // keys and should not be blocked unless they actually fall back to Claude.
@@ -3176,7 +3215,7 @@ Deno.serve(async (req: Request) => {
     //      unchanged.
     //   2. Native Anthropic model: forward to api.anthropic.com unchanged.
     if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
-      const isMarketplaceRelay = !!model && /^(openai|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|perplexity|together_ai|fireworks_ai|deepseek|z_ai|ollama)\//.test(model);
+      const isMarketplaceRelay = !!model && /^(openai|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|cohere|perplexity|together_ai|fireworks_ai|deepseek|zai|z_ai|minimax|ollama)\//.test(model);
       let routingFallback: { provider: string; reason: string } | null = null;
 
       if (isMarketplaceRelay && circleId) {
@@ -3189,14 +3228,18 @@ Deno.serve(async (req: Request) => {
           : model!.startsWith("groq/") ? "groq"
           : model!.startsWith("google_ai/") ? "google_ai"
           : model!.startsWith("mistral_ai/") ? "mistral_ai"
+          : model!.startsWith("cohere/") ? "cohere"
           : model!.startsWith("perplexity/") ? "perplexity"
           : model!.startsWith("together_ai/") ? "together_ai"
           : model!.startsWith("fireworks_ai/") ? "fireworks_ai"
           : model!.startsWith("deepseek/") ? "deepseek"
-          : model!.startsWith("z_ai/") ? "z_ai"
+          : (model!.startsWith("z_ai/") || model!.startsWith("zai/")) ? "z_ai"
+          : model!.startsWith("minimax/") ? "minimax"
           : model!.startsWith("ollama/") ? "ollama"
           : null;
-        const tail = model!.slice(slashIdx + 1);
+        const tail = providerKey === "openrouter" && model === "openrouter/auto"
+          ? "openrouter/auto"
+          : model!.slice(slashIdx + 1);
         // Mirror of the non-relay endpoint-override path: when the
         // user picked the BlackSwan v5 (Endpoint) entry, we read URL
         // + token-provider from the dedicated BlackSwan integration
@@ -3217,11 +3260,24 @@ Deno.serve(async (req: Request) => {
             };
           }
         }
+        if (model!.startsWith("ollama/")) {
+          const ollamaUrl = await loadCircleOllamaBaseUrl(supabase, circleId);
+          if (ollamaUrl) {
+            endpointOverride = ollamaUrl;
+          } else {
+            routingFallback = {
+              provider: "ollama",
+              reason: "Ollama baseUrl not set on the integration metadata",
+            };
+          }
+        }
         if (providerKey && (!model!.startsWith("huggingface_endpoint/") || endpointOverride)) {
           // Read the BlackSwan card's own api_token when it's the
           // source of truth, otherwise fall through to the standard
           // marketplace-provider key resolver.
-          const providerApiKey = tokenFromBlackswanCard
+          const providerApiKey = model!.startsWith("ollama/") && endpointOverride
+            ? "ollama"
+            : tokenFromBlackswanCard
             ? await loadCircleProviderApiKey(supabase, circleId, "blackswan", "api_token")
             : await loadMarketplaceProviderApiKey(supabase, circleId, userId, providerKey);
           if (providerApiKey) {
@@ -3272,14 +3328,22 @@ Deno.serve(async (req: Request) => {
             console.warn(`[swanbot-ai relay] ${providerKey} call failed:`, relayResult.error);
           } else {
             routingFallback = { provider: providerKey, reason: "integration_not_connected" };
-            console.warn(`[swanbot-ai relay] no ${providerKey} api_key for circle ${circleId}; falling back to Anthropic`);
+            console.warn(`[swanbot-ai relay] no ${providerKey} api_key for circle ${circleId}; refusing Anthropic fallback`);
           }
         }
       }
 
-      // Marketplace ids that failed to route default to Sonnet 4.6 so we
-      // don't 400 on the unknown slug at the Anthropic edge. Native Claude
-      // ids continue to map through CLAUDE_MODEL_MAP unchanged.
+      if (isMarketplaceRelay && routingFallback) {
+        return errResponse(
+          400,
+          "marketplace_provider_unavailable",
+          `Selected marketplace model could not be routed through ${routingFallback.provider}: ${routingFallback.reason}. Connect/fix that provider instead of falling back to Anthropic.`,
+        );
+      }
+
+      // Native Claude ids map through CLAUDE_MODEL_MAP. Marketplace ids
+      // must route through their selected provider; if that fails, the
+      // branch above returns instead of silently spending Anthropic dollars.
       const relayModel = isMarketplaceRelay
         ? "claude-sonnet-4-6"
         : ((model && CLAUDE_MODEL_MAP[model]) || model || "claude-sonnet-4-6");
@@ -3315,7 +3379,7 @@ Deno.serve(async (req: Request) => {
         relayBody.output_config = {
           effort: thinkingLevel === "deep" ? "high" : "medium",
         };
-        relayBody.max_tokens = Math.max(relayMaxTokens, thinkingLevel === "deep" ? 16000 : 8192);
+        relayBody.max_tokens = Math.max(relayMaxTokens, thinkingLevel === "deep" ? 8192 : 4096);
       }
 
       const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -3815,7 +3879,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
     // dedicated HF Inference Endpoint and saved its URL in the
     // integration metadata. Same provider key for credential lookup
     // as plain `huggingface/`, just a different endpoint.
-    const isMarketplacePrefix = !!effectiveModel && /^(openai|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|perplexity|together_ai|fireworks_ai|deepseek|z_ai|ollama)\//.test(effectiveModel);
+    const isMarketplacePrefix = !!effectiveModel && /^(openai|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|cohere|perplexity|together_ai|fireworks_ai|deepseek|zai|z_ai|minimax|ollama)\//.test(effectiveModel);
     const hfModelId = effectiveModel && !isMarketplacePrefix
       ? (HF_MODEL_MAP[effectiveModel] || (effectiveModel.includes("/") ? effectiveModel : null))
       : null;
@@ -3861,8 +3925,8 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
     // integration's provider key. We strip the prefix, look up the
     // circle's stored API key, and call the provider directly so the user
     // gets the model they actually picked. If the circle hasn't connected
-    // the integration we fall through to the Claude fallback below and
-    // signal the fallback in the response so the UI can show a notice.
+    // the integration, return a provider-specific setup error instead of
+    // silently falling back to Anthropic spend.
     let nonRelayRouting: {
       provider_routed?: string;
       provider_model?: string;
@@ -3871,7 +3935,6 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
     if (!aiResponse && isMarketplacePrefix && circleId && effectiveModel) {
       const slashIdx = effectiveModel.indexOf("/");
       const head = effectiveModel.slice(0, slashIdx);
-      const tail = effectiveModel.slice(slashIdx + 1);
       const providerKey: MarketplaceProviderKey | null =
         head === "openai" ? "openai"
         : head === "openrouter" ? "openrouter"
@@ -3880,13 +3943,18 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         : head === "groq" ? "groq"
         : head === "google_ai" ? "google_ai"
         : head === "mistral_ai" ? "mistral_ai"
+        : head === "cohere" ? "cohere"
         : head === "perplexity" ? "perplexity"
         : head === "together_ai" ? "together_ai"
         : head === "fireworks_ai" ? "fireworks_ai"
         : head === "deepseek" ? "deepseek"
-        : head === "z_ai" ? "z_ai"
+        : (head === "z_ai" || head === "zai") ? "z_ai"
+        : head === "minimax" ? "minimax"
         : head === "ollama" ? "ollama"
         : null;
+      const tail = providerKey === "openrouter" && effectiveModel === "openrouter/auto"
+        ? "openrouter/auto"
+        : effectiveModel.slice(slashIdx + 1);
       // For the endpoint variant we read the URL + token-provider from
       // the dedicated BlackSwan integration (with HF metadata
       // fallback for legacy setups). If neither has the URL, fall
@@ -3932,7 +4000,9 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         // BlackSwan-card-routed endpoint reads its own api_token; all
         // other paths (regular huggingface, openrouter, openai,
         // legacy HF-card-only BlackSwan) use loadMarketplaceProviderApiKey.
-        const providerApiKey = head === "huggingface_endpoint" && tokenProviderOverride === null
+        const providerApiKey = head === "ollama" && endpointOverride
+          ? "ollama"
+          : head === "huggingface_endpoint" && tokenProviderOverride === null
           ? await loadCircleProviderApiKey(supabase, circleId, "blackswan", "api_token")
           : await loadMarketplaceProviderApiKey(supabase, circleId, userId, providerKey);
         if (providerApiKey) {
@@ -3965,9 +4035,17 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
           }
         } else {
           nonRelayRouting.routing_fallback = { provider: providerKey, reason: "integration_not_connected" };
-          console.warn(`[swanbot-ai] no ${providerKey} api_key found for circle ${circleId}; falling through to Claude`);
+          console.warn(`[swanbot-ai] no ${providerKey} api_key found for circle ${circleId}; refusing Anthropic fallback`);
         }
       }
+    }
+
+    if (!aiResponse && isMarketplacePrefix && nonRelayRouting.routing_fallback) {
+      return errResponse(
+        400,
+        "marketplace_provider_unavailable",
+        `Selected marketplace model could not be routed through ${nonRelayRouting.routing_fallback.provider}: ${nonRelayRouting.routing_fallback.reason}. Connect/fix that provider instead of falling back to Anthropic.`,
+      );
     }
 
     // Route to HuggingFace if user selected an open model

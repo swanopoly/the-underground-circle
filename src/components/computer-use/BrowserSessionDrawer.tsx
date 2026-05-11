@@ -62,6 +62,7 @@ export default function BrowserSessionDrawer({ session, visible, onClose, onOpen
                 </Text>
                 <Text style={styles.actionDescription}>{action.description}</Text>
                 {action.target ? <Text style={styles.actionMeta} numberOfLines={1}>{action.target}</Text> : null}
+                {action.output ? <Text style={styles.actionOutput} numberOfLines={6}>{action.output}</Text> : null}
                 {action.error ? <Text style={styles.actionError}>{action.error}</Text> : null}
                 <View style={styles.shotRow}>
                   {action.screenshotBefore ? (
@@ -202,6 +203,12 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: MONO,
     marginTop: 4,
+  },
+  actionOutput: {
+    color: '#a7f3d0',
+    fontSize: 10,
+    fontFamily: MONO,
+    marginTop: 6,
   },
   actionError: {
     color: '#ef4444',

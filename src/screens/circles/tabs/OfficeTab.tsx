@@ -49,18 +49,11 @@ import {
 } from '../../../lib/connectionManager';
 import { supportsOpenSwanRpc, testAgentBridgeConnection } from '../../../lib/agentBridgeSupport';
 import {
-  ClaudeCodePoller, bridgeSessionsToAgents, detectClaudeCodeBridge,
-  publishClaudeCodeAgent, updateClaudeCodeAgentStatus, markClaudeCodeAgentOffline,
-  saveSessionsToMemory,
-} from '../../../lib/claudeCodeDetector';
-import {
   isAutoConnectRunning,
   getAutoConnectConnections,
   getAutoConnectSessions,
   subscribeAutoConnect,
-  setAutoConnectCircleId,
-  updateAutoConnectConnections,
-} from '../../../lib/agentAutoConnect';
+} from '../../../lib/agentAutoConnectState';
 import { storage } from '../../../lib/storage';
 import { loadTrendingContent } from '../../../lib/trendingContent';
 import AgentQuickConnect from "../../../components/AgentQuickConnect";
@@ -128,6 +121,18 @@ import {
 } from '../../../lib/idleBehaviors';
 import { supabase } from '../../../lib/supabase';
 import { fetchNFTs } from '../../../lib/crypto';
+
+function setAutoConnectCircleId(circleId: string) {
+  import('../../../lib/agentAutoConnect')
+    .then((mod) => mod.setAutoConnectCircleId(circleId))
+    .catch(() => {});
+}
+
+function updateAutoConnectConnections(connections: AgentConnection[]) {
+  import('../../../lib/agentAutoConnect')
+    .then((mod) => mod.updateAutoConnectConnections(connections))
+    .catch(() => {});
+}
 import { NFT } from '../../../types';
 import AgentSetupWizard from '../../../components/AgentSetupWizard';
 import ConnectAgentModal from '../../../components/ConnectAgentModal';
@@ -495,9 +500,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const pollersRef = useRef<Map<string, OpenSwanPoller>>(new Map());
   const sessionsRef = useRef<Map<string, OpenSwanSession[]>>(new Map());
   const [sessionsTick, setSessionsTick] = useState(0); // force re-render on session updates
-  const ccPollerRef = useRef<ClaudeCodePoller | null>(null);
-  const ccPublishedRef = useRef(false);
-  const lastMemorySaveRef = useRef(0); // throttle memory saves to every 30s
 
   // ─── Current user ─────────────────────────────────────────────────────────
   const [currentUserId, setCurrentUserId] = useState<string>('');
@@ -1310,10 +1312,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         if (preSessions.size > 0) {
           setSessionsTick(t => t + 1);
         }
-        // Mark CC as already published if singleton has sessions
-        if (preSessions.has('claude-code-auto')) {
-          ccPublishedRef.current = true;
-        }
       } else {
         // Fallback: singleton hasn't started yet — do legacy load
         let conns = await loadConnections();
@@ -1330,33 +1328,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         for (const conn of conns) {
           if (conn.enabled && !shouldSkipOpenSwanConnectionAttempt(conn)) connectOne(conn);
         }
-
-        // Legacy CC detection
-        detectClaudeCodeBridge().then(detected => {
-          if (detected && !ccPollerRef.current) {
-            ccPollerRef.current = new ClaudeCodePoller(sessions => {
-              sessionsRef.current.set('claude-code-auto', bridgeSessionsToAgents(sessions) as any);
-              setSessionsTick(t => t + 1);
-              if (!ccPublishedRef.current && circleId) {
-                ccPublishedRef.current = true;
-                publishClaudeCodeAgent(circleId, sessions.length)
-                  .then(() => scheduleCircleOfficeRefresh(150))
-                  .catch(err => console.error('[OfficeTab] Failed to publish Claude Code agent:', err));
-              }
-              if (ccPublishedRef.current && circleId) {
-                updateClaudeCodeAgentStatus(circleId, sessions).catch(() => {});
-              }
-              // Auto-save session context to memory (throttled to every 30s)
-              if (circleId && userId && Date.now() - lastMemorySaveRef.current > 30_000) {
-                lastMemorySaveRef.current = Date.now();
-                saveSessionsToMemory(circleId, userId, sessions)
-                  .then(r => { if (r) console.log('[OfficeTab] Memory save result:', r); })
-                  .catch(err => console.error('[OfficeTab] Memory save FAILED:', err));
-              }
-            });
-            ccPollerRef.current.start(5000);
-          }
-        });
+        import('../../../lib/agentAutoConnect')
+          .then((mod) => mod.startAgentAutoConnect())
+          .catch(() => {});
       }
 
       // ── Subscribe to singleton updates so OfficeTab stays in sync ──
@@ -1639,14 +1613,6 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       pollersRef.current.forEach(p => p.stop());
       pollersRef.current.clear();
       if (tgPollerRef.current) tgPollerRef.current.stop();
-      if (ccPollerRef.current) {
-        ccPollerRef.current.stop();
-        ccPollerRef.current = null;
-      }
-      // Mark Claude Code agent idle (not offline) when tab unmounts — stays visible for 1 hour
-      if (ccPublishedRef.current && circleId) {
-        markClaudeCodeAgentOffline(circleId).catch(() => {});
-      }
     };
   }, [circleId]);
 

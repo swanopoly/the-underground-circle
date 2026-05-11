@@ -7,14 +7,15 @@
 //   1. Client POSTs { task, circleId, browserbase: {apiKey, projectId} }
 //   2. Server opens a Browserbase session (or reuses one by sessionId).
 //   3. Loop:
-//        - Call Claude with conversation + tool_result from previous turn.
+//        - Call a Claude computer-use capable model with conversation +
+//          tool_result from previous turn.
 //        - Claude returns either (a) a tool_use asking for a browser action,
 //          or (b) a final text answer (stop_reason: 'end_turn').
 //        - If tool_use: execute against Browserbase → capture screenshot +
 //          current_url → emit SSE → feed back to Claude as tool_result.
 //        - If end_turn: emit `result` SSE with the final answer + session
 //          link, close stream.
-//   4. Safety rails: max 20 iterations, 200k token budget, 5-minute wall
+//   4. Safety rails: max 12 iterations, 75k token budget, 5-minute wall
 //      clock, per-action timeout.
 //
 // SSE protocol (outbound):
@@ -42,11 +43,16 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-// Opus 4.7 is the right choice here — computer use wants the best planning
-// and screenshot-understanding the app has. Haiku is too thin for visual
-// reasoning, Sonnet works but Opus is markedly more reliable on multi-step
-// tasks where a bad click early snowballs.
-const AGENT_MODEL = "claude-opus-4-7";
+// Anthropic currently exposes native computer use on Sonnet-class models.
+// Do not route this through Opus/Haiku: those can reject the computer tool.
+const DEFAULT_AGENT_MODEL = "claude-sonnet-4-6";
+
+function resolveComputerUseModel(model?: string | null): string {
+  const raw = String(model || "").trim();
+  if (!raw) return DEFAULT_AGENT_MODEL;
+  const normalized = raw.startsWith("anthropic/") ? raw.slice("anthropic/".length) : raw;
+  return /^claude-.*sonnet/i.test(normalized) ? normalized : DEFAULT_AGENT_MODEL;
+}
 
 // Anthropic's computer-use tool spec. The viewport is a reasonable
 // middle-ground — matches what Browserbase ships by default.
@@ -162,13 +168,16 @@ interface AgentRequest {
     projectId: string;
     region?: string;
   };
-  /** Max iterations. Defaults to 20. */
+  /** Max iterations. Defaults to 12. */
   maxIterations?: number;
-  /** Max tokens budget. Defaults to 200_000. */
+  /** Max tokens budget. Defaults to 75_000. */
   maxTokensBudget?: number;
+  /** Optional selected model. Non-computer-use-capable choices fall back
+   *  to the supported Sonnet computer-use model for this native loop. */
+  model?: string | null;
   /** Max USD cost for this task. Aborts the run gracefully if the
    *  estimated cost would exceed this. Defaults to the circle's
-   *  `computer_use_max_cost_usd` setting, else $2.00. */
+   *  `computer_use_max_cost_usd` setting, else $0.75. */
   maxCostUsd?: number;
 }
 
@@ -281,14 +290,15 @@ Deno.serve(async (req: Request) => {
     } catch { /* persistence is best-effort */ }
   }
 
-  const maxIterations = Math.min(body.maxIterations ?? 20, 40);
-  const maxTokensBudget = Math.min(body.maxTokensBudget ?? 200_000, 500_000);
+  const maxIterations = Math.min(body.maxIterations ?? 12, 20);
+  const maxTokensBudget = Math.min(body.maxTokensBudget ?? 75_000, 200_000);
+  const agentModel = resolveComputerUseModel(body.model);
 
   // Per-circle budget cap — read from `circles.settings.computer_use_max_cost_usd`
-  // unless the caller passed an explicit override. Defaults to $2. Any
+  // unless the caller passed an explicit override. Defaults to $0.75. Any
   // iteration that would push running cost above this aborts the run
   // gracefully with a summary of what was done so far.
-  let maxCostUsd = typeof body.maxCostUsd === "number" && body.maxCostUsd > 0 ? body.maxCostUsd : 2;
+  let maxCostUsd = typeof body.maxCostUsd === "number" && body.maxCostUsd > 0 ? body.maxCostUsd : 0.75;
   if (supabase && body.circleId && typeof body.maxCostUsd !== "number") {
     try {
       const { data } = await supabase
@@ -384,13 +394,13 @@ Deno.serve(async (req: Request) => {
             });
             break;
           }
-          const runningCost = computeCostUsd(AGENT_MODEL, usage);
+          const runningCost = computeCostUsd(agentModel, usage);
           if (runningCost > maxCostUsd) {
             emit("error", { message: `Budget cap reached: $${runningCost.toFixed(4)} > $${maxCostUsd.toFixed(2)}. Raise the cap in circle settings or run a narrower task.` });
             break;
           }
 
-          const claudeResponse = await callClaudeWithTools(apiKey.apiKey, messages);
+          const claudeResponse = await callClaudeWithTools(apiKey.apiKey, messages, agentModel);
           usage = addUsage(usage, claudeResponse.usage);
           // Running ticker — cache-aware. `inputTokens` stays the total
           // input-side count (uncached + create + read) for backwards
@@ -404,7 +414,7 @@ Deno.serve(async (req: Request) => {
             uncachedInputTokens: usage.uncachedIn,
             cacheCreateTokens:   usage.cacheCreate,
             cacheReadTokens:     usage.cacheRead,
-            estimatedCost: computeCostUsd(AGENT_MODEL, usage),
+            estimatedCost: computeCostUsd(agentModel, usage),
           });
 
           // Record the assistant's turn verbatim so tool_use_id refs resolve
@@ -439,7 +449,7 @@ Deno.serve(async (req: Request) => {
             // Mark the run complete in DB (best-effort — do this BEFORE
             // emitting so a disconnected client can still see the final
             // state via the follow-up-context read on the next run).
-            const finalCost = computeCostUsd(AGENT_MODEL, usage);
+            const finalCost = computeCostUsd(agentModel, usage);
             const totalInputSideFinal = usage.uncachedIn + usage.cacheCreate + usage.cacheRead;
             if (supabase && runId) {
               try {
@@ -563,7 +573,7 @@ Deno.serve(async (req: Request) => {
           circleId: body.circleId || null,
           userId,
           source:   "computer-use-agent",
-          model:    AGENT_MODEL,
+          model:    agentModel,
           usage,
           metadata: { task: body.task.slice(0, 200), runId },
         });
@@ -581,7 +591,7 @@ Deno.serve(async (req: Request) => {
                 iterations: 0,
                 input_tokens: usage.uncachedIn + usage.cacheCreate + usage.cacheRead,
                 output_tokens: usage.output,
-                estimated_cost: computeCostUsd(AGENT_MODEL, usage),
+                estimated_cost: computeCostUsd(agentModel, usage),
                 completed_at: new Date().toISOString(),
               })
               .eq("id", runId);
@@ -671,11 +681,11 @@ Format, verbatim including the tags:
 // Thin wrapper around the shared `callClaude()` — pins the computer-use
 // beta header + the frozen system prompt (cached automatically). The
 // agent loop uses `.content`, `.stop_reason`, and `.usage` directly.
-async function callClaudeWithTools(apiKey: string, messages: Array<{ role: string; content: any }>) {
+async function callClaudeWithTools(apiKey: string, messages: Array<{ role: string; content: any }>, model = DEFAULT_AGENT_MODEL) {
   return await callClaude({
     apiKey,
-    model: AGENT_MODEL,
-    maxTokens: 8192,
+    model,
+    maxTokens: 4096,
     system: AGENT_SYSTEM_PROMPT,
     tools: [COMPUTER_USE_TOOL, BASH_TOOL, ASK_USER_TOOL, FILL_SAVED_LOGIN_TOOL],
     messages,

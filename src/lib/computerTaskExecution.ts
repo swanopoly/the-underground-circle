@@ -7,6 +7,7 @@ import {
   summarizeComputerTaskCapabilityReadiness,
   type ComputerTaskPlanPreview,
 } from './computerTaskPlanner';
+import type { BusinessModelTaskPlan } from './businessModelProfiles';
 
 export interface ComputerTaskExecutionEnvelope {
   preview: ComputerTaskPlanPreview;
@@ -20,6 +21,7 @@ export interface ComputerTaskExecutionEnvelope {
   capabilityProfile: TaskCapabilityProfileKey;
   entrypoint: 'browser_runtime' | 'agent_runtime';
   grants: ComputerTaskGrantPlan;
+  businessModelPlan?: BusinessModelTaskPlan | null;
 }
 
 function resolveCapabilityProfile(kind: ComputerTaskPlanPreview['kind']): TaskCapabilityProfileKey {
@@ -56,6 +58,7 @@ export function prepareComputerTaskExecution(args: {
   task: string;
   audit: ComputerCapabilityAudit | null;
   grantedIds?: import('./computerTaskGrants').ComputerTaskGrantId[];
+  businessModelPlan?: BusinessModelTaskPlan | null;
 }): ComputerTaskExecutionEnvelope {
   const preview = planComputerTaskPreview(args.task);
   const readiness = summarizeComputerTaskCapabilityReadiness(preview, args.audit);
@@ -75,10 +78,12 @@ export function prepareComputerTaskExecution(args: {
       readiness,
       audit: args.audit,
       grants,
+      businessModelPlan: args.businessModelPlan,
     }),
     recommendedMode: resolveMode(preview.kind),
     capabilityProfile: resolveCapabilityProfile(preview.kind),
     entrypoint: preview.kind === 'browser_task' ? 'browser_runtime' : 'agent_runtime',
     grants,
+    businessModelPlan: args.businessModelPlan,
   };
 }

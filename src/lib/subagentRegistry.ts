@@ -511,7 +511,7 @@ export async function delegateToSubagent(opts: {
     const toolLoopResult = await executeToolUseLoop({
       systemPrompt: subagentSystemPrompt,
       userMessage: fullPrompt,
-      model: opts.model || opts.subagent.modelPreference || 'claude-sonnet-4-6',
+      model: opts.model || opts.subagent.modelPreference || 'claude-haiku-4-5',
       circleId: opts.circleId,
       userId: opts.userId,
       runId,

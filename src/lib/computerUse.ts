@@ -11,14 +11,27 @@ import { getCircleIntegration, getCircleIntegrationSecretValues } from './circle
 import { getSwanBotResponse as getAIResponse } from './swanbot';
 import { analyzeBrowserTask, type BrowserTaskIntent } from './browserTaskIntent';
 import { buildBrowserbaseWorkflowPromptBlock } from './browserbaseWorkflowIntent';
+import { buildFallbackBrowserActions as buildPureFallbackBrowserActions } from './browserActionFallback';
+import { chooseBrowserAutomationBackendPreference, type BrowserAutomationBackendPreference } from './browserAutomationBackend';
 import { getBridgeUrl } from './bridgeEnvironment';
+import { ensureDesktopBridgePaired } from './desktopBridge';
+import {
+  clickRole as localBrowserClickRole,
+  domSnapshot as localBrowserDomSnapshot,
+  fillField as localBrowserFillField,
+  openUrl as localBrowserOpenUrl,
+  pressKey as localBrowserPressKey,
+  renderBrowserTree,
+  screenshot as localBrowserScreenshot,
+  selectOption as localBrowserSelectOption,
+} from './browserBridge';
 
 export type ComputerUsePermission = 'none' | 'ask_every_time' | 'ask_for_new_sites' | 'trusted';
 export type ComputerUseBackend = 'playwright_bridge' | 'browserbase_stagehand';
 
 export interface BrowserAction {
   id: string;
-  type: 'navigate' | 'click' | 'fill' | 'screenshot' | 'select' | 'press_key' | 'wait' | 'scroll';
+  type: 'navigate' | 'observe' | 'extract' | 'click' | 'fill' | 'screenshot' | 'select' | 'press_key' | 'wait' | 'scroll';
   target?: string;
   value?: string;
   description: string;
@@ -28,6 +41,7 @@ export interface BrowserAction {
   status: 'pending' | 'approved' | 'rejected' | 'executing' | 'completed' | 'failed';
   screenshotBefore?: string;
   screenshotAfter?: string;
+  output?: string;
   error?: string;
   executedAt?: string;
 }
@@ -47,6 +61,7 @@ export interface ComputerUseSession {
   backend: ComputerUseBackend;
   backendLabel: string;
   backendDetails?: string;
+  backendPreference?: BrowserAutomationBackendPreference;
   backendSessionId?: string;
   backendLiveUrl?: string;
   sourceMessageId?: string;
@@ -72,6 +87,7 @@ export interface ComputerUsePlanSummary {
   backend: ComputerUseBackend;
   backendLabel: string;
   backendDetails?: string;
+  backendPreference?: BrowserAutomationBackendPreference;
   actions: BrowserAction[];
   requiresApproval: boolean;
   summaryText: string;
@@ -85,6 +101,7 @@ export interface BrowserPlanCardData {
   backend: ComputerUseBackend;
   backendLabel: string;
   backendDetails?: string;
+  backendPreference?: BrowserAutomationBackendPreference;
   requiresApproval: boolean;
   recommendedPermission?: ComputerUsePermission;
   status: 'planned' | 'approval_requested' | 'launched' | 'completed' | 'failed';
@@ -124,6 +141,7 @@ export interface BrowserSessionRecord {
   backend: ComputerUseBackend;
   backendLabel: string;
   backendDetails?: string;
+  backendPreference?: BrowserAutomationBackendPreference;
   status: ComputerUseSession['status'];
   startedAt: string;
   completedAt?: string;
@@ -160,6 +178,7 @@ interface StagehandRunnerResponse {
   sessionId?: string;
   currentUrl?: string;
   screenshot?: string | null;
+  output?: string | null;
 }
 
 type BrowserActionSafetyAssessment = {
@@ -207,10 +226,10 @@ function assessBrowserActionSafety(
     return { requiresApproval: explicitApproval };
   }
 
-  if (intent.requiresLogin && (action.type === 'fill' || action.type === 'press_key')) {
+  if (intent.requiresLogin && (action.type === 'fill' || action.type === 'press_key' || action.type === 'observe' || action.type === 'extract')) {
     return {
       requiresApproval: true,
-      approvalReason: 'This step may enter credentials or interact with an authenticated session.',
+      approvalReason: 'This step may enter credentials, read account data, or interact with an authenticated session.',
     };
   }
 
@@ -297,14 +316,14 @@ async function callBridgeExec(command: string, timeoutMs: number = BRIDGE_TIMEOU
   return res.json();
 }
 
-async function resolveComputerUseBackend(circleId?: string): Promise<ComputerUseBackendContext> {
+async function resolveComputerUseBackend(circleId?: string, intent?: BrowserTaskIntent): Promise<ComputerUseBackendContext> {
   if (!circleId) {
-    return { backend: 'playwright_bridge', label: 'Local Playwright Bridge', details: 'No circle context provided' };
+    return { backend: 'playwright_bridge', label: 'Local Browser Bridge', details: 'No circle context provided' };
   }
 
   const integration = await getCircleIntegration(circleId, 'browserbase');
   if (!integration || integration.is_active === false || integration.status === 'disabled') {
-    return { backend: 'playwright_bridge', label: 'Local Playwright Bridge' };
+    return { backend: 'playwright_bridge', label: 'Local Browser Bridge' };
   }
 
   const secrets = await getCircleIntegrationSecretValues(integration.id);
@@ -315,15 +334,24 @@ async function resolveComputerUseBackend(circleId?: string): Promise<ComputerUse
   if (!apiKey || !projectId) {
     return {
       backend: 'playwright_bridge',
-      label: 'Local Playwright Bridge',
+      label: 'Local Browser Bridge',
       details: 'Browserbase connected, but api_key/project_id are incomplete',
+    };
+  }
+
+  const browserbaseDecision = chooseBrowserAutomationBackendPreference(intent);
+  if (browserbaseDecision.backend !== 'browserbase_stagehand') {
+    return {
+      backend: 'playwright_bridge',
+      label: 'Local Browser Bridge',
+      details: `Browserbase connected; local selected for cost control. ${browserbaseDecision.reason}`,
     };
   }
 
   return {
     backend: 'browserbase_stagehand',
     label: 'Browserbase Stagehand',
-    details: integration.display_name || String(integration.metadata?.workspaceName || 'Connected Browserbase workspace'),
+    details: `${integration.display_name || String(integration.metadata?.workspaceName || 'Connected Browserbase workspace')} — ${browserbaseDecision.reason}`,
     browserbase: { apiKey, projectId, region },
   };
 }
@@ -334,21 +362,24 @@ export async function createSession(
   permission: ComputerUsePermission,
   opts?: { circleId?: string; intent?: BrowserTaskIntent; recommendedPermission?: ComputerUsePermission }
 ): Promise<ComputerUseSession> {
-  const backend = await resolveComputerUseBackend(opts?.circleId);
+  const intent = opts?.intent || analyzeBrowserTask(task);
+  const backend = await resolveComputerUseBackend(opts?.circleId, intent);
+  const backendPreference = chooseBrowserAutomationBackendPreference(intent);
   return {
     id: generateId(),
     agentName,
     task,
-    intent: opts?.intent || analyzeBrowserTask(task),
+    intent,
     permission,
     actions: [],
     status: 'planning',
     startedAt: new Date().toISOString(),
-    approvedDomains: opts?.intent?.allowedDomains ? [...opts.intent.allowedDomains] : [],
+    approvedDomains: intent.allowedDomains ? [...intent.allowedDomains] : [],
     circleId: opts?.circleId,
     backend: backend.backend,
     backendLabel: backend.label,
     backendDetails: backend.details,
+    backendPreference,
     recommendedPermission: opts?.recommendedPermission,
   };
 }
@@ -367,6 +398,7 @@ export async function createSessionFromBrowserPlan(
   session.backend = plan.backend;
   session.backendLabel = plan.backendLabel;
   session.backendDetails = plan.backendDetails;
+  session.backendPreference = plan.backendPreference;
   session.actions = plan.actions.map((action) => {
     const safety = assessBrowserActionSafety(plan.intent, action);
     const status =
@@ -403,6 +435,7 @@ export async function planActions(
   task: string,
   context?: string,
   intent?: BrowserTaskIntent,
+  opts?: { circleId?: string; userId?: string; model?: string | null },
 ): Promise<BrowserAction[]> {
   const analyzedIntent = intent || analyzeBrowserTask(task);
   const planPrompt = `You are a browser automation planner. You need to complete this task using a web browser.
@@ -432,13 +465,13 @@ ${buildBrowserbaseWorkflowPromptBlock(analyzedIntent.browserbaseWorkflow)}
 Break this into specific browser actions. Return ONLY a JSON array (no markdown, no explanation).
 Each action has: type, target, value (optional), description.
 
-Valid types: navigate, click, fill, screenshot, select, press_key, wait, scroll
+Valid types: navigate, observe, extract, click, fill, screenshot, select, press_key, wait, scroll
 
 Rules:
 - Prefer the explicit start URL when one is present.
 - Keep actions inside the allowed domains unless the task clearly requires otherwise.
-- For web data retrieval, keep the action plan narrow: navigate, wait for rendered content when needed, capture/check the source page, and return structured data in the final agent summary.
-- For Stagehand-style tasks, write action descriptions as semantic browser instructions that can be passed to Stagehand's act/extract flow.
+- For web data retrieval, keep the action plan narrow: navigate, wait for rendered content when needed, extract the requested fields, and add a screenshot only when visual proof matters.
+- For Stagehand-style tasks, use observe before ambiguous UI choices, act-sized click/fill steps for changes, and extract for requested data.
 - For form submission, include field-filling steps, a review screenshot before submit, and a post-submit verification step.
 - If the task appears transactional or login-related, stop before final submission and add a screenshot step near the end.
 - If the task is read-only or extract-focused, end with a screenshot after reaching the requested result.
@@ -446,17 +479,20 @@ Rules:
 Example:
 [
   {"type":"navigate","target":"https://example.com","description":"Open example.com"},
+  {"type":"observe","description":"Observe the visible navigation and form controls"},
   {"type":"click","target":"#login-button","description":"Click the login button"},
   {"type":"fill","target":"#email","value":"user@test.com","description":"Enter email address"},
+  {"type":"extract","description":"Extract the requested records as structured JSON"},
   {"type":"screenshot","description":"Capture the result"}
 ]
 
 Return ONLY the JSON array:`;
 
   const aiResponse = await getAIResponse(planPrompt, {
-    userId: 'computer-use-planner',
-    circleId: undefined,
+    userId: opts?.userId || '00000000-0000-0000-0000-000000000000',
+    circleId: opts?.circleId,
     userName: 'ComputerUse',
+    model: opts?.model || undefined,
   });
 
   let parsed: any[] = [];
@@ -478,9 +514,13 @@ Return ONLY the JSON array:`;
   const normalized = parsed
     .filter(Boolean)
     .map((item: any, index: number) => {
+      const allowedTypes = new Set<BrowserAction['type']>([
+        'navigate', 'observe', 'extract', 'click', 'fill', 'screenshot', 'select', 'press_key', 'wait', 'scroll',
+      ]);
+      const itemType = allowedTypes.has(item.type) ? item.type : 'navigate';
       const base = {
         id: `action_${Date.now()}_${index}`,
-        type: item.type || 'navigate',
+        type: itemType,
         target: item.target || undefined,
         value: item.value || undefined,
         description: item.description || `Step ${index + 1}`,
@@ -497,43 +537,7 @@ Return ONLY the JSON array:`;
 
   if (normalized.length > 0) return normalized;
 
-  const fallbackTarget = analyzedIntent.startUrls[0]
-    || (analyzedIntent.allowedDomains[0] ? `https://${analyzedIntent.allowedDomains[0]}` : '')
-    || task;
-  const fallback: BrowserAction[] = [
-    {
-      id: `action_${Date.now()}_0`,
-      type: 'navigate',
-      target: fallbackTarget,
-      description: analyzedIntent.startUrls[0]
-        ? `Open ${analyzedIntent.startUrls[0]}`
-        : `Open the browser target for: ${task}`,
-      requiresApproval: true,
-      approvalReason: analyzedIntent.allowedDomains.length > 0 ? `Keep execution scoped to ${analyzedIntent.allowedDomains.join(', ')}` : undefined,
-      status: 'pending',
-    },
-  ];
-  if (analyzedIntent.requiresLogin) {
-    fallback.push({
-      id: `action_${Date.now()}_1`,
-      type: 'wait',
-      value: '1500',
-      description: 'Pause for login or account review before continuing',
-      requiresApproval: true,
-      approvalReason: 'Explicit review before interacting with authenticated state.',
-      status: 'pending',
-    });
-  }
-  fallback.push({
-    id: `action_${Date.now()}_${fallback.length}`,
-    type: 'screenshot',
-    description: analyzedIntent.mode === 'extract'
-      ? 'Capture the page that contains the requested information'
-      : 'Capture the browser state for review',
-    requiresApproval: false,
-    status: 'pending',
-  });
-  return fallback;
+  return buildPureFallbackBrowserActions(task, analyzedIntent) as BrowserAction[];
 }
 
 export async function callPlaywrightMCP(
@@ -549,13 +553,23 @@ export async function callPlaywrightMCP(
     throw new Error(`Bridge not reachable at ${bridgeUrl}`);
   }
 
+  let mcpError: any = null;
   try {
+    const paired = await ensureDesktopBridgePaired();
+    if (!paired.ok || !paired.data?.token) {
+      throw new Error(paired.error || 'Desktop bridge not paired.');
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), BRIDGE_TIMEOUT);
     const res = await fetch(`${bridgeUrl}/mcp`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-UC-Desktop-Token': paired.data.token,
+      },
       body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: `computer-use-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         method: 'tools/call',
         params: {
           name: toolName,
@@ -567,9 +581,16 @@ export async function callPlaywrightMCP(
     clearTimeout(timeout);
 
     if (res.ok) {
-      return res.json();
+      const json = await res.json();
+      if (json?.error) {
+        throw new Error(json.error.message || JSON.stringify(json.error));
+      }
+      return json?.result ?? json;
     }
-  } catch {
+    const text = await res.text().catch(() => '');
+    throw new Error(text || `Bridge /mcp failed: ${res.status}`);
+  } catch (err) {
+    mcpError = err;
     // Fall through to /exec fallback
   }
 
@@ -587,7 +608,7 @@ export async function callPlaywrightMCP(
   }
 
   throw new Error(
-    `Playwright MCP not available at ${bridgeUrl}/mcp. Install @playwright/mcp and wire it into the bridge, or enable Browserbase Stagehand for this circle.`,
+    `Playwright MCP not available at ${bridgeUrl}/mcp. ${mcpError?.message ? `Last error: ${mcpError.message}. ` : ''}Install @playwright/mcp and wire it into the bridge, or enable Browserbase Stagehand for this circle.`,
   );
 }
 
@@ -605,7 +626,7 @@ async function callStagehandRunner(payload: StagehandRunnerPayload): Promise<Sta
 
 async function ensureStagehandSession(session: ComputerUseSession): Promise<void> {
   if (session.backend !== 'browserbase_stagehand' || session.backendSessionId) return;
-  const backend = await resolveComputerUseBackend(session.circleId);
+  const backend = await resolveComputerUseBackend(session.circleId, session.intent);
   if (backend.backend !== 'browserbase_stagehand' || !backend.browserbase) {
     throw new Error('Browserbase Stagehand is not configured for this circle');
   }
@@ -628,7 +649,7 @@ async function runStagehandSessionCommand(
   mode: 'action' | 'screenshot',
   action?: Pick<BrowserAction, 'type' | 'target' | 'value' | 'description'>,
 ): Promise<StagehandRunnerResponse> {
-  const backend = await resolveComputerUseBackend(session.circleId);
+  const backend = await resolveComputerUseBackend(session.circleId, session.intent);
   if (backend.backend !== 'browserbase_stagehand' || !backend.browserbase) {
     throw new Error('Browserbase Stagehand is not configured for this circle');
   }
@@ -651,6 +672,86 @@ async function runStagehandSessionCommand(
   return response;
 }
 
+async function runPlaywrightReadAction(action: BrowserAction): Promise<string> {
+  const toolCandidates = action.type === 'observe'
+    ? ['mcp__playwright__browser_snapshot', 'mcp__playwright__browser_get_page_snapshot']
+    : ['mcp__playwright__browser_snapshot', 'mcp__playwright__browser_get_page_snapshot'];
+  let lastError: any = null;
+  for (const toolName of toolCandidates) {
+    try {
+      const result = await callPlaywrightMCP(toolName, {});
+      const serialized = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+      if (serialized && serialized !== '{}') return serialized.slice(0, 20000);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('No browser read/snapshot tool is available for observe/extract.');
+}
+
+function looksLikeBrowserSelector(value?: string): boolean {
+  const text = String(value || '').trim();
+  return !!text && (
+    /^[#.]/.test(text)
+    || /\[[\w-]+\s*([~|^$*]?=|\])/.test(text)
+    || /:nth-(?:child|of-type|last-child)/.test(text)
+    || /^[a-z][\w-]*\s*[>+~]/i.test(text)
+    || /^[a-z][\w-]*\s*\[/i.test(text)
+    || /^[a-z][\w-]*\s*\.[\w-]/i.test(text)
+  );
+}
+
+function extractQuotedLabel(value?: string): string | undefined {
+  const match = String(value || '').match(/["'“”‘’]([^"'“”‘’]{1,120})["'“”‘’]/);
+  return match?.[1]?.trim() || undefined;
+}
+
+function inferBrowserRole(action: BrowserAction, fallback: string): string {
+  const text = `${action.target || ''} ${action.description || ''}`.toLowerCase();
+  if (/\blink\b|href|anchor/.test(text)) return 'link';
+  if (/\btab\b/.test(text)) return 'tab';
+  if (/\bcheckbox\b|check box/.test(text)) return 'checkbox';
+  if (/\bradio\b/.test(text)) return 'radio';
+  if (/\bcombo|dropdown|drop down|select\b/.test(text)) return 'combobox';
+  if (/\btextbox|text box|input|field|email|password|search\b/.test(text)) return 'textbox';
+  return fallback;
+}
+
+function buildLocalBrowserLocatorArgs(
+  action: BrowserAction,
+  fallbackRole: string,
+): { role: string; name?: string; selector?: string; exact?: boolean; timeoutMs?: number } {
+  const target = String(action.target || '').trim();
+  const role = inferBrowserRole(action, fallbackRole);
+  if (looksLikeBrowserSelector(target)) {
+    return { role, selector: target, timeoutMs: 10000 };
+  }
+  const name = target || extractQuotedLabel(action.description);
+  if (!name) {
+    throw new Error(`${action.type} action needs a target selector or accessible name.`);
+  }
+  return { role, name, timeoutMs: 10000 };
+}
+
+async function runLocalBrowserReadAction(action: BrowserAction): Promise<string> {
+  const maxNodes = action.type === 'extract' ? 300 : 180;
+  const result = await localBrowserDomSnapshot({ maxNodes, interestingOnly: true });
+  if (!result.ok || !result.data) {
+    throw new Error(result.error || 'Browser DOM snapshot failed.');
+  }
+  const treeText = renderBrowserTree(result.data.tree).join('\n');
+  return [
+    `URL: ${result.data.url}`,
+    `Title: ${result.data.title || '(untitled)'}`,
+    `Nodes: ${result.data.nodeCount}`,
+    '',
+    treeText.slice(0, 20000),
+    treeText.length > 20000 ? '\n...truncated' : '',
+  ].filter(Boolean).join('\n');
+}
+
 export async function takeScreenshot(session?: ComputerUseSession): Promise<string | null> {
   if (session?.backend === 'browserbase_stagehand') {
     try {
@@ -659,6 +760,15 @@ export async function takeScreenshot(session?: ComputerUseSession): Promise<stri
     } catch {
       // Fall through to bridge fallback if Stagehand screenshot fails
     }
+  }
+
+  try {
+    const result = await localBrowserScreenshot({ fullPage: false });
+    if (result.ok && result.data?.base64) {
+      return result.data.base64;
+    }
+  } catch {
+    // Fall through to legacy MCP/shell capture paths.
   }
 
   try {
@@ -700,6 +810,13 @@ export async function executeAction(
 
     if (session?.backend === 'browserbase_stagehand') {
       switch (action.type) {
+        case 'observe':
+        case 'extract': {
+          const result = await runStagehandSessionCommand(session, 'action', action);
+          updated.output = result.output || undefined;
+          updated.status = 'completed';
+          return updated;
+        }
         case 'screenshot': {
           const shot = await takeScreenshot(session);
           if (!shot) {
@@ -726,22 +843,35 @@ export async function executeAction(
       }
     } else {
       switch (action.type) {
-        case 'navigate':
-          await callPlaywrightMCP('mcp__playwright__browser_navigate', { url: action.target || '' });
-          if (session && action.target) session.currentUrl = action.target;
+        case 'navigate': {
+          const result = await localBrowserOpenUrl(action.target || '', { waitUntil: 'domcontentloaded' });
+          if (!result.ok) throw new Error(result.error || 'Local browser navigation failed.');
+          if (session) session.currentUrl = result.data?.url || action.target;
           break;
-        case 'click':
-          await callPlaywrightMCP('mcp__playwright__browser_click', {
-            selector: action.target || '',
-            element: action.target || '',
+        }
+        case 'observe':
+        case 'extract': {
+          try {
+            updated.output = await runLocalBrowserReadAction(action);
+          } catch {
+            updated.output = await runPlaywrightReadAction(action);
+          }
+          updated.status = 'completed';
+          return updated;
+        }
+        case 'click': {
+          const result = await localBrowserClickRole(buildLocalBrowserLocatorArgs(action, 'button'));
+          if (!result.ok) throw new Error(result.error || 'Local browser click failed.');
+          break;
+        }
+        case 'fill': {
+          const result = await localBrowserFillField({
+            ...buildLocalBrowserLocatorArgs(action, 'textbox'),
+            text: action.value || '',
           });
+          if (!result.ok) throw new Error(result.error || 'Local browser fill failed.');
           break;
-        case 'fill':
-          await callPlaywrightMCP('mcp__playwright__browser_fill_form', {
-            selector: action.target || '',
-            value: action.value || '',
-          });
-          break;
+        }
         case 'screenshot': {
           const shot = await takeScreenshot(session);
           if (!shot) {
@@ -755,27 +885,29 @@ export async function executeAction(
           updated.status = 'completed';
           return updated;
         }
-        case 'select':
-          await callPlaywrightMCP('mcp__playwright__browser_select_option', {
-            selector: action.target || '',
+        case 'select': {
+          const result = await localBrowserSelectOption({
+            ...buildLocalBrowserLocatorArgs(action, 'combobox'),
             value: action.value || '',
           });
+          if (!result.ok) throw new Error(result.error || 'Local browser select failed.');
           break;
-        case 'press_key':
-          await callPlaywrightMCP('mcp__playwright__browser_press_key', {
-            key: action.value || action.target || '',
-          });
+        }
+        case 'press_key': {
+          const result = await localBrowserPressKey(action.value || action.target || '');
+          if (!result.ok) throw new Error(result.error || 'Local browser key press failed.');
           break;
+        }
         case 'wait': {
           const ms = parseInt(action.value || '1000', 10);
           await new Promise(resolve => setTimeout(resolve, Math.min(ms, 10000)));
           break;
         }
-        case 'scroll':
-          await callPlaywrightMCP('mcp__playwright__browser_press_key', {
-            key: action.value === 'up' ? 'PageUp' : 'PageDown',
-          });
+        case 'scroll': {
+          const result = await localBrowserPressKey(action.value === 'up' ? 'PageUp' : 'PageDown');
+          if (!result.ok) throw new Error(result.error || 'Local browser scroll failed.');
           break;
+        }
         default:
           throw new Error(`Unknown action type: ${action.type}`);
       }
@@ -877,11 +1009,17 @@ export async function executePlan(
   }
 
   const allCompleted = results.every(a => a.status === 'completed' || a.status === 'rejected');
+  const outputs = results
+    .filter(a => a.output)
+    .map((a, index) => `Output ${index + 1} (${a.type}):\n${String(a.output).slice(0, 4000)}`);
   return {
     success: allCompleted,
-    message: allCompleted
-      ? `Completed ${results.filter(a => a.status === 'completed').length} actions successfully`
-      : `Completed ${results.filter(a => a.status === 'completed').length}/${results.length} actions`,
+    message: [
+      allCompleted
+        ? `Completed ${results.filter(a => a.status === 'completed').length} actions successfully`
+        : `Completed ${results.filter(a => a.status === 'completed').length}/${results.length} actions`,
+      outputs.length ? outputs.join('\n\n') : '',
+    ].filter(Boolean).join('\n\n'),
     screenshotUrl: lastScreenshot ? `data:image/png;base64,${lastScreenshot}` : undefined,
     actions: results,
     currentUrl: session.currentUrl,
@@ -894,6 +1032,8 @@ export async function describeComputerUsePlan(opts: {
   task: string;
   circleId?: string;
   agentName?: string;
+  userId?: string;
+  model?: string | null;
 }): Promise<ComputerUsePlanSummary> {
   const task = opts.task.trim();
   const intent = analyzeBrowserTask(task);
@@ -903,11 +1043,17 @@ export async function describeComputerUsePlan(opts: {
     intent.suggestedPermission,
     { circleId: opts.circleId, intent, recommendedPermission: intent.suggestedPermission },
   );
-  const actions = await planActions(task, undefined, intent);
+  const actions = await planActions(task, undefined, intent, {
+    circleId: opts.circleId,
+    userId: opts.userId,
+    model: opts.model,
+  });
   session.actions = actions;
+  const backendPreference = session.backendPreference || chooseBrowserAutomationBackendPreference(intent);
 
   const summaryText = [
     `Browser backend: ${session.backendLabel}${session.backendDetails ? ` (${session.backendDetails})` : ''}`,
+    `Backend policy: ${backendPreference.costTier === 'free_local' ? 'local/free' : 'metered remote'} — ${backendPreference.reason}`,
     `Mode: ${intent.mode.replace(/_/g, ' ')} · Risk: ${intent.risk.toUpperCase()} · Recommended permission: ${intent.suggestedPermission.replace(/_/g, ' ')}`,
     intent.allowedDomains.length > 0 ? `Domains: ${intent.allowedDomains.join(', ')}` : 'Domains: not specified',
     intent.requiresLogin ? 'Requires login or account access' : 'No login signals detected',
@@ -930,6 +1076,7 @@ export async function describeComputerUsePlan(opts: {
     backend: session.backend,
     backendLabel: session.backendLabel,
     backendDetails: session.backendDetails,
+    backendPreference,
     actions,
     requiresApproval: true,
     summaryText,
@@ -950,6 +1097,7 @@ export function toBrowserSessionRecord(
     backend: session.backend,
     backendLabel: session.backendLabel,
     backendDetails: session.backendDetails,
+    backendPreference: session.backendPreference,
     status: isTerminal
       ? (result.success ? 'completed' : 'failed')
       : session.status,
@@ -971,6 +1119,7 @@ export function toBrowserPlanCardData(plan: ComputerUsePlanSummary): BrowserPlan
     backend: plan.backend,
     backendLabel: plan.backendLabel,
     backendDetails: plan.backendDetails,
+    backendPreference: plan.backendPreference,
     requiresApproval: plan.requiresApproval,
     recommendedPermission: plan.recommendedPermission,
     status: 'planned',

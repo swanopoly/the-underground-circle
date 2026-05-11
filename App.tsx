@@ -2,22 +2,22 @@ import './src/lib/animationPatch'; // Must be first — patches Animated.loop fo
 import './src/lib/pixelDesign'; // Side effect: injects the global system font stack + :root CSS vars on web
 import { installErrorReporter } from './src/lib/errorReporter';
 installErrorReporter(); // Register global unhandled-rejection / error handlers
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { Suspense, useState, useEffect, useRef, useMemo } from 'react';
 import { StatusBar, View, Text, StyleSheet, Animated, Platform } from 'react-native';
 import { NavigationContainer, useNavigation, LinkingOptions } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Session } from '@supabase/supabase-js';
 import { supabase } from './src/lib/supabase';
-import AuthNavigator from './src/navigation/AuthNavigator';
-import MainNavigator from './src/navigation/MainNavigator';
 import ErrorBoundary from './src/components/ErrorBoundary';
 import AppHeader from './src/components/AppHeader';
-import { startAgentAutoConnect, stopAgentAutoConnect, setAutoConnectCircleId } from './src/lib/agentAutoConnect';
 import { acceptInvite, lookupInvite } from './src/lib/invites';
-import OnboardingFlow, { isOnboardingComplete } from './src/components/OnboardingFlow';
 import { buildAppActions } from './src/components/command/commandActions';
-import XPOverlay from './src/components/rpg/XPOverlay';
 import { ToastProvider } from './src/components/Toast';
+
+const AuthNavigator = React.lazy(() => import('./src/navigation/AuthNavigator'));
+const MainNavigator = React.lazy(() => import('./src/navigation/MainNavigator'));
+const OnboardingFlow = React.lazy(() => import('./src/components/OnboardingFlow'));
+const XPOverlay = React.lazy(() => import('./src/components/rpg/XPOverlay'));
 
 // Conditionally import the web-only command palette provider
 let CommandPaletteProvider: React.FC<{ children: React.ReactNode; actions: any[] }> | null = null;
@@ -32,6 +32,55 @@ const PENDING_INVITE_KEY = 'uc_pending_invite';
 // Lets a recipient land directly on the mission they were invited to instead
 // of the default tab. MissionsTab consumes + clears this on mount.
 const PENDING_MISSION_KEY = 'uc_pending_mission_deeplink';
+const ONBOARDING_KEY = 'uc_onboarding_complete';
+
+function isOnboardingComplete(): boolean {
+  if (Platform.OS !== 'web') return true;
+  try {
+    return localStorage.getItem(ONBOARDING_KEY) === '1';
+  } catch {
+    return true;
+  }
+}
+
+function deferAfterFirstPaint(work: () => void) {
+  if (Platform.OS !== 'web') {
+    setTimeout(work, 0);
+    return;
+  }
+  const win = typeof window !== 'undefined' ? window as any : null;
+  if (win?.requestIdleCallback) {
+    win.requestIdleCallback(work, { timeout: 2500 });
+  } else {
+    setTimeout(work, 1200);
+  }
+}
+
+function startAgentAutoConnectDeferred() {
+  deferAfterFirstPaint(() => {
+    import('./src/lib/agentAutoConnect')
+      .then((mod) => mod.startAgentAutoConnect())
+      .catch(() => {});
+  });
+}
+
+function stopAgentAutoConnectDeferred() {
+  import('./src/lib/agentAutoConnect')
+    .then((mod) => mod.stopAgentAutoConnect())
+    .catch(() => {});
+}
+
+function setAutoConnectCircleIdDeferred(circleId: string) {
+  deferAfterFirstPaint(() => {
+    import('./src/lib/agentAutoConnect')
+      .then((mod) => mod.setAutoConnectCircleId(circleId))
+      .catch(() => {});
+  });
+}
+
+function AppRouteFallback() {
+  return <View style={{ flex: 1, backgroundColor: '#000' }} />;
+}
 
 /** Redeem a pending invite token after login */
 async function handlePendingInvite(_userId: string) {
@@ -128,7 +177,9 @@ function MainWithHeader() {
   const content = (
     <View style={{ flex: 1 }}>
       <AppHeader navigation={navigation} />
-      <MainNavigator />
+      <Suspense fallback={<AppRouteFallback />}>
+        <MainNavigator />
+      </Suspense>
     </View>
   );
 
@@ -244,7 +295,7 @@ export default function App() {
       setHasCircles(nextHasCircles);
       // Set the first circle for agent auto-connect memory saves
       if (data && data.length > 0 && data[0].circle_id) {
-        setAutoConnectCircleId(data[0].circle_id);
+        setAutoConnectCircleIdDeferred(data[0].circle_id);
       }
       return nextHasCircles;
     } catch {
@@ -304,7 +355,7 @@ export default function App() {
       setLoading(false);
       // Start agent auto-connect immediately if already logged in
       if (session) {
-        startAgentAutoConnect();
+        startAgentAutoConnectDeferred();
         // Redeem pending invite if user just logged in with one
         handlePendingInvite(session.user.id).finally(() => {
           refreshHasCircles(session.user.id).then((userHasCircles) => {
@@ -326,7 +377,7 @@ export default function App() {
       // Only stop on explicit SIGNED_OUT — token refresh events can briefly have null session
       // which was killing all agent connections
       if (session) {
-        startAgentAutoConnect();
+        startAgentAutoConnectDeferred();
         // Redeem pending invite after auth
         if (event === 'SIGNED_IN') {
           handlePendingInvite(session.user.id).finally(() => {
@@ -340,7 +391,7 @@ export default function App() {
           });
         }
       } else if (event === 'SIGNED_OUT') {
-        stopAgentAutoConnect();
+        stopAgentAutoConnectDeferred();
         setShowOnboarding(false);
         setHasCircles(false);
       }
@@ -378,15 +429,27 @@ export default function App() {
           }}
         >
           <StatusBar barStyle="light-content" />
-          {session ? <MainWithHeader /> : <AuthNavigator />}
+          {session ? (
+            <MainWithHeader />
+          ) : (
+            <Suspense fallback={<AppRouteFallback />}>
+              <AuthNavigator />
+            </Suspense>
+          )}
         </NavigationContainer>
         {showOnboarding && session && !hasCircles && (
-          <OnboardingFlow
-            userId={session.user.id}
-            onComplete={() => setShowOnboarding(false)}
-          />
+          <Suspense fallback={null}>
+            <OnboardingFlow
+              userId={session.user.id}
+              onComplete={() => setShowOnboarding(false)}
+            />
+          </Suspense>
         )}
-        {session && <XPOverlay />}
+        {session && (
+          <Suspense fallback={null}>
+            <XPOverlay />
+          </Suspense>
+        )}
       </ToastProvider>
     </ErrorBoundary>
   );

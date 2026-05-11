@@ -110,12 +110,29 @@ export type OpenSwanRuntimeToolName =
   | 'desktop.type_text'
   | 'desktop.press_keys'
   | 'desktop.list_running_apps'
+  | 'desktop.list_browser_tabs'
+  | 'desktop.window_state'
+  | 'desktop.clipboard'
+  | 'desktop.clipboard_write'
+  | 'desktop.clipboard_clear'
+  | 'desktop.file_list'
+  | 'desktop.file_read'
+  | 'desktop.file_search'
+  | 'desktop.shortcuts_list'
+  | 'desktop.shortcuts_run'
+  | 'desktop.window_manage'
+  | 'desktop.mouse_move'
+  | 'desktop.mouse_click'
+  | 'desktop.mouse_drag'
+  | 'desktop.mouse_scroll'
   | 'desktop.wait_for_app'
   | 'desktop.screenshot'
   | 'desktop.open_url'
   | 'desktop.open_path'
   | 'desktop.click_at'
-  | 'desktop.screen_size';
+  | 'desktop.screen_size'
+  | 'desktop.read_a11y_tree'
+  | 'desktop.click_element';
 
 export type OpenSwanToolDefinition = {
   name: OpenSwanRuntimeToolName;
@@ -257,6 +274,14 @@ export type OpenSwanToolExecutionArgs = {
   'verification.lint': VerificationCommandArgs;
   'verification.preview': { note?: string };
   'browser.plan_task': BrowserPlanTaskArgs;
+  'browser.open_url': { url: string; timeoutMs?: number; waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' };
+  'browser.dom_snapshot': { maxNodes?: number; interestingOnly?: boolean };
+  'browser.click_role': { role: string; name?: string; selector?: string; exact?: boolean; nth?: number; timeoutMs?: number };
+  'browser.fill_field': { role?: string; name?: string; selector?: string; text: string; submit?: boolean; exact?: boolean; timeoutMs?: number };
+  'browser.select_option': { role?: string; name?: string; selector?: string; value: string; exact?: boolean; timeoutMs?: number };
+  'browser.press_key': { combo: string };
+  'browser.screenshot': { fullPage?: boolean };
+  'browser.close': Record<string, never>;
   search_memories: SearchMemoriesArgs;
   save_memory: { title: string; content: string; kind?: string };
   fetch_url: FetchUrlArgs;
@@ -309,12 +334,29 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.type_text':       { text: string };
   'desktop.press_keys':      { combo: string };
   'desktop.list_running_apps': Record<string, never>;
+  'desktop.list_browser_tabs': { browsers?: string[] };
+  'desktop.window_state':      Record<string, never>;
+  'desktop.clipboard':         Record<string, never>;
+  'desktop.clipboard_write':   { text: string };
+  'desktop.clipboard_clear':   Record<string, never>;
+  'desktop.file_list':         { path: string };
+  'desktop.file_read':         { path: string; maxBytes?: number };
+  'desktop.file_search':       { rootPath: string; query: string };
+  'desktop.shortcuts_list':    Record<string, never>;
+  'desktop.shortcuts_run':     { name: string };
+  'desktop.window_manage':     { action: 'focus' | 'raise' | 'minimize' | 'unminimize' | 'zoom' | 'resize'; appName?: string; width?: number; height?: number };
+  'desktop.mouse_move':        { x: number; y: number };
+  'desktop.mouse_click':       { x: number; y: number; button?: 'left' | 'right'; count?: number };
+  'desktop.mouse_drag':        { fromX: number; fromY: number; toX: number; toY: number; durationMs?: number };
+  'desktop.mouse_scroll':      { deltaY?: number; deltaX?: number; x?: number; y?: number };
   'desktop.wait_for_app':      { appName: string; timeoutMs?: number };
   'desktop.screenshot':        Record<string, never>;
   'desktop.open_url':          { url: string };
   'desktop.open_path':         { path: string };
   'desktop.click_at':          { x: number; y: number };
   'desktop.screen_size':       Record<string, never>;
+  'desktop.read_a11y_tree':    { appName?: string; maxDepth?: number; maxNodes?: number };
+  'desktop.click_element':     { pid: number; path: string };
   [key: string]: Record<string, unknown>;
 };
 
@@ -339,6 +381,14 @@ export type OpenSwanToolExecutionResultMap = {
   'verification.lint': VerificationExecutionResult;
   'verification.preview': { ok: true; planned: true };
   'browser.plan_task': { ok: true; summaryText: string; backend: string; actionCount: number; requiresApproval: boolean; plan: BrowserPlanCardData };
+  'browser.open_url': { ok: boolean; resultsText: string };
+  'browser.dom_snapshot': { ok: boolean; resultsText: string };
+  'browser.click_role': { ok: boolean; resultsText: string };
+  'browser.fill_field': { ok: boolean; resultsText: string };
+  'browser.select_option': { ok: boolean; resultsText: string };
+  'browser.press_key': { ok: boolean; resultsText: string };
+  'browser.screenshot': { ok: boolean; resultsText: string; base64?: string; mimeType?: string; sizeBytes?: number };
+  'browser.close': { ok: boolean; resultsText: string };
   search_memories: { ok: boolean; resultsText: string };
   save_memory: { ok: boolean; resultsText: string };
   'missions.list': { ok: boolean; resultsText: string };
@@ -410,12 +460,29 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.type_text':         { ok: boolean; resultsText: string };
   'desktop.press_keys':        { ok: boolean; resultsText: string };
   'desktop.list_running_apps': { ok: boolean; resultsText: string };
+  'desktop.list_browser_tabs': { ok: boolean; resultsText: string };
+  'desktop.window_state':      { ok: boolean; resultsText: string };
+  'desktop.clipboard':         { ok: boolean; resultsText: string };
+  'desktop.clipboard_write':   { ok: boolean; resultsText: string };
+  'desktop.clipboard_clear':   { ok: boolean; resultsText: string };
+  'desktop.file_list':         { ok: boolean; resultsText: string };
+  'desktop.file_read':         { ok: boolean; resultsText: string };
+  'desktop.file_search':       { ok: boolean; resultsText: string };
+  'desktop.shortcuts_list':    { ok: boolean; resultsText: string };
+  'desktop.shortcuts_run':     { ok: boolean; resultsText: string };
+  'desktop.window_manage':     { ok: boolean; resultsText: string };
+  'desktop.mouse_move':        { ok: boolean; resultsText: string };
+  'desktop.mouse_click':       { ok: boolean; resultsText: string };
+  'desktop.mouse_drag':        { ok: boolean; resultsText: string };
+  'desktop.mouse_scroll':      { ok: boolean; resultsText: string };
   'desktop.wait_for_app':      { ok: boolean; resultsText: string };
   'desktop.screenshot':        { ok: boolean; resultsText: string; base64?: string; mimeType?: string; sizeBytes?: number };
   'desktop.open_url':          { ok: boolean; resultsText: string };
   'desktop.open_path':         { ok: boolean; resultsText: string };
   'desktop.click_at':          { ok: boolean; resultsText: string };
   'desktop.screen_size':       { ok: boolean; resultsText: string; width?: number; height?: number };
+  'desktop.read_a11y_tree':    { ok: boolean; resultsText: string };
+  'desktop.click_element':     { ok: boolean; resultsText: string };
   fetch_url: { ok: boolean; content: string; status?: number; statusText?: string; error?: string };
   list_circle_members: { ok: true; resultsText: string };
   schedule_action: { ok: boolean; resultText: string; actionId?: string; error?: string };
@@ -459,6 +526,110 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
       },
       required: ['task'],
     },
+  },
+  {
+    name: 'browser.open_url',
+    label: 'Open Local Browser URL',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Navigate the persistent local Playwright browser profile to a URL. Use when logged-in browser state matters.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: { type: 'string' },
+        timeoutMs: { type: 'number' },
+        waitUntil: { type: 'string' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'browser.dom_snapshot',
+    label: 'Read Browser DOM Snapshot',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Read a compact DOM/ARIA snapshot from the persistent local browser. Prefer before role clicks/fills and extraction.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        maxNodes: { type: 'number' },
+        interestingOnly: { type: 'boolean' },
+      },
+    },
+  },
+  {
+    name: 'browser.click_role',
+    label: 'Click Browser Element',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Click a browser element by ARIA role/name or selector using Playwright locator auto-waiting.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        role: { type: 'string' },
+        name: { type: 'string' },
+        selector: { type: 'string' },
+        exact: { type: 'boolean' },
+        nth: { type: 'number' },
+        timeoutMs: { type: 'number' },
+      },
+      required: ['role'],
+    },
+  },
+  {
+    name: 'browser.fill_field',
+    label: 'Fill Browser Field',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Fill a browser field by ARIA role/name or selector in the persistent local browser profile.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        role: { type: 'string' },
+        name: { type: 'string' },
+        selector: { type: 'string' },
+        text: { type: 'string' },
+        submit: { type: 'boolean' },
+        exact: { type: 'boolean' },
+        timeoutMs: { type: 'number' },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'browser.select_option',
+    label: 'Select Browser Option',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Select a dropdown/combobox option by ARIA role/name or selector in the persistent local browser profile.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        role: { type: 'string' },
+        name: { type: 'string' },
+        selector: { type: 'string' },
+        value: { type: 'string' },
+        exact: { type: 'boolean' },
+        timeoutMs: { type: 'number' },
+      },
+      required: ['value'],
+    },
+  },
+  {
+    name: 'browser.press_key',
+    label: 'Press Browser Key',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Press a key or key combo in the persistent browser page.',
+    inputSchema: { type: 'object', properties: { combo: { type: 'string' } }, required: ['combo'] },
+  },
+  {
+    name: 'browser.screenshot',
+    label: 'Browser Screenshot',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Capture a PNG screenshot of the persistent browser page for visual verification.',
+    inputSchema: { type: 'object', properties: { fullPage: { type: 'boolean' } } },
+  },
+  {
+    name: 'browser.close',
+    label: 'Close Local Browser',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Close the persistent local browser context when the user asks to reset/stop it.',
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'code.inspect',
@@ -1386,6 +1557,154 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'desktop.list_browser_tabs',
+    label: 'List Browser Tabs',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Reads titles and URLs for tabs open in local Mac browsers through Automation permission. Use for "what Chrome tabs do I have open?"',
+    inputSchema: { type: 'object', properties: { browsers: { type: 'array', items: { type: 'string' } } } },
+  },
+  {
+    name: 'desktop.window_state',
+    label: 'Read Active Window',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Reads the frontmost app, active window title, bounds, and visible window names from System Events.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'desktop.clipboard',
+    label: 'Read Clipboard',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Reads current macOS clipboard text with pbpaste.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'desktop.clipboard_write',
+    label: 'Write Clipboard',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Writes explicit user-provided text to the macOS clipboard.',
+    inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+  },
+  {
+    name: 'desktop.clipboard_clear',
+    label: 'Clear Clipboard',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Clears the macOS clipboard.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'desktop.file_list',
+    label: 'List Local Files',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Lists files and folders under a local path. Read-only.',
+    inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+  },
+  {
+    name: 'desktop.file_read',
+    label: 'Read Local File',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Reads a bounded UTF-8 preview of a local file. Read-only.',
+    inputSchema: { type: 'object', properties: { path: { type: 'string' }, maxBytes: { type: 'number' } }, required: ['path'] },
+  },
+  {
+    name: 'desktop.file_search',
+    label: 'Search Local Files',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Searches filenames and small text-file contents under a local folder. Read-only and bounded.',
+    inputSchema: { type: 'object', properties: { rootPath: { type: 'string' }, query: { type: 'string' } }, required: ['rootPath', 'query'] },
+  },
+  {
+    name: 'desktop.shortcuts_list',
+    label: 'List Apple Shortcuts',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Lists Apple Shortcuts available to the user through the macOS shortcuts CLI.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'desktop.shortcuts_run',
+    label: 'Run Apple Shortcut',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Runs a named Apple Shortcut. This can have side effects and requires approval.',
+    inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+  },
+  {
+    name: 'desktop.window_manage',
+    label: 'Manage Desktop Window',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Focuses, raises, minimizes, unminimizes, zooms, or resizes the active or named app window.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string' },
+        appName: { type: 'string' },
+        width: { type: 'number' },
+        height: { type: 'number' },
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'desktop.mouse_move',
+    label: 'Move Desktop Mouse',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Moves or hovers the local mouse cursor at explicit screen coordinates.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number' },
+        y: { type: 'number' },
+      },
+      required: ['x', 'y'],
+    },
+  },
+  {
+    name: 'desktop.mouse_click',
+    label: 'Click Desktop Mouse',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Clicks the local mouse at explicit screen coordinates. Supports left/right and single/double clicks.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number' },
+        y: { type: 'number' },
+        button: { type: 'string' },
+        count: { type: 'number' },
+      },
+      required: ['x', 'y'],
+    },
+  },
+  {
+    name: 'desktop.mouse_drag',
+    label: 'Drag Desktop Mouse',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Drags the local mouse from one explicit coordinate to another.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fromX: { type: 'number' },
+        fromY: { type: 'number' },
+        toX: { type: 'number' },
+        toY: { type: 'number' },
+        durationMs: { type: 'number' },
+      },
+      required: ['fromX', 'fromY', 'toX', 'toY'],
+    },
+  },
+  {
+    name: 'desktop.mouse_scroll',
+    label: 'Scroll Desktop Mouse',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Sends a mouse-wheel scroll event through the local input helper.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        deltaY: { type: 'number' },
+        deltaX: { type: 'number' },
+        x: { type: 'number' },
+        y: { type: 'number' },
+      },
+    },
+  },
+  {
     name: 'desktop.wait_for_app',
     label: 'Wait for Desktop App',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
@@ -1468,6 +1787,34 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
       "coordinates or before desktop.screenshot to know the dimensions of the image you'll receive.",
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'desktop.read_a11y_tree',
+    label: 'Read Accessibility Tree',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Reads a compact accessibility tree for the frontmost or named app. Prefer this before screenshot-based clicking when available.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string' },
+        maxDepth: { type: 'number' },
+        maxNodes: { type: 'number' },
+      },
+    },
+  },
+  {
+    name: 'desktop.click_element',
+    label: 'Click Accessibility Element',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Clicks an element by PID and dotted path from desktop.read_a11y_tree.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: { type: 'number' },
+        path: { type: 'string' },
+      },
+      required: ['pid', 'path'],
+    },
+  },
 ];
 
 function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolPolicy {
@@ -1504,6 +1851,24 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     };
   }
 
+  if (tool.startsWith('browser.')) {
+    const readOnlyTools = new Set<OpenSwanRuntimeToolName>([
+      'browser.dom_snapshot',
+      'browser.screenshot',
+    ]);
+    const readOnly = readOnlyTools.has(tool);
+    return {
+      family: 'browser',
+      approvalMode: readOnly ? 'auto' : 'ask',
+      mutatesState: !readOnly,
+      externalSideEffect: !readOnly,
+      approvalKind: readOnly ? undefined : 'browser_action',
+      summary: readOnly
+        ? 'Observes the persistent local browser with DOM snapshots or screenshots.'
+        : 'Controls the persistent local browser with Playwright navigation, role clicks, fills, or key presses.',
+    };
+  }
+
   if (tool.startsWith('vault.')) {
     const mutates = tool === 'vault.grant' || tool === 'vault.revoke';
     return {
@@ -1526,9 +1891,17 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     // category which the user can opt into 'auto' via the banner.
     const readOnlyTools = new Set([
       'desktop.list_running_apps',
+      'desktop.list_browser_tabs',
+      'desktop.window_state',
+      'desktop.clipboard',
+      'desktop.file_list',
+      'desktop.file_read',
+      'desktop.file_search',
+      'desktop.shortcuts_list',
       'desktop.screen_size',
       'desktop.screenshot',
       'desktop.wait_for_app',
+      'desktop.read_a11y_tree',
     ]);
     const readOnly = readOnlyTools.has(tool);
     return {
@@ -1706,6 +2079,14 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   // available everywhere, but changing access needs explicit action intent.
   'vault.grant': ['execute', 'plan'],
   'vault.revoke': ['execute', 'plan'],
+  // Local browser controls mutate a persistent browser profile and may
+  // touch logged-in accounts, so keep them out of read-only modes.
+  'browser.open_url': ['execute'],
+  'browser.click_role': ['execute'],
+  'browser.fill_field': ['execute'],
+  'browser.select_option': ['execute'],
+  'browser.press_key': ['execute'],
+  'browser.close': ['execute', 'support'],
   // Desktop write/control actions only belong in execute mode. Read-only
   // desktop tools are intentionally left mode-agnostic for diagnostics.
   'desktop.launch_app': ['execute'],
@@ -1715,6 +2096,15 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'desktop.open_url':   ['execute'],
   'desktop.open_path':  ['execute'],
   'desktop.click_at':   ['execute'],
+  'desktop.clipboard_write': ['execute'],
+  'desktop.clipboard_clear': ['execute'],
+  'desktop.shortcuts_run': ['execute'],
+  'desktop.window_manage': ['execute'],
+  'desktop.mouse_move': ['execute'],
+  'desktop.mouse_click': ['execute'],
+  'desktop.mouse_drag': ['execute'],
+  'desktop.mouse_scroll': ['execute'],
+  'desktop.click_element': ['execute'],
 };
 
 /** Returns the mode list for a tool (inline def wins over the central map). */
@@ -1747,6 +2137,14 @@ export function listToolsHiddenByMode(
 const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'code.inspect',
   'browser.plan_task',
+  'browser.open_url',
+  'browser.dom_snapshot',
+  'browser.click_role',
+  'browser.fill_field',
+  'browser.select_option',
+  'browser.press_key',
+  'browser.screenshot',
+  'browser.close',
   'code.generate',
   'code.review',
   'verification.typecheck',
@@ -1805,12 +2203,29 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'desktop.type_text',
   'desktop.press_keys',
   'desktop.list_running_apps',
+  'desktop.list_browser_tabs',
+  'desktop.window_state',
+  'desktop.clipboard',
+  'desktop.clipboard_write',
+  'desktop.clipboard_clear',
+  'desktop.file_list',
+  'desktop.file_read',
+  'desktop.file_search',
+  'desktop.shortcuts_list',
+  'desktop.shortcuts_run',
+  'desktop.window_manage',
+  'desktop.mouse_move',
+  'desktop.mouse_click',
+  'desktop.mouse_drag',
+  'desktop.mouse_scroll',
   'desktop.wait_for_app',
   'desktop.screenshot',
   'desktop.open_url',
   'desktop.open_path',
   'desktop.click_at',
   'desktop.screen_size',
+  'desktop.read_a11y_tree',
+  'desktop.click_element',
   // App-edit tools (Phase 1-4) — let BlackSwan modify anything the user can edit
   'circle.update_settings',
   'circle.update_budget_caps',
@@ -2106,17 +2521,42 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'vault.revoke':
     case 'vault.runbook':
     case 'vault.resolve_for_task':
+    case 'browser.open_url':
+    case 'browser.dom_snapshot':
+    case 'browser.click_role':
+    case 'browser.fill_field':
+    case 'browser.select_option':
+    case 'browser.press_key':
+    case 'browser.screenshot':
+    case 'browser.close':
     case 'desktop.launch_app':
     case 'desktop.focus_app':
     case 'desktop.type_text':
     case 'desktop.press_keys':
     case 'desktop.list_running_apps':
+    case 'desktop.list_browser_tabs':
+    case 'desktop.window_state':
+    case 'desktop.clipboard':
+    case 'desktop.clipboard_write':
+    case 'desktop.clipboard_clear':
+    case 'desktop.file_list':
+    case 'desktop.file_read':
+    case 'desktop.file_search':
+    case 'desktop.shortcuts_list':
+    case 'desktop.shortcuts_run':
+    case 'desktop.window_manage':
+    case 'desktop.mouse_move':
+    case 'desktop.mouse_click':
+    case 'desktop.mouse_drag':
+    case 'desktop.mouse_scroll':
     case 'desktop.wait_for_app':
     case 'desktop.screenshot':
     case 'desktop.open_url':
     case 'desktop.open_path':
     case 'desktop.click_at':
     case 'desktop.screen_size':
+    case 'desktop.read_a11y_tree':
+    case 'desktop.click_element':
       return (result as { resultsText: string }).resultsText;
     case 'browser.plan_task': {
       const browserResult = result as OpenSwanToolExecutionResultMap['browser.plan_task'];
@@ -2254,6 +2694,7 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
       const browserPlan = await describeComputerUsePlan({
         task: String((args as BrowserPlanTaskArgs).task || ''),
         circleId: context.circleId,
+        userId: context.userId,
         agentName: 'OpenSwan',
       });
       return {
@@ -2264,6 +2705,87 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         requiresApproval: browserPlan.requiresApproval,
         plan: toBrowserPlanCardData(browserPlan),
       } as OpenSwanToolExecutionResultMap[T];
+    }
+    case 'browser.open_url': {
+      try {
+        const { openUrl } = await import('./browserBridge');
+        const a = args as OpenSwanToolExecutionArgs['browser.open_url'];
+        const r = await openUrl(String(a.url || ''), { timeoutMs: a.timeoutMs, waitUntil: a.waitUntil });
+        if (!r.ok) return { ok: false, resultsText: r.error || 'Browser navigation failed.' } as any;
+        return { ok: true, resultsText: `Opened ${r.data?.url || a.url}${r.data?.title ? ` — ${r.data.title}` : ''}.` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'browser.dom_snapshot': {
+      try {
+        const { domSnapshot, renderBrowserTree } = await import('./browserBridge');
+        const a = args as OpenSwanToolExecutionArgs['browser.dom_snapshot'];
+        const r = await domSnapshot({ maxNodes: a.maxNodes, interestingOnly: a.interestingOnly });
+        if (!r.ok || !r.data) return { ok: false, resultsText: r.error || 'Browser DOM snapshot failed.' } as any;
+        const text = renderBrowserTree(r.data.tree).join('\n');
+        return {
+          ok: true,
+          resultsText: `Browser DOM snapshot for ${r.data.title || r.data.url} (${r.data.nodeCount} nodes):\n${text.slice(0, 8192)}${text.length > 8192 ? '\n...truncated' : ''}`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'browser.click_role': {
+      try {
+        const { clickRole } = await import('./browserBridge');
+        const a = args as OpenSwanToolExecutionArgs['browser.click_role'];
+        const r = await clickRole(a);
+        if (!r.ok) return { ok: false, resultsText: r.error || 'Browser click failed.' } as any;
+        return { ok: true, resultsText: `Clicked browser ${a.role}${a.name ? ` "${a.name}"` : a.selector ? ` selector ${a.selector}` : ''}.` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'browser.fill_field': {
+      try {
+        const { fillField } = await import('./browserBridge');
+        const a = args as OpenSwanToolExecutionArgs['browser.fill_field'];
+        const r = await fillField({ ...a, role: a.role || 'textbox' });
+        if (!r.ok) return { ok: false, resultsText: r.error || 'Browser fill failed.' } as any;
+        return { ok: true, resultsText: `Filled browser field${a.name ? ` "${a.name}"` : a.selector ? ` ${a.selector}` : ''} (${a.text.length} chars${a.submit ? ', submitted' : ''}).` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'browser.select_option': {
+      try {
+        const { selectOption } = await import('./browserBridge');
+        const a = args as OpenSwanToolExecutionArgs['browser.select_option'];
+        const r = await selectOption({ ...a, role: a.role || 'combobox' });
+        if (!r.ok) return { ok: false, resultsText: r.error || 'Browser select failed.' } as any;
+        return { ok: true, resultsText: `Selected browser option "${a.value}"${a.name ? ` in "${a.name}"` : a.selector ? ` in ${a.selector}` : ''}.` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'browser.press_key': {
+      try {
+        const { pressKey } = await import('./browserBridge');
+        const a = args as OpenSwanToolExecutionArgs['browser.press_key'];
+        const r = await pressKey(String(a.combo || ''));
+        if (!r.ok) return { ok: false, resultsText: r.error || 'Browser key press failed.' } as any;
+        return { ok: true, resultsText: `Pressed browser key ${r.data?.combo || a.combo}.` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'browser.screenshot': {
+      try {
+        const { screenshot } = await import('./browserBridge');
+        const a = args as OpenSwanToolExecutionArgs['browser.screenshot'];
+        const r = await screenshot({ fullPage: a.fullPage === true });
+        if (!r.ok || !r.data) return { ok: false, resultsText: r.error || 'Browser screenshot failed.' } as any;
+        return {
+          ok: true,
+          resultsText: `Captured browser screenshot (${Math.round((r.data.sizeBytes || 0) / 1024)} KB PNG). base64 length: ${(r.data.base64 || '').length} chars.`,
+          base64: r.data.base64,
+          mimeType: r.data.mimeType,
+          sizeBytes: r.data.sizeBytes,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'browser.close': {
+      try {
+        const { closeBrowser } = await import('./browserBridge');
+        const r = await closeBrowser();
+        if (!r.ok) return { ok: false, resultsText: r.error || 'Browser close failed.' } as any;
+        return { ok: true, resultsText: 'Closed local browser context.' } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'fetch_url': {
       const url = String((args as FetchUrlArgs).url || '');
@@ -3226,6 +3748,157 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         return { ok: true, resultsText: apps.length ? `Running apps (${apps.length}): ${apps.join(', ')}` : 'No foreground apps reported.' } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
+    case 'desktop.list_browser_tabs': {
+      try {
+        const { listBrowserTabs, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const r = await listBrowserTabs(Array.isArray((args as any).browsers) ? (args as any).browsers : undefined);
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const tabs = r.data?.tabs || [];
+        const tabLines = tabs.slice(0, 40).map((tab, index) => `${index + 1}. [${tab.browser}] ${tab.title || '(untitled)'} — ${tab.url}`);
+        const errors = r.data?.errors?.length ? `\nWarnings: ${r.data.errors.slice(0, 5).join('; ')}` : '';
+        return { ok: true, resultsText: tabs.length ? `Open browser tabs (${tabs.length}):\n${tabLines.join('\n')}${tabs.length > 40 ? '\n...truncated' : ''}${errors}` : `No browser tabs reported.${errors}` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.window_state': {
+      try {
+        const { getWindowState, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const r = await getWindowState();
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const state = r.data;
+        const bounds = state?.activeWindowBounds ? ` (${state.activeWindowBounds.width}x${state.activeWindowBounds.height} at ${state.activeWindowBounds.x},${state.activeWindowBounds.y})` : '';
+        const windows = state?.windows?.length ? `\nWindows: ${state.windows.slice(0, 20).join(', ')}` : '';
+        return { ok: true, resultsText: `Frontmost app: ${state?.frontmostApp || 'unknown'}\nActive window: ${state?.activeWindowTitle || '(untitled)'}${bounds}${windows}` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.clipboard': {
+      try {
+        const { readClipboard, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const r = await readClipboard();
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const text = (r.data?.text || '').slice(0, 4000);
+        return { ok: true, resultsText: text ? `Clipboard (${r.data?.chars || text.length} chars):\n${text}${r.data?.truncated ? '\n...truncated' : ''}` : 'Clipboard is empty or contains no text.' } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.clipboard_write': {
+      try {
+        const { writeClipboard, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const r = await writeClipboard(String((args as any).text || ''));
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `Copied ${r.data?.chars ?? 0} chars to clipboard.` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.clipboard_clear': {
+      try {
+        const { clearClipboard, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const r = await clearClipboard();
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: 'Clipboard cleared.' } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.file_list': {
+      try {
+        const { listFiles, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const r = await listFiles(String((args as any).path || ''));
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const entries = r.data?.entries || [];
+        const lines = entries.slice(0, 60).map((entry) => `${entry.kind === 'directory' ? 'dir ' : 'file'} ${entry.name}${typeof entry.size === 'number' ? ` (${entry.size} bytes)` : ''}`);
+        return { ok: true, resultsText: `Files in ${r.data?.path || ''} (${entries.length}):\n${lines.join('\n')}${r.data?.truncated ? '\n...truncated' : ''}` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.file_read': {
+      try {
+        const { readFile, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const r = await readFile(String((args as any).path || ''), typeof (args as any).maxBytes === 'number' ? (args as any).maxBytes : undefined);
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `File: ${r.data?.path}\nSize: ${r.data?.size} bytes${r.data?.truncated ? ' (preview truncated)' : ''}\n\n${r.data?.content || ''}` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.file_search': {
+      try {
+        const { searchFiles, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const r = await searchFiles(String((args as any).rootPath || ''), String((args as any).query || ''));
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const matches = r.data?.matches || [];
+        const lines = matches.slice(0, 40).map((match, index) => `${index + 1}. ${match.path}${match.snippet ? ` — ${match.snippet}` : ''}`);
+        return { ok: true, resultsText: matches.length ? `File search matches (${matches.length}, visited ${r.data?.visited || 0}):\n${lines.join('\n')}${r.data?.truncated ? '\n...truncated' : ''}` : `No file matches for "${r.data?.query || ''}" under ${r.data?.rootPath || ''}.` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.shortcuts_list': {
+      try {
+        const { listShortcuts, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const r = await listShortcuts();
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const shortcuts = r.data || [];
+        return { ok: true, resultsText: shortcuts.length ? `Apple Shortcuts (${shortcuts.length}): ${shortcuts.slice(0, 80).join(', ')}` : 'No Apple Shortcuts reported.' } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.shortcuts_run': {
+      try {
+        const { runShortcut, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const r = await runShortcut(String((args as any).name || ''));
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `Ran shortcut "${r.data?.name || ''}".${r.data?.output ? `\n${r.data.output}` : ''}` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.window_manage': {
+      try {
+        const { manageWindow, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await manageWindow({ action: a.action, appName: a.appName, width: a.width, height: a.height });
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `Window action "${r.data?.action || a.action}" completed${r.data?.appName ? ` for ${r.data.appName}` : ''}.` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.mouse_move': {
+      try {
+        const { mouseMove, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await mouseMove(Number(a.x), Number(a.y));
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `Moved mouse to (${r.data?.x}, ${r.data?.y}).` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.mouse_click': {
+      try {
+        const { mouseClick, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await mouseClick({ x: Number(a.x), y: Number(a.y), button: a.button === 'right' ? 'right' : 'left', count: typeof a.count === 'number' ? a.count : undefined });
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `${r.data?.button || 'left'} click x${r.data?.count || 1} at (${r.data?.x}, ${r.data?.y}).` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.mouse_drag': {
+      try {
+        const { mouseDrag, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await mouseDrag({ fromX: Number(a.fromX), fromY: Number(a.fromY), toX: Number(a.toX), toY: Number(a.toY), durationMs: typeof a.durationMs === 'number' ? a.durationMs : undefined });
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `Dragged mouse from (${r.data?.fromX}, ${r.data?.fromY}) to (${r.data?.toX}, ${r.data?.toY}) over ${r.data?.durationMs || 0}ms.` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.mouse_scroll': {
+      try {
+        const { mouseScroll, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const r = await mouseScroll(args as any);
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `Scrolled mouse deltaX=${r.data?.deltaX ?? 0}, deltaY=${r.data?.deltaY ?? 0}.` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
     case 'desktop.wait_for_app': {
       try {
         const { waitForApp, isDesktopBridgeAvailable } = await import('./desktopBridge');
@@ -3298,6 +3971,27 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         const r = await getScreenSize();
         if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
         return { ok: true, resultsText: `Screen size: ${r.data?.width} × ${r.data?.height}.`, width: r.data?.width, height: r.data?.height } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.read_a11y_tree': {
+      try {
+        const { readA11yTree, renderA11yTree, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await readA11yTree({ appName: a.appName, maxDepth: a.maxDepth, maxNodes: a.maxNodes });
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const lines = r.data?.tree ? renderA11yTree(r.data.tree).slice(0, 220) : [];
+        return { ok: true, resultsText: `Accessibility tree for ${r.data?.app || 'frontmost app'} (pid ${r.data?.pid || 0}, nodes ${r.data?.budget_used || 0}):\n${lines.join('\n')}` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.click_element': {
+      try {
+        const { clickElement, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await clickElement({ pid: Number(a.pid || 0), path: String(a.path || '') });
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `Clicked accessibility element ${String(a.path || '')} via ${r.data?.method || 'unknown'}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     // ── Memory Save ─────────────────────────────────────────────────────

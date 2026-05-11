@@ -10,13 +10,34 @@ import { publishAgentToCircle, PROVIDER_DISPLAY } from './circleOffice';
 import { supabase } from './supabase';
 import { saveAgentSessionsToMemory, type AgentSessionForMemory } from './agentSessionMemory';
 
-import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+import { cacheBridgeToken, ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
 
 const BRIDGE_PORT = 7779;
 
 function getCodexBridgeUrl(): string | null {
   return getBridgeUrl(BRIDGE_PORT);
+}
+
+async function pairCodexBridge(bridgeUrl: string): Promise<string | null> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch(`${bridgeUrl}/pair`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    const token = typeof data?.token === 'string' ? data.token : null;
+    if (token) cacheBridgeToken(token);
+    return token;
+  } catch {
+    return null;
+  }
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -34,6 +55,15 @@ export interface CodexSession {
   recentActions: string[];
   filesRead: number;
   filesWritten: number;
+  displayName?: string;
+  prompt?: string;
+  launchId?: string;
+  launchedAt?: string;
+  terminal?: string;
+  terminalPid?: number;
+  terminalTitle?: string;
+  manageable?: boolean;
+  launchError?: string;
 }
 
 // Green tones to match OpenAI/Codex branding
@@ -48,6 +78,11 @@ function codexTaskLabel(status: AgentStatus, session: CodexSession): string {
   if (status === 'building') return session.task ? `Building: ${session.task}` : `Drafting ${project}`;
   if (status === 'idle') return `Open on ${project}`;
   return `Session ended on ${project}`;
+}
+
+function codexDisplayName(session: CodexSession, index: number, total: number): string {
+  if (session.displayName?.trim()) return session.displayName.trim();
+  return total > 1 ? `Codex #${index + 1}` : CODEX_AGENT_NAME;
 }
 
 // ── Detection ────────────────────────────────────────────────────────────────
@@ -140,9 +175,7 @@ function inferActivity(s: CodexSession): string {
 export function codexSessionsToAgents(sessions: CodexSession[]): OfficeAgent[] {
   return sessions.map((s, i) => {
     // Give each session a unique name when multiple exist
-    const name = sessions.length > 1
-      ? `Codex #${i + 1}`
-      : 'Codex';
+    const name = codexDisplayName(s, i, sessions.length);
 
     // Estimate tokens from Codex's typical usage if bridge reports 0
     // Codex uses ~50K input + ~5K output per task on average
@@ -165,7 +198,10 @@ export function codexSessionsToAgents(sessions: CodexSession[]): OfficeAgent[] {
       uptimeHours: 0,
       uptime: '',
       lastActive: s.lastActivity || '',
-      recentActions: s.recentActions || [],
+      recentActions: [
+        ...(s.launchError ? [`Launch error: ${s.launchError}`] : []),
+        ...(s.recentActions || []),
+      ],
       recentMessages: [],
       costToday: costEstimate,
       costTotal: costEstimate,
@@ -198,9 +234,10 @@ export async function publishCodexAgent(
 
   // Multiple sessions — publish each with unique name
   if (sessions && sessions.length > 1) {
+    const { data: auth } = await supabase.auth.getUser();
     for (let i = 0; i < sessions.length; i++) {
       const session = sessions[i];
-      const name = `Codex #${i + 1}`;
+      const name = codexDisplayName(session, i, sessions.length);
       const status = deriveSessionStatus({ lastActivityIso: session.lastActivity });
       await publishAgentToCircle({
         circleId, provider: 'codex', name,
@@ -208,14 +245,17 @@ export async function publishCodexAgent(
         toolIcon: display?.icon || '🧠',
         gatewayUrl: getCodexBridgeUrl() || 'http://localhost:7779', isPublic: false,
       });
-      await supabase.from('circle_office_agents')
+      let update = supabase.from('circle_office_agents')
         .update({
           status: clampToDbStatus(status),
           current_task: codexTaskLabel(status, session),
           last_active_at: session.lastActivity || new Date().toISOString(),
           updated_at: new Date().toISOString(),
         })
-        .eq('circle_id', circleId).eq('name', name);
+        .eq('circle_id', circleId)
+        .eq('name', name);
+      if (auth.user?.id) update = update.eq('owner_id', auth.user.id);
+      await update;
     }
     return {};
   }
@@ -263,7 +303,7 @@ export async function updateCodexAgentStatus(
       // Multiple sessions — update each named agent
       for (let i = 0; i < sessions.length; i++) {
         const session = sessions[i];
-        const name = `Codex #${i + 1}`;
+        const name = codexDisplayName(session, i, sessions.length);
         const status = deriveSessionStatus({ lastActivityIso: session.lastActivity });
         await supabase.from('circle_office_agents')
           .update({
@@ -304,6 +344,111 @@ export async function updateCodexAgentStatus(
       .eq('owner_id', auth.user.id)
       .eq('name', CODEX_AGENT_NAME);
   } catch {}
+}
+
+// ── Launch local Codex terminal sessions ────────────────────────────────────
+
+export interface CodexLaunchRequest {
+  count: number;
+  prompts?: string[];
+  prompt?: string;
+  names?: string[];
+  cwd?: string;
+  projectDir?: string;
+  model?: string;
+  fullAuto?: boolean;
+  search?: boolean;
+  circleId?: string;
+  userId?: string;
+}
+
+export interface CodexLaunchResult {
+  ok: boolean;
+  launchId?: string;
+  sessions: CodexSession[];
+  launched: number;
+  failed: Array<{ sessionId?: string; displayName?: string; error: string }>;
+  projectDir?: string;
+  error?: string;
+}
+
+export async function launchCodexSessions(input: CodexLaunchRequest): Promise<CodexLaunchResult> {
+  const bridgeUrl = getCodexBridgeUrl();
+  if (!bridgeUrl) {
+    return {
+      ok: false,
+      sessions: [],
+      launched: 0,
+      failed: [{ error: 'Codex bridge URL is unavailable in this runtime.' }],
+      error: 'Codex bridge URL is unavailable in this runtime.',
+    };
+  }
+
+  try {
+    const body = JSON.stringify({
+      count: input.count,
+      prompts: input.prompts,
+      prompt: input.prompt,
+      names: input.names,
+      cwd: input.cwd,
+      projectDir: input.projectDir,
+      model: input.model,
+      fullAuto: input.fullAuto,
+      search: input.search,
+    });
+    const postLaunch = async (token: string | null) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 60_000);
+      try {
+        return await fetch(`${bridgeUrl}/launch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+          body,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
+
+    let token = await ensureBridgeToken();
+    let res = await postLaunch(token);
+    if (res.status === 401) {
+      token = await pairCodexBridge(bridgeUrl);
+      if (token) res = await postLaunch(token);
+    }
+
+    const data = await res.json().catch(() => null) as Partial<CodexLaunchResult> | null;
+    if (!res.ok || !data) {
+      const error = data?.error || `Codex bridge launch failed with HTTP ${res.status}`;
+      return { ok: false, sessions: [], launched: 0, failed: [{ error }], error };
+    }
+
+    const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    if (input.circleId && sessions.length > 0) {
+      await publishCodexAgent(input.circleId, sessions.length, sessions);
+      await updateCodexAgentStatus(input.circleId, sessions);
+      const userId = input.userId || (await supabase.auth.getUser()).data.user?.id;
+      if (userId) {
+        void saveCodexSessionsToMemory(input.circleId, userId, sessions).catch(() => {});
+      }
+    }
+
+    return {
+      ok: data.ok !== false,
+      launchId: data.launchId,
+      sessions,
+      launched: typeof data.launched === 'number' ? data.launched : sessions.length,
+      failed: Array.isArray(data.failed) ? data.failed : [],
+      projectDir: data.projectDir,
+      error: data.error,
+    };
+  } catch (err) {
+    const message = err instanceof Error && err.name === 'AbortError'
+      ? 'Codex bridge launch timed out.'
+      : err instanceof Error ? err.message : String(err);
+    return { ok: false, sessions: [], launched: 0, failed: [{ error: message }], error: message };
+  }
 }
 
 // ── Session Memory Persistence ──────────────────────────────────────────────

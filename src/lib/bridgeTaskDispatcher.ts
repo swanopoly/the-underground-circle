@@ -5,12 +5,14 @@
  */
 
 import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
+import { getBridgeUrl } from './bridgeEnvironment';
+import type { TerminalLaunchMode } from './agentIdentity';
 
 const BRIDGE_PORTS: Record<string, number> = {
   'claude-code': 7778,
-  'codex': 7778,    // Routes through Claude Code bridge
-  'gemini': 7778,   // Routes through Claude Code bridge (no dedicated bridge yet)
-  'gemini-cli': 7778,
+  'codex': 7779,
+  'gemini': 7780,
+  'gemini-cli': 7780,
   'cursor': 7778,   // Routes through Claude Code bridge
 };
 
@@ -22,11 +24,25 @@ export interface BridgeTaskResult {
   provider: string;
 }
 
+export interface TerminalSessionSendResult extends BridgeTaskResult {
+  sessionId?: string;
+  displayName?: string;
+}
+
+export interface TerminalSpawnOptions {
+  fileName?: string;
+  launchMode?: TerminalLaunchMode;
+  model?: string;
+  sessionName?: string;
+  workdir?: string;
+}
+
 async function probeBridge(port: number): Promise<boolean> {
   try {
+    const baseUrl = getBridgeUrl(port) || `http://localhost:${port}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(`http://localhost:${port}/health`, { signal: controller.signal });
+    const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
     clearTimeout(timeout);
     return res.ok;
   } catch {
@@ -109,43 +125,62 @@ async function dispatchToGemini(prompt: string, fileName?: string | null): Promi
   }
 }
 
-/**
- * Dispatch to Codex — routes through Claude bridge /exec to invoke codex CLI
- */
 async function dispatchToCodex(prompt: string, fileName?: string | null): Promise<BridgeTaskResult> {
-  const port = BRIDGE_PORTS['claude-code'];
+  const fileCtx = fileName ? `\n\nFile context: ${fileName}` : '';
+  return spawnNewCodexSession(`${prompt}${fileCtx}`);
+}
+
+export async function sendTerminalAgentSessionMessage(
+  provider: string,
+  sessionId: string,
+  message: string,
+): Promise<TerminalSessionSendResult> {
+  const normalized = provider.toLowerCase().replace(/\s+/g, '-');
+  const bridgeProvider = normalized === 'gemini-cli' ? 'gemini' : normalized;
+  const port = BRIDGE_PORTS[bridgeProvider];
+  if (!port || !['claude-code', 'codex', 'gemini'].includes(bridgeProvider)) {
+    return { ok: false, error: `Terminal session send is not supported for ${provider}`, dispatchedVia: 'none', provider: normalized };
+  }
+
   const online = await probeBridge(port);
   if (!online) {
-    return { ok: false, error: 'Claude bridge offline — cannot dispatch to Codex CLI', dispatchedVia: 'none', provider: 'codex' };
+    return { ok: false, error: `Bridge on port ${port} is not reachable`, dispatchedVia: 'none', provider: normalized };
   }
-  try {
-    const escaped = prompt.replace(/'/g, "'\\''");
-    const fileCtx = fileName ? ` (file: ${fileName})` : '';
-    const command = `echo '${escaped}${fileCtx}' | codex --quiet 2>&1 | tail -200`;
 
+  const bridgeUrl = getBridgeUrl(port) || `http://localhost:${port}`;
+  try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120000);
+    const timeout = setTimeout(() => controller.abort(), 15000);
     const token = await ensureBridgeToken();
-    const res = await fetch(`http://localhost:${port}/exec`, {
+    const res = await fetch(`${bridgeUrl}/terminal/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
-      body: JSON.stringify({ command }),
+      body: JSON.stringify({ sessionId, message }),
       signal: controller.signal,
     });
     clearTimeout(timeout);
-
-    const data = await res.json();
-    if (data.ok) {
+    const data = await res.json().catch(() => null);
+    if (res.ok && data?.ok) {
       return {
         ok: true,
-        response: data.stdout || data.stderr || 'Task completed (no output)',
+        response: data.message || `Sent to ${data.displayName || sessionId}.`,
         dispatchedVia: 'bridge',
-        provider: 'codex',
+        provider: normalized,
+        sessionId: data.sessionId || sessionId,
+        displayName: data.displayName,
       };
     }
-    return { ok: false, error: data.error || 'Exec failed', dispatchedVia: 'bridge', provider: 'codex' };
+    return {
+      ok: false,
+      error: data?.error || `Terminal send failed with HTTP ${res.status}`,
+      dispatchedVia: 'bridge',
+      provider: normalized,
+      sessionId,
+      displayName: data?.displayName,
+    };
   } catch (e: any) {
-    return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'codex' };
+    if (e.name === 'AbortError') return { ok: false, error: 'Terminal send timed out', dispatchedVia: 'none', provider: normalized, sessionId };
+    return { ok: false, error: e.message || 'Bridge not reachable', dispatchedVia: 'none', provider: normalized, sessionId };
   }
 }
 
@@ -241,9 +276,10 @@ export async function checkAllBridges(): Promise<Record<string, boolean>> {
  */
 export async function spawnNewClaudeSession(
   task: string,
-  options?: { model?: string; workdir?: string },
+  options?: TerminalSpawnOptions,
 ): Promise<BridgeTaskResult> {
   const port = BRIDGE_PORTS['claude-code'];
+  const bridgeUrl = getBridgeUrl(port) || `http://localhost:${port}`;
   try {
     const online = await probeBridge(port);
     if (!online) {
@@ -251,18 +287,30 @@ export async function spawnNewClaudeSession(
     }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
-    const res = await fetch(`http://localhost:${port}/spawn`, {
+    const token = await ensureBridgeToken();
+    const res = await fetch(`${bridgeUrl}/launch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task, model: options?.model, workdir: options?.workdir }),
+      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      body: JSON.stringify({
+        count: 1,
+        prompts: [task],
+        names: [options?.sessionName || 'Claude Code #1'],
+        model: options?.model,
+        projectDir: options?.workdir,
+        permissionMode: options?.launchMode === 'full-auto'
+          ? 'bypassPermissions'
+          : options?.launchMode === 'auto'
+            ? 'acceptEdits'
+            : 'default',
+      }),
       signal: controller.signal,
     });
     clearTimeout(timeout);
-    const data = await res.json();
-    if (data.ok) {
-      return { ok: true, response: data.message || `Session spawned (PID ${data.pid})`, dispatchedVia: 'bridge', provider: 'claude-code' };
+    const data = await res.json().catch(() => null);
+    if (res.ok && data?.launched > 0) {
+      return { ok: true, response: data.message || 'Claude Code terminal session launched.', dispatchedVia: 'bridge', provider: 'claude-code' };
     }
-    return { ok: false, error: data.error || 'Spawn failed', dispatchedVia: 'bridge', provider: 'claude-code' };
+    return { ok: false, error: data?.error || data?.failed?.[0]?.error || 'Launch failed', dispatchedVia: 'bridge', provider: 'claude-code' };
   } catch (e: any) {
     return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'claude-code' };
   }
@@ -271,25 +319,83 @@ export async function spawnNewClaudeSession(
 /**
  * Spawn a new Codex session with a task
  */
-export async function spawnNewCodexSession(task: string): Promise<BridgeTaskResult> {
-  const port = BRIDGE_PORTS['claude-code'];
+export async function spawnNewCodexSession(
+  task: string,
+  options?: TerminalSpawnOptions,
+): Promise<BridgeTaskResult> {
+  const port = BRIDGE_PORTS['codex'];
+  const bridgeUrl = getBridgeUrl(port) || `http://localhost:${port}`;
   try {
     const online = await probeBridge(port);
-    if (!online) return { ok: false, error: 'Bridge not reachable', dispatchedVia: 'none', provider: 'codex' };
-    const escaped = task.replace(/'/g, "'\\''");
-    const command = `nohup codex --quiet -p "${escaped}" > /tmp/codex-spawn-$$.log 2>&1 & echo $!`;
+    if (!online) return { ok: false, error: 'Codex bridge not reachable', dispatchedVia: 'none', provider: 'codex' };
     const token = await ensureBridgeToken();
-    const res = await fetch(`http://localhost:${port}/exec`, {
+    const res = await fetch(`${bridgeUrl}/launch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
-      body: JSON.stringify({ command }),
+      body: JSON.stringify({
+        count: 1,
+        prompts: [task],
+        names: [options?.sessionName || 'Codex'],
+        model: options?.model,
+        projectDir: options?.workdir,
+        fullAuto: options?.launchMode === 'full-auto',
+      }),
     });
-    const data = await res.json();
-    return data.ok
-      ? { ok: true, response: `Codex session spawned (PID ${data.stdout?.trim()})`, dispatchedVia: 'bridge', provider: 'codex' }
-      : { ok: false, error: data.error, dispatchedVia: 'bridge', provider: 'codex' };
+    const data = await res.json().catch(() => null);
+    if (res.ok && data?.launched > 0) {
+      const session = Array.isArray(data.sessions) ? data.sessions[0] : null;
+      return {
+        ok: true,
+        response: `Codex terminal session launched${session?.displayName ? ` as ${session.displayName}` : ''}.`,
+        dispatchedVia: 'bridge',
+        provider: 'codex',
+      };
+    }
+    return {
+      ok: false,
+      error: data?.error || data?.failed?.[0]?.error || `Codex bridge launch failed with HTTP ${res.status}`,
+      dispatchedVia: 'bridge',
+      provider: 'codex',
+    };
   } catch (e: any) {
     return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'codex' };
+  }
+}
+
+export async function spawnNewGeminiCliSession(
+  task: string,
+  options?: TerminalSpawnOptions,
+): Promise<BridgeTaskResult> {
+  const port = BRIDGE_PORTS['gemini'];
+  const bridgeUrl = getBridgeUrl(port) || `http://localhost:${port}`;
+  try {
+    const online = await probeBridge(port);
+    if (!online) return { ok: false, error: 'Gemini CLI bridge not reachable', dispatchedVia: 'none', provider: 'gemini' };
+    const token = await ensureBridgeToken();
+    const res = await fetch(`${bridgeUrl}/launch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      body: JSON.stringify({
+        count: 1,
+        prompts: [task],
+        names: [options?.sessionName || 'Gemini CLI #1'],
+        model: options?.model,
+        projectDir: options?.workdir,
+        yolo: options?.launchMode === 'full-auto',
+      }),
+    });
+    const data = await res.json().catch(() => null);
+    if (res.ok && data?.launched > 0) {
+      return { ok: true, response: 'Gemini CLI terminal session launched.', dispatchedVia: 'bridge', provider: 'gemini' };
+    }
+    return {
+      ok: false,
+      error: data?.error || data?.failed?.[0]?.error || `Gemini CLI bridge launch failed with HTTP ${res.status}`,
+      dispatchedVia: 'bridge',
+      provider: 'gemini',
+    };
+  } catch (e: any) {
+    return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'gemini' };
   }
 }
 
@@ -299,17 +405,17 @@ export async function spawnNewCodexSession(task: string): Promise<BridgeTaskResu
 export async function spawnNewSession(
   provider: string,
   task: string,
-  options?: { model?: string; workdir?: string },
+  options?: TerminalSpawnOptions,
 ): Promise<BridgeTaskResult> {
   const normalized = provider.toLowerCase().replace(/\s+/g, '-');
   switch (normalized) {
     case 'claude-code':
       return spawnNewClaudeSession(task, options);
     case 'codex':
-      return spawnNewCodexSession(task);
+      return spawnNewCodexSession(task, options);
     case 'gemini':
     case 'gemini-cli':
-      return dispatchToGemini(task); // Gemini doesn't have persistent sessions, just dispatch
+      return spawnNewGeminiCliSession(task, options);
     default:
       return { ok: false, error: `Cannot spawn sessions for provider: ${provider}`, dispatchedVia: 'none', provider: normalized };
   }
@@ -332,7 +438,7 @@ export async function wakeAndAssignTask(
   task: string,
   circleId: string,
   agentDbId?: string,
-  options?: { model?: string; workdir?: string; fileName?: string },
+  options?: TerminalSpawnOptions,
 ): Promise<BridgeTaskResult> {
   const normalized = provider.toLowerCase().replace(/\s+/g, '-');
   const port = BRIDGE_PORTS[normalized] || BRIDGE_PORTS['claude-code'];
@@ -376,4 +482,3 @@ export async function wakeAndAssignTask(
   const dispatchResult = await dispatchBridgeTask(normalized, task, options?.fileName);
   return dispatchResult;
 }
-

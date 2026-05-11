@@ -24,7 +24,6 @@ import ChatBotIdentityRow from './chat/ChatBotIdentityRow';
 import ChatInlineRichText from './chat/ChatInlineRichText';
 import ChatSlashCommandPalette from './chat/ChatSlashCommandPalette';
 import {
-  formatPersistedChatBotMessage,
   getChatAgentAvatarSource,
   isPersistedChatBotMessage,
   loadChatAgentAvatar,
@@ -32,6 +31,9 @@ import {
   MAIN_CHAT_AGENT_NAME,
 } from '../lib/chatAgentIdentity';
 import { shapePersistedChatMessage } from '../lib/chatMessageShape';
+import { getCircleDefaultThread } from '../lib/circleChatThreads';
+import { loadThreadMessages, persistChatMessage } from '../lib/chatService';
+import { persistMainChatBotMessageWithRetry } from '../lib/chatAgentService';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -77,6 +79,7 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
   const [agentName, setAgentName] = useState<string>(MAIN_CHAT_AGENT_NAME);
   const [agentAvatarUri, setAgentAvatarUri] = useState<string | null>(null);
   const [focused, setFocused] = useState(false);
+  const [threadId, setThreadId] = useState<string | null>(null);
 
   // Position and size (web dragging/resizing)
   const [posX, setPosX] = useState(DEFAULT_RIGHT);
@@ -161,23 +164,18 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
 
   const loadMessages = async () => {
     try {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('id, circle_id, user_id, content, created_at, is_bot, user:profiles(username, display_name)')
-        .eq('circle_id', circleId)
-        .order('created_at', { ascending: true })
-        .limit(50);
-
-      if (!error && data && data.length > 0) {
-        const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
-        const loaded: FloatingMessage[] = data.map((m: any) =>
-          shapePersistedChatMessage(m, {
-            currentUserId: user?.id,
-            botDisplayName: agentName,
-          })
-        );
-        setMessages(loaded);
-      }
+      const defaultThread = await getCircleDefaultThread(circleId).catch(() => null);
+      const resolvedThreadId = defaultThread?.id || null;
+      setThreadId(resolvedThreadId);
+      const { rows } = await loadThreadMessages(circleId, resolvedThreadId);
+      const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+      const loaded: FloatingMessage[] = rows.map((m: any) =>
+        shapePersistedChatMessage(m, {
+          currentUserId: user?.id,
+          botDisplayName: agentName,
+        })
+      );
+      setMessages(loaded);
     } catch (e) {
       console.error('[FloatingChat] Error loading messages:', e);
     }
@@ -197,6 +195,7 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
         filter: `circle_id=eq.${circleId}`,
       }, (payload: any) => {
         const newMsg = payload.new;
+        if (threadId && (newMsg.thread_id || null) !== threadId) return;
         const isBotFromDb = isPersistedChatBotMessage(newMsg.content, newMsg.is_bot === true);
         if (newMsg.user_id === currentUserId && !isBotFromDb) return;
 
@@ -249,7 +248,7 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [circleId, currentUserId]);
+  }, [circleId, currentUserId, threadId]);
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -364,6 +363,12 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
     if (!content || !currentUserId) return;
     sendLockRef.current = true;
     setTimeout(() => { sendLockRef.current = false; }, 350);
+    let messageThreadId = threadId;
+    if (!messageThreadId) {
+      const defaultThread = await getCircleDefaultThread(circleId).catch(() => null);
+      messageThreadId = defaultThread?.id || null;
+      if (messageThreadId) setThreadId(messageThreadId);
+    }
 
     const lowerContent = content.toLowerCase().trim();
     if (lowerContent === '/help' || lowerContent === '/commands') {
@@ -399,26 +404,17 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
 
     // Persist to Supabase
     try {
-      const { data, error } = await supabase.from('messages').insert({
-        circle_id: circleId,
-        user_id: currentUserId,
+      const dbId = await persistChatMessage({
+        circleId,
+        userId: currentUserId,
         content,
+        threadId: messageThreadId,
+        isBot: false,
         reactions: {},
-        is_bot: false,
-      }).select('id').single();
+      });
 
-      if (!error && data) {
-        setMessages(prev => prev.map(m => m.id === localId ? { ...m, dbId: data.id } : m));
-      } else if (error && (error.code === 'PGRST204' || error.code === '42703')) {
-        // Fallback without new columns
-        const { data: d2 } = await supabase.from('messages').insert({
-          circle_id: circleId,
-          user_id: currentUserId,
-          content,
-        }).select('id').single();
-        if (d2) {
-          setMessages(prev => prev.map(m => m.id === localId ? { ...m, dbId: d2.id } : m));
-        }
+      if (dbId) {
+        setMessages(prev => prev.map(m => m.id === localId ? { ...m, dbId } : m));
       }
     } catch (e) {
       console.error('[FloatingChat] Error persisting message:', e);
@@ -455,26 +451,25 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
         };
         setMessages(prev => [...prev, botMsg]);
 
-        // Persist bot message to DB so it survives pop-out close
-        try {
-          const { error: botInsertErr } = await supabase.from('messages').insert({
-            circle_id: circleId,
-            user_id: currentUserId,
-            content: formatPersistedChatBotMessage(agentName, botResponse),
-            reactions: {},
-            is_bot: true,
-          });
-          if (botInsertErr) {
-            console.warn('[FloatingChat] Bot message persist failed, retrying without is_bot:', botInsertErr.message);
-            await supabase.from('messages').insert({
-              circle_id: circleId,
-              user_id: currentUserId,
-              content: formatPersistedChatBotMessage(agentName, botResponse),
-            });
-          }
-        } catch (e: any) {
-          console.error('[FloatingChat] Bot message persist error:', e.message);
-        }
+        // Persist bot message to the same default thread as the main Chat tab.
+        persistMainChatBotMessageWithRetry({
+          circleId,
+          userId: currentUserId,
+          agentName,
+          content: botResponse,
+          threadId: messageThreadId,
+          localMessageId: botId,
+          source: {
+            actor: agentName,
+            surface: 'floating_chat',
+          },
+          onError: (e: any) => {
+            console.error('[FloatingChat] Bot message persist error:', e?.message || e);
+          },
+          onPersisted: (dbId) => {
+            setMessages(prev => prev.map(m => m.id === botId ? { ...m, dbId } : m));
+          },
+        });
       } catch {
         const errMsg: FloatingMessage = {
           id: `err-${Date.now()}`,
@@ -488,7 +483,7 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
       }
       setBotTyping(false);
     }
-  }, [input, currentUserId, currentUserName, circleId, messages, agentName]);
+  }, [input, currentUserId, currentUserName, circleId, messages, agentName, threadId]);
 
   const applySlashCommand = useCallback((command: ChatSlashCommand) => {
     if (blurTimeoutRef.current) {

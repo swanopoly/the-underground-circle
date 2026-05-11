@@ -175,6 +175,215 @@ export async function listRunningApps(): Promise<DesktopResult<string[]>> {
   return { ok: true, data: ((r.data as any)?.apps as string[]) || [] };
 }
 
+export type DesktopBrowserTab = {
+  browser: string;
+  title: string;
+  url: string;
+};
+
+export async function listBrowserTabs(browsers?: string[]): Promise<DesktopResult<{ tabs: DesktopBrowserTab[]; errors: string[] }>> {
+  const query = browsers && browsers.length > 0 ? `?browsers=${encodeURIComponent(browsers.join(','))}` : '';
+  const r = await callBridge('GET', `/desktop/browser_tabs${query}`);
+  if (!r.ok) return r as DesktopResult<{ tabs: DesktopBrowserTab[]; errors: string[] }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      tabs: Array.isArray(d?.tabs) ? d.tabs : [],
+      errors: Array.isArray(d?.errors) ? d.errors : [],
+    },
+  };
+}
+
+export type DesktopWindowState = {
+  frontmostApp: string;
+  activeWindowTitle: string;
+  activeWindowBounds: { x: number; y: number; width: number; height: number } | null;
+  windows: string[];
+};
+
+export async function getWindowState(): Promise<DesktopResult<DesktopWindowState>> {
+  const r = await callBridge('GET', '/desktop/window_state');
+  if (!r.ok) return r as DesktopResult<DesktopWindowState>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      frontmostApp: String(d?.frontmostApp || ''),
+      activeWindowTitle: String(d?.activeWindowTitle || ''),
+      activeWindowBounds: d?.activeWindowBounds || null,
+      windows: Array.isArray(d?.windows) ? d.windows : [],
+    },
+  };
+}
+
+export async function readClipboard(): Promise<DesktopResult<{ text: string; chars: number; truncated: boolean }>> {
+  const r = await callBridge('GET', '/desktop/clipboard');
+  if (!r.ok) return r as DesktopResult<{ text: string; chars: number; truncated: boolean }>;
+  const d = r.data as any;
+  return { ok: true, data: { text: String(d?.text || ''), chars: Number(d?.chars || 0), truncated: Boolean(d?.truncated) } };
+}
+
+export async function writeClipboard(text: string): Promise<DesktopResult<{ chars: number }>> {
+  if (typeof text !== 'string') return { ok: false, error: 'text must be a string', errorCode: 'invalid_input' };
+  if (text.length > 4000) return { ok: false, error: 'text too long (max 4000 chars)', errorCode: 'invalid_input' };
+  const r = await callBridge('POST', '/desktop/clipboard_write', { text });
+  if (!r.ok) return r as DesktopResult<{ chars: number }>;
+  return { ok: true, data: { chars: Number((r.data as any)?.chars ?? text.length) } };
+}
+
+export async function clearClipboard(): Promise<DesktopResult<Record<string, never>>> {
+  const r = await callBridge('POST', '/desktop/clipboard_clear', {});
+  if (!r.ok) return r as DesktopResult<Record<string, never>>;
+  return { ok: true, data: {} };
+}
+
+export type DesktopFileEntry = {
+  name: string;
+  path: string;
+  kind: 'file' | 'directory' | 'other';
+  size: number | null;
+  modifiedAt: string | null;
+};
+
+export async function listFiles(rawPath: string): Promise<DesktopResult<{ path: string; entries: DesktopFileEntry[]; truncated: boolean }>> {
+  const v = validateDesktopPath(rawPath);
+  if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+  const r = await callBridge('GET', `/desktop/file_list?path=${encodeURIComponent(v.path)}`);
+  if (!r.ok) return r as DesktopResult<{ path: string; entries: DesktopFileEntry[]; truncated: boolean }>;
+  const d = r.data as any;
+  return { ok: true, data: { path: String(d?.path || v.path), entries: Array.isArray(d?.entries) ? d.entries : [], truncated: Boolean(d?.truncated) } };
+}
+
+export async function readFile(rawPath: string, maxBytes?: number): Promise<DesktopResult<{ path: string; content: string; size: number; truncated: boolean }>> {
+  const v = validateDesktopPath(rawPath);
+  if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+  const params = new URLSearchParams({ path: v.path });
+  if (typeof maxBytes === 'number') params.set('maxBytes', String(maxBytes));
+  const r = await callBridge('GET', `/desktop/file_read?${params.toString()}`);
+  if (!r.ok) return r as DesktopResult<{ path: string; content: string; size: number; truncated: boolean }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: { path: String(d?.path || v.path), content: String(d?.content || ''), size: Number(d?.size || 0), truncated: Boolean(d?.truncated) },
+  };
+}
+
+export type DesktopFileSearchMatch = {
+  path: string;
+  name: string;
+  reason: 'name' | 'content';
+  size: number;
+  modifiedAt: string;
+  snippet?: string;
+};
+
+export async function searchFiles(rootPath: string, query: string): Promise<DesktopResult<{ rootPath: string; query: string; matches: DesktopFileSearchMatch[]; visited: number; truncated: boolean }>> {
+  const v = validateDesktopPath(rootPath);
+  if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+  const q = String(query || '').trim();
+  if (!q || q.length > 120) return { ok: false, error: 'query is required and must be <= 120 chars', errorCode: 'invalid_input' };
+  const params = new URLSearchParams({ rootPath: v.path, query: q });
+  const r = await callBridge('GET', `/desktop/file_search?${params.toString()}`);
+  if (!r.ok) return r as DesktopResult<{ rootPath: string; query: string; matches: DesktopFileSearchMatch[]; visited: number; truncated: boolean }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      rootPath: String(d?.rootPath || v.path),
+      query: String(d?.query || q),
+      matches: Array.isArray(d?.matches) ? d.matches : [],
+      visited: Number(d?.visited || 0),
+      truncated: Boolean(d?.truncated),
+    },
+  };
+}
+
+export async function listShortcuts(): Promise<DesktopResult<string[]>> {
+  const r = await callBridge('GET', '/desktop/shortcuts/list');
+  if (!r.ok) return r as DesktopResult<string[]>;
+  return { ok: true, data: Array.isArray((r.data as any)?.shortcuts) ? (r.data as any).shortcuts : [] };
+}
+
+export async function runShortcut(name: string): Promise<DesktopResult<{ name: string; output: string }>> {
+  const clean = String(name || '').trim();
+  if (!clean || clean.length > 120) return { ok: false, error: 'shortcut name is required and must be <= 120 chars', errorCode: 'invalid_input' };
+  const r = await callBridge('POST', '/desktop/shortcuts/run', { name: clean });
+  if (!r.ok) return r as DesktopResult<{ name: string; output: string }>;
+  return { ok: true, data: { name: String((r.data as any)?.name || clean), output: String((r.data as any)?.output || '') } };
+}
+
+export async function manageWindow(args: {
+  action: 'focus' | 'raise' | 'minimize' | 'unminimize' | 'zoom' | 'resize';
+  appName?: string;
+  width?: number;
+  height?: number;
+}): Promise<DesktopResult<{ action: string; appName: string | null; width: number | null; height: number | null }>> {
+  const r = await callBridge('POST', '/desktop/window_manage', args as Record<string, unknown>);
+  if (!r.ok) return r as DesktopResult<{ action: string; appName: string | null; width: number | null; height: number | null }>;
+  const d = r.data as any;
+  return { ok: true, data: { action: String(d?.action || args.action), appName: d?.appName || null, width: d?.width ?? null, height: d?.height ?? null } };
+}
+
+export async function mouseMove(x: number, y: number): Promise<DesktopResult<{ x: number; y: number }>> {
+  const v = validateClickCoords(x, y);
+  if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+  const r = await callBridge('POST', '/desktop/mouse_move', { x: v.x, y: v.y });
+  if (!r.ok) return r as DesktopResult<{ x: number; y: number }>;
+  const d = r.data as any;
+  return { ok: true, data: { x: Number(d?.x ?? v.x), y: Number(d?.y ?? v.y) } };
+}
+
+export async function mouseClick(args: {
+  x: number;
+  y: number;
+  button?: 'left' | 'right';
+  count?: number;
+}): Promise<DesktopResult<{ x: number; y: number; button: string; count: number }>> {
+  const v = validateClickCoords(args.x, args.y);
+  if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+  const button = args.button === 'right' ? 'right' : 'left';
+  const count = Math.max(1, Math.min(3, Math.trunc(Number(args.count || 1))));
+  const r = await callBridge('POST', '/desktop/mouse_click', { x: v.x, y: v.y, button, count });
+  if (!r.ok) return r as DesktopResult<{ x: number; y: number; button: string; count: number }>;
+  const d = r.data as any;
+  return { ok: true, data: { x: Number(d?.x ?? v.x), y: Number(d?.y ?? v.y), button: String(d?.button || button), count: Number(d?.count || count) } };
+}
+
+export async function mouseDrag(args: {
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  durationMs?: number;
+}): Promise<DesktopResult<{ fromX: number; fromY: number; toX: number; toY: number; durationMs: number }>> {
+  const start = validateClickCoords(args.fromX, args.fromY);
+  if (!start.ok) return { ok: false, error: start.error, errorCode: 'invalid_input' };
+  const end = validateClickCoords(args.toX, args.toY);
+  if (!end.ok) return { ok: false, error: end.error, errorCode: 'invalid_input' };
+  const durationMs = Math.max(50, Math.min(5000, Math.trunc(Number(args.durationMs || 450))));
+  const r = await callBridge('POST', '/desktop/mouse_drag', { fromX: start.x, fromY: start.y, toX: end.x, toY: end.y, durationMs });
+  if (!r.ok) return r as DesktopResult<{ fromX: number; fromY: number; toX: number; toY: number; durationMs: number }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      fromX: Number(d?.fromX ?? start.x),
+      fromY: Number(d?.fromY ?? start.y),
+      toX: Number(d?.toX ?? end.x),
+      toY: Number(d?.toY ?? end.y),
+      durationMs: Number(d?.durationMs || durationMs),
+    },
+  };
+}
+
+export async function mouseScroll(args: { deltaY?: number; deltaX?: number; x?: number; y?: number } = {}): Promise<DesktopResult<{ x: number; y: number; deltaX: number; deltaY: number }>> {
+  const r = await callBridge('POST', '/desktop/mouse_scroll', args as Record<string, unknown>);
+  if (!r.ok) return r as DesktopResult<{ x: number; y: number; deltaX: number; deltaY: number }>;
+  const d = r.data as any;
+  return { ok: true, data: { x: Number(d?.x || 0), y: Number(d?.y || 0), deltaX: Number(d?.deltaX || 0), deltaY: Number(d?.deltaY || 0) } };
+}
+
 export async function launchApp(appName: string): Promise<DesktopResult<{ appName: string }>> {
   if (!isValidAppName(appName)) {
     return { ok: false, error: 'Invalid appName (letters/numbers/space/.-_() only)', errorCode: 'invalid_input' };

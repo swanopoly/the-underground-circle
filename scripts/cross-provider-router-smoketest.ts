@@ -40,8 +40,8 @@ function main() {
       available: set('anthropic', 'openrouter'),
     });
     assert(routes.length === 2, 'sonnet 4.6: 2 routes (anthropic + openrouter)', `got ${routes.length}`);
-    assert(routes[0].provider === 'anthropic-direct', 'sonnet 4.6: anthropic-direct first (cheaper passthrough)');
-    assert(routes[1].provider === 'openrouter', 'sonnet 4.6: openrouter second (broad fallback)');
+    assert(routes[0].provider === 'openrouter', 'sonnet 4.6: openrouter first by default to reduce direct Anthropic spend');
+    assert(routes[1].provider === 'anthropic-direct', 'sonnet 4.6: anthropic-direct fallback when OR is unavailable');
   }
 
   // ── Only OR connected → only OR route ────────────────────────────
@@ -70,12 +70,13 @@ function main() {
     assert(providers.includes('groq'), 'llama 3.3 70B: groq present');
     assert(providers.includes('openrouter'), 'llama 3.3 70B: openrouter present');
     assert(providers.includes('huggingface'), 'llama 3.3 70B: huggingface present');
-    // Default preference: groq before openrouter before huggingface.
+    // Default preference is cost-sensitive: HF/free first, then fast cheap
+    // providers, then OR paid/free fallbacks.
     const groqIdx = providers.indexOf('groq');
     const orIdx = providers.indexOf('openrouter');
     const hfIdx = providers.indexOf('huggingface');
-    assert(groqIdx < orIdx && orIdx < hfIdx,
-      'llama 3.3 70B order: groq → openrouter → huggingface',
+    assert(hfIdx < groqIdx && groqIdx < orIdx,
+      'llama 3.3 70B order: huggingface → groq → openrouter',
       `got ${providers.join(' → ')}`);
   }
 

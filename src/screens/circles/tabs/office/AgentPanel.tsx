@@ -411,11 +411,26 @@ export default function AgentPanel({
       {/* ── TERMINAL TAB — Remote Shell + AI Terminal ── */}
       {panelTab === 'terminal' && (
         <>
+          {terminalPanelsModule?.AgentTerminalProfilePanel && (
+            <terminalPanelsModule.AgentTerminalProfilePanel
+              agent={agent}
+              circleId={circleId}
+              userId={userId}
+              onRenameAgent={onRenameAgent}
+              onIdentityChange={onAgentIdentityChange}
+            />
+          )}
           {onRunCommand && terminalPanelsModule?.AgentRemoteShell && (
             <terminalPanelsModule.AgentRemoteShell onRunCommand={onRunCommand} />
           )}
           {circleId && terminalPanelsModule?.AgentQuickTerminal && (
-            <terminalPanelsModule.AgentQuickTerminal agentName={agent.name} agentId={agent.id} circleId={circleId} />
+            <terminalPanelsModule.AgentQuickTerminal
+              agentName={agent.name}
+              agentId={agent.id}
+              circleId={circleId}
+              providerType={agent.providerType}
+              sessionKey={agent.sessionKey}
+            />
           )}
           {!terminalPanelsModule && (
             <View style={{ paddingHorizontal: 12, paddingVertical: 24, alignItems: 'center' }}>

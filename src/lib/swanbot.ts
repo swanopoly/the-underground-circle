@@ -16,6 +16,7 @@ import { getStrictLocalAiModeMessage, isStrictLocalAiModeEnabled, shouldBlockExt
 import type { OpenSwanMemoryStores } from './openswanMemoryStores';
 import type { OpenSwanChatMode } from './openswanModePolicy';
 import type { OpenSwanResolvedSkill } from './openswanSkillResolution';
+import type { ConnectedProviderSet } from './serviceProfileSouls';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -44,6 +45,7 @@ export type SwanBotContext = {
   spiritId?: string | null;
   attachmentContext?: string;
   sessionArchiveContext?: string;
+  connectedProviders?: ConnectedProviderSet;
 };
 
 async function resolveContextSpiritId(context: SwanBotContext): Promise<string | null> {
@@ -484,9 +486,46 @@ export function clearConversationHistory(circleId: string): void {
 // means "use the default Claude path".
 function pickProviderForModel(modelId: string | null | undefined): string | null {
   if (!modelId) return null;
-  if (modelId === 'glm-5' || modelId.startsWith('glm-')) return 'zai';
-  if (modelId.startsWith('MiniMax-') || modelId.startsWith('minimax-')) return 'minimax';
+  const normalized = modelId.trim();
+  const slashIdx = normalized.indexOf('/');
+  if (slashIdx > 0) {
+    const head = normalized.slice(0, slashIdx);
+    if (head === 'huggingface_endpoint') return null;
+    if (head === 'huggingface') return 'huggingface';
+    if (head === 'z_ai') return 'zai';
+    if (head === 'zai') return 'zai';
+    if ([
+      'openai',
+      'openai_compatible',
+      'openrouter',
+      'groq',
+      'google_ai',
+      'mistral_ai',
+      'cohere',
+      'perplexity',
+      'together_ai',
+      'fireworks_ai',
+      'deepseek',
+      'minimax',
+      'ollama',
+    ].includes(head)) return head;
+  }
+  if (normalized === 'glm-5' || normalized.startsWith('glm-')) return 'zai';
+  if (normalized.startsWith('MiniMax-') || normalized.startsWith('minimax-')) return 'minimax';
   return null;
+}
+
+function stripProviderPrefixForProxy(provider: string, modelId: string): string {
+  if (provider === 'openrouter' && modelId === 'openrouter/auto') return modelId;
+  const prefixes = provider === 'huggingface'
+    ? ['huggingface_endpoint/', 'huggingface/']
+    : provider === 'zai'
+      ? ['z_ai/', 'zai/']
+      : [`${provider}/`];
+  for (const prefix of prefixes) {
+    if (modelId.startsWith(prefix)) return modelId.slice(prefix.length);
+  }
+  return modelId;
 }
 
 async function callLlmProxy(
@@ -541,8 +580,8 @@ async function callSwanBotV2(
   model?: string | null,
   _wikiContext?: string,
   conversationMessages?: Array<{ role: string; content: string }>,
-  thinkingLevel: 'fast' | 'balanced' | 'deep' = 'deep',
-  _maxTokens = 6144,
+  thinkingLevel: 'fast' | 'balanced' | 'deep' = 'balanced',
+  _maxTokens = 4096,
   systemDirective?: string,
 ): Promise<string | null> {
   if (shouldBlockExternalAiProvider('anthropic')) return null;
@@ -1185,8 +1224,8 @@ async function callSwanBotAI(
   model?: string | null,
   wikiContext?: string,
   conversationMessages?: Array<{ role: string; content: string }>,
-  thinkingLevel: 'fast' | 'balanced' | 'deep' = 'deep',
-  maxTokens = 6144,
+  thinkingLevel: 'fast' | 'balanced' | 'deep' = 'balanced',
+  maxTokens = 4096,
   systemDirective?: string,
 ): Promise<string | null> {
   // Phase M1 router: if the user opted into v2, try v2 first. On any
@@ -1223,7 +1262,7 @@ async function callSwanBotAI(
         discordContext,
         wikiContext,
         conversationMessages,
-        model: model || 'claude-sonnet-4-6',
+        model: model || undefined,
         maxTokens,
         thinkingLevel,
         // High-priority behavior directive prepended to the frozen system
@@ -1258,8 +1297,8 @@ async function callSwanBotAIStructured(
   model?: string | null,
   wikiContext?: string,
   conversationMessages?: Array<{ role: string; content: string }>,
-  thinkingLevel: 'fast' | 'balanced' | 'deep' = 'deep',
-  maxTokens = 6144,
+  thinkingLevel: 'fast' | 'balanced' | 'deep' = 'balanced',
+  maxTokens = 4096,
 ): Promise<SwanBotStructuredResponse | null> {
   if (shouldBlockExternalAiProvider('anthropic')) {
     console.warn('[SwanBot] Strict local AI mode blocked structured swanbot-ai');
@@ -1277,7 +1316,7 @@ async function callSwanBotAIStructured(
         discordContext,
         wikiContext,
         conversationMessages,
-        model: model || 'claude-sonnet-4-6',
+        model: model || undefined,
         maxTokens,
         thinkingLevel,
       },
@@ -2042,9 +2081,8 @@ export async function getSwanBotResponse(
   const { route: msgRoute } = analyzeMessageRouting(cleaned, 'main_chat');
   const { resolveModelForSoul } = await import('./serviceProfileSouls');
   // Build-state markers let the resolver pick a latency-appropriate model:
-  // exploring -> Haiku (fast clarifying questions), converging -> Opus
-  // (reasoning to propose a brief). Without these hints the router would
-  // send "build" intent to Sonnet and every discovery turn would feel slow.
+  // exploring -> Haiku/free connected provider, converging -> stronger
+  // connected provider/Sonnet. Opus stays explicit-pick only.
   const buildConverging = (context as any).buildConverging === true;
   const buildStateCtx = (context as any).buildState as
     | import('./conversationalBuild').BuildConversationState
@@ -2057,6 +2095,7 @@ export async function getSwanBotResponse(
     msgRoute.complexity,
     buildConverging,
     buildExploring,
+    context.connectedProviders,
   );
   // During a conversational build, the SYSTEM DIRECTIVE is the behavior —
   // the LLM does NOT need wiki bundles, memory lookups, or personality
@@ -2181,7 +2220,8 @@ export async function getSwanBotResponse(
         })),
         { role: 'user' as const, content: cleaned },
       ];
-      const proxyResponse = await callLlmProxy(customModelProvider, enrichedContext.model!, proxyMessages, enrichedContext.circleId);
+      const proxyModel = stripProviderPrefixForProxy(customModelProvider, enrichedContext.model!);
+      const proxyResponse = await callLlmProxy(customModelProvider, proxyModel, proxyMessages, enrichedContext.circleId);
       if (proxyResponse) {
         if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', proxyResponse);
         return proxyResponse;
@@ -2203,8 +2243,8 @@ export async function getSwanBotResponse(
       enrichedContext.model,
       enrichedContext.wikiContext,
       enrichedContext.conversationMessages,
-      enrichedContext.thinkingLevel || 'deep',
-      enrichedContext.maxTokens || 6144,
+      enrichedContext.thinkingLevel || 'balanced',
+      enrichedContext.maxTokens || 4096,
       (enrichedContext as any).systemDirective,
     );
     if (aiResponse) {
@@ -2271,7 +2311,15 @@ export async function getSwanBotStructuredResponse(
   const { analyzeMessageRouting } = await import('./messageRouting');
   const { route: structuredRoute } = analyzeMessageRouting(cleaned, 'main_chat');
   const { resolveModelForSoul } = await import('./serviceProfileSouls');
-  const effectiveModel = resolveModelForSoul(spiritId, context.model, structuredRoute.intent);
+  const effectiveModel = resolveModelForSoul(
+    spiritId,
+    context.model,
+    structuredRoute.intent,
+    structuredRoute.complexity,
+    false,
+    false,
+    context.connectedProviders,
+  );
   const needsKnowledgeStructured = structuredRoute.complexity !== 'trivial' && structuredRoute.complexity !== 'simple';
   const knowledgeBundle = needsKnowledgeStructured
     ? (context.wikiContext || await buildCombinedKnowledgeBundle(cleaned, context.circleId, spiritId))
@@ -2310,8 +2358,8 @@ export async function getSwanBotStructuredResponse(
         enrichedContext.model,
         enrichedContext.wikiContext,
         enrichedContext.conversationMessages,
-        enrichedContext.thinkingLevel || 'deep',
-        enrichedContext.maxTokens || 6144,
+        enrichedContext.thinkingLevel || 'balanced',
+        enrichedContext.maxTokens || 4096,
       )
     : null;
 

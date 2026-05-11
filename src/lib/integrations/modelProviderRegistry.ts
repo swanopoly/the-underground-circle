@@ -174,6 +174,12 @@ const DIRECT_BYOK_PROVIDERS: Array<{
   hint: string;
 }> = [
   {
+    userProvider: 'openai_compatible',
+    marketplaceProvider: 'openai_compatible' as CircleIntegrationProvider,
+    label: 'Business Models',
+    hint: 'Connect a business/self-hosted OpenAI-compatible endpoint in Marketplace for private task and agent models.',
+  },
+  {
     userProvider: 'openai',
     marketplaceProvider: 'openai',
     label: 'OpenAI',
@@ -284,6 +290,22 @@ function mergeModelOptions<T extends Omit<ModelOption, 'ready'>>(baseModels: T[]
     merged.push(model);
   }
   return merged;
+}
+
+function businessEndpointModelsFromKeys(keys: Array<{ provider: LLMProvider; label: string | null; endpoint: string | null }>): Omit<ModelOption, 'ready'>[] {
+  const endpointHost = (endpoint: string | null): string | null => {
+    if (!endpoint) return null;
+    try { return new URL(endpoint).host; } catch { return null; }
+  };
+  return keys
+    .filter((key) => key.provider === 'openai_compatible' && !!key.label && key.label !== 'default')
+    .map((key) => ({
+      id: `openai_compatible/${key.label}`,
+      label: key.label || 'Business Model',
+      provider: 'openai_compatible',
+      description: endpointHost(key.endpoint) ? `Business endpoint | ${endpointHost(key.endpoint)}` : 'Business endpoint',
+      contextWindow: 128000,
+    }));
 }
 
 function maybeRefreshDirectProviderCatalog(provider: LLMProvider) {
@@ -446,7 +468,9 @@ export async function loadModelGroups(circleId: string | null | undefined, opts:
       hint,
       models: mergeModelOptions(
         directModelsForProvider(entry.userProvider, entry.marketplaceProvider),
-        entry.userProvider === 'openai'
+        entry.userProvider === 'openai_compatible'
+          ? businessEndpointModelsFromKeys(userApiKeys)
+          : entry.userProvider === 'openai'
           ? registeredModelsToOptions(registeredOpenAIModels, 'openai', 'openai')
           : [],
       ).map((model) => ({ ...model, ready: hasUserKey })),

@@ -14,6 +14,17 @@ import { OfficeAgent } from './officeAgents';
 import { DEFAULT_APPEARANCE, type AgentAppearance } from './officeConfig';
 
 const STORAGE_KEY_AGENT_IDENTITY = '@agent_identity_store';
+const TERMINAL_CONFIG_TAG_PREFIX = 'uc_terminal_config:';
+
+export type TerminalLaunchMode = 'safe' | 'auto' | 'full-auto';
+
+export interface TerminalAgentOfficeConfig {
+  defaultCwd?: string;
+  defaultModel?: string;
+  defaultPrompt?: string;
+  launchMode?: TerminalLaunchMode;
+  autoSaveMemory?: boolean;
+}
 
 export interface AgentIdentity {
   sessionKey: string; // The stable identifier (e.g., "rapid-slug")
@@ -55,6 +66,7 @@ export interface AgentIdentity {
   isCustomized?: boolean;      // Has the user customized this agent?
   boundAiProvider?: string;    // 'claude' | 'gemini' | 'blackswan'
   boundModel?: string;         // Specific model this agent uses
+  terminalConfig?: TerminalAgentOfficeConfig;
   soulTraits?: Record<string, number>; // Trait strengths (local cache)
 }
 
@@ -97,11 +109,68 @@ export function applyIdentityToAgent(agent: OfficeAgent, identity?: AgentIdentit
     spirit: identity.spiritId || agent.spirit,
   };
 
-  if (identity.boundModel && (!agent.model || agent.model === 'unknown')) {
-    next.model = identity.boundModel;
+  const preferredModel = identity.terminalConfig?.defaultModel || identity.boundModel;
+  if (preferredModel && (!agent.model || agent.model === 'unknown' || identity.terminalConfig?.defaultModel)) {
+    next.model = preferredModel;
   }
 
   return next;
+}
+
+function sanitizeTerminalConfig(value: unknown): TerminalAgentOfficeConfig | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const launchMode = raw.launchMode === 'auto' || raw.launchMode === 'full-auto' || raw.launchMode === 'safe'
+    ? raw.launchMode
+    : undefined;
+  const config: TerminalAgentOfficeConfig = {
+    defaultCwd: typeof raw.defaultCwd === 'string' ? raw.defaultCwd.slice(0, 500) : undefined,
+    defaultModel: typeof raw.defaultModel === 'string' ? raw.defaultModel.slice(0, 120) : undefined,
+    defaultPrompt: typeof raw.defaultPrompt === 'string' ? raw.defaultPrompt.slice(0, 4000) : undefined,
+    launchMode,
+    autoSaveMemory: typeof raw.autoSaveMemory === 'boolean' ? raw.autoSaveMemory : undefined,
+  };
+  return Object.values(config).some(v => v !== undefined && v !== '') ? config : undefined;
+}
+
+function encodeTerminalConfigTag(config: TerminalAgentOfficeConfig | undefined): string | null {
+  const clean = sanitizeTerminalConfig(config);
+  if (!clean) return null;
+  try {
+    const json = JSON.stringify(clean);
+    if (typeof btoa === 'function') return `${TERMINAL_CONFIG_TAG_PREFIX}${btoa(unescape(encodeURIComponent(json)))}`;
+    return `${TERMINAL_CONFIG_TAG_PREFIX}${Buffer.from(json, 'utf8').toString('base64')}`;
+  } catch {
+    return null;
+  }
+}
+
+function decodeTerminalConfigTag(tags: unknown): TerminalAgentOfficeConfig | undefined {
+  if (!Array.isArray(tags)) return undefined;
+  const encoded = tags.find(tag => typeof tag === 'string' && tag.startsWith(TERMINAL_CONFIG_TAG_PREFIX));
+  if (!encoded || typeof encoded !== 'string') return undefined;
+  try {
+    const payload = encoded.slice(TERMINAL_CONFIG_TAG_PREFIX.length);
+    const json = typeof atob === 'function'
+      ? decodeURIComponent(escape(atob(payload)))
+      : Buffer.from(payload, 'base64').toString('utf8');
+    return sanitizeTerminalConfig(JSON.parse(json));
+  } catch {
+    return undefined;
+  }
+}
+
+function publicIdentityTags(tags: unknown): string[] | undefined {
+  if (!Array.isArray(tags)) return undefined;
+  return tags
+    .filter((tag): tag is string => typeof tag === 'string')
+    .filter(tag => !tag.startsWith(TERMINAL_CONFIG_TAG_PREFIX));
+}
+
+function identityTagsForRow(identity: AgentIdentity): string[] {
+  const tags = Array.isArray(identity.tags) ? identity.tags.filter(tag => !tag.startsWith(TERMINAL_CONFIG_TAG_PREFIX)) : [];
+  const configTag = encodeTerminalConfigTag(identity.terminalConfig);
+  return configTag ? [...tags, configTag] : tags;
 }
 
 // ─── Load/Save Identity Store ──────────────────────────────
@@ -196,6 +265,7 @@ export async function syncAgentIdentitiesFromServer(): Promise<Map<string, Agent
 }
 
 function rowToIdentity(row: any): AgentIdentity {
+  const terminalConfig = sanitizeTerminalConfig(row.terminal_config) || decodeTerminalConfigTag(row.tags);
   return {
     sessionKey: row.session_key,
     customName: row.custom_name || undefined,
@@ -216,7 +286,7 @@ function rowToIdentity(row: any): AgentIdentity {
     assignedFloorId: row.assigned_floor_id || undefined,
     deskIndex: typeof row.desk_index === 'number' ? row.desk_index : undefined,
     mostUsedModel: row.most_used_model || undefined,
-    tags: Array.isArray(row.tags) ? row.tags : undefined,
+    tags: publicIdentityTags(row.tags),
     bondId: row.bond_id || undefined,
     bondLevel: typeof row.bond_level === 'number' ? row.bond_level : undefined,
     bondXP: typeof row.bond_xp === 'number' ? row.bond_xp : undefined,
@@ -224,6 +294,7 @@ function rowToIdentity(row: any): AgentIdentity {
     isCustomized: !!row.is_customized,
     boundAiProvider: row.bound_ai_provider || undefined,
     boundModel: row.bound_model || undefined,
+    terminalConfig,
   };
 }
 
@@ -248,8 +319,9 @@ function identityToRow(userId: string, identity: AgentIdentity) {
     is_customized: !!identity.isCustomized,
     bound_ai_provider: identity.boundAiProvider ?? null,
     bound_model: identity.boundModel ?? null,
+    terminal_config: sanitizeTerminalConfig(identity.terminalConfig) || {},
     most_used_model: identity.mostUsedModel ?? null,
-    tags: Array.isArray(identity.tags) ? identity.tags : [],
+    tags: identityTagsForRow(identity),
     total_messages: identity.totalMessages || 0,
     total_turns: identity.totalTurns || 0,
     total_cost_all_time: identity.totalCostAllTime || 0,
@@ -277,7 +349,7 @@ async function persistIdentitiesToServer(identities: Map<string, AgentIdentity>)
     const rows = Array.from(identities.values()).map(id => identityToRow(user.id, id));
     if (rows.length === 0) return;
     // Batch upsert — single round-trip per save.
-    const { error } = await supabase
+    let { error } = await supabase
       .from('agent_identities')
       .upsert(rows, { onConflict: 'user_id,session_key' });
     if (error) {
@@ -286,6 +358,14 @@ async function persistIdentitiesToServer(identities: Map<string, AgentIdentity>)
       // 404      = generic schema/table miss from the REST gateway.
       const code = (error as any).code;
       const status = (error as any).status;
+      if (code === 'PGRST204' && String(error.message || '').includes('terminal_config')) {
+        const fallbackRows = rows.map(({ terminal_config, ...row }) => row);
+        const retry = await supabase
+          .from('agent_identities')
+          .upsert(fallbackRows, { onConflict: 'user_id,session_key' });
+        error = retry.error;
+        if (!error) return;
+      }
       if (code === 'PGRST205' || code === 'PGRST204' || status === 404) {
         _identitiesPersistDisabled = true;
         console.warn(

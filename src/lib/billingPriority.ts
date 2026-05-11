@@ -15,19 +15,19 @@ import type { LLMProvider } from './llmProviders';
 import type { ProviderRoute } from './crossProviderRouter';
 
 /** Per-user preference for how to order providers when multiple keys
- *  are connected. Default `prefer_direct` matches what most users
- *  actually want — pay providers directly, no OpenRouter markup. */
+ *  are connected. Default `cheapest` keeps surprise Anthropic spend
+ *  down by preferring local/free/low-cost connected providers first. */
 export type ProviderRoutingMode = 'prefer_direct' | 'prefer_openrouter' | 'cheapest';
 
 const STORAGE_KEY = 'uc_provider_routing_mode_v1';
 
 export function getProviderRoutingMode(): ProviderRoutingMode {
-  if (typeof window === 'undefined' || !window.localStorage) return 'prefer_direct';
+  if (typeof window === 'undefined' || !window.localStorage) return 'cheapest';
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (raw === 'prefer_openrouter' || raw === 'cheapest' || raw === 'prefer_direct') return raw;
   } catch {}
-  return 'prefer_direct';
+  return 'cheapest';
 }
 
 export function setProviderRoutingMode(mode: ProviderRoutingMode): void {
@@ -39,17 +39,17 @@ export function setProviderRoutingMode(mode: ProviderRoutingMode): void {
  *  `resolveProviderRoutes`. Pure — no I/O. */
 export function preferenceForMode(mode: ProviderRoutingMode): Array<ProviderRoute['provider']> {
   if (mode === 'prefer_openrouter') {
-    return ['openrouter', 'anthropic-direct', 'openai', 'groq', 'huggingface', 'openswan'];
+    return ['openrouter', 'openai_compatible', 'anthropic-direct', 'openai', 'google_ai', 'deepseek', 'groq', 'mistral_ai', 'cohere', 'perplexity', 'together_ai', 'fireworks_ai', 'zai', 'minimax', 'huggingface', 'ollama', 'openswan'];
   }
   if (mode === 'cheapest') {
     // Free tier first, then OR (which has cheap routing across
     // providers), then direct (often cheaper than OR for cached
     // requests but not for first-time hits).
-    return ['huggingface', 'openrouter', 'groq', 'anthropic-direct', 'openai', 'openswan'];
+    return ['ollama', 'openai_compatible', 'huggingface', 'groq', 'openrouter', 'deepseek', 'google_ai', 'mistral_ai', 'anthropic-direct', 'openai', 'together_ai', 'fireworks_ai', 'zai', 'minimax', 'cohere', 'perplexity', 'openswan'];
   }
   // prefer_direct (default): native passthrough first, then OR
   // broad fallback, then HF.
-  return ['anthropic-direct', 'openai', 'groq', 'openrouter', 'huggingface', 'openswan'];
+  return ['openai_compatible', 'anthropic-direct', 'openai', 'google_ai', 'deepseek', 'groq', 'mistral_ai', 'cohere', 'perplexity', 'together_ai', 'fireworks_ai', 'zai', 'minimax', 'openrouter', 'huggingface', 'ollama', 'openswan'];
 }
 
 /** What appears in the marketplace as the "billing priority" preview
@@ -70,8 +70,16 @@ export interface BillingRouteEntry {
 const PROVIDER_DISPLAY: Record<string, { label: string; scope: string }> = {
   'anthropic':       { label: 'Anthropic',     scope: 'Claude Opus / Sonnet / Haiku' },
   'openai':          { label: 'OpenAI',        scope: 'GPT-4o / 4.1 / o-series' },
+  'openai_compatible': { label: 'Business Model', scope: 'Custom OpenAI-compatible endpoints' },
   'groq':            { label: 'Groq',          scope: 'Llama / Mixtral (fast)' },
   'openrouter':      { label: 'OpenRouter',    scope: 'Anything else + web search' },
+  'google_ai':       { label: 'Google AI',     scope: 'Gemini long-context + browser planning' },
+  'mistral_ai':      { label: 'Mistral AI',    scope: 'Mistral + Codestral' },
+  'cohere':          { label: 'Cohere',        scope: 'Command R / retrieval-heavy chat' },
+  'perplexity':      { label: 'Perplexity',    scope: 'Search-grounded Sonar models' },
+  'together_ai':     { label: 'Together AI',   scope: 'Hosted open-source models' },
+  'fireworks_ai':    { label: 'Fireworks AI',  scope: 'Low-latency OSS inference' },
+  'deepseek':        { label: 'DeepSeek',      scope: 'Reasoning + code models' },
   'huggingface':     { label: 'Hugging Face',  scope: 'Open-source models + free tier' },
   'replicate':       { label: 'Replicate',     scope: 'Image / video / audio gen' },
   'ollama':          { label: 'Ollama (Local)',scope: 'Self-hosted models' },
@@ -89,7 +97,7 @@ const PROVIDER_DISPLAY: Record<string, { label: string; scope: string }> = {
  */
 export function buildBillingPreview(
   connectedProviders: Set<LLMProvider | 'openswan'>,
-  mode: ProviderRoutingMode = 'prefer_direct',
+  mode: ProviderRoutingMode = 'cheapest',
 ): BillingRouteEntry[] {
   const order: Array<LLMProvider | 'openswan'> = [];
   const preference = preferenceForMode(mode);
@@ -98,9 +106,20 @@ export function buildBillingPreview(
   for (const p of preference) {
     if (p === 'anthropic-direct' && connectedProviders.has('anthropic')) order.push('anthropic');
     else if (p === 'openai' && connectedProviders.has('openai')) order.push('openai');
+    else if (p === 'openai_compatible' && connectedProviders.has('openai_compatible')) order.push('openai_compatible');
+    else if (p === 'google_ai' && connectedProviders.has('google_ai')) order.push('google_ai');
+    else if (p === 'deepseek' && connectedProviders.has('deepseek')) order.push('deepseek');
     else if (p === 'groq' && connectedProviders.has('groq')) order.push('groq');
+    else if (p === 'mistral_ai' && connectedProviders.has('mistral_ai')) order.push('mistral_ai');
+    else if (p === 'cohere' && connectedProviders.has('cohere')) order.push('cohere');
+    else if (p === 'perplexity' && connectedProviders.has('perplexity')) order.push('perplexity');
+    else if (p === 'together_ai' && connectedProviders.has('together_ai')) order.push('together_ai');
+    else if (p === 'fireworks_ai' && connectedProviders.has('fireworks_ai')) order.push('fireworks_ai');
+    else if (p === 'zai' && connectedProviders.has('zai')) order.push('zai');
+    else if (p === 'minimax' && connectedProviders.has('minimax')) order.push('minimax');
     else if (p === 'openrouter' && connectedProviders.has('openrouter')) order.push('openrouter');
     else if (p === 'huggingface' && connectedProviders.has('huggingface')) order.push('huggingface');
+    else if (p === 'ollama' && connectedProviders.has('ollama')) order.push('ollama');
     else if (p === 'openswan' && connectedProviders.has('openswan')) order.push('openswan');
   }
 

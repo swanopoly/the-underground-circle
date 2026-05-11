@@ -11,7 +11,25 @@ import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './pr
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type LLMProvider = 'openai' | 'anthropic' | 'openrouter' | 'groq' | 'ollama' | 'replicate' | 'github-models' | 'huggingface' | 'zai' | 'minimax';
+export type LLMProvider =
+  | 'openai'
+  | 'openai_compatible'
+  | 'anthropic'
+  | 'openrouter'
+  | 'groq'
+  | 'ollama'
+  | 'replicate'
+  | 'github-models'
+  | 'huggingface'
+  | 'zai'
+  | 'minimax'
+  | 'google_ai'
+  | 'mistral_ai'
+  | 'cohere'
+  | 'perplexity'
+  | 'together_ai'
+  | 'fireworks_ai'
+  | 'deepseek';
 
 export interface ProviderKey {
   id: string;
@@ -57,6 +75,12 @@ export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
     { id: 'gpt-4o-mini',  label: 'GPT-4o Mini',   provider: 'openai', contextWindow: 128000,  costTier: 'cheap' },
     { id: 'o4-mini',      label: 'O4 Mini',       provider: 'openai', contextWindow: 200000,  costTier: 'mid' },
     { id: 'o3-mini',      label: 'O3 Mini',       provider: 'openai', contextWindow: 200000,  costTier: 'mid' },
+  ],
+  openai_compatible: [
+    { id: 'business-default', label: 'Business Default', provider: 'openai_compatible', contextWindow: 128000, costTier: 'mid' },
+    { id: 'company-chat', label: 'Company Chat', provider: 'openai_compatible', contextWindow: 128000, costTier: 'mid' },
+    { id: 'company-agent', label: 'Company Agent', provider: 'openai_compatible', contextWindow: 128000, costTier: 'mid' },
+    { id: 'company-code', label: 'Company Code', provider: 'openai_compatible', contextWindow: 128000, costTier: 'mid' },
   ],
   anthropic: [
     { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'anthropic', contextWindow: 200000, costTier: 'mid' },
@@ -131,12 +155,41 @@ export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
     { id: 'MiniMax-M1',      label: 'MiniMax M1',      provider: 'minimax', contextWindow: 1000000, costTier: 'mid' },
     { id: 'MiniMax-Text-01', label: 'MiniMax Text 01', provider: 'minimax', contextWindow: 1000000, costTier: 'cheap' },
   ],
+  google_ai: [
+    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', provider: 'google_ai', contextWindow: 1000000, costTier: 'mid' },
+    { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', provider: 'google_ai', contextWindow: 1000000, costTier: 'cheap' },
+  ],
+  mistral_ai: [
+    { id: 'mistral-large-latest', label: 'Mistral Large', provider: 'mistral_ai', contextWindow: 128000, costTier: 'mid' },
+    { id: 'codestral-latest', label: 'Codestral', provider: 'mistral_ai', contextWindow: 32000, costTier: 'mid' },
+  ],
+  cohere: [
+    { id: 'command-r-plus', label: 'Command R+', provider: 'cohere', contextWindow: 128000, costTier: 'mid' },
+    { id: 'command-r', label: 'Command R', provider: 'cohere', contextWindow: 128000, costTier: 'cheap' },
+  ],
+  perplexity: [
+    { id: 'sonar-pro', label: 'Sonar Pro', provider: 'perplexity', contextWindow: 200000, costTier: 'mid' },
+    { id: 'sonar', label: 'Sonar', provider: 'perplexity', contextWindow: 128000, costTier: 'cheap' },
+  ],
+  together_ai: [
+    { id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', label: 'Llama 3.3 70B Turbo', provider: 'together_ai', contextWindow: 131072, costTier: 'cheap' },
+    { id: 'Qwen/Qwen3-235B-A22B-fp8-tput', label: 'Qwen 3 235B', provider: 'together_ai', contextWindow: 131072, costTier: 'mid' },
+  ],
+  fireworks_ai: [
+    { id: 'accounts/fireworks/models/llama-v3p1-405b-instruct', label: 'Llama 3.1 405B', provider: 'fireworks_ai', contextWindow: 131072, costTier: 'mid' },
+    { id: 'accounts/fireworks/models/deepseek-r1', label: 'DeepSeek R1', provider: 'fireworks_ai', contextWindow: 160000, costTier: 'mid' },
+  ],
+  deepseek: [
+    { id: 'deepseek-chat', label: 'DeepSeek Chat', provider: 'deepseek', contextWindow: 128000, costTier: 'cheap' },
+    { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner', provider: 'deepseek', contextWindow: 128000, costTier: 'mid' },
+  ],
 };
 
 // ─── Provider help text ─────────────────────────────────────────────────────
 
 export const PROVIDER_HELP: Record<LLMProvider, { url: string; hint: string }> = {
   openai:     { url: 'https://platform.openai.com/api-keys',         hint: 'Get your API key from OpenAI Platform' },
+  openai_compatible: { url: 'https://platform.openai.com/docs/api-reference/chat', hint: 'Paste a business/self-hosted OpenAI-compatible endpoint and key. Supports vLLM, LiteLLM, internal gateways, and compatible managed endpoints.' },
   anthropic:  { url: 'https://console.anthropic.com/settings/keys',  hint: 'Get your API key from Anthropic Console' },
   openrouter: { url: 'https://openrouter.ai/keys',                   hint: 'Get your API key from OpenRouter — access 2000+ models' },
   groq:       { url: 'https://console.groq.com/keys',                hint: 'Get your API key from Groq — ultra-fast inference' },
@@ -146,6 +199,13 @@ export const PROVIDER_HELP: Record<LLMProvider, { url: string; hint: string }> =
   huggingface:     { url: 'https://huggingface.co/settings/tokens',          hint: 'Get your HF token — free tier available, PRO ($9/mo) gets 20x credits' },
   zai:             { url: 'https://bigmodel.cn/usercenter/apikeys',          hint: 'Get your z.ai / GLM API key for GLM models' },
   minimax:         { url: 'https://www.minimax.io/platform/user-center/basic-information/interface-key', hint: 'Get your MiniMax API key for MiniMax models' },
+  google_ai:       { url: 'https://aistudio.google.com/app/apikey',          hint: 'Get your Google AI Studio key for Gemini models' },
+  mistral_ai:      { url: 'https://console.mistral.ai/api-keys',             hint: 'Get your Mistral API key' },
+  cohere:          { url: 'https://dashboard.cohere.com/api-keys',           hint: 'Get your Cohere API key' },
+  perplexity:      { url: 'https://www.perplexity.ai/settings/api',          hint: 'Get your Perplexity API key for Sonar search models' },
+  together_ai:     { url: 'https://api.together.ai/settings/api-keys',       hint: 'Get your Together AI API key' },
+  fireworks_ai:    { url: 'https://fireworks.ai/account/api-keys',           hint: 'Get your Fireworks AI API key' },
+  deepseek:        { url: 'https://platform.deepseek.com/api_keys',          hint: 'Get your DeepSeek API key' },
 };
 
 // ─── API Key CRUD ───────────────────────────────────────────────────────────
@@ -191,6 +251,8 @@ export async function deleteApiKey(keyId: string): Promise<{ error?: string }> {
 export async function testApiKey(
   provider: LLMProvider,
   apiKey: string,
+  endpoint?: string,
+  modelOverride?: string,
 ): Promise<{ success: boolean; error?: string }> {
   if (shouldBlockExternalAiProvider(provider)) {
     return { success: false, error: getStrictLocalAiModeMessage(provider) };
@@ -199,10 +261,11 @@ export async function testApiKey(
     const { data, error } = await supabase.functions.invoke('llm-proxy', {
       body: {
         provider,
-        model: getDefaultModel(provider),
+        model: modelOverride || getDefaultModel(provider),
         messages: [{ role: 'user', content: 'Say "ok" in one word.' }],
         max_tokens: 5,
         api_key: apiKey,
+        endpoint,
       },
     });
 

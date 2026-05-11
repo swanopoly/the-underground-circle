@@ -19,8 +19,7 @@ import {
   getAutoConnectConnections,
   getAutoConnectSessions,
   subscribeAutoConnect,
-  setAutoConnectCircleId,
-} from '../lib/agentAutoConnect';
+} from '../lib/agentAutoConnectState';
 import { loadAgentIdentities, type AgentIdentity } from '../lib/agentIdentity';
 import { storage } from '../lib/storage';
 import { sessionsToAgents, type OfficeAgent } from '../lib/officeAgents';
@@ -50,7 +49,11 @@ export function useAutoConnectLiveAgents(opts: Options = {}): UseAutoConnectLive
   const [legacyNames, setLegacyNames] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    if (circleId) setAutoConnectCircleId(circleId);
+    if (circleId) {
+      import('../lib/agentAutoConnect')
+        .then((mod) => mod.setAutoConnectCircleId(circleId))
+        .catch(() => {});
+    }
     const unsub = subscribeAutoConnect(() => setTick(t => t + 1));
     loadAgentIdentities().then(setAgentIdentities).catch(() => {});
     storage.getItem('@office_agent_names').then(raw => {

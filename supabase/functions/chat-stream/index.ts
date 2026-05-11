@@ -14,7 +14,7 @@
 // Deploy: npx supabase functions deploy chat-stream
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
-import { computeCostUsd, checkCircleClaudeBudget, type UsageBreakdown } from "../_claude/anthropic.ts";
+import { computeCostUsd, checkCircleClaudeBudget, logClaudeUsage, type UsageBreakdown } from "../_claude/anthropic.ts";
 import { byokMissingMessage, resolveUserModelApiKey } from "../_shared/edge.ts";
 
 const corsHeaders = {
@@ -246,22 +246,33 @@ Deno.serve(async (req: Request) => {
           },
         });
 
-        // Track usage in DB (fire-and-forget). Writes to user_ai_usage
-        // (per-user, chat-specific) rather than claude_api_usage.
+        // Track usage in both ledgers:
+        // - user_ai_usage powers per-message cost drawers.
+        // - claude_api_usage powers the 24h Claude spend cap/dashboard.
         try {
           const supabase = createClient(supabaseUrl, serviceKey);
-          await supabase.from("user_ai_usage").insert({
-            user_id: userId,
-            circle_id: circleId || null,
-            model,
-            provider: "anthropic",
-            input_tokens: usage.uncachedIn,
-            output_tokens: usage.output,
-            cache_creation_tokens: usage.cacheCreate,
-            cache_read_tokens: usage.cacheRead,
-            estimated_cost: estimatedCost,
-            source: "chat-stream",
-          });
+          await Promise.allSettled([
+            supabase.from("user_ai_usage").insert({
+              user_id: userId,
+              circle_id: circleId || null,
+              model,
+              provider: "anthropic",
+              input_tokens: usage.uncachedIn,
+              output_tokens: usage.output,
+              cache_creation_tokens: usage.cacheCreate,
+              cache_read_tokens: usage.cacheRead,
+              estimated_cost: estimatedCost,
+              source: "chat-stream",
+            }),
+            logClaudeUsage(supabase, {
+              circleId: circleId || null,
+              userId,
+              source: "chat-stream",
+              model,
+              usage,
+              metadata: { streaming: true },
+            }),
+          ]);
         } catch { /* non-critical */ }
 
         emit({ type: "done" });

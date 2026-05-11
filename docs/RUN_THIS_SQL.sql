@@ -1,6 +1,7 @@
 -- ═════════════════════════════════════════════════════════════════════════════
 -- Underground Circle — consolidated pending SQL
 -- Generated 2026-04-21 as part of the optimization pass.
+-- Comment labels last normalized 2026-05-09.
 -- Paste the whole thing into the Supabase SQL Editor. Safe to re-run — every
 -- statement is idempotent (IF NOT EXISTS / OR REPLACE / DROP+CREATE for RLS).
 --
@@ -13,8 +14,16 @@
 --   §6  New indexes recommended by the audit
 --   §7  Scheduled cleanup jobs for growth-prone tables
 --   §8  PostgREST schema reload
+--   §9  Hermes-inspired agent runtime telemetry
+--   §10 Circle skill library + agent_approvals.applied_at
+--   §11 Per-user memory
 --   §12 Phase 1d: idx_claude_api_usage_circle_source_created for automation cap check
---   §13 Google Workspace: user_google_credentials + RLS
+--   §13 Phase CA-7: chat_checkpoints
+--   §14 Phase CA-5: circle_memory bank
+--   §15 Phase CA-8c: circle_skill_files
+--   §16 Google Workspace: user_google_credentials + RLS
+--   §17 Chat-thread lineage columns
+--   §18 Computer-use confirmation sweeper
 -- ═════════════════════════════════════════════════════════════════════════════
 
 -- ─── §1. Custom themes ──────────────────────────────────────────────────────
@@ -539,7 +548,7 @@ CREATE INDEX IF NOT EXISTS idx_circle_memory_history_circle_doc_version
 NOTIFY pgrst, 'reload schema';
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- Done. Verify with:
+-- Interim verify for sections 1-14:
 --   SELECT jobname, schedule FROM cron.job ORDER BY jobname;
 --   \d user_custom_themes
 --   \d step_away_sessions
@@ -553,7 +562,7 @@ NOTIFY pgrst, 'reload schema';
 -- ═════════════════════════════════════════════════════════════════════════════
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- §13. Google Workspace integration — per-user OAuth credentials
+-- §16. Google Workspace integration — per-user OAuth credentials
 -- ═════════════════════════════════════════════════════════════════════════════
 -- Holds the Gmail/Calendar/Drive/Sheets/Docs/Contacts OAuth state per user.
 -- Distinct from Supabase Auth's own provider_token (that covers sign-in only).
@@ -693,7 +702,7 @@ NOTIFY pgrst, 'reload schema';
 -- ═════════════════════════════════════════════════════════════════════════════
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- CA-8j — Chat-thread lineage columns (added 2026-04-23)
+-- §17. CA-8j — Chat-thread lineage columns (added 2026-04-23)
 -- ═════════════════════════════════════════════════════════════════════════════
 -- When a chat thread gets compressed (memory-bank summariser) or forked
 -- by a user, we want to trace the task across forks in the Run Ledger.
@@ -727,7 +736,7 @@ alter table if exists circle_chat_threads
   check (parent_thread_id is null or parent_thread_id <> id);
 
 -- ═════════════════════════════════════════════════════════════════════════════
--- CA-8e server completion — sweep stale computer_use_confirmations (2026-04-23)
+-- §18. CA-8e server completion — sweep stale computer_use_confirmations (2026-04-23)
 -- ═════════════════════════════════════════════════════════════════════════════
 -- In-run poller handles the live 120s timeout. If a run dies mid-poll,
 -- this sweeper reaps the orphan rows every 5 min. Marks `__expired__`
@@ -761,3 +770,15 @@ grant execute on function sweep_stale_computer_use_confirmations() to service_ro
 create index if not exists idx_computer_use_confirmations_unresolved_old
   on computer_use_confirmations (created_at)
   where resolved_at is null;
+
+NOTIFY pgrst, 'reload schema';
+
+-- Final verify:
+--   SELECT jobname, schedule FROM cron.job ORDER BY jobname;
+--   \d user_google_credentials
+--   \d google_oauth_states
+--   \d circle_skill_files
+--   SELECT column_name FROM information_schema.columns
+--    WHERE table_name = 'circle_chat_threads'
+--      AND column_name IN ('parent_thread_id', 'lineage_root_id');
+--   \d computer_use_confirmations

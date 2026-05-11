@@ -1,56 +1,67 @@
-# AGENTS.md — start here
+# AGENTS.md - Start Here
 
-This file is the entry point every contributing agent (Claude Code, Codex,
-Cursor, Gemini, Hermes, future bridges) reads first. It is intentionally
-short. Everything load-bearing lives in the docs it links to.
+This is the entry point for every contributing agent: Claude Code, Codex,
+Cursor, Gemini, OpenSwan bridges, and future runtime agents. Keep this file
+short. Detailed context lives in the linked docs.
 
-## Canonical plan
+## Read Order
 
-**Read this first, every session:** [`docs/AGENTS_ROADMAP.md`](./docs/AGENTS_ROADMAP.md).
+1. `docs/AGENTS_ROADMAP.md` - canonical agent runtime plan.
+2. `docs/UC_APP_STACK_REFERENCE.md` - current app stack and navigation map.
+3. `CLAUDE.md` - human-readable project context and current app review.
+4. Tool-specific notes only as needed:
+   - `AGENT.md` for Codex-style repo work.
+   - `Gemini.md` for Gemini CLI.
+   - `MEMORY.md` for persistent gotchas and project memory.
 
-That doc owns:
-- the file ownership table (`§2`) — who owns which `*.ts` / table
-- the phase status tracker (`§3`)
-- the in-flight migration plans (`§4`)
-- the 10 rules for contributing agents (`§6`)
-- the SQL checklist (`§5`)
+**If you are in an openswan worktree** (path contains `.openswan-worktrees/`): the `AGENT.md`
+and `CLAUDE.md` in that worktree are current. The worktree `CLAUDE.md` carries a stale warning
+at the top — read it and follow the root `CLAUDE.md` for anything not in the Missions/office
+sections.
 
-If `AGENTS_ROADMAP.md` disagrees with any other doc, `AGENTS_ROADMAP.md` wins
-and the other doc needs fixing.
+If any doc conflicts with `docs/AGENTS_ROADMAP.md`, the roadmap wins and the
+other doc should be fixed in the same change.
 
-## Full project context
+## Canonical Ownership
 
-- [`CLAUDE.md`](./CLAUDE.md) — project overview, tech stack, schema, known
-  gotchas, coding conventions. The 30-minute orientation read.
-- [`Gemini.md`](./Gemini.md) — Gemini-specific notes.
+`docs/AGENTS_ROADMAP.md` owns:
 
-## Specialized plan docs (all consistent with the roadmap; read as needed)
+- the file ownership table in section 2
+- the phase status tracker in section 3
+- the execution-loop migration plan in section 4
+- the SQL checklist in section 5
+- the contributing-agent rules in section 6
 
-- [`docs/OPENSWAN_AGENT_IMPLEMENTATION_PLAN.md`](./docs/OPENSWAN_AGENT_IMPLEMENTATION_PLAN.md)
-  — Codex's 8-section runtime breakdown. Still authoritative per-section;
-  the roadmap just tracks which pieces are shipped / pending.
-- [`docs/HERMES_INTEGRATION_PLAN.md`](./docs/HERMES_INTEGRATION_PLAN.md)
-  — Claude Code's phased Hermes-adoption plan. Adoption ordering.
-- [`docs/HERMES_AGENT_OPENSWAN_RESEARCH_2026-04-21.md`](./docs/HERMES_AGENT_OPENSWAN_RESEARCH_2026-04-21.md)
-  — Codex's research into Hermes patterns. Reference.
-- [`docs/OPTIMIZATION_PLAN.md`](./docs/OPTIMIZATION_PLAN.md)
-  — non-agent optimization work (bundle, pagination, error boundaries).
-- [`docs/RUN_THIS_SQL.sql`](./docs/RUN_THIS_SQL.sql)
-  — all pending DB changes, idempotent, paste-and-run.
+Before adding a new file under `src/lib/openswan*.ts`, `src/lib/agent*.ts`,
+provider-routing code, chat automation code, or agent-runtime SQL, check the
+roadmap ownership table. If a concern already has an owner, extend the owner
+instead of creating a parallel path.
 
-## The contract, in one sentence
+## Current Direction
 
-Before you add a new file under `src/lib/openswan*.ts`, `src/lib/agent*.ts`,
-or a new Supabase migration, check the ownership table in
-[`docs/AGENTS_ROADMAP.md`](./docs/AGENTS_ROADMAP.md) §2 and the rules in §6.
-If the concern is already owned, extend — don't duplicate.
+The Underground Circle is a web-first Expo/React Native + Supabase app for
+shared AI-agent accountability. The core product loop is:
 
-## When to update the plan
+`connect repo/providers -> work in Chat/Office/Feed -> agents run tasks ->
+proof/activity/memory updates -> team sees what shipped`.
 
-- Shipped a phase item → move it in §3 with today's date.
-- Added a new canonical file → add a row to §2.
-- Deprecated a file → move it to the deprecated table in §2 with its
-  replacement.
-- Ran new SQL → update §5.
-- Discovered a new architectural concern not covered → add it to §2 with
-  "Planned" status and link the discussion in the PR.
+The active runtime work is centered on:
+
+- BlackSwan/OpenSwan chat and tool execution.
+- Provider marketplace and BYOK routing across Anthropic, OpenAI, OpenRouter,
+  Hugging Face, Groq, Google AI, DeepSeek, Mistral, Cohere, Perplexity,
+  Together, Fireworks, z.ai, MiniMax, Ollama, and related providers.
+- Computer Use and local desktop awareness through Browserbase, bridge tools,
+  and guarded local actions.
+- Memory bank, user memory, SKILL.md library, checkpoints, and run telemetry.
+
+## Update Contract
+
+- Shipped a roadmap item: update `docs/AGENTS_ROADMAP.md` with the date.
+- Added a canonical file: add it to the roadmap ownership table.
+- Added agent-runtime SQL: update the migration, `docs/RUN_THIS_SQL.sql` if it
+  is part of the consolidated agent SQL, and the roadmap SQL checklist.
+- Deprecated a path: mark the replacement in the roadmap before removing live
+  callers.
+- Changed app-wide architecture: update `CLAUDE.md`,
+  `docs/UC_APP_STACK_REFERENCE.md`, and the roadmap if ownership changed.

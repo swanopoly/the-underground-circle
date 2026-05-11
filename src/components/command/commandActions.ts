@@ -1,4 +1,4 @@
-import { Action } from 'kbar';
+import type { Action } from 'kbar';
 import { navigateToUnifiedProfile } from '../../lib/profileNavigation';
 
 export function buildAppActions(navigate: (screen: string, params?: any) => void, circleId?: string): Action[] {

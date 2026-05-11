@@ -98,6 +98,7 @@ export function providerDisplayName(provider: string): string {
   const names: Record<string, string> = {
     anthropic: "Anthropic",
     openai: "OpenAI",
+    openai_compatible: "OpenAI-compatible business model",
     "openai-embed": "OpenAI",
     openrouter: "OpenRouter",
     groq: "Groq",
@@ -107,6 +108,14 @@ export function providerDisplayName(provider: string): string {
     huggingface: "Hugging Face",
     zai: "z.ai",
     minimax: "MiniMax",
+    google_ai: "Google AI",
+    mistral_ai: "Mistral AI",
+    cohere: "Cohere",
+    perplexity: "Perplexity",
+    together_ai: "Together AI",
+    fireworks_ai: "Fireworks AI",
+    deepseek: "DeepSeek",
+    brave: "Brave Search",
   };
   return names[provider] || provider;
 }

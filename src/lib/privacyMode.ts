@@ -7,6 +7,7 @@ const STRICT_LOCAL_AI_MODE_EVENT = 'uc:strict-local-ai-mode-changed';
 const EXTERNAL_AI_PROVIDERS = new Set([
   'anthropic',
   'openai',
+  'openai_compatible',
   'openrouter',
   'groq',
   'replicate',

@@ -29,6 +29,7 @@ export interface RegisteredModel {
   is_active: boolean;
   api_compatible: string;
   last_verified_at: string;
+  released_at?: string | null;
 }
 
 // ─── Cache ──────────────────────────────────────────────────────────────────

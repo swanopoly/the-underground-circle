@@ -1,45 +1,63 @@
-import React from 'react';
+import React, { Suspense } from 'react';
+import { View, Text, StyleSheet } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
-import CirclesScreen from '../screens/circles/CirclesScreen';
-import CircleDetailScreen from '../screens/circles/CircleDetailScreen';
-import CreateCircleScreen from '../screens/circles/CreateCircleScreen';
-import DiscoverScreen from '../screens/circles/DiscoverScreen';
-import JoinCircleScreen from '../screens/circles/JoinCircleScreen';
-import CircleSettingsScreen from '../screens/circles/CircleSettingsScreen';
-import ProfileScreen from '../screens/profile/ProfileScreen';
-import EditProfileScreen from '../screens/profile/EditProfileScreen';
-import FriendsScreen from '../screens/friends/FriendsScreen';
-import DMScreen from '../screens/friends/DMScreen';
-// AgentsScreenLive is the rebuilt multi-source fleet view (pinned defaults +
-// live sessions + bonded agents + providers). The original AgentsScreen.tsx
-// is owned by root in the repo so we route past it; once chowned it can be
-// replaced and this import flipped back.
-import AgentsScreen from '../screens/agents/AgentsScreenLive';
-import IntegrationsScreen from '../screens/integrations/IntegrationsScreen';
-import InviteManageScreen from '../screens/circles/InviteManageScreen';
-import OrgListScreen from '../screens/organizations/OrgListScreen';
-import OrgDetailScreen from '../screens/organizations/OrgDetailScreen';
-import CreateOrgScreen from '../screens/organizations/CreateOrgScreen';
-import OrgSettingsScreen from '../screens/organizations/OrgSettingsScreen';
-import BillingScreen from '../screens/organizations/BillingScreen';
-import SSOConfigScreen from '../screens/organizations/SSOConfigScreen';
-import GoalsScreen from '../screens/organizations/GoalsScreen';
-import ReportsScreen from '../screens/organizations/ReportsScreen';
-import WhiteLabelScreen from '../screens/organizations/WhiteLabelScreen';
-import SchoolsScreen from '../screens/schools/SchoolsScreen';
-import SchoolsTrackScreen from '../screens/schools/SchoolsTrackScreen';
-import SchoolsModuleScreen from '../screens/schools/SchoolsModuleScreen';
-import SchoolsLessonScreen from '../screens/schools/SchoolsLessonScreen';
-import WikiScreen from '../screens/wiki/WikiScreen';
-import WikiCategoryScreen from '../screens/wiki/WikiCategoryScreen';
-import WikiArticleScreen from '../screens/wiki/WikiArticleScreen';
-import ResearchControlCenterScreen from '../screens/wiki/ResearchControlCenterScreen';
-import ResearchDocumentDetailScreen from '../screens/wiki/ResearchDocumentDetailScreen';
-import ResearchRunDetailScreen from '../screens/wiki/ResearchRunDetailScreen';
-import SoulMemoryScreen from '../screens/wiki/SoulMemoryScreen';
-
 const Stack = createNativeStackNavigator();
+
+function ScreenFallback() {
+  return (
+    <View style={styles.fallback}>
+      <Text style={styles.fallbackText}>Loading...</Text>
+    </View>
+  );
+}
+
+function lazyScreen(loader: () => Promise<{ default: React.ComponentType<any> }>, name: string) {
+  const LazyComponent = React.lazy(loader);
+  function LazyScreen(props: any) {
+    return (
+      <Suspense fallback={<ScreenFallback />}>
+        <LazyComponent {...props} />
+      </Suspense>
+    );
+  }
+  LazyScreen.displayName = `Lazy${name}`;
+  return LazyScreen;
+}
+
+const CirclesScreen = lazyScreen(() => import('../screens/circles/CirclesScreen'), 'CirclesScreen');
+const CircleDetailScreen = lazyScreen(() => import('../screens/circles/CircleDetailScreen'), 'CircleDetailScreen');
+const CreateCircleScreen = lazyScreen(() => import('../screens/circles/CreateCircleScreen'), 'CreateCircleScreen');
+const DiscoverScreen = lazyScreen(() => import('../screens/circles/DiscoverScreen'), 'DiscoverScreen');
+const JoinCircleScreen = lazyScreen(() => import('../screens/circles/JoinCircleScreen'), 'JoinCircleScreen');
+const CircleSettingsScreen = lazyScreen(() => import('../screens/circles/CircleSettingsScreen'), 'CircleSettingsScreen');
+const ProfileScreen = lazyScreen(() => import('../screens/profile/ProfileScreen'), 'ProfileScreen');
+const EditProfileScreen = lazyScreen(() => import('../screens/profile/EditProfileScreen'), 'EditProfileScreen');
+const FriendsScreen = lazyScreen(() => import('../screens/friends/FriendsScreen'), 'FriendsScreen');
+const DMScreen = lazyScreen(() => import('../screens/friends/DMScreen'), 'DMScreen');
+const AgentsScreen = lazyScreen(() => import('../screens/agents/AgentsScreenLive'), 'AgentsScreen');
+const IntegrationsScreen = lazyScreen(() => import('../screens/integrations/IntegrationsScreen'), 'IntegrationsScreen');
+const InviteManageScreen = lazyScreen(() => import('../screens/circles/InviteManageScreen'), 'InviteManageScreen');
+const OrgListScreen = lazyScreen(() => import('../screens/organizations/OrgListScreen'), 'OrgListScreen');
+const OrgDetailScreen = lazyScreen(() => import('../screens/organizations/OrgDetailScreen'), 'OrgDetailScreen');
+const CreateOrgScreen = lazyScreen(() => import('../screens/organizations/CreateOrgScreen'), 'CreateOrgScreen');
+const OrgSettingsScreen = lazyScreen(() => import('../screens/organizations/OrgSettingsScreen'), 'OrgSettingsScreen');
+const BillingScreen = lazyScreen(() => import('../screens/organizations/BillingScreen'), 'BillingScreen');
+const SSOConfigScreen = lazyScreen(() => import('../screens/organizations/SSOConfigScreen'), 'SSOConfigScreen');
+const GoalsScreen = lazyScreen(() => import('../screens/organizations/GoalsScreen'), 'GoalsScreen');
+const ReportsScreen = lazyScreen(() => import('../screens/organizations/ReportsScreen'), 'ReportsScreen');
+const WhiteLabelScreen = lazyScreen(() => import('../screens/organizations/WhiteLabelScreen'), 'WhiteLabelScreen');
+const SchoolsScreen = lazyScreen(() => import('../screens/schools/SchoolsScreen'), 'SchoolsScreen');
+const SchoolsTrackScreen = lazyScreen(() => import('../screens/schools/SchoolsTrackScreen'), 'SchoolsTrackScreen');
+const SchoolsModuleScreen = lazyScreen(() => import('../screens/schools/SchoolsModuleScreen'), 'SchoolsModuleScreen');
+const SchoolsLessonScreen = lazyScreen(() => import('../screens/schools/SchoolsLessonScreen'), 'SchoolsLessonScreen');
+const WikiScreen = lazyScreen(() => import('../screens/wiki/WikiScreen'), 'WikiScreen');
+const WikiCategoryScreen = lazyScreen(() => import('../screens/wiki/WikiCategoryScreen'), 'WikiCategoryScreen');
+const WikiArticleScreen = lazyScreen(() => import('../screens/wiki/WikiArticleScreen'), 'WikiArticleScreen');
+const ResearchControlCenterScreen = lazyScreen(() => import('../screens/wiki/ResearchControlCenterScreen'), 'ResearchControlCenterScreen');
+const ResearchDocumentDetailScreen = lazyScreen(() => import('../screens/wiki/ResearchDocumentDetailScreen'), 'ResearchDocumentDetailScreen');
+const ResearchRunDetailScreen = lazyScreen(() => import('../screens/wiki/ResearchRunDetailScreen'), 'ResearchRunDetailScreen');
+const SoulMemoryScreen = lazyScreen(() => import('../screens/wiki/SoulMemoryScreen'), 'SoulMemoryScreen');
 
 export default function MainNavigator() {
   return (
@@ -55,7 +73,6 @@ export default function MainNavigator() {
       <Stack.Screen name="JoinCircle" component={JoinCircleScreen} />
       <Stack.Screen name="CircleDetail" component={CircleDetailScreen} />
       <Stack.Screen name="CircleSettings" component={CircleSettingsScreen} />
-      {/* Profile sub-screens */}
       <Stack.Screen name="Profile" component={ProfileScreen} />
       <Stack.Screen name="EditProfile" component={EditProfileScreen} />
       <Stack.Screen name="Friends" component={FriendsScreen} />
@@ -63,7 +80,6 @@ export default function MainNavigator() {
       <Stack.Screen name="Agents" component={AgentsScreen} />
       <Stack.Screen name="Integrations" component={IntegrationsScreen} />
       <Stack.Screen name="InviteManage" component={InviteManageScreen} />
-      {/* Organization screens */}
       <Stack.Screen name="OrgList" component={OrgListScreen} />
       <Stack.Screen name="OrgDetail" component={OrgDetailScreen} />
       <Stack.Screen name="CreateOrg" component={CreateOrgScreen} />
@@ -73,12 +89,10 @@ export default function MainNavigator() {
       <Stack.Screen name="Goals" component={GoalsScreen} />
       <Stack.Screen name="Reports" component={ReportsScreen} />
       <Stack.Screen name="WhiteLabel" component={WhiteLabelScreen} />
-      {/* Schools */}
       <Stack.Screen name="Schools" component={SchoolsScreen} />
       <Stack.Screen name="SchoolsTrack" component={SchoolsTrackScreen} />
       <Stack.Screen name="SchoolsModule" component={SchoolsModuleScreen} />
       <Stack.Screen name="SchoolsLesson" component={SchoolsLessonScreen} />
-      {/* AI Wiki */}
       <Stack.Screen name="Wiki" component={WikiScreen} />
       <Stack.Screen name="ResearchControlCenter" component={ResearchControlCenterScreen} />
       <Stack.Screen name="ResearchDocumentDetail" component={ResearchDocumentDetailScreen} />
@@ -89,3 +103,18 @@ export default function MainNavigator() {
     </Stack.Navigator>
   );
 }
+
+const styles = StyleSheet.create({
+  fallback: {
+    flex: 1,
+    backgroundColor: '#000',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fallbackText: {
+    color: '#8b8b96',
+    fontSize: 12,
+    letterSpacing: 2,
+    textTransform: 'uppercase',
+  },
+});

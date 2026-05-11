@@ -27,6 +27,7 @@ import type { OpenSwanObservedEvalSummary } from './openswanObservedEvals';
 import { soulKeyForProfile } from './serviceProfileSouls';
 import { OPENSWAN_RUNTIME_PLAN_VERSION } from './openswanRuntimePlan';
 import type { PromptMemoryReference } from './memoryService';
+import type { ConnectedProviderSet } from './serviceProfileSouls';
 
 // ─── Unified Types ──────────────────────────────────────────────────────────
 
@@ -71,6 +72,7 @@ export interface AgentRunRequest {
   agentId?: string;
   agentName?: string;
   model?: string;
+  connectedProviders?: ConnectedProviderSet | string[];
   mode?: 'talk' | 'build' | 'plan' | 'execute' | 'review' | 'research' | 'support' | 'design';
   capabilityProfile?: string;
   context?: {
@@ -83,6 +85,16 @@ export interface AgentRunRequest {
     roomId?: string;
     replyTo?: string;
   };
+}
+
+function normalizeConnectedProviders(value?: ConnectedProviderSet | string[]): ConnectedProviderSet | undefined {
+  if (!value) return undefined;
+  const raw = Array.isArray(value) ? value : Array.from(value);
+  return new Set(raw.map((provider) => {
+    if (provider === 'hugging_face') return 'huggingface';
+    if (provider === 'z_ai') return 'zai';
+    return provider;
+  }));
 }
 
 export interface AgentRunResult {
@@ -328,10 +340,13 @@ export async function executeAgentRun(
   const routeAnalysis = analyzeMessageRouting(prompt, routingSurface);
   const profileResolution = resolveOpenSwanProfileForMode(mode || 'talk', prompt, routingSurface);
   const { resolveModelForProfile } = await import('./serviceProfileSouls');
+  const connectedProviders = normalizeConnectedProviders(request.connectedProviders);
   const resolvedModel = resolveModelForProfile(
     profileResolution.resolvedProfile,
     model,
     routeAnalysis.route.intent,
+    connectedProviders,
+    routeAnalysis.route.complexity,
   );
   const activeTaskKind =
     modePolicy.key === 'build' || modePolicy.key === 'execute'
@@ -365,6 +380,7 @@ export async function executeAgentRun(
         autoDetectedSessionProfile: profileResolution.autoDetected,
         routingIntent: routeAnalysis.route.intent,
         routingComplexity: routeAnalysis.route.complexity,
+        connectedProviders: connectedProviders ? Array.from(connectedProviders) : [],
       },
     });
     if (run) runId = run.id;

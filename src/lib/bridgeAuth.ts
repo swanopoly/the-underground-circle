@@ -43,6 +43,11 @@ function writeToken(value: string) {
   }
 }
 
+export function cacheBridgeToken(value: string | null | undefined) {
+  if (!value || value.length < 32) return;
+  writeToken(value);
+}
+
 /**
  * Pair against the first reachable bridge. All bridges return the same
  * shared token, so a single round-trip is sufficient. 1.5s timeout per

@@ -37,11 +37,11 @@ const AGENT_MODELS: Record<string, AgentModelConfig> = {
   jon:       { name: "Jon Snow",  preferredModel: "claude-sonnet", role: "boss" },
   tyrion:    { name: "Tyrion",    preferredModel: "claude-sonnet", role: "writer" },
   varys:     { name: "Varys",     preferredModel: "claude-sonnet", role: "researcher" },
-  daenerys:  { name: "Daenerys",  preferredModel: "claude-opus",   role: "strategist" },
+  daenerys:  { name: "Daenerys",  preferredModel: "claude-sonnet", role: "strategist" },
   arya:      { name: "Arya",      preferredModel: "claude-haiku",  role: "executor" },
   sansa:     { name: "Sansa",     preferredModel: "claude-sonnet", role: "designer" },
   sandor:    { name: "Sandor",    preferredModel: "claude-haiku",  role: "reviewer" },
-  bran:      { name: "Bran",      preferredModel: "claude-opus",   role: "analyst" },
+  bran:      { name: "Bran",      preferredModel: "claude-sonnet", role: "analyst" },
   samwell:   { name: "Samwell",   preferredModel: "claude-haiku",  role: "writer" },
   petyr:     { name: "Petyr",     preferredModel: "claude-sonnet", role: "strategist" },
   jorah:     { name: "Jorah",     preferredModel: "claude-haiku",  role: "executor" },
@@ -290,13 +290,13 @@ Available agents: ${JSON.stringify(agentNames)}
 Agent model assignments: ${JSON.stringify(agentModels)}
 
 Output ONLY a JSON array. Each item: {"title": "...", "description": "...", "priority": "normal|high", "assigned_agent_id": "agent-uuid-here"}
-Assign tasks round-robin to the available agents. Match task complexity to the agent's model — give complex/strategic tasks to Opus agents, creative tasks to Sonnet agents, and fast/routine tasks to Haiku agents. Make tasks specific and actionable. Do NOT duplicate existing task titles.`;
+Assign tasks round-robin to the available agents. Match task complexity to the agent's model — use Sonnet agents for strategic/creative tasks and Haiku agents for fast/routine tasks. Make tasks specific and actionable. Do NOT duplicate existing task titles.`;
 
     try {
       const result = await callClaude(
         "You generate tasks as JSON arrays. Output ONLY valid JSON, no markdown.",
         aiPrompt,
-        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
         { supabase, circleId, source: "boss-agent.generate_tasks", metadata: { goal_id: goal.id } },
       );
 

@@ -2,11 +2,12 @@
 
 **Audience:** Every agent contributing to this repo (Claude Code, Codex, Cursor, Gemini, future bridges). This is the single doc you consult before starting work on the agent runtime. Keep it in sync.
 
-**Last synced:** 2026-04-21
+**Last synced:** 2026-05-11
 
 **Why this doc exists:** Two agents (Claude Code + Codex) have been independently converging on the same Hermes-style architecture for OpenSwan. Each shipped complementary pieces without full awareness of the other. This doc reconciles both into one plan so we stop building parallel stacks.
 
 Related docs (all still valid, read them after this one):
+- [`UC_APP_STACK_REFERENCE.md`](./UC_APP_STACK_REFERENCE.md) — current app map, runtime files, provider routing, and validation guide.
 - [`OPENSWAN_AGENT_IMPLEMENTATION_PLAN.md`](./OPENSWAN_AGENT_IMPLEMENTATION_PLAN.md) — Codex's section-by-section plan (8 architectural sections). Still the authoritative breakdown per concern.
 - [`HERMES_INTEGRATION_PLAN.md`](./HERMES_INTEGRATION_PLAN.md) — research summary of Hermes Agent patterns + the phased adoption we lifted from them.
 - [`CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md`](./CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md) — full audit of chat automation, routing fragmentation, and the unification plan for command/build/browser/automation flows.
@@ -19,8 +20,9 @@ Related docs (all still valid, read them after this one):
 - [`DESKTOP_AUTOMATION_PHASE_1_PLAN.md`](./DESKTOP_AUTOMATION_PHASE_1_PLAN.md) — canonical rollout for "launch X app AND do something inside it." Phases 1a (bridge plumbing), 1b (agent tools + HITL + known apps + status chip), **and 1c (screenshot + wait_for_app + hardened auto-chain) all shipped**. Phase 1d (click + a11y tree) later.
 - [`SWANBOT_V2_MIGRATION_PLAN.md`](./SWANBOT_V2_MIGRATION_PLAN.md) — canonical plan for retiring the v1 edge function (hardcoded BLACKSWAN_TOOLS) in favour of v2 (typed tool loop, openswanToolRuntime catalog). **M1 + M2 shipped 2026-04-23**: feature flag + `/v2 on|off` slash, `callSwanBotV2` with auto v1 fallback, round-trip client-delegated tool protocol (edge emits `{ pending: true, clientToolCalls, continuationRunId }` → client executes against bridge → posts back `{ continuationRunId, toolResults }` → loop resumes), 11 `desktop.*` tools registered as `clientOnly: true` on v2, 6-continuation cap on client. Smoke coverage: 40+ assertions. M3 (full OpenSwan tool parity on v2) next.
 - [`PHASE_CA-8_HERMES_DELTA_PLAN.md`](./PHASE_CA-8_HERMES_DELTA_PLAN.md) — **canonical rollout** of the top 10. Every agent picks sub-phases (CA-8a..CA-8j) from here.
+- [`OPENROUTER_INTEGRATION_RESEARCH_2026-05-06.md`](./OPENROUTER_INTEGRATION_RESEARCH_2026-05-06.md) — OpenRouter/provider-marketplace expansion research. Use as background; implementation ownership stays in this roadmap.
 - [`OPTIMIZATION_PLAN.md`](./OPTIMIZATION_PLAN.md) — non-agent optimization work (bundle, pagination, error boundaries, SQL).
-- [`RUN_THIS_SQL.sql`](./RUN_THIS_SQL.sql) — every pending DB change, idempotent.
+- [`RUN_THIS_SQL.sql`](./RUN_THIS_SQL.sql) — consolidated idempotent agent/runtime SQL helper; production status is tracked in section 5.
 
 ---
 
@@ -45,6 +47,13 @@ This table is the tie-breaker. When two files overlap, the one listed under "Can
 |---|---|---|---|
 | **Execution loop** (model turns, tool dispatch, event stream) | `src/lib/agentExecutionCore.ts` | Provider-agnostic typed loop. Everything should route through `runAgent(...)`. | Shipped 2026-04-21 |
 | **Provider adapter (Claude)** | `src/lib/agentProviders/anthropic.ts` | Implements `AgentProvider.turn()` against Anthropic Messages API with prompt caching. | Shipped 2026-04-21 |
+| **Provider catalog + key UX** | `src/lib/llmProviders.ts` + `src/components/marketplace/LlmProviderMarketplace.tsx` | Canonical frontend provider enum, static model defaults, API key CRUD, proxy invocation helper, and marketplace connection surface. Keep in sync with edge providers and DB provider checks. | Current 2026-05-09 |
+| **Provider edge proxy** | `supabase/functions/llm-proxy/index.ts` + `supabase/functions/_shared/edge.ts` | Server-side BYOK dispatch for OpenAI-compatible providers, Anthropic, embeddings, provider normalization, display names, and upstream error mapping. | Current 2026-05-09 |
+| **OpenRouter rankings** | `supabase/functions/openrouter-rankings/index.ts` | Fetches OpenRouter ranking/catalog data, normalizes popular model cards, and caches edge responses for the chat/model picker. | Current 2026-05-09 |
+| **OpenRouter smart routing + dynamic catalog** | `src/lib/llmProviders.ts` (`PROVIDER_MODELS.openrouter`) + `supabase/functions/llm-proxy/index.ts` (OpenRouter branch) | Current state: static 6-model list + basic proxy passthrough. Planned: dynamic model discovery from `/v1/models`, `:nitro`/`:floor` speed/cost aliases, `models:[]` fallback arrays, real per-call cost from `/v1/generation/{id}`, per-circle routing preference toggle, BYOK passthrough. This makes OpenRouter the primary universal gateway with Anthropic-direct as an opt-in. Research: `docs/OPENROUTER_INTEGRATION_RESEARCH_2026-05-06.md`. | Planned (4 phases) |
+| **Provider model resolution** | `src/lib/serviceProfileSouls.ts` | Auto-selects model/profile from intent, complexity, user pick, and connected providers. Prefer direct BYOK providers first, then OpenRouter/HF/local fallbacks according to mode. | Current 2026-05-09 |
+| **Cross-provider fallback** | `src/lib/crossProviderRouter.ts` + `src/lib/universalInvoke.ts` + `src/lib/billingPriority.ts` | Logical model aliases, available-provider route chains, transient-error fallback, and billing preference modes (`prefer_direct`, `prefer_openrouter`, `cheapest`). | Current 2026-05-09 |
+| **BlackSwan model routing** | `src/lib/blackswanRouting.ts` | Owns BlackSwan-v5 IDs, marketplace-prefix detection, Anthropic-stream eligibility, tool-executor fallback, and app-grounding prompt block. | Current 2026-05-09 |
 | **Run persistence** | `src/lib/agentRunPersistence.ts` | Hooks `AgentEvent` → `agent_runs` + `agent_run_events`. Fire-and-forget; never blocks the loop. | Shipped 2026-04-21 |
 | **Tool catalog + dispatch** | `src/lib/openswanToolRuntime.ts` | The 1929-line typed tool registry (`executeOpenSwanTool`, `listOpenSwanAnthropicToolsForSurface`, `formatOpenSwanRuntimeToolResult`). 30+ tools with policy + surface permissions. | Shipped (Codex) |
 | **Tool catalog compat shim** | `src/lib/openswanTools/index.ts` | `dispatchTool()` / `dispatchToolDetailed()` for the existing chat / verification consumers. Keeps them working while the loop migrates. | Shipped (Codex) |
@@ -81,11 +90,14 @@ This table is the tie-breaker. When two files overlap, the one listed under "Can
 | **Computer capability audit** | `src/lib/computerCapabilityRegistry.ts` | Canonical browser/files/apps/bridges/integrations capability audit for a circle. First step toward a true permissioned computer runtime instead of separate browser/MCP/bridge silos. | Shipped 2026-04-22 |
 | **Computer task execution envelope** | `src/lib/computerTaskExecution.ts` | Canonical task-shape -> readiness -> entrypoint envelope for `Use Computer`. Browser tasks route to the live computer-use runtime; file/app/hybrid tasks route through the unified agent runtime with explicit dispatch context. Initial grant planning is now included for browser navigation, browser side effects, file read/write, app read/action, MCP tools, and bridge access. Remembered grant ids can now flow back into the execution envelope so repeated tasks reuse prior browser grants. | Shipped 2026-04-22 |
 | **Computer task runtime** | `src/lib/computerTaskRuntime.ts` | Shared non-browser `Use Computer` runtime. Owns adapter identity, mode/profile selection, dispatch prefix, and agent-runtime execution for file/app/hybrid tasks so `ChatTab` stays thin and future adapters plug into one place. | Shipped 2026-04-22 |
+| **Local desktop awareness intent** | `src/lib/localComputerAwarenessIntent.ts` | Detects local browser/app/file/screen/clipboard/shortcut/window requests and classifies risk before bridge dispatch. Keep local-action approval behavior aligned here. | Current 2026-05-09 |
 | **Computer file adapter** | `src/lib/computerFileAdapter.ts` | First real `file_task` adapter. Discovers filesystem MCP tools, attempts a concrete file search/read/list execution, and only falls back to the generic agent runtime when no usable filesystem tool surface is available. | Shipped 2026-04-22 |
 | **Computer app adapter** | `src/lib/computerAppAdapter.ts` | First real `app_task` adapter. Discovers MCP app/desktop tools, integrations, and enabled bridges; attempts a concrete MCP-backed app action when there is a plausible match, otherwise returns a structured app-surface inventory instead of pretending the task executed. | Shipped 2026-04-22 |
 | **Computer task state** | `src/lib/computerTaskState.ts` + `src/screens/circles/tabs/ChatTab.tsx` + `src/components/computer-use/ComputerUseConsole.tsx` | First durable task-state foundation for Cline-style Focus Chain work. `Use Computer` now persists planning / awaiting approval / executing / completed / failed state with steps, blockers, next steps, access plan, and granted access, and the launcher console now surfaces that state so later chat/Office surfaces can extend one canonical runtime object. | Shipped 2026-04-22 |
 | **Chat session archive** | `src/lib/chatSessionArchive.ts` + `src/screens/circles/tabs/ChatTab.tsx` + `src/lib/swanbot.ts` + `src/lib/agentRuntime.ts` + `src/components/agent/MemoryViewer.tsx` + `src/lib/memoryService.ts` + `src/screens/circles/tabs/chat/ChatTranscript.tsx` | Canonical per-thread SwanBot archive for durable transcript + tool/error/memory/browser context. Chat now upserts message snapshots and failure events into a local session archive, clears it on thread nuke, injects a bounded archive block back into SwanBot / OpenSwan runs, exposes archive search/suggestions in Memory Viewer, tracks handled recommendation state so promoted or dismissed archive patterns stop resurfacing as noise, stamps archive-derived memories with lineage + initial acceptance feedback, adjusts archive-derived memory trust automatically in both directions with passive `confirmed_helpful` / `weak_signal` feedback, throttles repeated passive feedback per memory/action/source so similar runs in a short window do not over-train the same archive pattern, weights passive scores by evidence depth using run quality, verification coverage, response quality, and blocker intensity, applies a small retrieval-time archive bias based on recent passive evidence so strong archive patterns are slightly easier to reuse and weak ones are slightly suppressed before generation, surfaces that archive bias directly in chat/transcript memory cards for debuggable retrieval, and now exposes an archive-learning view in Memory Viewer showing boosted memories, suppressed memories, and recent passive feedback events. | Shipped 2026-04-22 |
+| **Persisted chat metadata** | `src/lib/persistedChatMetadata.ts` + `src/lib/chatAgentService.ts` + `src/lib/pendingBotMessages.ts` | Bounded metadata envelope for saved bot/user messages: source, routing, usage, artifacts, memory refs, browser plans, execution stream, observed evals, and local-message reconciliation. Keep payload size bounded. | Current 2026-05-09 |
 | **Chat computer-task routing** | `src/lib/chatAutomationPlanner.ts` + `src/lib/runChatAutomationPlan.ts` + `src/screens/circles/tabs/ChatTab.tsx` | First-class `run_computer_task` planning/dispatch path. Browser, file, app, and hybrid computer tasks now enter through the same shared chat transport; browser tasks still execute on the browser runtime after shared planning/approval, while non-browser tasks route through the shared computer-task runtime instead of falling back to generic chat. Chat now surfaces the inferred access plan and approval summary for these tasks, and browser approvals can persist remembered grant scopes for later runs. | Shipped 2026-04-22 |
+| **Marketplace integration prompt context** | `src/lib/marketplaceIntegrationContext.ts` | Sanitized prompt block/list of connected circle integrations. Secret values are excluded; only safe metadata and configured secret key names may appear. | Current 2026-05-09 |
 | **Edge-side Anthropic adapter** | `supabase/functions/_claude/anthropic.ts` | Deno-side provider adapter (mirrors `src/lib/agentProviders/anthropic.ts`): `callClaude()`, `computeCostUsd()`, `addUsage()`, `logClaudeUsage()`. Central pricing table + cache accounting; every new edge function MUST import from here per Rule #3. In `_claude/` instead of `_shared/` because the latter is owned by root. | Shipped 2026-04-21 |
 | **Per-circle budget cap settings** | `src/screens/circles/CircleSettingsScreen.tsx` (COMPUTER USE BUDGET + AUTOMATION DAILY CAP sections) | Numeric USD caps + preset chips bound to `circles.settings.computer_use_max_cost_usd` (per-run, default $2) and `circles.settings.automation_max_cost_usd` (rolling 24h, default $1). All four persistence paths (saveAll / CU blur / Automation blur / memory toggle) always carry both caps to prevent stale-state clobbering. | Shipped 2026-04-21 |
 | **Client-side Computer Use surface** | `src/lib/computerUseAgent.ts` + `src/lib/useComputerUseTask.ts` + `src/lib/useComputerUseQueue.ts` + `src/components/ComputerUseLiveCard.tsx` | SSE reader, single-task hook, multi-task queue hook (up to 3 concurrent), live card with cache-hit % indicator. `queue` hook shipped but not yet wired into a surface. | Shipped 2026-04-21 (queue unwired) |
@@ -126,6 +138,30 @@ This table is the tie-breaker. When two files overlap, the one listed under "Can
 - Office localhost gating + `BridgeUnavailableBanner` (no more silent blank Office on prod).
 - Global unhandled-rejection logger (`errorReporter.ts`).
 - Confirm dialogs on delete circle / leave circle / disconnect wallet / delete theme / delete mission task.
+
+#### 2026-05-09 app review / agent-doc cleanup
+
+- Agent entrypoint normalized: `AGENTS.md` is the start file; `AGENT.md`,
+  `CLAUDE.md`, `Gemini.md`, `MEMORY.md`, and `UC_APP_STACK_REFERENCE.md` now
+  point back to this roadmap instead of competing with it.
+- Current TypeScript baseline: `npm run typecheck` passes.
+- Provider marketplace is now part of the runtime architecture. Current
+  ownership includes `llmProviders`, `circleIntegrations`,
+  `serviceProfileSouls`, `crossProviderRouter`, `universalInvoke`,
+  `billingPriority`, `llm-proxy`, `swanbot-ai`, and DB provider constraints.
+- Current provider set includes Anthropic, OpenAI, OpenRouter, Hugging Face,
+  Groq, Google AI, Mistral AI, Cohere, Perplexity, Together AI, Fireworks AI,
+  DeepSeek, z.ai, MiniMax, Ollama, GitHub Models, Replicate, Brave Search, and
+  browser/computer providers such as Browserbase and Stagehand.
+- Computer-use model policy clarified: the native Anthropic computer-use edge
+  loop must run a Sonnet-capable model; selected non-Sonnet models fall back to
+  the default Sonnet computer-use model.
+- Persisted chat metadata is now a bounded envelope for source, routing, usage,
+  artifacts, memory refs, browser plans, execution stream, and observed evals.
+  Keep new metadata compact enough for message rows.
+- Remaining auth risk: many older files still call `supabase.auth.getUser()` /
+  `getSession()` directly. New code should use `authSession` helpers or caught
+  direct calls; do not add fresh unguarded calls.
 
 #### 2026-04-21 optimization pass (Chat / SwanBot / OpenSwan)
 
@@ -369,17 +405,24 @@ Tracked fully in [`CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md`](./CHAT_AUTOMATION_
 - [x] **Phase CA-7b — Checkpoints wired to memory-bank writes** (closes CA-7 pending callsite): `memory_bank.write` registered as a new `CheckpointToolKind`. `writeMemoryBankWithCheckpoint()` in `memoryBankChatCommands.ts` wraps update/append/clear paths — users see a `checkpoint \`abc12345\`` id in the response and can restore via `ToolCallCheckpointStrip`. Restore handler reads/writes `circle_memory(circle_id, doc_kind)` directly to avoid pulling react-native through `sharedMemory.ts`. 5th case added to checkpoint smoke — green. Shipped 2026-04-22.
 - [x] **Phase CA-OS — OpenSwan console pop-up on chat dashboard**: New `src/components/openswan/OpenSwanConsole.tsx` — centered blurred-backdrop modal matching the Computer Use / Assign / Spawn pattern. Reuses `OPENSWAN_MODE_POLICIES` (8 modes with per-mode color + response contract). Quick Action `__OPENSWAN__` opens it; onSubmit syncs `chatMode` + fires `sendMessage(task)` so the task flows through the existing planner + dispatcher + HITL gate. Shipped 2026-04-22.
 
-- [ ] **Phase CA-8 — Hermes Delta (top 10 items)**. Canonical rollout: [`PHASE_CA-8_HERMES_DELTA_PLAN.md`](./PHASE_CA-8_HERMES_DELTA_PLAN.md). Sub-phases CA-8a..CA-8j. Summary:
-  - [x] CA-8a · agent-side context compression — `src/lib/agentContextCompression.ts` shipped 2026-04-22. Pure lib with injected summariser, tail-preserving cut, tool-pair protection, safe bail on summariser throw. 20 smoke assertions green. Integration into `agentExecutionCore.runAgent` is a separate trivial merge.
-  - [x] CA-8b · memory bounded-char caps (user_memory only) — pure `src/lib/userMemoryCaps.ts` + `appendUserMemory`/`replaceUserMemory` return structured `memory_cap_exceeded` error with `suggestion:'consolidate'`. Shared `circle_memory` HITL regime unchanged. 23 smoke assertions green. Shipped 2026-04-22.
-  - [x] CA-8c · skill sub-file support — new `circle_skill_files` table (migration `20260507_circle_skill_files.sql`, mirrored in `RUN_THIS_SQL.sql` §15) + read helpers `listLibrarySkillFiles` / `viewLibrarySkillFile` in `skillLibrary.ts` + pure relpath validator in `skillRelPath.ts` (29 smoke assertions green). Primary SKILL.md stays on `circle_skills.content` for back-compat. Importer + write-side in CA-8i. Shipped 2026-04-22.
-  - [ ] CA-8d · subagent summary-only gate (finishes pending 1c-1)
-  - [ ] CA-8e · `clarify` / `ask_user` timeout (120s default)
-  - [ ] CA-8f · provider fallback chain (Anthropic → OpenRouter on 529)
-  - [ ] CA-8g · trace export + evals scaffolding (prep for Phase 5 gate)
-  - [ ] CA-8h · context file priority + per-turn discovery append
-  - [ ] CA-8i · `skill_manage` sub-file actions (rides CA-8c)
-  - [ ] CA-8j · session lineage columns (`room_messages.parent_thread_id`, `.lineage_root_id`)
+- [x] **Phase CA-8 — Hermes Delta (top 10 items)**. Canonical rollout: [`PHASE_CA-8_HERMES_DELTA_PLAN.md`](./PHASE_CA-8_HERMES_DELTA_PLAN.md). All 10 sub-phases shipped 2026-04-22/23. Follow-up wiring items tracked below.
+  - [x] CA-8a · agent-side context compression — `src/lib/agentContextCompression.ts`. Pure lib: injected summariser, tail-preserving cut, tool-pair protection, safe bail on summariser throw. 20 smoke assertions. Shipped 2026-04-22.
+  - [x] CA-8b · memory bounded-char caps (user_memory) — `src/lib/userMemoryCaps.ts` + enforcement in `appendUserMemory`/`replaceUserMemory` (`memory_cap_exceeded` structured error, `suggestion:'consolidate'`). 23 smoke assertions. Shipped 2026-04-22.
+  - [x] CA-8c · skill sub-file support — `circle_skill_files` table + `listLibrarySkillFiles` / `viewLibrarySkillFile` + `skillRelPath.ts` safe-path validator. Primary body stays on `circle_skills.content`. Write-side shipped in CA-8i. 29 smoke assertions. Shipped 2026-04-22.
+  - [x] CA-8d · subagent summary-only gate — `src/lib/delegationGate.ts`: depth ≤ 2, concurrency ≤ 3, `redactSubagentOutput` (summary > finalText > placeholder, 1200-char cap). 43 smoke assertions. Gate library shipped 2026-04-23; wiring into `subagentRegistry` is a separate pending item (see follow-ups below, blocked on Phase 3 task #32).
+  - [x] CA-8e · `clarify` / `ask_user` timeout — `src/lib/clarifyTimeout.ts`: 120s default, `autoResolveOnTimeout`, `formatCountdown`. 41 smoke assertions. Shipped 2026-04-23; `HitlApprovalBanner` countdown UI is a pending follow-up.
+  - [x] CA-8f · provider fallback chain — `src/lib/agentProviders/fallbackChain.ts`: 429/529/5xx/408/timeout retryable → next provider; 400/401/403/404/422 bubble immediately. Observer fires per chain advance. 55+ smoke assertions. Shipped 2026-04-23.
+  - [x] CA-8g · trace export + evals scaffolding — `scripts/export-traces.ts`, `docs/evals/` (10 golden cases), `docs/EVOLVABLE_SURFACES.md` (evolvable surfaces cap: skill bodies + tool descriptions + prompt components only, never `.ts` files). Shipped 2026-04-23.
+  - [x] CA-8h · context file priority + per-turn discovery append — `CONTEXT_FILE_PRIORITY` exported const in `openswanContextDiscovery.ts`. UC order: `.openswan.md → AGENTS.md → AGENT.md → CLAUDE.md → .cursorrules`. First match wins; `resolveContextFilePriority(available)` returns null when nothing matches. 30 smoke assertions. Shipped 2026-04-23.
+  - [x] CA-8i · `skill_manage` sub-file actions — `write_file` / `remove_file` actions in `manageLibrarySkill.ts`; `applyApprovedSkillAction` extended in `skillLibraryWrite.ts`. Both gate on safe `relpath`; file HITL `agent_approvals` rows, never write directly. 40+ smoke assertions. Shipped 2026-04-23.
+  - [x] CA-8j · session lineage columns — `parent_thread_id` + `lineage_root_id` on `circle_chat_threads` (target table is `circle_chat_threads`, not `room_messages`). Helpers: `resolveLineageRoot`, `walkLineageAncestors`, `orderByLineage` in `src/lib/chatThreadLineage.ts`. Migration `20260508_chat_threads_lineage.sql`. 29 smoke assertions. Shipped 2026-04-23.
+
+- **Phase CA-8 follow-up wiring (pending — pure libraries shipped, integration not yet wired):**
+  - [ ] Wire `compressContextIfOversized(...)` into `agentExecutionCore.runAgent` pre-turn — 5-line change, every `runAgent(...)` call gets compression for free. (`src/lib/agentExecutionCore.ts`)
+  - [ ] Wire `describeUserMemoryUsage()` into system prompt memory block so the agent sees cap status and can self-consolidate before hitting the hard cap. (`src/lib/agentSystemPrompt.ts` or `agentPromptBuilder.ts`)
+  - [ ] Wire `canDelegate()` + `redactSubagentOutput()` into actual subagent spawner — blocked on Phase 3 task #32 (`subagentRegistry.ts` → `agentExecutionCore` swap).
+  - [ ] `HitlApprovalBanner` countdown UI — consume `planClarifyTimeout()` for visible countdown when `ask_user` is pending. (`src/components/HitlApprovalBanner.tsx`)
+  - [ ] Migrate `swanbot-ai` + `openswanSessionRuntime` onto `agentPromptBuilder.ts` so both surfaces share one ordered component sequence and prevent prompt-cache drift. (CA-4b pending note)
 
 Rule: do not extend the six legacy routers. New routing behavior goes into `buildChatAutomationPlan`; the executor is the only consumer of the plan.
 
@@ -435,23 +478,34 @@ After this adapter is in place, the 3 add-on tools in `src/lib/agentTools/` eith
 
 ## 5. SQL checklist (run in Supabase SQL Editor)
 
-All of `docs/RUN_THIS_SQL.sql` is idempotent. Current state of each section:
+`docs/RUN_THIS_SQL.sql` is idempotent helper SQL for agent/runtime work. Local
+files in `supabase/migrations/` are source, not proof that production has run
+them. Verify production state before depending on a table/column.
 
-| § | Description | Status |
+| Section | Description | Status |
 |---|---|---|
-| 1  | `user_custom_themes` + RLS | Applied |
-| 2  | `profiles.agent_appearance` JSONB | Applied |
-| 3  | `profiles.office_layout` JSONB | Applied |
-| 4  | `sweep_offline_agents` pg_cron | Applied |
-| 5  | `step_away_sessions` + RLS | Applied |
-| 6  | 6 hot-path indexes (fixed `circle_github_events.created_at`) | Applied |
-| 7  | Daily cleanup crons | **Pending re-run** (was blocked by §6 error) |
-| 8  | `NOTIFY pgrst` | Applied each run |
-| 9  | `agent_run_events` + `agent_runs.tool_calls` / `iteration_count` / `final_stop_reason` | `agent_run_events` applied; columns need patch (§9 referenced the wrong table name — fixed in source, run patch SQL in chat) |
+| 1 | `user_custom_themes` + RLS | Applied |
+| 2 | `profiles.agent_appearance` JSONB | Applied |
+| 3 | `profiles.office_layout` JSONB | Applied |
+| 4 | `sweep_offline_agents` pg_cron | Applied |
+| 5 | `step_away_sessions` + RLS | Applied |
+| 6 | hot-path indexes, including `circle_github_events.created_at` fix | Applied |
+| 7 | daily cleanup crons | Verify before relying on cron behavior |
+| 8 | `NOTIFY pgrst` | Run after schema changes |
+| 9 | `agent_run_events` + `agent_runs.tool_calls` / `iteration_count` / `final_stop_reason` | Verify columns before relying on run-ledger telemetry |
 | 10 | `circle_skills` + RLS | Applied |
-| 11 | `user_memory` + RLS | **Pending re-run** |
+| 10b | `agent_approvals.applied_at` | Applied in source SQL; verify in target DB |
+| 11 | `user_memory` + RLS | Applied in source SQL; verify in target DB |
+| 12 | `idx_claude_api_usage_circle_source_created` | Applied in source SQL; verify in target DB |
+| 13 | `chat_checkpoints` | Mirrored from `20260505_chat_checkpoints.sql`; verify in target DB |
+| 14 | `circle_memory` bank docs (`brief`, `active_context`, `progress`) | Mirrored from `20260506_circle_memory_bank.sql`; verify in target DB |
+| 15 | `circle_skill_files` | Mirrored from `20260507_circle_skill_files.sql`; verify in target DB |
+| 16 | Google Workspace OAuth credential tables | In source SQL; verify before using workspace tools |
+| 17 | chat-thread lineage columns | In source SQL; verify before lineage queries |
+| 18 | stale `computer_use_confirmations` sweeper | In source SQL; verify pg_cron before relying on cleanup |
+| 19 | `circle_site_credentials` schema fix — 8 columns + RPC functions missing from migration (`secret_kind`, `login_url`, `access_policy`, `expires_at`, `rotation_due_at`, `last_used_at`, `last_used_by`, + `list_*`/`store_*`/`get_*`/`delete_*` RPCs). See `docs/VAULT_REVIEW_2026-05-04.md` §P0. | **Pending P0** — every vault store/list call silently fails until this runs |
 
-When in doubt, rerun the whole file — every statement is guarded.
+When in doubt, rerun the relevant idempotent section and then reload schema.
 
 ---
 
@@ -464,11 +518,13 @@ When in doubt, rerun the whole file — every statement is guarded.
 5. **Retrieved content is untrusted.** Wrap `session_search` / `searchCircleMemory` results in `<untrusted_quoted>…</untrusted_quoted>` before giving them back to the model.
 6. **Don't delete the deprecated files in §2 yet** — they have live callers. Remove only after the migrations in Phase 1c and Phase 3 land.
 7. **Update this doc when you ship a phase item.** Move it from "Planned" to "Shipped" with a date.
-8. **New SQL goes into `RUN_THIS_SQL.sql`, not a new migration file** — we're bypassing Supabase's broken migration runner (per `CLAUDE.md`).
+8. **Agent-runtime SQL must stay mirrored.** Add normal app schema changes as migrations under `supabase/migrations/`. If the SQL is part of this agent/runtime roadmap, also mirror it into `docs/RUN_THIS_SQL.sql` and update this checklist.
 9. **Use `safeGetUser` / `safeGetSession`, not `supabase.auth.getUser()` directly.** See `src/lib/authSession.ts`.
 10. **Skills follow the [agentskills.io](https://agentskills.io) SKILL.md format** — YAML frontmatter + `## When to use / ## Procedure / ## Pitfalls / ## Verification` sections. No custom fields.
 11. **Edge functions call Anthropic through `supabase/functions/_claude/anthropic.ts`.** Use `callClaude()` for non-streaming requests, `computeCostUsd()` + `logClaudeUsage()` for streaming ones (import-only — streaming loop stays in the function). Never hand-roll `fetch("https://api.anthropic.com/v1/messages", ...)` — that drops you out of central pricing, cache accounting, and telemetry. If you need a feature the helper doesn't expose, extend the helper rather than bypass it.
 12. **Budget caps are a per-circle setting, not a code constant.** Long-running or cron-triggered agents (Computer Use, automation-executor) MUST read a USD cap from `circles.settings.<feature>_max_cost_usd` with a safe default. Enforce in the loop using `computeCostUsd()` so it matches billing.
+13. **Provider additions are cross-surface changes.** Keep `llmProviders`, `circleIntegrations`, `serviceProfileSouls`, `crossProviderRouter`, `billingPriority`, `llm-proxy`, `swanbot-ai`, UI cards, and DB provider constraints in sync.
+14. **Native computer-use execution needs a computer-use-capable model.** The Browserbase/Anthropic edge loop should stay on Sonnet-capable models; route other selected models through planning/validation or fall back before the native screenshot/action loop.
 
 ---
 

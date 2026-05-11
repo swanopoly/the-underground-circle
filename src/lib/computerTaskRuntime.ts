@@ -7,6 +7,13 @@ import {
 } from './computerTaskExecution';
 import { executeComputerFileTask } from './computerFileAdapter';
 import { executeComputerAppTask } from './computerAppAdapter';
+import { listApiKeys } from './llmProviders';
+import {
+  loadCircleBusinessModelProfiles,
+  buildImplicitBusinessModelProfiles,
+  planBusinessModelForComputerTask,
+  type BusinessModelTaskPlan,
+} from './businessModelProfiles';
 
 export type ComputerTaskRuntimeAdapterId =
   | 'browser_adapter'
@@ -70,14 +77,33 @@ export async function executeComputerTaskWithAgent(args: {
   model?: string;
   audit: ComputerCapabilityAudit | null;
   grantedIds?: import('./computerTaskGrants').ComputerTaskGrantId[];
+  businessModelPlan?: BusinessModelTaskPlan | null;
   chatHistory?: string;
   sessionArchiveContext?: string;
   replyTo?: string;
 }): Promise<ComputerTaskRuntimeResult> {
+  const previewForRouting = prepareComputerTaskExecution({
+    task: args.task,
+    audit: args.audit,
+    grantedIds: args.grantedIds,
+  }).preview;
+  const businessModelPlan = args.businessModelPlan || await (async () => {
+    const [businessProfiles, providerKeys] = await Promise.all([
+      loadCircleBusinessModelProfiles(args.circleId).catch(() => []),
+      listApiKeys().catch(() => []),
+    ]);
+    return planBusinessModelForComputerTask({
+      task: args.task,
+      preview: previewForRouting,
+      profiles: [...businessProfiles, ...buildImplicitBusinessModelProfiles(providerKeys)],
+      providerKeys,
+    });
+  })();
   const execution = prepareComputerTaskExecution({
     task: args.task,
     audit: args.audit,
     grantedIds: args.grantedIds,
+    businessModelPlan,
   });
 
   const warnings: string[] = [];

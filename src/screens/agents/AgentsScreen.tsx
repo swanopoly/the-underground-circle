@@ -8,7 +8,7 @@ import {
   View,
 } from 'react-native';
 import FlatIcon from '../../components/FlatIcon';
-import { getAutoConnectConnections, getAutoConnectSessions, subscribeAutoConnect } from '../../lib/agentAutoConnect';
+import { getAutoConnectConnections, getAutoConnectSessions, subscribeAutoConnect } from '../../lib/agentAutoConnectState';
 import { type AgentIdentity, loadAgentIdentities } from '../../lib/agentIdentity';
 import { type OfficeAgent, getOfficeStatusColor, getOfficeStatusLabel, isConnectedOfficeStatus, sessionsToAgents } from '../../lib/officeAgents';
 

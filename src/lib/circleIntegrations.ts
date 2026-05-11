@@ -75,6 +75,7 @@ export type CircleIntegrationProvider =
   // ── Wave 2: native LLM providers (BYOK) ──
   | 'anthropic'
   | 'openai'
+  | 'openai_compatible'
   | 'google_ai'
   | 'groq'
   | 'mistral_ai'
@@ -939,6 +940,19 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
       { key: 'defaultModel', label: 'Default Model', placeholder: 'gpt-5' },
     ],
     validationHints: ['Get the key from https://platform.openai.com/api-keys. Set organization_id if you belong to multiple orgs.'],
+  },
+  openai_compatible: {
+    provider: 'openai_compatible',
+    label: 'Business Models',
+    description: 'Private or self-hosted OpenAI-compatible model endpoints for company-specific task, browser, and desktop agents.',
+    capabilityFlags: ['openai_compatible_chat', 'private_model_endpoint', 'function_calling', 'agent_routing'],
+    requiredSecretKeys: ['api_key'],
+    optionalSecretKeys: ['endpoint_url'],
+    metadataFields: [
+      { key: 'endpoint_url', label: 'Endpoint URL', placeholder: 'https://models.company.com/v1 or /v1/chat/completions' },
+      { key: 'defaultModel', label: 'Default Model', placeholder: 'company-agent' },
+    ],
+    validationHints: ['Use any endpoint that accepts OpenAI Chat Completions request/response shape. Store this per user so usage bills to the business account.'],
   },
   google_ai: {
     provider: 'google_ai',

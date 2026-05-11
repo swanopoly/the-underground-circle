@@ -68,14 +68,11 @@ export function buildAvailableSet(
   keys: Array<{ provider: LLMProvider; isActive: boolean }>,
   opts?: { openswanReachable?: boolean },
 ): RouteResolutionOptions['available'] {
-  const set = new Set<'openrouter' | 'huggingface' | 'anthropic' | 'openai' | 'groq' | 'openswan'>();
+  const set = new Set<LLMProvider | 'anthropic' | 'openswan'>();
   for (const k of keys) {
     if (!k.isActive) continue;
-    if (k.provider === 'openrouter')   set.add('openrouter');
-    if (k.provider === 'huggingface')  set.add('huggingface');
-    if (k.provider === 'anthropic')    set.add('anthropic');
-    if (k.provider === 'openai')       set.add('openai');
-    if (k.provider === 'groq')         set.add('groq');
+    set.add(k.provider);
+    if (k.provider === 'anthropic') set.add('anthropic');
   }
   if (opts?.openswanReachable) set.add('openswan');
   return set;
@@ -127,9 +124,26 @@ async function invokeOneRoute(
   route: ProviderRoute,
   req: UniversalInvokeRequest,
 ): Promise<{ response: string; usage?: LLMProxyResponse['usage'] }> {
-  if (route.provider === 'openrouter' || route.provider === 'openai' || route.provider === 'groq') {
+  const proxyProviders: ReadonlySet<string> = new Set([
+    'openrouter',
+    'openai_compatible',
+    'openai',
+    'groq',
+    'google_ai',
+    'mistral_ai',
+    'cohere',
+    'perplexity',
+    'together_ai',
+    'fireworks_ai',
+    'deepseek',
+    'zai',
+    'minimax',
+    'ollama',
+    'github-models',
+  ]);
+  if (proxyProviders.has(route.provider)) {
     const result = await invokeLLMProxy({
-      provider: route.provider,
+      provider: route.provider as LLMProvider,
       model: route.modelId,
       messages: req.messages,
       circleId: req.circleId,
@@ -204,12 +218,11 @@ export async function invokeAnyChat(
 ): Promise<UniversalInvokeResult> {
   const available = req.userKeys
     ? buildAvailableSet(req.userKeys, { openswanReachable: req.openswanReachable })
-    : new Set<'openrouter' | 'huggingface' | 'anthropic' | 'openai' | 'groq' | 'openswan'>(['openrouter']);
+    : new Set<LLMProvider | 'anthropic' | 'openswan'>(['openrouter']);
   // Honor the user's billing-priority preference (set in the
   // marketplace) when the caller didn't pin an explicit order.
-  // Default `prefer_direct` keeps native keys ahead of OpenRouter,
-  // which is what most users actually want — pay providers
-  // directly with no markup.
+  // Default is cost-sensitive: local/free/cheap connected providers before
+  // direct Anthropic, unless the user explicitly changes Marketplace routing.
   const prefer = req.prefer ?? preferenceForMode(getProviderRoutingMode());
   const routes = resolveProviderRoutes(req.modelId, {
     available,

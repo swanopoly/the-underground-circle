@@ -15,12 +15,31 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { exec, execSync } = require('child_process');
+const {
+  clampLaunchCount,
+  loadManagedTerminalSessions,
+  makeLaunchId,
+  makeTerminalTitle,
+  normalizeCliPrompt,
+  openTerminal,
+  promptPreview,
+  isAllowedPairOrigin,
+  readJsonBody,
+  safeProjectDir,
+  saveManagedTerminalSession,
+  sendToTerminalByTitle,
+  shellQuote,
+  shellTextArg,
+} = require('./terminal-launch-utils');
 
 const PORT = 7780;
 const ACTIVE_THRESHOLD = 60_000;    // 60s → active (Gemini sessions update less frequently)
 const IDLE_THRESHOLD = 86_400_000;  // 24h → show sessions from today
 const SCAN_INTERVAL = 5000;         // Scan every 5s
+const LAUNCHED_SESSION_TTL = 12 * 60 * 60_000;
+const TOKEN_FILE = path.join(os.homedir(), '.uc-desktop-token');
 const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 // Gemini CLI's OAuth client ID (public, embedded in the CLI)
@@ -29,7 +48,7 @@ const GEMINI_CLI_CLIENT_ID = '681255809395-oo8ft2oprdrp9e3aqf6av3hmdib135j.apps.
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token',
   'Access-Control-Allow-Private-Network': 'true',
   'Content-Type': 'application/json',
 };
@@ -38,6 +57,24 @@ let cachedSessions = [];
 let lastScanTime = '';
 let oauthCreds = null;
 let userEmail = '';
+let launchedSessions = loadManagedTerminalSessions('gemini');
+
+function getOrCreateBridgeToken() {
+  try {
+    if (fs.existsSync(TOKEN_FILE)) {
+      const existing = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+      if (existing.length >= 32) return existing;
+    }
+  } catch {}
+  const token = crypto.randomBytes(32).toString('hex');
+  try { fs.writeFileSync(TOKEN_FILE, `${token}\n`, { mode: 0o600 }); } catch {}
+  return token;
+}
+
+function hasBridgeAuth(req) {
+  const sent = req.headers['x-uc-desktop-token'];
+  return typeof sent === 'string' && sent === getOrCreateBridgeToken();
+}
 
 // ── WSL-aware path resolution ────────────────────────────────────────────────
 
@@ -330,7 +367,20 @@ function scanSessions() {
     }
   }
 
-  return sessions;
+  launchedSessions = launchedSessions.filter((s) => {
+    const age = Date.now() - new Date(s.lastActivity).getTime();
+    return age < LAUNCHED_SESSION_TTL;
+  }).map((s) => {
+    const age = Date.now() - new Date(s.lastActivity).getTime();
+    return { ...s, status: age < ACTIVE_THRESHOLD ? s.status : 'idle' };
+  });
+
+  const seen = new Set();
+  return [...launchedSessions, ...sessions].filter((s) => {
+    if (seen.has(s.sessionId)) return false;
+    seen.add(s.sessionId);
+    return true;
+  });
 }
 
 function parseGeminiSession(filePath, fstat, projectName) {
@@ -420,6 +470,170 @@ function parseGeminiSession(filePath, fstat, projectName) {
   }
 }
 
+function buildGeminiManagedPrompt({ sessionId, displayName, index, count, prompt }) {
+  const cleanPrompt = normalizeCliPrompt(prompt) || `Stand by for delegated work from The Underground Circle. You are session ${index + 1} of ${count}.`;
+  return [
+    `[UC-GEMINI-CLI:${sessionId}]`,
+    `You are ${displayName}, a managed Gemini CLI terminal session launched from The Underground Circle.`,
+    `Session ${index + 1} of ${count}. Work independently and keep concise terminal notes.`,
+    '',
+    'User task:',
+    cleanPrompt,
+  ].join('\n');
+}
+
+function registerLaunchedGeminiSession(data) {
+  const session = {
+    sessionId: data.sessionId,
+    projectDir: data.projectDir || process.cwd(),
+    model: data.model || 'gemini-cli',
+    status: data.status || 'active',
+    task: data.task || 'Gemini CLI terminal session',
+    lastActivity: data.lastActivity || new Date().toISOString(),
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    messageCount: 0,
+    recentActions: data.recentActions || [],
+    thinkingEnabled: false,
+    displayName: data.displayName,
+    prompt: data.prompt,
+    launchId: data.launchId,
+    launchedAt: data.launchedAt,
+    terminal: data.terminal,
+    terminalPid: data.terminalPid,
+    launchError: data.launchError,
+    terminalTitle: data.terminalTitle,
+    manageable: Boolean(data.terminalTitle),
+  };
+  const idx = launchedSessions.findIndex((s) => s.sessionId === session.sessionId);
+  if (idx >= 0) launchedSessions[idx] = session;
+  else launchedSessions.push(session);
+  if (session.terminalTitle) saveManagedTerminalSession('gemini', session);
+  return session;
+}
+
+function buildGeminiLaunchCommand({ cwd, prompt, model, yolo = false }) {
+  const parts = ['gemini'];
+  if (model) parts.push('--model', shellQuote(model));
+  if (yolo) parts.push('--yolo');
+  parts.push('--prompt-interactive', shellTextArg(prompt));
+  return `cd ${shellQuote(cwd)} && ${parts.join(' ')}`;
+}
+
+async function launchGeminiCliSessions(data) {
+  const prompts = Array.isArray(data.prompts)
+    ? data.prompts.map((p) => normalizeCliPrompt(p)).filter(Boolean)
+    : [];
+  const count = clampLaunchCount(data.count || prompts.length || 1);
+  const cwd = safeProjectDir(data.cwd || data.projectDir);
+  const launchId = data.launchId || makeLaunchId('gemini-cli-launch');
+  const model = data.model ? String(data.model).trim() : '';
+  const yolo = Boolean(data.yolo);
+  const basePrompt = normalizeCliPrompt(data.prompt || data.task || '');
+  const sessions = [];
+  const failed = [];
+
+  for (let i = 0; i < count; i++) {
+    const sessionId = `${launchId}-${i + 1}`;
+    const displayName = Array.isArray(data.names) && data.names[i] ? String(data.names[i]) : `Gemini CLI #${i + 1}`;
+    const cleanPrompt = prompts[i] || basePrompt || `Stand by as ${displayName}. Wait for a delegated task from The Underground Circle.`;
+    const cliPrompt = buildGeminiManagedPrompt({ sessionId, displayName, index: i, count, prompt: cleanPrompt });
+    const command = buildGeminiLaunchCommand({ cwd, prompt: cliPrompt, model, yolo });
+    const launchedAt = new Date().toISOString();
+    const terminalTitle = makeTerminalTitle('Gemini CLI', displayName, sessionId);
+    const terminalResult = await openTerminal(command, terminalTitle);
+    const session = registerLaunchedGeminiSession({
+      sessionId,
+      projectDir: cwd,
+      model: model || 'gemini-cli',
+      status: terminalResult.ok ? 'active' : 'idle',
+      displayName,
+      task: promptPreview(cleanPrompt, 240),
+      prompt: cleanPrompt,
+      launchId,
+      launchedAt,
+      lastActivity: launchedAt,
+      terminal: terminalResult.terminal,
+      terminalPid: terminalResult.pid,
+      terminalTitle: terminalResult.terminalTitle || terminalTitle,
+      launchError: terminalResult.ok ? undefined : terminalResult.error,
+      recentActions: [
+        terminalResult.ok
+          ? `Launched in ${terminalResult.terminal || 'terminal'}`
+          : `Launch failed: ${terminalResult.error || 'unknown error'}`,
+        `Prompt: ${promptPreview(cleanPrompt, 160)}`,
+      ],
+    });
+    sessions.push(session);
+    if (!terminalResult.ok) failed.push({ sessionId, displayName, error: terminalResult.error || 'Launch failed' });
+  }
+
+  return {
+    ok: failed.length === 0,
+    launchId,
+    sessions,
+    launched: sessions.length - failed.length,
+    failed,
+    projectDir: cwd,
+  };
+}
+
+function findLaunchedGeminiSession(sessionId) {
+  const key = String(sessionId || '').trim().toLowerCase();
+  if (!key) return null;
+  return cachedSessions.find((s) =>
+    String(s.sessionId || '').toLowerCase() === key
+    || String(s.displayName || '').toLowerCase() === key
+    || String(s.sessionId || '').toLowerCase().startsWith(key)
+  ) || null;
+}
+
+function buildGeminiFollowupPrompt(message) {
+  return [
+    '[UC-GEMINI-CLI-CONTROL]',
+    'Follow-up instruction from The Underground Circle chat:',
+    normalizeCliPrompt(message),
+  ].join('\n');
+}
+
+async function sendToLaunchedGeminiSession(data) {
+  const session = findLaunchedGeminiSession(data.sessionId || data.target || data.displayName);
+  if (!session) return { ok: false, error: 'Gemini CLI session not found.' };
+  if (!session.terminalTitle) {
+    return {
+      ok: false,
+      error: 'This Gemini CLI session was detected but was not launched by The Underground Circle, so it cannot be safely targeted from chat. Launch a managed Gemini CLI session from chat first.',
+      session,
+    };
+  }
+  const message = normalizeCliPrompt(data.message || data.command || data.prompt || '');
+  if (!message) return { ok: false, error: 'Missing message.' };
+  const result = await sendToTerminalByTitle(session.terminalTitle, buildGeminiFollowupPrompt(message));
+  if (!result.ok) return { ok: false, error: result.error || 'Terminal send failed.', session };
+
+  const updated = registerLaunchedGeminiSession({
+    ...session,
+    status: 'active',
+    task: promptPreview(message, 240),
+    prompt: message,
+    lastActivity: new Date().toISOString(),
+    messageCount: (session.messageCount || 0) + 1,
+    recentActions: [
+      ...(session.recentActions || []).slice(-4),
+      `Chat sent: ${promptPreview(message, 120)}`,
+    ],
+  });
+  doScan();
+  return {
+    ok: true,
+    provider: 'gemini-cli',
+    sessionId: updated.sessionId,
+    displayName: updated.displayName,
+    message: `Sent to ${updated.displayName || updated.sessionId}.`,
+    session: updated,
+  };
+}
+
 // ── Periodic scan ───────────────────────────────────────────────────────────
 
 function doScan() {
@@ -453,18 +667,68 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({
       ok: true,
       agent: 'gemini-cli',
-      version: '1.0.0',
+      bridge: 'gemini-cli',
+      version: '1.1.0',
       sessions: cachedSessions.length,
       auth: oauthCreds ? 'oauth' : 'none',
       email: userEmail,
       geminiDir: GEMINI_DIR,
+      capabilities: ['sessions', 'send', 'launch', 'terminal-send'],
     }));
+    return;
+  }
+
+  if (url === '/pair' && req.method === 'POST') {
+    if (!isAllowedPairOrigin(req)) {
+      res.writeHead(403, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Pairing origin not allowlisted.' }));
+      return;
+    }
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: true, token: getOrCreateBridgeToken(), bridge: 'gemini-cli' }));
     return;
   }
 
   if (url === '/sessions') {
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ sessions: cachedSessions, timestamp: lastScanTime }));
+    return;
+  }
+
+  if (url === '/launch' && req.method === 'POST') {
+    if (!hasBridgeAuth(req)) {
+      res.writeHead(401, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop bridge token' }));
+      return;
+    }
+    try {
+      const data = await readJsonBody(req);
+      const result = await launchGeminiCliSessions(data);
+      doScan();
+      res.writeHead(result.ok ? 200 : 207, CORS);
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      res.writeHead(400, CORS);
+      res.end(JSON.stringify({ ok: false, error: e.message || 'Launch failed' }));
+    }
+    return;
+  }
+
+  if (url === '/terminal/send' && req.method === 'POST') {
+    if (!hasBridgeAuth(req)) {
+      res.writeHead(401, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop bridge token' }));
+      return;
+    }
+    try {
+      const data = await readJsonBody(req);
+      const result = await sendToLaunchedGeminiSession(data);
+      res.writeHead(result.ok ? 200 : 409, CORS);
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      res.writeHead(400, CORS);
+      res.end(JSON.stringify({ ok: false, error: e.message || 'Send failed' }));
+    }
     return;
   }
 
@@ -565,7 +829,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   res.writeHead(404, CORS);
-  res.end(JSON.stringify({ error: 'Not found. Use /health, /sessions, /auth, or /send' }));
+  res.end(JSON.stringify({ error: 'Not found. Use /health, /sessions, /auth, /launch, /terminal/send, or /send' }));
 });
 
 server.on('error', (err) => {
@@ -588,5 +852,7 @@ server.listen(PORT, () => {
   console.log(`    GET  /health    — Bridge status + auth info`);
   console.log(`    GET  /sessions  — Active Gemini CLI sessions`);
   console.log(`    GET  /auth      — OAuth authentication status`);
+  console.log(`    POST /launch    — Launch visible Gemini CLI terminal sessions`);
+  console.log(`    POST /terminal/send — Send a chat instruction to a managed terminal session`);
   console.log(`    POST /send      — Send message via Gemini API (uses Gmail OAuth)\n`);
 });

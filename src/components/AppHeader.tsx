@@ -5,7 +5,6 @@ import {
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { createLinkInvite } from '../lib/invites';
-import { reconnectAllBridges } from '../lib/agentAutoConnect';
 import { navigateToUnifiedProfile } from '../lib/profileNavigation';
 import FlatIcon from './FlatIcon';
 
@@ -332,6 +331,7 @@ export default function AppHeader({ navigation, title }: AppHeaderProps) {
               setBridgeConnecting(true);
               setBridgeResult('idle');
               try {
+                const { reconnectAllBridges } = await import('../lib/agentAutoConnect');
                 const status = await reconnectAllBridges();
                 const total = [status.claudeCode, status.codex, status.gemini, status.cursor].filter(Boolean).length;
                 setBridgeResult(total > 0 ? 'success' : 'partial');

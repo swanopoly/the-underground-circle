@@ -56,6 +56,8 @@ const PERMISSION_OPTIONS: { value: ComputerUsePermission; label: string; desc: s
 
 const ACTION_TYPE_LABELS: Record<string, string> = {
   navigate: 'Navigate',
+  observe: 'Observe',
+  extract: 'Extract',
   click: 'Click',
   fill: 'Fill form',
   screenshot: 'Screenshot',

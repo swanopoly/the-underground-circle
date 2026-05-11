@@ -1,7 +1,8 @@
 /**
  * LlmProviderMarketplace — Marketplace section for connecting LLM API
- * keys (OpenAI, Anthropic, OpenRouter, Groq, HuggingFace, Replicate,
- * Ollama, Z.AI, MiniMax). Sits at the top of the Marketplace tab so
+ * keys (business OpenAI-compatible endpoints, OpenAI, Anthropic,
+ * OpenRouter, Groq, HuggingFace, Replicate, Ollama, Z.AI, MiniMax).
+ * Sits at the top of the Marketplace tab so
  * users can wire up the providers their agents will run on without
  * hunting through Settings.
  *
@@ -86,6 +87,13 @@ const PROVIDER_CARDS: ProviderCardSpec[] = [
     glyph: 'A',
   },
   {
+    id: 'openai_compatible',
+    label: 'Business Models',
+    blurb: 'Connect a private OpenAI-compatible endpoint for company-tuned task agents.',
+    accent: '#14b8a6',
+    glyph: 'B',
+  },
+  {
     id: 'openai',
     label: 'OpenAI',
     blurb: 'GPT-4.1, 4o, o3 / o4 reasoning models.',
@@ -164,6 +172,7 @@ export default function LlmProviderMarketplace(_props: Props) {
   const { keys, isLoading, refresh, hasProvider } = useUserApiKeys();
   const [expandedId, setExpandedId] = useState<LLMProvider | null>(null);
   const [keyInput, setKeyInput] = useState('');
+  const [endpointInput, setEndpointInput] = useState('');
   const [labelInput, setLabelInput] = useState('');
   const [busy, setBusy] = useState<LLMProvider | null>(null);
   const [errorById, setErrorById] = useState<Partial<Record<LLMProvider, string>>>({});
@@ -192,6 +201,7 @@ export default function LlmProviderMarketplace(_props: Props) {
   const handleStartConnect = useCallback((id: LLMProvider) => {
     setExpandedId(id);
     setKeyInput('');
+    setEndpointInput('');
     setLabelInput('');
     setTestStatus('idle');
     setErrorById((prev) => ({ ...prev, [id]: undefined }));
@@ -200,14 +210,24 @@ export default function LlmProviderMarketplace(_props: Props) {
   const handleCancel = useCallback(() => {
     setExpandedId(null);
     setKeyInput('');
+    setEndpointInput('');
     setLabelInput('');
     setTestStatus('idle');
   }, []);
 
   const handleSave = useCallback(async (provider: LLMProvider) => {
     const trimmedKey = keyInput.trim();
+    const trimmedEndpoint = endpointInput.trim();
     if (!trimmedKey) {
       setErrorById((prev) => ({ ...prev, [provider]: 'Paste an API key first.' }));
+      return;
+    }
+    if (provider === 'openai_compatible' && !trimmedEndpoint) {
+      setErrorById((prev) => ({ ...prev, [provider]: 'Paste the OpenAI-compatible endpoint URL first.' }));
+      return;
+    }
+    if (provider === 'openai_compatible' && !labelInput.trim()) {
+      setErrorById((prev) => ({ ...prev, [provider]: 'Enter the model or deployment ID for this endpoint.' }));
       return;
     }
     setBusy(provider);
@@ -217,7 +237,8 @@ export default function LlmProviderMarketplace(_props: Props) {
     // Validate the key against the live provider before persisting,
     // so users get instant feedback ("invalid key", "rate limited",
     // "model not found") instead of a silent failure later in chat.
-    const test = await testApiKey(provider, trimmedKey);
+    const modelId = provider === 'openai_compatible' ? labelInput.trim() : undefined;
+    const test = await testApiKey(provider, trimmedKey, trimmedEndpoint || undefined, modelId);
     if (!test.success) {
       setBusy(null);
       setTestStatus('fail');
@@ -225,7 +246,7 @@ export default function LlmProviderMarketplace(_props: Props) {
       return;
     }
 
-    const stored = await storeApiKey(provider, trimmedKey, labelInput.trim() || 'default');
+    const stored = await storeApiKey(provider, trimmedKey, labelInput.trim() || 'default', trimmedEndpoint || undefined);
     setBusy(null);
     if (stored.error) {
       setTestStatus('fail');
@@ -235,9 +256,10 @@ export default function LlmProviderMarketplace(_props: Props) {
     setTestStatus('pass');
     setExpandedId(null);
     setKeyInput('');
+    setEndpointInput('');
     setLabelInput('');
     await refresh();
-  }, [keyInput, labelInput, refresh]);
+  }, [keyInput, endpointInput, labelInput, refresh]);
 
   const handleDisconnect = useCallback(async (provider: LLMProvider) => {
     const match = keys.find((k) => k.provider === provider && k.isActive);
@@ -441,11 +463,22 @@ export default function LlmProviderMarketplace(_props: Props) {
                     autoCorrect={false}
                     secureTextEntry={Platform.OS !== 'web'}
                   />
+                  {card.id === 'openai_compatible' && (
+                    <TextInput
+                      style={[styles.input, styles.inputCompact]}
+                      value={endpointInput}
+                      onChangeText={setEndpointInput}
+                      placeholder="Endpoint URL (https://models.company.com/v1)"
+                      placeholderTextColor="#475569"
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                    />
+                  )}
                   <TextInput
                     style={[styles.input, styles.inputCompact]}
                     value={labelInput}
                     onChangeText={setLabelInput}
-                    placeholder="Optional label (e.g. personal, work)"
+                    placeholder={card.id === 'openai_compatible' ? 'Model/deployment ID (e.g. company-agent)' : 'Optional label (e.g. personal, work)'}
                     placeholderTextColor="#475569"
                   />
                   {error && <Text style={styles.errorText}>{error}</Text>}

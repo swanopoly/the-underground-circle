@@ -1,7 +1,10 @@
 import type { ComputerCapabilityAudit } from './computerCapabilityRegistry';
 import type { ComputerTaskGrantPlan } from './computerTaskGrants';
 import type { ComputerTaskPlanPreview } from './computerTaskPlanner';
+import { analyzeBrowserTask } from './browserTaskIntent';
+import { chooseBrowserAutomationBackendPreference } from './browserAutomationBackend';
 import { buildBrowserbaseWorkflowPromptBlock } from './browserbaseWorkflowIntent';
+import { formatBusinessModelTaskBlock, type BusinessModelTaskPlan } from './businessModelProfiles';
 
 export function buildComputerTaskDispatchPrefix(args: {
   task: string;
@@ -13,6 +16,7 @@ export function buildComputerTaskDispatchPrefix(args: {
   };
   audit: ComputerCapabilityAudit | null;
   grants: ComputerTaskGrantPlan;
+  businessModelPlan?: BusinessModelTaskPlan | null;
 }): string {
   const lines: string[] = [
     'COMPUTER TASK DISPATCH CONTEXT',
@@ -45,8 +49,19 @@ export function buildComputerTaskDispatchPrefix(args: {
     }
   }
 
+  const businessModelBlock = formatBusinessModelTaskBlock(args.businessModelPlan || null);
+  if (businessModelBlock) {
+    lines.push(businessModelBlock);
+  }
+
   if (args.preview.browserbaseWorkflow && args.preview.browserbaseWorkflow.kind !== 'general_browser') {
     lines.push(buildBrowserbaseWorkflowPromptBlock(args.preview.browserbaseWorkflow));
+  }
+
+  const browserIntent = analyzeBrowserTask(args.task);
+  const backendPreference = chooseBrowserAutomationBackendPreference(browserIntent);
+  if (args.preview.kind === 'browser_task' || args.preview.kind === 'hybrid_task') {
+    lines.push(`Browser backend policy: ${backendPreference.costTier === 'free_local' ? 'prefer local browser bridge' : 'prefer Browserbase/Stagehand'} — ${backendPreference.reason}`);
   }
 
   if (args.preview.kind === 'file_task') {
@@ -54,7 +69,7 @@ export function buildComputerTaskDispatchPrefix(args: {
   } else if (args.preview.kind === 'app_task') {
     lines.push('Execution guidance: prioritize connected apps, MCP tools, integrations, and bridges. Be explicit about missing access or missing connectors.');
   } else if (args.preview.kind === 'browser_task') {
-    lines.push('Execution guidance: prioritize Browserbase/remote browser execution, visible checkpoints, domain scope, vault-safe login use, and explicit approvals for form submission or external state changes.');
+    lines.push('Execution guidance: follow the browser backend policy, use DOM/role actions before screenshots or coordinates, keep domain scope tight, use vault-safe login instructions, and require explicit approval for form submission or external state changes.');
   } else if (args.preview.kind === 'hybrid_task') {
     lines.push('Execution guidance: break the task into ordered surfaces such as files, apps, and browser. State what you can do now, what access is missing, and the recommended next step.');
   } else {

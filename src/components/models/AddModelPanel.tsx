@@ -15,6 +15,8 @@ interface Props {
   onModelAdded: (model: CustomModel) => void;
   onClose: () => void;
   accentColor?: string;
+  marketplaceConnected?: boolean;
+  marketplaceHint?: string;
 }
 
 function formatNum(n: number): string {
@@ -23,7 +25,13 @@ function formatNum(n: number): string {
   return String(n);
 }
 
-export default function AddModelPanel({ onModelAdded, onClose, accentColor = '#6366f1' }: Props) {
+export default function AddModelPanel({
+  onModelAdded,
+  onClose,
+  accentColor = '#6366f1',
+  marketplaceConnected,
+  marketplaceHint,
+}: Props) {
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<HFCategory>('text-generation');
   const [results, setResults] = useState<HFModelResult[]>([]);
@@ -85,7 +93,11 @@ export default function AddModelPanel({ onModelAdded, onClose, accentColor = '#6
       <View style={s.header}>
         <View>
           <Text style={s.title}>Hugging Face Models</Text>
-          <Text style={s.subtitle}>Browse and add AI models to your workspace</Text>
+          <Text style={s.subtitle}>
+            {marketplaceConnected
+              ? 'Browse and add models that can use your connected Hugging Face key'
+              : marketplaceHint || 'Browse and add AI models to your workspace'}
+          </Text>
         </View>
         <Pressable onPress={onClose} accessibilityRole="button" style={s.closeBtn}>
           <Text style={s.closeBtnText}>X</Text>

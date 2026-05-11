@@ -30,7 +30,7 @@ const TAIL_BYTES = 32768;           // Read last 32KB of each transcript
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token',
   'Access-Control-Allow-Private-Network': 'true',
   'Content-Type': 'application/json',
 };

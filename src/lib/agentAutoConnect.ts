@@ -67,6 +67,18 @@ import { areBridgesAvailable } from './bridgeEnvironment';
 import { Platform } from 'react-native';
 import { devLog } from './devLog';
 import { safeGetUserId } from './authSession';
+import {
+  clearAutoConnectStateListeners,
+  publishAutoConnectSnapshot,
+  setAutoConnectCircleContext,
+} from './agentAutoConnectState';
+
+export {
+  getAutoConnectConnections,
+  getAutoConnectSessions,
+  isAutoConnectRunning,
+  subscribeAutoConnect,
+} from './agentAutoConnectState';
 
 // ── Singleton state ──────────────────────────────────────────────────────────
 
@@ -158,10 +170,6 @@ let _consecutiveReconnectFailures = 0;
 let _hasWarnedPersistentReconnectFailure = false;
 const PERSISTENT_RECONNECT_WARN_AFTER = 20; // ~10 min at the 30 s cap
 
-// Listeners that want to know when sessions/connections change
-type Listener = () => void;
-const _listeners = new Set<Listener>();
-
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const RETRY_BASE_MS = 5000;      // Initial retry interval
@@ -183,35 +191,19 @@ function hasAuthFailure(conn: AgentConnection): boolean {
   return typeof conn.error === 'string' && /authentication failed|wrong or missing token/i.test(conn.error);
 }
 
-// ── Public getters ───────────────────────────────────────────────────────────
-
-export function isAutoConnectRunning(): boolean {
-  return _running;
-}
-
-export function getAutoConnectConnections(): AgentConnection[] {
-  return _connections;
-}
-
-export function getAutoConnectSessions(): Map<string, any[]> {
-  return _sessionsMap;
-}
-
-/** Subscribe to state changes. Returns unsubscribe fn. */
-export function subscribeAutoConnect(listener: Listener): () => void {
-  _listeners.add(listener);
-  return () => _listeners.delete(listener);
-}
-
 function _notify() {
-  for (const fn of _listeners) {
-    try { fn(); } catch {}
-  }
+  publishAutoConnectSnapshot({
+    running: _running,
+    connections: _connections,
+    sessionsMap: _sessionsMap,
+    circleId: _circleId,
+  });
 }
 
 /** Allow OfficeTab to set the circleId once it knows it, so we can publish to DB */
 export function setAutoConnectCircleId(circleId: string) {
   _circleId = circleId;
+  setAutoConnectCircleContext(circleId);
 }
 
 /** Allow OfficeTab to update connections (e.g. user adds/removes) */
@@ -313,6 +305,7 @@ export async function startAgentAutoConnect() {
   if (_running) return;
   _running = true;
   _retryAttempt = 0;
+  _notify();
   console.log('[agentAutoConnect] Starting app-level agent detection...');
 
   if (Platform.OS === 'web') {
@@ -422,9 +415,11 @@ export function stopAgentAutoConnect() {
   _cursorStarting = false;
   _visibilityDebounce = false;
   _circleId = null;
+  setAutoConnectCircleContext(null);
   _retryAttempt = 0;
   _stopVisibilityListener();
-  _listeners.clear();
+  _notify();
+  clearAutoConnectStateListeners();
   console.log('[agentAutoConnect] Stopped');
 }
 
@@ -820,9 +815,11 @@ function _startGeminiPoller() {
     // Publish to circle DB if we have a circleId
     if (!_geminiPublished && _circleId) {
       _geminiPublished = true;
-      publishGeminiCliAgent(_circleId, sessions.length).catch(err =>
+      publishGeminiCliAgent(_circleId, sessions.length, sessions).catch(err =>
         console.error('[agentAutoConnect] Failed to publish Gemini CLI agent:', err),
       );
+    } else if (_geminiPublished && _circleId) {
+      publishGeminiCliAgent(_circleId, sessions.length, sessions).catch(() => {});
     }
     if (_geminiPublished && _circleId) {
       updateGeminiCliAgentStatus(_circleId, sessions).catch(() => {});
