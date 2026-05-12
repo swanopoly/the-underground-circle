@@ -181,18 +181,47 @@ export type DesktopBrowserTab = {
   url: string;
 };
 
-export async function listBrowserTabs(browsers?: string[]): Promise<DesktopResult<{ tabs: DesktopBrowserTab[]; errors: string[] }>> {
-  const query = browsers && browsers.length > 0 ? `?browsers=${encodeURIComponent(browsers.join(','))}` : '';
-  const r = await callBridge('GET', `/desktop/browser_tabs${query}`);
+function normalizeBrowserFilter(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'google chrome') return 'chrome';
+  if (normalized === 'microsoft edge') return 'edge';
+  if (normalized === 'brave browser') return 'brave';
+  return normalized;
+}
+
+function filterBrowserTabs(
+  tabs: DesktopBrowserTab[],
+  browsers?: string[],
+): DesktopBrowserTab[] {
+  if (!browsers || browsers.length === 0) return tabs;
+  const wanted = new Set(browsers.map(normalizeBrowserFilter).filter(Boolean));
+  if (wanted.size === 0) return tabs;
+  return tabs.filter((tab) => wanted.has(normalizeBrowserFilter(tab.browser)));
+}
+
+function parseBrowserTabsResult(r: DesktopResult, browsers?: string[]): DesktopResult<{ tabs: DesktopBrowserTab[]; errors: string[] }> {
   if (!r.ok) return r as DesktopResult<{ tabs: DesktopBrowserTab[]; errors: string[] }>;
   const d = r.data as any;
   return {
     ok: true,
     data: {
-      tabs: Array.isArray(d?.tabs) ? d.tabs : [],
+      tabs: filterBrowserTabs(Array.isArray(d?.tabs) ? d.tabs : [], browsers),
       errors: Array.isArray(d?.errors) ? d.errors : [],
     },
   };
+}
+
+export async function listBrowserTabs(browsers?: string[]): Promise<DesktopResult<{ tabs: DesktopBrowserTab[]; errors: string[] }>> {
+  const query = browsers && browsers.length > 0 ? `?browsers=${encodeURIComponent(browsers.join(','))}` : '';
+  const r = await callBridge('GET', `/desktop/browser_tabs${query}`);
+  if (r.ok || !query) return parseBrowserTabsResult(r, browsers);
+
+  // Older running bridge processes matched the full URL instead of the
+  // pathname, so `/desktop/browser_tabs?browsers=chrome` 404ed while the
+  // no-query endpoint worked. Retry without the query and filter locally
+  // so users don't have to restart the bridge just to read Chrome tabs.
+  const fallback = await callBridge('GET', '/desktop/browser_tabs');
+  return parseBrowserTabsResult(fallback.ok ? fallback : r, browsers);
 }
 
 export type DesktopWindowState = {

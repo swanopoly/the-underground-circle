@@ -21,7 +21,7 @@ import {
   Platform,
   useWindowDimensions,
 } from 'react-native';
-import { useBackpackData, type BackpackData } from '../../../hooks/useBackpackData';
+import { useBackpackData } from '../../../hooks/useBackpackData';
 import StatCube from '../../../components/StatCube';
 import {
   PIXEL_COLORS, PIXEL_ICONS, GRID, PX,
@@ -41,6 +41,7 @@ import ProjectRoomsPanel from '../../../components/ProjectRoomsPanel';
 import PromptManagerPanel from './office/PromptManagerPanel';
 import TraceViewer from '../../../components/TraceViewer';
 import DevicePanel from '../../../components/DevicePanel';
+import SecondBrainDashboard from '../../../components/SecondBrainDashboard';
 
 // Heavy / niche compartments — deferred. These panels (TradingBotPanel ~3.5K
 // lines with Solana deps, ModelLabPanel, LLMBenchmarkPanel, PixelOfficeCanvas)
@@ -93,15 +94,8 @@ interface Props {
 export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props) {
   const data = useBackpackData(circleId);
   const [activeCompartment, setActiveCompartment] = useState<Compartment>('none');
-  const [viewMode, setViewMode] = useState<'spline' | '3d' | 'list'>('list');
   const { width } = useWindowDimensions();
   const isDesktop = width > 768;
-  const Backpack3DSceneComponent = Platform.OS === 'web' && viewMode === '3d'
-    ? (require('../../../components/backpack3d/Backpack3DScene').default as React.ComponentType<{ data: BackpackData; onOpenCompartment: (key: string) => void }>)
-    : null;
-  const SplineBackpackSceneComponent = Platform.OS === 'web' && viewMode === 'spline'
-    ? (require('../../../components/backpack3d/SplineBackpackScene').default as React.ComponentType<{ data: BackpackData; onOpenCompartment: (key: string) => void }>)
-    : null;
 
   // Terminal shared state — must match OfficeTerminal's expected defaults
   const [terminalInput, setTerminalInput] = useState('');
@@ -254,8 +248,6 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
   const healthPct = data.enrichedAgents.length > 0
     ? Math.round((healthyAgents / data.enrichedAgents.length) * 100)
     : 100;
-  const tagCount = data.sessionTags.size;
-
   // Format tokens
   const fmtTokens = (n: number) => n >= 1_000_000 ? `${(n/1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n/1000).toFixed(1)}K` : String(n);
 
@@ -265,12 +257,12 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           <View style={styles.headerPixelIcon}>
-            <Text style={styles.headerPixelChar}>B</Text>
+            <Text style={styles.headerPixelChar}>.</Text>
           </View>
           <View>
             <Text style={styles.headerTitle}>BACKPACK</Text>
             <Text style={styles.headerSubtitle}>
-              {data.lastRefreshed ? `Updated ${new Date(data.lastRefreshed).toLocaleTimeString()}` : 'Everything you need for the journey'}
+              {data.lastRefreshed ? `.web Digital Brain updated ${new Date(data.lastRefreshed).toLocaleTimeString()}` : '.web Digital Brain for this circle'}
             </Text>
           </View>
         </View>
@@ -278,6 +270,13 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
           <Text style={styles.refreshText}>↻</Text>
         </Pressable>
       </View>
+
+      <SecondBrainDashboard
+        circleId={circleId}
+        userId={data.currentUserId}
+        accentColor={accentColor}
+        onOpenCompartment={(key) => setActiveCompartment(key as Compartment)}
+      />
 
       {/* ─── Journey Dashboard — Pixel Stat Blocks ─── */}
       <View style={styles.statsSection}>
@@ -335,154 +334,6 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
         </View>
       )}
 
-      {/* ─── Quick Actions ─── */}
-      <View style={styles.quickActions}>
-        <Text style={styles.sectionLabel}>QUICK ACTIONS</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickActionsRow}>
-          {COMPARTMENTS.map((comp) => (
-            <Pressable key={comp.key} onPress={() => setActiveCompartment(comp.key)} style={[styles.quickActionBtn, { borderColor: comp.color + '30' }]}>
-              <Text style={[styles.quickActionIcon, { color: comp.color }]}>{comp.iconLabel}</Text>
-              <Text style={styles.quickActionLabel}>{comp.label}</Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-      </View>
-
-      {/* ─── Compartments ─── */}
-      <View style={styles.compartmentsSection}>
-        <View style={styles.compartmentHeader}>
-          <View>
-            <Text style={styles.sectionLabel}>COMPARTMENTS</Text>
-            <Text style={styles.sectionHint}>{viewMode === 'list' ? 'Tap to open' : 'Click a pocket to open'}</Text>
-          </View>
-          {Platform.OS === 'web' && (
-            <View style={{ flexDirection: 'row', gap: 4 }}>
-              <Pressable
-                onPress={() => setViewMode('list')}
-                style={[styles.viewToggle, viewMode === 'list' && styles.viewToggleActive]}
-              >
-                <Text style={[styles.viewToggleText, viewMode === 'list' && styles.viewToggleTextActive]}>
-                  [LIST]
-                </Text>
-              </Pressable>
-              <Pressable
-                onPress={() => setViewMode('3d')}
-                style={[styles.viewToggle, viewMode === '3d' && styles.viewToggleActive]}
-              >
-                <Text style={[styles.viewToggleText, viewMode === '3d' && styles.viewToggleTextActive]}>
-                  [3D]
-                </Text>
-              </Pressable>
-              <Pressable
-                onPress={() => setViewMode('spline')}
-                style={[styles.viewToggle, viewMode === 'spline' && styles.viewToggleActive]}
-              >
-                <Text style={[styles.viewToggleText, viewMode === 'spline' && styles.viewToggleTextActive]}>
-                  [SPLINE]
-                </Text>
-              </Pressable>
-            </View>
-          )}
-        </View>
-
-        {/* Spline View — real 3D model */}
-        {SplineBackpackSceneComponent ? (
-            <SplineBackpackSceneComponent
-              data={data}
-              onOpenCompartment={(key: string) => setActiveCompartment(key as Compartment)}
-            />
-        ) : null}
-
-        {/* Procedural 3D View */}
-        {Backpack3DSceneComponent ? (
-            <Backpack3DSceneComponent
-              data={data}
-              onOpenCompartment={(key: string) => setActiveCompartment(key as Compartment)}
-            />
-        ) : null}
-
-        {/* List View (2D cards) */}
-        {(viewMode === 'list' || Platform.OS !== 'web') ? (
-        <View style={[styles.compartmentGrid, isDesktop && styles.compartmentGridDesktop]}>
-          {COMPARTMENTS.map((comp, i) => {
-            // Compute mini stat for each compartment — real data
-            let miniStat = '';
-            let hasActivity = false;
-            switch (comp.key) {
-              case 'cost':
-                miniStat = `$${data.periodCosts.today.toFixed(2)} today · $${data.periodCosts.week.toFixed(2)}/wk`;
-                hasActivity = data.periodCosts.today > 0;
-                break;
-              case 'terminal':
-                miniStat = `${data.agentCount} agents · ${data.totalMessagesToday} msgs today`;
-                hasActivity = data.totalMessagesToday > 0;
-                break;
-              case 'traces':
-                miniStat = `${data.traceCount} traces · ${data.totalMessagesToday} today`;
-                hasActivity = data.traceCount > 0;
-                break;
-              case 'farm':
-                miniStat = `${healthPct}% healthy · ${activeAgents} active`;
-                hasActivity = activeAgents > 0;
-                break;
-              case 'performance': {
-                const top = data.enrichedAgents.reduce((best, a) => a.turns > (best?.turns || 0) ? a : best, data.enrichedAgents[0]);
-                miniStat = top ? `Top: ${top.name} · ${top.turns} turns` : 'No data yet';
-                hasActivity = (top?.turns || 0) > 0;
-                break;
-              }
-              case 'projects':
-                miniStat = `${tagCount} tags · ${data.sessionCount} sessions`;
-                hasActivity = tagCount > 0;
-                break;
-              case 'analytics':
-                miniStat = `${data.mergedCircleAgents.length} agents · ${fmtTokens(data.totalTokensToday)} tokens`;
-                hasActivity = data.mergedCircleAgents.length > 0;
-                break;
-              case 'canvas':
-                miniStat = `${data.mergedCircleAgents.length} agents on floor`;
-                hasActivity = data.mergedCircleAgents.length > 0;
-                break;
-              case 'prompts':
-                miniStat = 'Prompt library & A/B testing';
-                break;
-              case 'llm-bench':
-                miniStat = '29 models · 6 benchmarks';
-                break;
-              case 'model-lab':
-                miniStat = 'Train · Optimize · Deploy';
-                hasActivity = true;
-                break;
-              case 'trading':
-                miniStat = data.featuredTradeCount > 0
-                  ? `${data.featuredTradeCount} active trades`
-                  : 'Solana trading & DCA';
-                hasActivity = data.featuredTradeCount > 0;
-                break;
-              case 'devices':
-                miniStat = 'Printers · 3D · Serial · USB';
-                break;
-            }
-
-            return (
-              <CompartmentCard
-                key={comp.key}
-                iconLabel={comp.iconLabel}
-                label={comp.label}
-                description={comp.description}
-                color={comp.color}
-                miniStat={miniStat}
-                hasActivity={hasActivity}
-                delay={i * 60}
-                onPress={() => setActiveCompartment(comp.key)}
-                isDesktop={isDesktop}
-              />
-            );
-          })}
-        </View>
-        ) : null}
-      </View>
-
       {/* ─── Recent Activity Feed ─── */}
       {data.recentActivity.length > 0 && (
         <View style={styles.activitySection}>
@@ -496,6 +347,31 @@ export default function BackpackTab({ circleId, accentColor = '#6366f1' }: Props
           ))}
         </View>
       )}
+
+      {/* ─── Bottom Backpack Tabs ─── */}
+      <View style={styles.bottomTabs}>
+        <View>
+          <Text style={styles.sectionLabel}>BACKPACK TOOLS</Text>
+          <Text style={styles.sectionHint}>Digital Brain stays primary. Open the older compartments from here.</Text>
+        </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.bottomTabsRow}>
+          {COMPARTMENTS.map((comp) => (
+            <Pressable
+              key={comp.key}
+              onPress={() => setActiveCompartment(comp.key)}
+              style={({ hovered, pressed }: any) => [
+                styles.bottomTab,
+                { borderColor: comp.color + '38' },
+                hovered && Platform.OS === 'web' ? { backgroundColor: comp.color + '12', transform: [{ translateY: -1 }] } as any : null,
+                pressed && Platform.OS === 'web' ? { transform: [{ scale: 0.98 }] } as any : null,
+              ]}
+            >
+              <Text style={[styles.bottomTabIcon, { color: comp.color }]}>{comp.iconLabel}</Text>
+              <Text style={styles.bottomTabLabel}>{comp.label}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      </View>
 
       {/* ─── Pack Status Footer ─── */}
       <View style={styles.packStatus}>
@@ -859,6 +735,49 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: 'monospace',
     color: PIXEL_COLORS.text3,
+  },
+
+  // Bottom tabs — secondary Backpack tools live below the Digital Brain.
+  bottomTabs: {
+    marginHorizontal: GRID.lg,
+    marginTop: GRID.xl,
+    padding: GRID.md,
+    gap: GRID.sm,
+    borderWidth: 2,
+    borderColor: PIXEL_COLORS.border0,
+    borderRadius: 2,
+    backgroundColor: PIXEL_COLORS.bg1,
+  },
+  bottomTabsRow: {
+    flexDirection: 'row',
+    gap: GRID.sm,
+    paddingRight: GRID.md,
+  },
+  bottomTab: {
+    minWidth: 112,
+    minHeight: 66,
+    borderWidth: 2,
+    borderRadius: 2,
+    backgroundColor: PIXEL_COLORS.bg2,
+    paddingVertical: GRID.sm,
+    paddingHorizontal: GRID.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    ...(Platform.OS === 'web' ? { transition: 'all 0.16s ease', cursor: 'pointer' } as any : {}),
+  },
+  bottomTabIcon: {
+    fontSize: 14,
+    fontWeight: '900',
+    fontFamily: 'monospace',
+  },
+  bottomTabLabel: {
+    color: PIXEL_COLORS.text2,
+    fontSize: 9,
+    fontWeight: '800',
+    fontFamily: 'monospace',
+    letterSpacing: 0.4,
+    textAlign: 'center',
   },
 
   // Pack Status Footer

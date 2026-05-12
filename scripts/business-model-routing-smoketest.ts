@@ -3,7 +3,7 @@ import {
   buildImplicitBusinessModelProfiles,
   coerceBusinessModelProfiles,
   planBusinessModelForComputerTask,
-} from '../src/lib/businessModelProfiles';
+} from '../src/lib/businessModelProfileCore';
 import { planComputerTaskPreview } from '../src/lib/computerTaskPlanner';
 import { resolveProviderRoutes } from '../src/lib/crossProviderRouter';
 
@@ -32,8 +32,22 @@ const explicitProfiles = coerceBusinessModelProfiles([{
   allowedSurfaces: ['browser', 'automation'],
   capabilities: { toolUse: true, browserPlanning: true, structuredOutput: true },
   governance: { allowCredentialUse: false, allowExternalSideEffects: false },
+}, {
+  label: 'Legacy HF Alias',
+  provider: 'hugging_face',
+  modelId: 'meta-llama/Llama-3.3-70B-Instruct',
+  allowedSurfaces: ['chat', 'invalid-surface'],
+  governance: { requireApprovalFor: ['browser', 'bad-surface'], maxAutonomousRisk: 'bad-risk' },
+}, {
+  label: 'Invalid Provider',
+  provider: 'not-a-provider',
+  modelId: 'nope',
 }]);
-assert.equal(explicitProfiles.length, 1);
+assert.equal(explicitProfiles.length, 2);
+assert.equal(explicitProfiles[1].provider, 'huggingface');
+assert.deepEqual(explicitProfiles[1].allowedSurfaces, ['chat']);
+assert.deepEqual(explicitProfiles[1].governance?.requireApprovalFor, ['browser']);
+assert.equal(explicitProfiles[1].governance?.maxAutonomousRisk, 'medium');
 
 const preview = planComputerTaskPreview('Log in to our CRM and update the renewal date');
 assert.equal(preview.kind, 'browser_task');

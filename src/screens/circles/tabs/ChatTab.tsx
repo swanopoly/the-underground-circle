@@ -77,7 +77,7 @@ import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
 import { createStagedFile, revokeStagedPreviews, uploadAttachment, type StagedFile } from '../../../lib/chatAttachments';
 import { soulKeyForProfile, resolveModelForProfile } from '../../../lib/serviceProfileSouls';
-import { BLACKSWAN_ENDPOINT_MODEL_ID, canUseAnthropicChatStream } from '../../../lib/blackswanRouting';
+import { canUseAnthropicChatStream } from '../../../lib/blackswanRouting';
 import { analyzeMessageRouting } from '../../../lib/messageRouting';
 import { dispatchBridgeTask, sendTerminalAgentSessionMessage, wakeAndAssignTask } from '../../../lib/bridgeTaskDispatcher';
 import SpawnAgentPanel from '../../../components/SpawnAgentPanel';
@@ -165,7 +165,10 @@ import {
 import { buildChatAutomationPlan, type ChatAutomationPlan } from '../../../lib/chatAutomationPlanner';
 import { executeTerminalAgentLaunchFromChat } from '../../../lib/terminalAgentSessionLauncher';
 import { executeTerminalAgentControlFromChat } from '../../../lib/terminalAgentControl';
-import { looksLikeLocalComputerAwarenessRequest } from '../../../lib/localComputerAwarenessIntent';
+import {
+  detectLocalComputerAwarenessIntent,
+  looksLikeLocalComputerAwarenessRequest,
+} from '../../../lib/localComputerAwarenessIntent';
 import { dispatchChatAutomationPlan } from '../../../lib/runChatAutomationPlan';
 import { attachPlanDecisionToRun } from '../../../lib/runChatAutomationPlanObserver';
 import { deriveChatActivityFlags, shapePersistedChatMessage } from '../../../lib/chatMessageShape';
@@ -527,6 +530,9 @@ function mapPersistedRowsToChatMessages(
       source: metadata?.source,
       usage: metadata?.usage || undefined,
       executionStream: metadata?.executionStream,
+      taskPlan: metadata?.taskPlan,
+      toolEvents: metadata?.toolEvents,
+      verificationResults: metadata?.verificationResults,
       browserPlans: metadata?.browserPlans,
       browserPlanEvents: metadata?.browserPlanEvents,
       browserSessions: metadata?.browserSessions,
@@ -2988,6 +2994,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         memoryRefs: extra?.memoryRefs,
         memoryRecommendations: extra?.memoryRecommendations,
         executionStream: extra?.executionStream,
+        taskPlan: extra?.taskPlan,
+        toolEvents: extra?.toolEvents,
+        verificationResults: extra?.verificationResults,
         browserPlans: extra?.browserPlans,
         browserPlanEvents: extra?.browserPlanEvents,
         browserSessions: extra?.browserSessions,
@@ -3213,6 +3222,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       memoryRefs: message.memoryRefs,
       memoryRecommendations: message.memoryRecommendations,
       executionStream: message.executionStream,
+      taskPlan: message.taskPlan,
+      toolEvents: message.toolEvents,
+      verificationResults: message.verificationResults,
       browserPlans: message.browserPlans,
       browserPlanEvents: message.browserPlanEvents,
       browserSessions: message.browserSessions,
@@ -3554,6 +3566,76 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       addBotMessage(`**Computer Use** failed locally: ${error?.message || 'Unknown error'}`);
     }
   }, [addBotMessage, agentName, circleId, finalizeBrowserPlanFromSession]);
+
+  const executeLocalComputerAwarenessRequest = async (message: string): Promise<boolean> => {
+    const intent = detectLocalComputerAwarenessIntent(message);
+    if (!intent.route || !intent.kind) return false;
+
+    const toolMap: Partial<Record<typeof intent.kind, { tool: string; args: Record<string, unknown> }>> = {
+      browser_tabs: { tool: 'desktop.list_browser_tabs', args: { browsers: intent.browsers } },
+      running_apps: { tool: 'desktop.list_running_apps', args: {} },
+      window_state: { tool: 'desktop.window_state', args: {} },
+      clipboard: { tool: 'desktop.clipboard', args: {} },
+    };
+    const mapped = toolMap[intent.kind];
+    if (!mapped) return false;
+
+    setBotTyping(true);
+    setRunStatus('running');
+    setCurrentRunStep('Reading local desktop state...');
+    try {
+      const { executeOpenSwanRuntimeTool } = await import('../../../lib/openswanToolRuntime');
+      const result = await executeOpenSwanRuntimeTool(
+        mapped.tool as any,
+        mapped.args as any,
+        {
+          circleId,
+          userId: currentUserId || 'anonymous',
+          threadId: activeThreadId || undefined,
+          surface: 'main_chat',
+          activePluginIds: activePlugins,
+        },
+      ) as any;
+      const text = String(result?.resultsText || result?.resultText || result?.error || 'No local desktop result returned.');
+      const status = result?.ok ? 'passed' : 'failed';
+      const toolEvent: OpenSwanToolEvent = {
+        tool: mapped.tool as any,
+        status,
+        summary: text,
+        metadata: {
+          source: 'local_desktop_awareness_short_circuit',
+          intentKind: intent.kind,
+        },
+      };
+      addBotMessage(text, undefined, {
+        localOnly: true,
+        source: {
+          actor: 'OpenSwan',
+          surface: 'main_chat_desktop_bridge',
+          selectedModel,
+          effectiveModel: 'local-desktop-bridge',
+        },
+        toolEvents: [toolEvent],
+        executionStream: buildOpenSwanExecutionStream({ toolEvents: [toolEvent], verificationResults: [] }),
+      });
+      return true;
+    } catch (err: any) {
+      addBotMessage(`Local desktop bridge failed: ${err?.message || 'Unknown error'}`, undefined, {
+        localOnly: true,
+        source: {
+          actor: 'OpenSwan',
+          surface: 'main_chat_desktop_bridge_error',
+          selectedModel,
+          effectiveModel: 'local-desktop-bridge',
+        },
+      });
+      return true;
+    } finally {
+      setBotTyping(false);
+      setRunStatus('idle');
+      setCurrentRunStep('');
+    }
+  };
 
   // ─── Send Crypto ──────────────────────────────────────────────────────────
 
@@ -4062,6 +4144,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       if (plan.execution.kind === 'run_computer_task') {
         const shared = await executeSharedComputerTask(content);
         if (shared?.handled && !shared.browser) {
+          return;
+        }
+      }
+      if (plan.execution.kind === 'run_openswan') {
+        const handledLocalDesktop = await executeLocalComputerAwarenessRequest(content);
+        if (handledLocalDesktop) {
           return;
         }
       }
@@ -8538,7 +8626,7 @@ function popularRankingToChatModel(model: {
 }
 
 const CHAT_MODELS: ChatPickerModel[] = [
-  // ── Smart Pick ──
+  // ── Auto ──
   // Default. Routes by detected intent + complexity:
   //   casual / status     → Haiku 4.5 (cheap + fast)
   //   question / debug    → Sonnet 4.6 (or Haiku if simple)
@@ -8546,14 +8634,7 @@ const CHAT_MODELS: ChatPickerModel[] = [
   //   build / review      → Sonnet 4.6, Opus when complex
   // Picks the cheapest model that meets the bar so the per-turn cost
   // stays sane while one-off heavy turns still get the headroom.
-  { id: 'auto', label: 'Auto', desc: 'Defaults to Haiku — escalates to Opus only for research / architecture / heavy tasks', color: '#22c55e', icon: 'A', group: 'smart', tags: ['text', 'code', 'reason'] },
-  // BlackSwan — our circle's own fine-tune. Routed via the dedicated
-  // HF Inference Endpoint when the BlackSwan integration is connected
-  // in Marketplace; otherwise the edge function falls through to
-  // platform Sonnet with a routing_fallback chip explaining why. Sits
-  // right after Auto so it's the second pick in the picker.
-  { id: BLACKSWAN_ENDPOINT_MODEL_ID, label: 'BlackSwan v5', desc: 'Custom fine-tune · app workflow grounded', color: '#22d3ee', icon: 'B', group: 'smart', tags: ['text', 'code'] },
-
+  { id: 'auto', label: 'Auto', desc: 'Defaults to Haiku — escalates to Opus only for research / architecture / heavy tasks', color: '#22c55e', icon: 'A', group: 'auto', tags: ['text', 'code', 'reason'] },
   // ── Coding & Engineering ──
   { id: 'claude-opus-4-6', label: 'Opus 4.6', desc: 'Best coder alive. Complex architecture.', color: '#a855f7', icon: 'O', group: 'code', tags: ['code', 'text', 'web'] },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', desc: 'Fast coding. Great for iteration.', color: '#6366f1', icon: 'S', group: 'code', tags: ['code', 'text', 'web'] },
@@ -8594,14 +8675,222 @@ const CHAT_MODELS: ChatPickerModel[] = [
 ];
 
 const MODEL_GROUPS: { key: string; label: string; color: string }[] = [
-  { key: 'smart', label: 'Smart Pick', color: '#22c55e' },
   { key: 'popular', label: 'Most Popular Models', color: '#f59e0b' },
-  { key: 'code', label: 'Coding & Engineering', color: '#a855f7' },
-  { key: 'reason', label: 'Reasoning & Research', color: '#f59e0b' },
-  { key: 'speed', label: 'Speed & Cost', color: '#22d3ee' },
+  { key: 'code', label: 'Coding & Engineering', color: '#8b5cf6' },
+  { key: 'reason', label: 'Reasoning & Research', color: '#ef4444' },
+  { key: 'speed', label: 'Speed & Cost', color: '#06b6d4' },
   { key: 'creative', label: 'Creative & Multimodal', color: '#10b981' },
-  { key: 'open', label: 'Open Source', color: '#f59e0b' },
+  { key: 'open', label: 'Open Source', color: '#84cc16' },
 ];
+
+const MODEL_SECTION_ACCENTS: Record<string, string> = {
+  'action:auto': '#22c55e',
+  'base:popular': '#f59e0b',
+  'base:code': '#8b5cf6',
+  'base:reason': '#ef4444',
+  'base:speed': '#06b6d4',
+  'base:creative': '#10b981',
+  'base:open': '#84cc16',
+  'provider:anthropic': '#d97706',
+  'provider:openai': '#10a37f',
+  'provider:openai_compatible': '#14b8a6',
+  'provider:openrouter': '#a78bfa',
+  'provider:blackswan': '#f8fafc',
+  'provider:hugging_face': '#ffbd45',
+  'provider:huggingface': '#ffbd45',
+  'provider:replicate': '#38bdf8',
+  'provider:groq': '#f97316',
+  'provider:google_ai': '#4285f4',
+  'provider:mistral_ai': '#fa520f',
+  'provider:cohere': '#2dd4bf',
+  'provider:perplexity': '#1fb8cd',
+  'provider:together_ai': '#0f6fff',
+  'provider:fireworks_ai': '#5b36bd',
+  'provider:deepseek': '#1a6fe0',
+  'provider:z_ai': '#0ea5e9',
+  'provider:minimax': '#ec4899',
+  'provider:ollama': '#5b21b6',
+  'custom:hf-hub': '#fb923c',
+  'action:add-hf-hub': '#f97316',
+};
+
+const MODEL_SECTION_FALLBACK_COLORS = [
+  '#22c55e',
+  '#f59e0b',
+  '#8b5cf6',
+  '#ef4444',
+  '#06b6d4',
+  '#10b981',
+  '#84cc16',
+  '#d97706',
+  '#14b8a6',
+  '#38bdf8',
+  '#f97316',
+  '#a78bfa',
+  '#ec4899',
+  '#0ea5e9',
+];
+
+function modelSectionAccent(sectionKey: string, fallback = '#22d3ee'): string {
+  const explicit = MODEL_SECTION_ACCENTS[sectionKey];
+  if (explicit) return explicit;
+  let hash = 0;
+  for (let i = 0; i < sectionKey.length; i += 1) {
+    hash = (hash * 31 + sectionKey.charCodeAt(i)) >>> 0;
+  }
+  return MODEL_SECTION_FALLBACK_COLORS[hash % MODEL_SECTION_FALLBACK_COLORS.length] || fallback;
+}
+
+const MODEL_ROUTE_PREFIXES = new Set([
+  'anthropic',
+  'openai',
+  'openai_compatible',
+  'openrouter',
+  'google',
+  'google_ai',
+  'groq',
+  'mistral_ai',
+  'cohere',
+  'perplexity',
+  'together_ai',
+  'fireworks_ai',
+  'deepseek',
+  'z_ai',
+  'zai',
+  'minimax',
+  'huggingface',
+  'hugging_face',
+  'huggingface_endpoint',
+  'ollama',
+  'replicate',
+  'accounts',
+  'models',
+]);
+
+const MODEL_AUTHOR_SEGMENTS = new Set([
+  'anthropic',
+  'openai',
+  'google',
+  'deepseek',
+  'moonshotai',
+  'tencent',
+  'minimax',
+  'x-ai',
+  'nvidia',
+  'inclusionai',
+  'stepfun',
+  'z-ai',
+  'qwen',
+  'meta-llama',
+  'mistralai',
+  'fireworks',
+  'cswan801',
+]);
+
+function modelDisplayToken(token: string): string {
+  const lower = token.toLowerCase();
+  const brandMap: Record<string, string> = {
+    ai: 'AI',
+    api: 'API',
+    bm: 'BM',
+    claude: 'Claude',
+    codex: 'Codex',
+    deepseek: 'DeepSeek',
+    flash: 'Flash',
+    gemini: 'Gemini',
+    glm: 'GLM',
+    gpt: 'GPT',
+    grok: 'Grok',
+    haiku: 'Haiku',
+    kimi: 'Kimi',
+    llama: 'Llama',
+    minimax: 'MiniMax',
+    mistral: 'Mistral',
+    nemotron: 'Nemotron',
+    opus: 'Opus',
+    oss: 'OSS',
+    qwen: 'Qwen',
+    sonar: 'Sonar',
+    sonnet: 'Sonnet',
+    v: 'V',
+  };
+  if (brandMap[lower]) return brandMap[lower];
+  if (/^gpt$/i.test(token)) return 'GPT';
+  if (/^o\d+$/i.test(token)) return token.toUpperCase();
+  if (/^\d+[a-z]+$/i.test(token)) return token.toUpperCase();
+  if (/^[a-z]+[0-9.]+[a-z0-9.]*$/i.test(token)) {
+    return token.charAt(0).toUpperCase() + token.slice(1);
+  }
+  return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
+}
+
+function compactVersionTokens(tokens: string[]): string[] {
+  const compacted: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const current = tokens[i];
+    if (/^\d+$/.test(current) && /^\d+$/.test(tokens[i + 1] || '')) {
+      compacted.push(`${current}.${tokens[i + 1]}`);
+      i += 1;
+    } else {
+      compacted.push(current);
+    }
+  }
+  return compacted;
+}
+
+function autoModelDisplayName(modelId?: string | null): string | null {
+  if (!modelId) return null;
+  const withoutQuery = modelId.split(/[?#]/, 1)[0];
+  const parts = withoutQuery
+    .split('/')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  let modelPart = parts[parts.length - 1] || withoutQuery;
+  if (parts.length > 1) {
+    for (let i = parts.length - 1; i >= 0; i -= 1) {
+      const part = parts[i];
+      const normalized = part.toLowerCase();
+      if (!MODEL_ROUTE_PREFIXES.has(normalized) && !MODEL_AUTHOR_SEGMENTS.has(normalized)) {
+        modelPart = part;
+        break;
+      }
+    }
+  }
+  const cleaned = modelPart
+    .replace(/:[a-z0-9_-]+$/i, '')
+    .replace(/\b(20\d{6}|20\d{4})\b/g, '')
+    .replace(/[_:.]+/g, '-')
+    .replace(/([a-z])([A-Z])/g, '$1-$2')
+    .trim();
+  const rawTokens = cleaned
+    .split(/[-\s]+/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .filter((token) => !MODEL_ROUTE_PREFIXES.has(token.toLowerCase()) && !MODEL_AUTHOR_SEGMENTS.has(token.toLowerCase()));
+  const tokens = compactVersionTokens(rawTokens);
+  const label = tokens.map(modelDisplayToken).join(' ').replace(/\s+/g, ' ').trim();
+  return label || modelDisplayToken(cleaned || modelId);
+}
+
+function modelSectionHoverStyle(color: string, hovered: boolean) {
+  if (!hovered) return null;
+  return {
+    borderColor: color + 'aa',
+    backgroundColor: color + '18',
+    ...(Platform.OS === 'web'
+      ? {
+          boxShadow: `0 0 0 1px ${color}44, 0 12px 30px ${color}22, 0 16px 34px rgba(0,0,0,0.46)`,
+          transform: 'translateY(-1px)',
+        } as any
+      : {}),
+  };
+}
+
+function modelSectionTransitionStyle() {
+  return Platform.OS === 'web'
+    ? [{ cursor: 'pointer', transition: 'all 0.16s ease' } as any]
+    : [];
+}
 
 // ── Quick Actions animated header ───────────────────────────────────────────
 // Dots pulse on hover like loading indicators. Title letters cycle through
@@ -8846,6 +9135,7 @@ function modelPickerProviderColor(provider?: string, connected = true): string {
   if (provider === 'openai') return '#10a37f';        // OpenAI teal
   if (provider === 'openrouter') return '#a78bfa';    // OpenRouter purple
   if (provider === 'blackswan') return '#22d3ee';     // BlackSwan cyan
+  if (provider === 'openai_compatible') return '#14b8a6';
   if (provider === 'hugging_face' || provider === 'huggingface') return '#f59e0b';
   if (provider === 'replicate') return '#38bdf8';
   if (provider === 'groq') return '#f97316';
@@ -8867,6 +9157,7 @@ function modelPickerProviderIcon(provider?: string): string {
   if (provider === 'openai') return 'O';
   if (provider === 'openrouter') return 'OR';
   if (provider === 'blackswan') return '🦢';
+  if (provider === 'openai_compatible') return 'BM';
   if (provider === 'hugging_face' || provider === 'huggingface') return 'HF';
   if (provider === 'replicate') return 'R';
   if (provider === 'groq') return 'GQ';
@@ -9246,13 +9537,14 @@ function EnhancedInput({
   } : CHAT_MODELS[0]);
   const browseableBaseModelSections: ModelBrowserSection[] = useMemo(() => {
     return MODEL_GROUPS.map((group) => {
+      const sectionColor = modelSectionAccent(`base:${group.key}`, group.color);
       const groupModels = group.key === 'popular'
         ? popularModels
         : CHAT_MODELS.filter((model: ChatPickerModel) => model.group === group.key);
       return {
         key: `base:${group.key}`,
         label: group.label,
-        color: group.color,
+        color: sectionColor,
         icon: group.label.slice(0, 2).replace(/\s/g, '') || 'M',
         connected: true,
         sourceLabel: group.key === 'popular' ? 'live OpenRouter weekly rankings' : 'built-in model shortlist',
@@ -9273,7 +9565,10 @@ function EnhancedInput({
     return marketplaceModelGroups
       .map((group) => {
         const provider = group.provider as string;
-        const color = modelPickerProviderColor(provider, group.connected);
+        const color = modelSectionAccent(
+          `provider:${provider}`,
+          modelPickerProviderColor(provider, group.connected),
+        );
         return {
           key: modelBrowserKeyForMarketplaceGroup(group),
           label: group.label,
@@ -9299,7 +9594,7 @@ function EnhancedInput({
     return [{
       key: 'custom:hf-hub',
       label: 'Custom HF Hub Models',
-      color: '#f59e0b',
+      color: modelSectionAccent('custom:hf-hub', '#f59e0b'),
       icon: 'HF',
       connected: true,
       sourceLabel: 'your saved Hugging Face Hub models',
@@ -9321,9 +9616,9 @@ function EnhancedInput({
     ? modelBrowserSections.find((section) => section.key === activeModelBrowserKey) || null
     : null;
   const huggingFaceMarketplaceGroup = marketplaceModelGroups.find((group) => group.provider === 'hugging_face');
-  const smartBuiltInModelGroup = MODEL_GROUPS.find((group) => group.key === 'smart');
+  const autoModelOption = CHAT_MODELS.find((model) => model.id === 'auto');
   const popularBuiltInModelGroup = MODEL_GROUPS.find((group) => group.key === 'popular');
-  const secondaryBuiltInModelGroups = MODEL_GROUPS.filter((group) => group.key !== 'smart' && group.key !== 'popular');
+  const secondaryBuiltInModelGroups = MODEL_GROUPS.filter((group) => group.key !== 'popular');
   const visibleMarketplaceModelGroups = useMemo(() => {
     return [...marketplaceModelGroups]
       .sort((a, b) => {
@@ -9336,9 +9631,10 @@ function EnhancedInput({
       });
   }, [marketplaceModelGroups]);
   const anthropicMarketplaceGroup = visibleMarketplaceModelGroups.find((group) => group.provider === 'anthropic');
+  const blackSwanMarketplaceGroup = visibleMarketplaceModelGroups.find((group) => group.provider === 'blackswan');
   const huggingFaceMarketplaceGroups = visibleMarketplaceModelGroups.filter((group) => group.provider === 'hugging_face');
-  const connectedMarketplaceModelGroups = visibleMarketplaceModelGroups.filter((group) => group.connected && group.provider !== 'anthropic' && group.provider !== 'hugging_face');
-  const disconnectedMarketplaceModelGroups = visibleMarketplaceModelGroups.filter((group) => !group.connected && group.provider !== 'anthropic' && group.provider !== 'hugging_face');
+  const connectedMarketplaceModelGroups = visibleMarketplaceModelGroups.filter((group) => group.connected && group.provider !== 'anthropic' && group.provider !== 'blackswan' && group.provider !== 'hugging_face');
+  const disconnectedMarketplaceModelGroups = visibleMarketplaceModelGroups.filter((group) => !group.connected && group.provider !== 'anthropic' && group.provider !== 'blackswan' && group.provider !== 'hugging_face');
 
   // Connected provider set — drives Auto's bias toward the team's BYOK
   // keys. When OpenRouter is connected, Auto routes through OR-prefixed
@@ -9382,15 +9678,7 @@ function EnhancedInput({
 
   const autoResolvedShortLabel = useMemo(() => {
     if (!autoResolvedModel) return null;
-    // OpenRouter-prefixed: surface the upstream model id sans provider.
-    if (autoResolvedModel.startsWith('openrouter/')) {
-      const tail = autoResolvedModel.split('/').pop() || autoResolvedModel;
-      return `OR · ${tail.replace(/^claude-/, '').split('-').slice(0, 3).join(' ')}`;
-    }
-    if (autoResolvedModel.includes('opus')) return 'Opus';
-    if (autoResolvedModel.includes('sonnet')) return 'Sonnet';
-    if (autoResolvedModel.includes('haiku')) return 'Haiku';
-    return autoResolvedModel.replace(/^claude-/, '').split('-').slice(0, 2).join(' ');
+    return autoModelDisplayName(autoResolvedModel);
   }, [autoResolvedModel]);
   const soulActions = getMainChatSessionActions(sessionProfile || 'senior');
   const controlStatusLabel = currentRunStep?.trim()
@@ -9405,14 +9693,60 @@ function EnhancedInput({
     { key: 'wallet', category: PROMPT_CATEGORIES[3] },
   ];
 
+  const renderAutoModelAction = () => {
+    const model = autoModelOption;
+    if (!model) return null;
+    const sectionColor = modelSectionAccent('action:auto', model.color);
+    const isActive = selectedModel === 'auto';
+    const isHovered = hoveredModel === model.id;
+    const autoExtra = autoResolvedShortLabel
+      ? `Routes to ${autoResolvedShortLabel}${input.trim() ? ' for this prompt' : ' by default'}`
+      : model.desc;
+    return (
+      <Pressable
+        key="auto-model-direct"
+        onPress={() => {
+          onModelChange('auto');
+          setShowModelPicker(false);
+        }}
+        onHoverIn={() => setHoveredModel(model.id)}
+        onHoverOut={() => setHoveredModel(null)}
+        accessibilityRole="button"
+        accessibilityLabel="Select Auto model routing"
+        style={[
+          styles.dropdownItem,
+          { borderWidth: 1, borderColor: sectionColor + '45', backgroundColor: sectionColor + '10' },
+          isActive && { backgroundColor: sectionColor + '18', borderColor: sectionColor + '80' },
+          modelSectionHoverStyle(sectionColor, isHovered),
+          ...modelSectionTransitionStyle(),
+        ]}
+      >
+        <View style={[styles.dropdownItemIcon, { backgroundColor: sectionColor + '20' }]}>
+          <Text style={[styles.dropdownItemIconText, { color: sectionColor }]}>{model.icon}</Text>
+        </View>
+        <View style={styles.dropdownItemText}>
+          <Text style={[styles.dropdownItemLabel, { color: sectionColor }]}>
+            {model.label}
+            {autoResolvedShortLabel ? (
+              <Text style={{ color: '#94a3b8', fontWeight: '500', fontSize: 11 }}>{`  ->  ${autoResolvedShortLabel}`}</Text>
+            ) : null}
+          </Text>
+          <Text style={styles.dropdownItemDesc}>{autoExtra}</Text>
+        </View>
+        {isActive ? <View style={[styles.dropdownActiveDot, { backgroundColor: sectionColor }]} /> : null}
+      </Pressable>
+    );
+  };
+
   const renderExpandedBuiltInModelGroup = (group: typeof MODEL_GROUPS[number]) => {
+    const sectionColor = modelSectionAccent(`base:${group.key}`, group.color);
     const groupModels = group.key === 'popular'
       ? popularModels
       : CHAT_MODELS.filter((m: ChatPickerModel) => m.group === group.key);
     if (groupModels.length === 0) return null;
     return (
       <View key={group.key}>
-        <Text style={[styles.dropdownCategoryTitle, { color: group.color }]}>{group.label}</Text>
+        <Text style={[styles.dropdownCategoryTitle, { color: sectionColor }]}>{group.label}</Text>
         {groupModels.map((model: any) => {
           const isActive = model.id === selectedModel;
           const isHovered = hoveredModel === model.id;
@@ -9468,38 +9802,44 @@ function EnhancedInput({
   };
 
   const renderBrowseBuiltInModelGroup = (group: typeof MODEL_GROUPS[number]) => {
+    const sectionColor = modelSectionAccent(`base:${group.key}`, group.color);
     const groupModels = group.key === 'popular'
       ? popularModels
       : CHAT_MODELS.filter((m: ChatPickerModel) => m.group === group.key);
     if (groupModels.length === 0) return null;
     const browserKey = `base:${group.key}`;
+    const hoverKey = `section:${browserKey}`;
+    const isHovered = hoveredModel === hoverKey;
     return (
       <View key={group.key}>
-        <Text style={[styles.dropdownCategoryTitle, { color: group.color }]}>{group.label}</Text>
+        <Text style={[styles.dropdownCategoryTitle, { color: sectionColor }]}>{group.label}</Text>
         <Pressable
           onPress={() => {
             setActiveModelBrowserKey(browserKey);
             setShowAddModel(false);
           }}
+          onHoverIn={() => setHoveredModel(hoverKey)}
+          onHoverOut={() => setHoveredModel(null)}
           accessibilityRole="button"
           style={[
             styles.dropdownItem,
-            { borderWidth: 1, borderColor: group.color + '35', backgroundColor: group.color + '10' },
-            ...(Platform.OS === 'web' ? [{ cursor: 'pointer' } as any] : []),
+            { borderWidth: 1, borderColor: sectionColor + '45', backgroundColor: sectionColor + '10' },
+            modelSectionHoverStyle(sectionColor, isHovered),
+            ...modelSectionTransitionStyle(),
           ]}
         >
-          <View style={[styles.dropdownItemIcon, { backgroundColor: group.color + '20' }]}>
-            <Text style={[styles.dropdownItemIconText, { color: group.color }]}>
+          <View style={[styles.dropdownItemIcon, { backgroundColor: sectionColor + '20' }]}>
+            <Text style={[styles.dropdownItemIconText, { color: sectionColor }]}>
               {group.label.slice(0, 2).replace(/\s/g, '')}
             </Text>
           </View>
           <View style={styles.dropdownItemText}>
-            <Text style={[styles.dropdownItemLabel, { color: group.color }]}>{group.label}</Text>
+            <Text style={[styles.dropdownItemLabel, { color: sectionColor }]}>{group.label}</Text>
             <Text style={styles.dropdownItemDesc}>
               {`${groupModels.length} model${groupModels.length === 1 ? '' : 's'}`}
             </Text>
           </View>
-          <Text style={[styles.modelChevron, { color: group.color }]}>{'>'}</Text>
+          <Text style={[styles.modelChevron, { color: sectionColor }]}>{'>'}</Text>
         </Pressable>
       </View>
     );
@@ -9507,14 +9847,21 @@ function EnhancedInput({
 
   const renderMarketplaceModelGroup = (group: ModelGroup) => {
     const provider = group.provider as string;
-    const providerColor = modelPickerProviderColor(provider, group.connected);
+    const isBlackSwanSection = provider === 'blackswan';
+    const providerColor = modelSectionAccent(
+      `provider:${provider}`,
+      modelPickerProviderColor(provider, group.connected),
+    );
+    const labelColor = isBlackSwanSection ? '#f8fafc' : providerColor;
+    const detailColor = isBlackSwanSection ? '#cbd5e1' : undefined;
     const providerIconText = modelPickerProviderIcon(provider);
     const browserKey = modelBrowserKeyForMarketplaceGroup(group);
     const groupKey = `mkt-${provider}-${browserKey}`;
     const modelCount = group.models?.length || 0;
+    const isHovered = hoveredModel === groupKey;
     return (
       <View key={groupKey}>
-        <Text style={[styles.dropdownCategoryTitle, { color: providerColor }]}>
+        <Text style={[styles.dropdownCategoryTitle, { color: labelColor }]}>
           {group.label}
           {!group.connected ? (
             <Text style={{ color: '#475569', fontSize: 9, fontWeight: '500', fontStyle: 'italic' }}>{'  · not connected'}</Text>
@@ -9525,25 +9872,47 @@ function EnhancedInput({
             setActiveModelBrowserKey(browserKey);
             setShowAddModel(false);
           }}
+          onHoverIn={() => setHoveredModel(groupKey)}
+          onHoverOut={() => setHoveredModel(null)}
           accessibilityRole="button"
           style={[
             styles.dropdownItem,
-            { borderWidth: 1, borderColor: providerColor + '35', backgroundColor: providerColor + '10' },
-            ...(Platform.OS === 'web' ? [{ cursor: 'pointer' } as any] : []),
+            isBlackSwanSection
+              ? {
+                  borderWidth: 1,
+                  borderColor: isHovered ? '#ffffffaa' : '#334155',
+                  backgroundColor: isHovered ? '#111827' : '#050505',
+                }
+              : { borderWidth: 1, borderColor: providerColor + '35', backgroundColor: providerColor + '10' },
+            !isBlackSwanSection ? modelSectionHoverStyle(providerColor, isHovered) : null,
+            isBlackSwanSection && Platform.OS === 'web'
+              ? {
+                  boxShadow: isHovered
+                    ? '0 0 0 1px rgba(255,255,255,0.22), 0 14px 32px rgba(0,0,0,0.72), inset 0 1px 0 rgba(255,255,255,0.12)'
+                    : 'inset 0 1px 0 rgba(255,255,255,0.06)',
+                  transform: isHovered ? 'translateY(-1px)' : 'translateY(0)',
+                } as any
+              : null,
+            ...modelSectionTransitionStyle(),
           ]}
         >
-          <View style={[styles.dropdownItemIcon, { backgroundColor: providerColor + '20' }]}>
-            <Text style={[styles.dropdownItemIconText, { color: providerColor }]}>{providerIconText}</Text>
+          <View style={[
+            styles.dropdownItemIcon,
+            isBlackSwanSection
+              ? { backgroundColor: isHovered ? '#f8fafc' : '#111827', borderWidth: 1, borderColor: '#475569' }
+              : { backgroundColor: providerColor + '20' },
+          ]}>
+            <Text style={[styles.dropdownItemIconText, { color: isBlackSwanSection ? (isHovered ? '#050505' : '#f8fafc') : providerColor }]}>{providerIconText}</Text>
           </View>
           <View style={styles.dropdownItemText}>
-            <Text style={[styles.dropdownItemLabel, { color: providerColor }]}>{group.label}</Text>
-            <Text style={styles.dropdownItemDesc} numberOfLines={1}>
+            <Text style={[styles.dropdownItemLabel, { color: labelColor }]}>{group.label}</Text>
+            <Text style={[styles.dropdownItemDesc, detailColor ? { color: detailColor } : null]} numberOfLines={1}>
               {modelCount > 0
                 ? `${modelCount} model${modelCount === 1 ? '' : 's'}${group.connected ? '' : ' · connect to run'}`
                 : group.hint || 'No models loaded yet'}
             </Text>
           </View>
-          <Text style={[styles.modelChevron, { color: providerColor }]}>{'>'}</Text>
+          <Text style={[styles.modelChevron, { color: labelColor }]}>{'>'}</Text>
         </Pressable>
       </View>
     );
@@ -9553,6 +9922,8 @@ function EnhancedInput({
     if (customModels.length === 0) return null;
     const section = customModelBrowserSections[0];
     if (!section) return null;
+    const hoverKey = 'section:custom-hf-hub';
+    const isHovered = hoveredModel === hoverKey;
     return (
       <View key="custom-hf-hub-models">
         <Text style={[styles.dropdownCategoryTitle, { color: section.color }]}>{section.label}</Text>
@@ -9561,11 +9932,14 @@ function EnhancedInput({
             setActiveModelBrowserKey(section.key);
             setShowAddModel(false);
           }}
+          onHoverIn={() => setHoveredModel(hoverKey)}
+          onHoverOut={() => setHoveredModel(null)}
           accessibilityRole="button"
           style={[
             styles.dropdownItem,
             { borderWidth: 1, borderColor: section.color + '35', backgroundColor: section.color + '10' },
-            ...(Platform.OS === 'web' ? [{ cursor: 'pointer' } as any] : []),
+            modelSectionHoverStyle(section.color, isHovered),
+            ...modelSectionTransitionStyle(),
           ]}
         >
           <View style={[styles.dropdownItemIcon, { backgroundColor: section.color + '20' }]}>
@@ -9583,29 +9957,37 @@ function EnhancedInput({
     );
   };
 
-  const renderAddHFHubModelAction = () => (
-    <Pressable
-      key="add-hf-hub-model"
-      onPress={() => {
-        setShowAddModel(true);
-        setActiveModelBrowserKey(null);
-      }}
-      accessibilityRole="button"
-      style={[
-        styles.dropdownItem,
-        { borderWidth: 1, borderColor: accentColor + '35', backgroundColor: accentColor + '10' },
-        ...(Platform.OS === 'web' ? [{ cursor: 'pointer' } as any] : []),
-      ]}
-    >
-      <View style={[styles.dropdownItemIcon, { backgroundColor: accentColor + '20' }]}>
-        <Text style={[styles.dropdownItemIconText, { color: accentColor }]}>+</Text>
-      </View>
-      <View style={styles.dropdownItemText}>
-        <Text style={[styles.dropdownItemLabel, { color: accentColor }]}>Add HF Hub Model</Text>
-        <Text style={styles.dropdownItemDesc}>Register a custom Hugging Face repo model</Text>
-      </View>
-    </Pressable>
-  );
+  const renderAddHFHubModelAction = () => {
+    const sectionColor = modelSectionAccent('action:add-hf-hub', accentColor);
+    const hoverKey = 'section:add-hf-hub';
+    const isHovered = hoveredModel === hoverKey;
+    return (
+      <Pressable
+        key="add-hf-hub-model"
+        onPress={() => {
+          setShowAddModel(true);
+          setActiveModelBrowserKey(null);
+        }}
+        onHoverIn={() => setHoveredModel(hoverKey)}
+        onHoverOut={() => setHoveredModel(null)}
+        accessibilityRole="button"
+        style={[
+          styles.dropdownItem,
+          { borderWidth: 1, borderColor: sectionColor + '45', backgroundColor: sectionColor + '10' },
+          modelSectionHoverStyle(sectionColor, isHovered),
+          ...modelSectionTransitionStyle(),
+        ]}
+      >
+        <View style={[styles.dropdownItemIcon, { backgroundColor: sectionColor + '20' }]}>
+          <Text style={[styles.dropdownItemIconText, { color: sectionColor }]}>+</Text>
+        </View>
+        <View style={styles.dropdownItemText}>
+          <Text style={[styles.dropdownItemLabel, { color: sectionColor }]}>Add HF Hub Model</Text>
+          <Text style={styles.dropdownItemDesc}>Register a custom Hugging Face repo model</Text>
+        </View>
+      </Pressable>
+    );
+  };
 
   const inputStyle = Platform.OS === 'web' ? {
     backdropFilter: 'blur(10px)',
@@ -9658,10 +10040,11 @@ function EnhancedInput({
           {/* Model Dropdown */}
           {showModelPicker && !showAddModel && !activeModelBrowserKey && (
             <AnimatedPopup style={[styles.dropdownPanel, { maxHeight: 480, width: 320, left: 0, right: 'auto' }, ...(Platform.OS === 'web' ? [{ boxShadow: '4px 4px 0px rgba(99,102,241,0.05), 0 12px 40px rgba(0,0,0,0.6)', overflowY: 'auto' } as any] : [])]}>
-              {smartBuiltInModelGroup ? renderBrowseBuiltInModelGroup(smartBuiltInModelGroup) : null}
+              {renderAutoModelAction()}
+              {blackSwanMarketplaceGroup ? renderMarketplaceModelGroup(blackSwanMarketplaceGroup) : null}
               {popularBuiltInModelGroup ? renderBrowseBuiltInModelGroup(popularBuiltInModelGroup) : null}
               {anthropicMarketplaceGroup ? renderMarketplaceModelGroup(anthropicMarketplaceGroup) : null}
-              <Text style={[styles.dropdownCategoryTitle, { color: '#ffbd45' }]}>Hugging Face</Text>
+              <Text style={[styles.dropdownCategoryTitle, { color: modelSectionAccent('provider:hugging_face', '#ffbd45') }]}>Hugging Face</Text>
               {renderAddHFHubModelAction()}
               {huggingFaceMarketplaceGroups.map(renderMarketplaceModelGroup)}
               {renderCustomModelGroup()}

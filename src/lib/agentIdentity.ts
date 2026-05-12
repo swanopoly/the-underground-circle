@@ -340,6 +340,40 @@ function identityToRow(userId: string, identity: AgentIdentity) {
 //
 // Reset by reloading the page (after the migration is applied).
 let _identitiesPersistDisabled = false;
+let _identitiesPersistWarningShown = false;
+
+function shouldDisableIdentityPersistence(error: any): boolean {
+  const code = String(error?.code || '');
+  const status = Number(error?.status || 0);
+  const message = String(error?.message || error?.details || '').toLowerCase();
+  return (
+    code === 'PGRST204' ||
+    code === 'PGRST205' ||
+    code === '42P10' ||
+    code === '42703' ||
+    status === 400 ||
+    status === 404 ||
+    message.includes('schema cache') ||
+    message.includes('agent_identities') ||
+    message.includes('terminal_config') ||
+    message.includes('no unique') ||
+    message.includes('on conflict') ||
+    message.includes('does not exist') ||
+    message.includes('could not find')
+  );
+}
+
+function disableIdentityPersistenceForSession(error?: any) {
+  _identitiesPersistDisabled = true;
+  if (_identitiesPersistWarningShown) return;
+  _identitiesPersistWarningShown = true;
+  const detail = error?.message ? ` Last error: ${error.message}` : '';
+  console.warn(
+    '[agentIdentity] agent_identities persistence disabled for this page session; localStorage remains active. ' +
+    'Apply the agent identity repair migration and reload to re-enable durable persistence.' +
+    detail,
+  );
+}
 
 async function persistIdentitiesToServer(identities: Map<string, AgentIdentity>): Promise<void> {
   if (_identitiesPersistDisabled) return;
@@ -357,7 +391,6 @@ async function persistIdentitiesToServer(identities: Map<string, AgentIdentity>)
       // PGRST204 = column not in schema cache (older migration version).
       // 404      = generic schema/table miss from the REST gateway.
       const code = (error as any).code;
-      const status = (error as any).status;
       if (code === 'PGRST204' && String(error.message || '').includes('terminal_config')) {
         const fallbackRows = rows.map(({ terminal_config, ...row }) => row);
         const retry = await supabase
@@ -366,12 +399,8 @@ async function persistIdentitiesToServer(identities: Map<string, AgentIdentity>)
         error = retry.error;
         if (!error) return;
       }
-      if (code === 'PGRST205' || code === 'PGRST204' || status === 404) {
-        _identitiesPersistDisabled = true;
-        console.warn(
-          '[agentIdentity] agent_identities table/column missing — falling back to localStorage only. ' +
-          'Apply migration `supabase/migrations/20260430_agent_identities.sql` and reload to re-enable durable persistence.',
-        );
+      if (shouldDisableIdentityPersistence(error)) {
+        disableIdentityPersistenceForSession(error);
         return;
       }
       console.warn('[agentIdentity] DB save failed:', error.message);

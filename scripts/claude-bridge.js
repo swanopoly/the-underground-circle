@@ -3041,10 +3041,11 @@ function browserTabScript(appName, mode) {
 if application "${appName}" is running then
   tell application "${appName}"
     set outText to ""
+    set tabDelimiter to ASCII character 9
     repeat with w in windows
       repeat with t in tabs of w
         try
-          set outText to outText & (${tabTitle} as text) & tab & (URL of t as text) & linefeed
+          set outText to outText & (${tabTitle} as text) & tabDelimiter & (URL of t as text) & linefeed
         end try
       end repeat
     end repeat

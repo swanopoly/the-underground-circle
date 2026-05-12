@@ -489,6 +489,36 @@ export async function updateAgentAnalytics(
 // The DB-side RPC tracks the prior snapshot key so bridge restarts cannot
 // reset daily/all-time aggregates back to zero.
 
+let _tokenSnapshotSyncDisabled = false;
+let _tokenSnapshotSyncWarningShown = false;
+
+function shouldDisableTokenSnapshotSync(error: any): boolean {
+  const code = String(error?.code || '');
+  const status = Number(error?.status || 0);
+  const message = String(error?.message || error?.details || '').toLowerCase();
+  return (
+    code === 'PGRST202' ||
+    code === 'PGRST204' ||
+    status === 404 ||
+    message.includes('sync_agent_token_snapshot') ||
+    message.includes('schema cache') ||
+    message.includes('could not find the function') ||
+    message.includes('function public.sync_agent_token_snapshot')
+  );
+}
+
+function disableTokenSnapshotSyncForSession(error?: any) {
+  _tokenSnapshotSyncDisabled = true;
+  if (_tokenSnapshotSyncWarningShown) return;
+  _tokenSnapshotSyncWarningShown = true;
+  const detail = error?.message ? ` Last error: ${error.message}` : '';
+  console.warn(
+    '[syncAgentTokenSnapshot] RPC unavailable; disabled Office token snapshot sync for this page session. ' +
+    'Apply the Office cost snapshot migration and reload to re-enable DB sync.' +
+    detail,
+  );
+}
+
 export async function syncAgentTokenSnapshot(
   circleId: string,
   agentName: string,
@@ -500,6 +530,7 @@ export async function syncAgentTokenSnapshot(
   model?: string,
   snapshotKey?: string,
 ): Promise<void> {
+  if (_tokenSnapshotSyncDisabled) return;
   try {
     const { data: auth } = await supabase.auth.getUser();
     if (!auth.user) return;
@@ -531,6 +562,14 @@ export async function syncAgentTokenSnapshot(
           p_model:          model || null,
         });
         if (!legacyError) return;
+        if (shouldDisableTokenSnapshotSync(legacyError)) {
+          disableTokenSnapshotSyncForSession(legacyError);
+          return;
+        }
+      }
+      if (shouldDisableTokenSnapshotSync(error)) {
+        disableTokenSnapshotSyncForSession(error);
+        return;
       }
       console.warn('[syncAgentTokenSnapshot] RPC failed:', error.message);
     }

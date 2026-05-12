@@ -456,7 +456,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   const doorProgress = useRef(new Animated.Value(0)).current;
   const lockShake = useRef(new Animated.Value(0)).current;
   const [entries, setEntries] = useState<SiteCredentialVaultEntry[]>([]);
-  const [expandedId, setExpandedId] = useState<string | null>('new');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState('');
@@ -469,7 +469,7 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
   const [query, setQuery] = useState('');
   const [rotationOnly, setRotationOnly] = useState(false);
   const [riskFilter, setRiskFilter] = useState<RiskFilter>('all');
-  const [securityOpen, setSecurityOpen] = useState(true);
+  const [securityOpen, setSecurityOpen] = useState(false);
 
   const [platform, setPlatform] = useState('wordpress');
   const [label, setLabel] = useState('default');
@@ -1395,7 +1395,9 @@ export default function SiteCredentialVaultPanel({ circleId, accentColor, fullHe
     setGlobalAuditEntries([]);
     setGlobalAuditOpen(false);
     setSelectedIds(new Set());
-    setExpandedId('new');
+    setExpandedId(null);
+    setSecurityOpen(false);
+    setImportOpen(false);
     setStatus('');
   };
 

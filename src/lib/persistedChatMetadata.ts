@@ -3,6 +3,9 @@ import type { BrowserPlanCardData, BrowserPlanEvent, BrowserSessionRecord } from
 import type { OpenSwanMemoryRecommendation, PromptMemoryReference } from './memoryService';
 import type { OpenSwanExecutionContract } from './openswanExecution';
 import type { OpenSwanObservedEvalSummary } from './openswanObservedEvals';
+import type { OpenSwanTaskPlan } from './openswanTaskPlanner';
+import type { OpenSwanToolEvent } from './openswanToolRuntime';
+import type { OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import type { ResearchDocumentReference } from './researchControl';
 import type { SwanBotStructuredArtifact, SwanBotStructuredResponse } from './swanbot';
 import type { WikiArticleReference } from './wikiData';
@@ -31,6 +34,9 @@ export type PersistedChatBotMetadata = {
   memoryRefs?: PromptMemoryReference[];
   memoryRecommendations?: OpenSwanMemoryRecommendation[];
   executionStream?: OpenSwanExecutionContract[];
+  taskPlan?: OpenSwanTaskPlan;
+  toolEvents?: OpenSwanToolEvent[];
+  verificationResults?: OpenSwanVerificationResult[];
   browserPlans?: BrowserPlanCardData[];
   browserPlanEvents?: BrowserPlanEvent[];
   browserSessions?: BrowserSessionRecord[];
@@ -67,6 +73,9 @@ function hasPersistedMetadata(metadata?: PersistedChatBotMetadata): boolean {
     (metadata.memoryRefs?.length || 0) > 0 ||
     (metadata.memoryRecommendations?.length || 0) > 0 ||
     (metadata.executionStream?.length || 0) > 0 ||
+    !!metadata.taskPlan ||
+    (metadata.toolEvents?.length || 0) > 0 ||
+    (metadata.verificationResults?.length || 0) > 0 ||
     (metadata.browserPlans?.length || 0) > 0 ||
     (metadata.browserPlanEvents?.length || 0) > 0 ||
     (metadata.browserSessions?.length || 0) > 0 ||
@@ -96,6 +105,40 @@ function compactPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
       ...step,
       body: typeof step?.body === 'string' ? truncateText(step.body, 800) : step?.body,
       summary: typeof step?.summary === 'string' ? truncateText(step.summary, 800) : step?.summary,
+    })) as any,
+    taskPlan: metadata.taskPlan ? {
+      kind: metadata.taskPlan.kind,
+      profile: metadata.taskPlan.profile,
+      summary: truncateText(String(metadata.taskPlan.summary || ''), 800),
+      recommendedTools: metadata.taskPlan.recommendedTools?.slice(0, 12),
+      verification: metadata.taskPlan.verification?.slice(0, 12).map((check) => ({
+        ...check,
+        reason: truncateText(String(check.reason || ''), 300),
+      })),
+    } as any : undefined,
+    toolEvents: metadata.toolEvents?.slice(-16).map((event) => ({
+      tool: event.tool,
+      status: event.status,
+      summary: truncateText(String(event.summary || ''), 700),
+      command: event.command ? truncateText(event.command, 500) : undefined,
+      metadata: event.metadata,
+    })) as any,
+    verificationResults: metadata.verificationResults?.slice(-12).map((result) => ({
+      check: result.check,
+      status: result.status,
+      ok: result.ok,
+      executed: result.executed,
+      summary: truncateText(String(result.summary || ''), 700),
+      command: result.command ? truncateText(result.command, 500) : undefined,
+      stdout: result.stdout ? truncateText(result.stdout, 500) : undefined,
+      stderr: result.stderr ? truncateText(result.stderr, 500) : undefined,
+      error: result.error ? truncateText(result.error, 500) : undefined,
+      execution: result.execution ? {
+        ...result.execution,
+        summary: truncateText(String(result.execution.summary || ''), 500),
+        command: result.execution.command ? truncateText(result.execution.command, 400) : undefined,
+        error: result.execution.error ? truncateText(String(result.execution.error), 400) : result.execution.error,
+      } : result.execution,
     })) as any,
     browserPlans: metadata.browserPlans?.slice(0, 3).map((plan: any) => ({
       planId: plan.planId,
@@ -168,6 +211,28 @@ function minimalPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
       title: step?.title,
       kind: step?.kind,
       label: step?.label,
+    })) as any,
+    taskPlan: metadata.taskPlan ? {
+      kind: metadata.taskPlan.kind,
+      profile: metadata.taskPlan.profile,
+      summary: truncateText(String(metadata.taskPlan.summary || ''), 240),
+    } as any : undefined,
+    toolEvents: metadata.toolEvents?.slice(-6).map((event) => ({
+      tool: event.tool,
+      status: event.status,
+      summary: truncateText(String(event.summary || ''), 240),
+    })) as any,
+    verificationResults: metadata.verificationResults?.slice(-4).map((result) => ({
+      check: result.check ? {
+        id: result.check.id,
+        label: result.check.label,
+        kind: result.check.kind,
+        required: result.check.required,
+      } : result.check,
+      status: result.status,
+      ok: result.ok,
+      executed: result.executed,
+      summary: truncateText(String(result.summary || ''), 240),
     })) as any,
     browserPlans: metadata.browserPlans?.slice(0, 2).map((plan: any) => ({
       planId: plan.planId,

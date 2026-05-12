@@ -4,6 +4,9 @@ import type { BrowserPlanCardData, BrowserPlanEvent, BrowserSessionRecord } from
 import type { OpenSwanMemoryRecommendation, PromptMemoryReference } from './memoryService';
 import type { OpenSwanExecutionContract } from './openswanExecution';
 import type { OpenSwanObservedEvalSummary } from './openswanObservedEvals';
+import type { OpenSwanTaskPlan } from './openswanTaskPlanner';
+import type { OpenSwanToolEvent } from './openswanToolRuntime';
+import type { OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import { persistChatMessage, updateChatMessageContent } from './chatService';
 import type { ResearchDocumentReference } from './researchControl';
 import { getResearchDocumentReferences } from './researchControl';
@@ -60,6 +63,9 @@ export function persistMainChatBotMessageWithRetry(params: {
   memoryRefs?: PromptMemoryReference[];
   memoryRecommendations?: OpenSwanMemoryRecommendation[];
   executionStream?: OpenSwanExecutionContract[];
+  taskPlan?: OpenSwanTaskPlan;
+  toolEvents?: OpenSwanToolEvent[];
+  verificationResults?: OpenSwanVerificationResult[];
   browserPlans?: BrowserPlanCardData[];
   browserPlanEvents?: BrowserPlanEvent[];
   browserSessions?: BrowserSessionRecord[];
@@ -91,6 +97,9 @@ export function persistMainChatBotMessageWithRetry(params: {
     memoryRefs,
     memoryRecommendations,
     executionStream,
+    taskPlan,
+    toolEvents,
+    verificationResults,
     browserPlans,
     browserPlanEvents,
     browserSessions,
@@ -119,6 +128,9 @@ export function persistMainChatBotMessageWithRetry(params: {
           memoryRefs,
           memoryRecommendations,
           executionStream,
+          taskPlan,
+          toolEvents,
+          verificationResults,
           browserPlans,
           browserPlanEvents,
           browserSessions,
@@ -165,6 +177,9 @@ export function updateMainChatBotMessageWithRetry(params: {
   memoryRefs?: PromptMemoryReference[];
   memoryRecommendations?: OpenSwanMemoryRecommendation[];
   executionStream?: OpenSwanExecutionContract[];
+  taskPlan?: OpenSwanTaskPlan;
+  toolEvents?: OpenSwanToolEvent[];
+  verificationResults?: OpenSwanVerificationResult[];
   browserPlans?: BrowserPlanCardData[];
   browserPlanEvents?: BrowserPlanEvent[];
   browserSessions?: BrowserSessionRecord[];
@@ -193,6 +208,9 @@ export function updateMainChatBotMessageWithRetry(params: {
     memoryRefs,
     memoryRecommendations,
     executionStream,
+    taskPlan,
+    toolEvents,
+    verificationResults,
     browserPlans,
     browserPlanEvents,
     browserSessions,
@@ -217,6 +235,9 @@ export function updateMainChatBotMessageWithRetry(params: {
         memoryRefs,
         memoryRecommendations,
         executionStream,
+        taskPlan,
+        toolEvents,
+        verificationResults,
         browserPlans,
         browserPlanEvents,
         browserSessions,

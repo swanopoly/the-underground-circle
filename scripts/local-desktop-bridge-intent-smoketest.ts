@@ -93,6 +93,10 @@ function main() {
     'browser_tabs',
   );
   assertIntent(
+    'need you to tell me all my tabs open in chrome right now',
+    'browser_tabs',
+  );
+  assertIntent(
     'what apps are open on my computer?',
     'running_apps',
   );
