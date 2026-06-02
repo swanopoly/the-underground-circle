@@ -196,17 +196,16 @@ async function doReplay(name: string, ctx: RecordingCommandContext): Promise<Rec
 }
 
 /**
- * Fires a single replay invocation. For `desktop.click_element` with a
- * captured target, we try semantic re-discovery first (re-fetch the
- * a11y tree, find the element by label+role, click by its new path).
- * If target lookup fails, fall back to the original path as a last
- * resort.
+ * Fires a single replay invocation. For semantic desktop AX actions
+ * with a captured target, we try re-discovery first (re-fetch the a11y
+ * tree, find the element by label+role, act on its new path). If target
+ * lookup fails, fall back to the original path as a last resort.
  */
 async function runReplayStep(
   inv: ReplayInvocation,
   ctx: RecordingCommandContext,
 ): Promise<{ ok: boolean; note?: string; error?: string }> {
-  if (inv.tool === 'desktop.click_element' && (inv.input as any)._target) {
+  if ((inv.tool === 'desktop.click_element' || inv.tool === 'desktop.set_element_value') && (inv.input as any)._target) {
     const target = (inv.input as any)._target as { role?: string; label?: string; app?: string };
     if (target.app && target.label) {
       // Refetch current tree — pid + text come back on this call.
@@ -215,16 +214,23 @@ async function runReplayStep(
         const data = (tree.data || {}) as { pid?: number; text?: string };
         const found = findInTree(data.text, target.label, target.role);
         if (data.pid && found.path) {
-          const clicked = await ctx.fireTool({ tool: 'desktop.click_element', input: { pid: data.pid, path: found.path } });
-          if (clicked.ok) return { ok: true, note: `resolved "${target.label}" → ${found.path}` };
-          return { ok: false, error: clicked.error || 'click failed' };
+          const action = await ctx.fireTool({
+            tool: inv.tool,
+            input: inv.tool === 'desktop.set_element_value'
+              ? { pid: data.pid, path: found.path, text: inv.input.text }
+              : { pid: data.pid, path: found.path },
+          });
+          if (action.ok) return { ok: true, note: `resolved "${target.label}" → ${found.path}` };
+          return { ok: false, error: action.error || `${inv.tool} failed` };
         }
       }
     }
     // Fallback: original path (may fail if tree shifted).
     const fallback = await ctx.fireTool({
-      tool: 'desktop.click_element',
-      input: { pid: inv.input.pid, path: inv.input.path },
+      tool: inv.tool,
+      input: inv.tool === 'desktop.set_element_value'
+        ? { pid: inv.input.pid, path: inv.input.path, text: inv.input.text }
+        : { pid: inv.input.pid, path: inv.input.path },
     });
     return { ok: fallback.ok, error: fallback.error, note: fallback.ok ? 'used recorded path (no semantic match)' : undefined };
   }

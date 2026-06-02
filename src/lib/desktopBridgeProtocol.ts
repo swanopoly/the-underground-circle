@@ -13,10 +13,25 @@ export type DesktopBridgeError =
   | 'not_paired'
   | 'origin_blocked'
   | 'app_not_found'
+  | 'path_not_found'
   | 'permission_denied'
+  | 'file_access_not_granted'
   | 'platform_unsupported'
   | 'invalid_input'
   | 'timeout'
+  | 'human_verification_required'
+  | 'browser_bridge_offline'
+  | 'browser_dialog_blocked'
+  | 'selector_not_found'
+  | 'uncertain_ui_target'
+  | 'auth_required'
+  | 'token_rejected'
+  | 'file_not_found'
+  | 'missing_permission'
+  | 'network_error'
+  | 'server_error'
+  | 'path_not_allowed'
+  | 'stale_bridge'
   // UC-1: returned when the Swift AX helper binary isn't compiled yet.
   // Callers should either prompt the user to rebuild (npm run bridge)
   // or fall back to vision-grounded tools (screenshot + click_at).
@@ -34,6 +49,8 @@ export interface DesktopResult<T = unknown> {
   ok: boolean;
   error?: string;
   errorCode?: DesktopBridgeError;
+  recoveryHint?: string;
+  requiredEvidence?: string[];
   data?: T;
 }
 
@@ -54,7 +71,12 @@ export const DESKTOP_MODIFIERS = new Set([
 export const DESKTOP_NAMED_KEYS = new Set([
   'return', 'enter', 'tab', 'space', 'delete', 'escape', 'esc',
   'left', 'right', 'down', 'up',
+  'home', 'end', 'pageup', 'pagedown', 'page-up', 'page-down',
   'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12',
+]);
+
+export const DESKTOP_PUNCTUATION_KEYS = new Set([
+  ',', '.', '-', '=', '`', '[', ']',
 ]);
 
 export function parseKeyCombo(combo: string): { ok: true; modifiers: string[]; key: string } | { ok: false; error: string } {
@@ -74,7 +96,8 @@ export function parseKeyCombo(combo: string): { ok: true; modifiers: string[]; k
   const lowerKey = key.toLowerCase();
   const isNamed = DESKTOP_NAMED_KEYS.has(lowerKey);
   const isChar = /^[a-zA-Z0-9]$/.test(key);
-  if (!isNamed && !isChar) return { ok: false, error: `unknown key "${key}"` };
+  const isPunctuation = DESKTOP_PUNCTUATION_KEYS.has(key);
+  if (!isNamed && !isChar && !isPunctuation) return { ok: false, error: `unknown key "${key}"` };
   return { ok: true, modifiers, key };
 }
 

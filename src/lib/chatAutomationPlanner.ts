@@ -1,7 +1,30 @@
 import { inferChatCommandExecution, matchesChatCommandRoute, type ChatCommandDecisionSource, type ChatCommandRouteId } from './chatCommandRegistry';
-import { planComputerTaskPreview } from './computerTaskPlanner';
+import { isLowRiskLocalImageExportTask, planComputerTaskPreview } from './computerTaskPlanner';
 import { classifyBrowserbaseWorkflow } from './browserbaseWorkflowIntent';
-import { detectLocalComputerAwarenessIntent, getLocalComputerAwarenessRisk } from './localComputerAwarenessIntent';
+import { detectLocalComputerAwarenessIntent, detectLocalComputerAwarenessIntentSequence, getLocalComputerAwarenessRisk } from './localComputerAwarenessIntent';
+import {
+  getBestUserTaskPipeline,
+  buildUserTaskPipelineDecision,
+  summarizeUserTaskPipelineMatch,
+  type UserTaskPipelineDecision,
+  type UserTaskPipelineMatch,
+  type UserTaskPipelineSummary,
+} from './userTaskPipelines';
+import { buildExecutionSurfacePlan, type ExecutionSurfacePlan } from './executionSurfaceRouter';
+import { buildAgentRunLedgerPreview, type AgentRunLedgerPreview } from './agentRunLedger';
+import { buildComputerAppTaskStrategy } from './computerAppTaskStrategy';
+import { buildChatComputerRequestRoute, type ChatComputerRequestRoute } from './chatComputerRequestRouter';
+import { summarizeChatComputerRequestUserNotice } from './chatComputerRequestUx';
+import { summarizeComputerTaskEvidenceContract } from './computerTaskEvidenceContract';
+import { classifyAgentFailure } from './agentFailureTaxonomy';
+import {
+  buildChatFailureRecoveryExecutionPlan,
+  parseChatFailureRecoveryOptionSelection,
+  type ChatFailureRecoveryExecutionPlan,
+  type ChatFailureRecoveryExecutionPolicy,
+} from './chatFailureRecovery';
+import type { ScenarioPolicy } from './scenarioPolicies';
+import type { LocalComputerAwarenessKind } from './localComputerAwarenessIntent';
 
 export type PlannerConversationalIntent =
   | { type: 'wordpress_publish'; title?: string; imageUrl?: string; status: 'draft' | 'publish' }
@@ -34,7 +57,25 @@ export type ChatAutomationExecutionKind =
   | 'run_browser_plan'
   | 'run_circle_automation'
   | 'create_circle_automation'
-  | 'suggest_automation_conversion';
+  | 'suggest_automation_conversion'
+  // The request is actionable but underspecified — ask the user for the
+  // missing details instead of guessing or fabricating placeholder params.
+  | 'ask_clarification';
+
+/**
+ * Carried on `execution.clarification` when `kind === 'ask_clarification'`.
+ * `missingParams` names the fields we couldn't resolve; the dispatcher/UI
+ * may try to fill them from memory before asking (see chatGapFill.ts).
+ */
+export type ChatAutomationClarification = {
+  question: string;
+  missingParams: string[];
+  reason: string;
+  /** The conversational intent we'd run once the gap is filled (for context). */
+  pendingIntent?: string | null;
+  /** Example answers shown to the user so they know what unblocks the task. */
+  examples?: string[];
+};
 
 export type ChatAutomationRisk =
   | 'safe'
@@ -54,11 +95,20 @@ export type ChatAutomationPlan = {
     routeId: ChatCommandRouteId | null;
     commandText?: string | null;
     modalKey?: string | null;
+    clarification?: ChatAutomationClarification | null;
   };
   risk: ChatAutomationRisk;
   approval: ChatAutomationApproval;
   confidence: number;
   notes: string[];
+  pipeline?: UserTaskPipelineSummary | null;
+  pipelineDecision?: UserTaskPipelineDecision | null;
+  scenarioPolicy?: ScenarioPolicy | null;
+  surfacePlan?: ExecutionSurfacePlan | null;
+  ledgerPreview?: AgentRunLedgerPreview | null;
+  computerRequestRoute?: ChatComputerRequestRoute | null;
+  recoveryPolicy?: ChatFailureRecoveryExecutionPolicy | null;
+  recoveryExecutionPlan?: ChatFailureRecoveryExecutionPlan | null;
 };
 
 export type BuildChatAutomationPlanInput = {
@@ -121,7 +171,7 @@ function detectPlannerConversationalIntent(
       taskTarget: /\btask\s+we\s+just\s+made\b/i.test(message) ? 'latest_user_task' : 'latest_circle_task',
     };
   }
-  if (/\bremember\b/i.test(message)) {
+  if (/\bremember\b/i.test(message) && !/\b(remember\s+me|checkbox|check\s*box|button|field|input|toggle|switch|menu|control)\b/i.test(message)) {
     return { type: 'remember', content: message.replace(/^(please\s+)?remember\s+/i, '').trim() || message };
   }
   if (/\b(forget|remove|delete|clear)\b.*\b(memory|what you know)\b/i.test(message)) {
@@ -134,6 +184,121 @@ function detectPlannerConversationalIntent(
     return { type: 'generate_image', prompt: message };
   }
   return { type: 'none' };
+}
+
+// ── Underspecification detection ────────────────────────────────────────────
+// A conversational intent was matched, but the detector can only fabricate a
+// placeholder for a required field (create_task copies the whole message in as
+// the title; office_agent_task hardcodes agentName:'Agent'). Rather than run
+// with a guessed value, ask the user for the missing piece. Kept deliberately
+// conservative — only fires when there is essentially NO real content for the
+// required field — so well-specified requests are never interrupted.
+
+const CLARIFY_STOP_WORDS = new Set([
+  'please', 'the', 'for', 'this', 'that', 'and', 'your', 'some', 'new', 'with',
+  'about', 'into', 'onto', 'from', 'just', 'can', 'you', 'could', 'would',
+]);
+
+function meaningfulWordCount(text: string): number {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .filter((word) => word.length > 2 && !CLARIFY_STOP_WORDS.has(word))
+    .length;
+}
+
+function detectConversationalClarification(
+  intent: PlannerConversationalIntent,
+  message: string,
+): ChatAutomationClarification | null {
+  switch (intent.type) {
+    case 'create_task': {
+      const stripped = message.replace(
+        /\b(create|add|make|open)\b\s*(a|an|the)?\s*(new\s+)?(task|todo|to-?do|ticket|issue)s?\s*(to|for|about|that|called|named|titled|:|-)?/i,
+        ' ',
+      );
+      if (meaningfulWordCount(stripped) < 1) {
+        return {
+          question: 'What should the task be? Give me a short title or what needs doing.',
+          missingParams: ['task description'],
+          reason: 'A task was requested but no task content was provided beyond the command itself.',
+          pendingIntent: 'create_task',
+          examples: ['Fix the login bug on mobile', 'Draft the Q3 board deck by Friday'],
+        };
+      }
+      return null;
+    }
+    case 'office_agent_task': {
+      const namedAgent = /@[\w-]+/.test(message)
+        || /\bagent\s+(?:named|called)\s+\S+/i.test(message);
+      if (!namedAgent) {
+        return {
+          question: 'Which agent should handle this? Name the agent (or @mention it), and confirm the task you want them to take on.',
+          missingParams: ['which agent'],
+          reason: 'An agent task was requested without naming which agent to assign.',
+          pendingIntent: 'office_agent_task',
+          examples: ['@Scout', 'the Research agent'],
+        };
+      }
+      return null;
+    }
+    case 'wordpress_publish':
+    case 'wordpress_schedule': {
+      const stripped = message
+        .replace(/\b(post|publish|upload|send|schedule|queue|plan|draft)\b/ig, ' ')
+        .replace(/\b(to|on|the)?\s*(wordpress|wp|blog|site|website)\b/ig, ' ');
+      if (meaningfulWordCount(stripped) < 1) {
+        return {
+          question: 'What should the post say? Give me a title and the content to publish (or notes / a link to turn into a post).',
+          missingParams: ['post title', 'post content'],
+          reason: 'A WordPress post was requested without a title or body to publish.',
+          pendingIntent: intent.type,
+          examples: ['Title: “Spring sale” — body: 20% off all plans through June', 'Turn this link into a post: https://…'],
+        };
+      }
+      return null;
+    }
+    case 'generate_image': {
+      const stripped = message
+        .replace(/\b(generate|create|make|draw|design|render)\b/ig, ' ')
+        .replace(/\b(a|an|the)?\s*(image|picture|photo|illustration|artwork|art|logo|banner|icon|graphic)s?\b/ig, ' ')
+        .replace(/\b(of|for|showing|with)\b/ig, ' ');
+      if (meaningfulWordCount(stripped) < 1) {
+        return {
+          question: 'What should the image show? Describe the subject, plus any style, colors, or mood you want.',
+          missingParams: ['image subject'],
+          reason: 'An image was requested without a subject to depict.',
+          pendingIntent: 'generate_image',
+          examples: ['a neon swan over a city at night, synthwave', 'a minimal logo for a coffee brand called “Bean There”'],
+        };
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+function buildClarificationPlan(
+  message: string,
+  clarification: ChatAutomationClarification,
+  pipelineDecision: UserTaskPipelineDecision | null,
+): ChatAutomationPlan {
+  return {
+    source: 'conversational_intent',
+    intent: { kind: 'direct_chat', message },
+    execution: {
+      kind: 'ask_clarification',
+      routeId: null,
+      commandText: message,
+      clarification,
+    },
+    risk: 'safe',
+    approval: { required: false, reason: null },
+    confidence: 0.9,
+    notes: [`Underspecified request — asking for: ${clarification.missingParams.join(', ')}.`],
+    pipelineDecision,
+  };
 }
 
 function buildRiskForRoute(routeId: ChatCommandRouteId | null): ChatAutomationRisk {
@@ -160,10 +325,104 @@ function buildApproval(routeId: ChatCommandRouteId | null, risk: ChatAutomationR
   return { required: false, reason: null };
 }
 
+function hasReviewLevelMutationIntent(message: string): boolean {
+  return /\b(delete|remove|overwrite|publish|submit|send|transfer|checkout|pay|apply|register|rename|change|move|copy|edit|write|save|replace|create)\b/i.test(message);
+}
+
+const ACTIONABLE_PIPELINE_IDS = new Set([
+  'live_research',
+  'knowledge_search',
+  'memory_second_brain',
+  'browser_data_retrieval',
+  'browser_form_submission',
+  'browser_navigation',
+  'desktop_awareness',
+  'bridge_troubleshooting',
+  'desktop_app_control',
+  'local_files',
+  'terminal_agents',
+  'vault_credentials',
+  'wordpress_cms',
+  'website_platform_admin',
+  'coding_build',
+  'debug_fix',
+  'code_review',
+  'security_privacy',
+  'performance_cost',
+  'creative_image_design',
+  'creative_layout_design',
+  'adobe_creative_cloud',
+  'customer_support_crm',
+  'sales_leads_outreach',
+  'analytics_reporting',
+  'meetings_calendar_email',
+  'data_import_export',
+  'finance_billing',
+  'document_intelligence',
+  'qa_testing',
+  'it_support_ops',
+  'compliance_monitoring',
+  'hr_onboarding',
+  'marketing_campaigns',
+  'workflow_recording_replay',
+  'travel_booking',
+  'procurement_shopping',
+  'cloud_devops',
+  'social_community',
+  'inbox_notifications',
+  'learning_training',
+  'high_stakes_advice',
+  'tasks_missions',
+  'office_agents',
+  'integrations_models',
+  'schedule_automation',
+  'governance_approvals',
+  'human_verification',
+] as const);
+
+function buildCommandTextFromPipeline(match: UserTaskPipelineMatch, message: string): string {
+  const command = match.pipeline.defaultCommand;
+  if (!command) return message;
+  if (command.endsWith(' ')) return `${command}${message}`.trim();
+  return command;
+}
+
+function buildPlanFromPipeline(
+  match: UserTaskPipelineMatch,
+  message: string,
+  decision: UserTaskPipelineDecision | null,
+): ChatAutomationPlan | null {
+  if (!ACTIONABLE_PIPELINE_IDS.has(match.pipeline.id as any)) return null;
+  if (match.confidence < 0.5) return null;
+  const routeId = match.pipeline.routeId;
+  const risk = match.pipeline.risk as ChatAutomationRisk;
+  const pipeline = summarizeUserTaskPipelineMatch(match);
+  const surfacePlan = buildExecutionSurfacePlan({ message, pipeline, pipelineDecision: decision });
+  const ledgerPreview = buildAgentRunLedgerPreview({ message, pipeline, pipelineDecision: decision, surfacePlan });
+  return {
+    source: 'plain_chat',
+    intent: { kind: 'direct_chat', message },
+    execution: {
+      kind: match.pipeline.executionKind,
+      routeId,
+      commandText: buildCommandTextFromPipeline(match, message),
+    },
+    risk,
+    approval: buildApproval(routeId, risk),
+    confidence: Math.max(0.55, Math.min(0.92, match.confidence)),
+    notes: [`Matched user task pipeline: ${match.pipeline.title}.`, ...match.reasons.slice(0, 2)],
+    pipeline,
+    pipelineDecision: decision,
+    scenarioPolicy: surfacePlan?.policy || null,
+    surfacePlan,
+    ledgerPreview,
+  };
+}
+
 function looksLikeComputerTask(message: string): boolean {
   const lower = String(message || '').trim().toLowerCase();
   if (!lower) return false;
-  if (/\b(use computer|on my computer|check my computer|search my computer|find on my computer)\b/i.test(lower)) {
+  if (/\b(use computer|on my computer|check my computer|search my computer|find on my computer|scan my computer|local files|local computer files|hard drive|home folder)\b/i.test(lower)) {
     return true;
   }
   const preview = planComputerTaskPreview(message);
@@ -172,6 +431,165 @@ function looksLikeComputerTask(message: string): boolean {
 
 function looksLikeBrowserbaseWorkflow(message: string): boolean {
   return classifyBrowserbaseWorkflow(message).kind !== 'general_browser';
+}
+
+function looksLikeHybridBrowserFileTransfer(message: string): boolean {
+  const text = String(message || '');
+  return /\b(upload|attach|choose file|select file|import|download|export|save (?:this )?(?:page|webpage|site|report|csv|pdf)|save as pdf|print to pdf)\b/i.test(text)
+    && /\b(browser|website|webpage|web page|page|site|shopify|wordpress|wp|webflow|wix|squarespace|woocommerce|bigcommerce|framer|cms|admin|product page|media library)\b/i.test(text);
+}
+
+function looksLikeAgentAssetAcquisition(message: string): boolean {
+  return buildComputerAppTaskStrategy(message)?.id === 'agent_asset_acquisition';
+}
+
+function looksLikeAgentFailureRecoveryRequest(message: string): boolean {
+  const text = String(message || '');
+  if (parseChatFailureRecoveryOptionSelection(text)) return true;
+  const assessment = classifyAgentFailure(text);
+  if (/\b(connected agent|codex agent|recovery agent|failure recovery|recover failed|failed task|task failed)\b/i.test(text)
+    && /\b(fix|diagnose|figure out|why|recover|retry|repair)\b/i.test(text)) {
+    return true;
+  }
+  return assessment.failureClass !== 'unknown'
+    && /\b(fix|diagnose|figure out|why|recover|retry|repair|agent|codex|openswan)\b/i.test(text);
+}
+
+function shouldUseComputerTaskForLocalIntent(kind: LocalComputerAwarenessKind | null | undefined): boolean {
+  if (!kind) return false;
+  if (kind.startsWith('file_')) return true;
+  return [
+    'launch_app',
+    'focus_app',
+    'window_manage',
+    'semantic_click',
+    'menu_click',
+    'type_text',
+    'paste_text',
+    'set_field_text',
+    'indesign_find_change',
+    'press_keys',
+    'wait',
+    'wait_for_app',
+    'mouse_move',
+    'mouse_click',
+    'mouse_down',
+    'mouse_up',
+    'mouse_drag',
+    'mouse_scroll',
+  ].includes(kind);
+}
+
+function buildPlanFromLocalComputerSequence(
+  normalized: string,
+  bestPipeline: UserTaskPipelineMatch | null,
+  pipelineDecision: UserTaskPipelineDecision | null,
+): ChatAutomationPlan | null {
+  const localComputerSequence = detectLocalComputerAwarenessIntentSequence(normalized);
+  if (localComputerSequence.length <= 1) return null;
+  const sequenceRisks = localComputerSequence.map(getLocalComputerAwarenessRisk);
+  const parsedRisk: ChatAutomationRisk = sequenceRisks.includes('external_side_effect')
+    ? 'external_side_effect'
+    : sequenceRisks.includes('review')
+      ? 'review'
+      : 'safe';
+  const risk: ChatAutomationRisk = isLowRiskLocalImageExportTask(normalized) ? 'safe' : parsedRisk;
+  const pipeline = bestPipeline ? summarizeUserTaskPipelineMatch(bestPipeline) : null;
+  const surfacePlan = pipeline ? buildExecutionSurfacePlan({ message: normalized, pipeline, pipelineDecision }) : null;
+  const ledgerPreview = pipeline ? buildAgentRunLedgerPreview({
+    message: normalized,
+    pipeline,
+    pipelineDecision,
+    surfacePlan,
+  }) : null;
+  const computerRequestRoute = buildChatComputerRequestRoute(normalized, { pipelineDecision });
+  return {
+    source: 'plain_chat',
+    intent: { kind: 'direct_chat', message: normalized },
+    execution: { kind: 'run_computer_task', routeId: 'browser', commandText: normalized },
+    risk,
+    approval: risk === 'safe'
+      ? { required: false, reason: null }
+      : { required: true, reason: `Local desktop sequence requires approval for ${localComputerSequence.length} parsed steps.` },
+    confidence: 0.93,
+    notes: [`Detected multi-step local desktop sequence: ${localComputerSequence.map((step) => step.kind || step.reason).join(' → ')}.`],
+    pipeline,
+    pipelineDecision,
+    scenarioPolicy: surfacePlan?.policy || null,
+    surfacePlan,
+    ledgerPreview,
+    computerRequestRoute,
+  };
+}
+
+function buildPlanFromLocalComputerIntent(
+  normalized: string,
+  bestPipeline: UserTaskPipelineMatch | null,
+  pipelineDecision: UserTaskPipelineDecision | null,
+): ChatAutomationPlan | null {
+  const localComputerIntent = detectLocalComputerAwarenessIntent(normalized);
+  if (!localComputerIntent.route) return null;
+  const useComputerTask = shouldUseComputerTaskForLocalIntent(localComputerIntent.kind);
+  const localRisk = getLocalComputerAwarenessRisk(localComputerIntent);
+  const risk: ChatAutomationRisk = localRisk === 'external_side_effect'
+    ? 'external_side_effect'
+    : localRisk === 'review'
+      ? 'review'
+      : 'safe';
+  const pipeline = bestPipeline ? summarizeUserTaskPipelineMatch(bestPipeline) : null;
+  const surfacePlan = pipeline ? buildExecutionSurfacePlan({ message: normalized, pipeline, pipelineDecision }) : null;
+  const ledgerPreview = pipeline ? buildAgentRunLedgerPreview({
+    message: normalized,
+    pipeline,
+    pipelineDecision,
+    surfacePlan,
+  }) : null;
+  const computerRequestRoute = buildChatComputerRequestRoute(normalized, { pipelineDecision });
+  return {
+    source: 'plain_chat',
+    intent: { kind: 'direct_chat', message: normalized },
+    execution: {
+      kind: useComputerTask ? 'run_computer_task' : 'run_openswan',
+      routeId: useComputerTask ? 'browser' : null,
+      commandText: normalized,
+    },
+    risk,
+    approval: risk === 'safe'
+      ? { required: false, reason: null }
+      : { required: true, reason: `Local desktop ${localComputerIntent.kind || 'action'} requires user-visible bridge approval.` },
+    confidence: 0.92,
+    notes: [`Detected local desktop bridge intent: ${localComputerIntent.kind || localComputerIntent.reason}.`],
+    pipeline,
+    pipelineDecision,
+    scenarioPolicy: surfacePlan?.policy || null,
+    surfacePlan,
+    ledgerPreview,
+    computerRequestRoute,
+  };
+}
+
+function buildPlanFromComputerRequestRoute(route: ChatComputerRequestRoute, normalized: string): ChatAutomationPlan {
+  return {
+    source: 'plain_chat',
+    intent: { kind: 'direct_chat', message: normalized },
+    execution: {
+      kind: route.executionKind,
+      routeId: route.routeId,
+      commandText: normalized,
+    },
+    risk: route.risk,
+    approval: route.approvalRequired
+      ? { required: true, reason: route.approvalReason || 'Computer/app route requires approval before execution.' }
+      : { required: false, reason: null },
+    confidence: route.confidence,
+    notes: route.notes,
+    pipeline: route.selectedPipeline,
+    pipelineDecision: route.pipelineDecision,
+    scenarioPolicy: route.surfacePlan?.policy || null,
+    surfacePlan: route.surfacePlan,
+    ledgerPreview: route.ledgerPreview,
+    computerRequestRoute: route,
+  };
 }
 
 function resolvePlannerQuickActionExecution(text: string): { text: string; mode: 'send' | 'prefill' | 'special'; routeId: ChatCommandRouteId | null } {
@@ -205,6 +623,8 @@ function resolvePlannerQuickActionExecution(text: string): { text: string; mode:
 export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): ChatAutomationPlan {
   const normalized = input.message.trim();
   const lower = normalized.toLowerCase();
+  const bestPipeline = getBestUserTaskPipeline(normalized, { includeFallback: false });
+  const pipelineDecision = buildUserTaskPipelineDecision(normalized, { includeFallback: false });
 
   if (input.quickActionText) {
     const execution = resolvePlannerQuickActionExecution(input.quickActionText);
@@ -255,8 +675,165 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
     };
   }
 
+  const recoveryOptionSelection = parseChatFailureRecoveryOptionSelection(normalized);
+  if (recoveryOptionSelection) {
+    const recoveryExecutionPlan = buildChatFailureRecoveryExecutionPlan(recoveryOptionSelection);
+    const recoveryPolicy = recoveryExecutionPlan.policy;
+    const pipeline = bestPipeline ? summarizeUserTaskPipelineMatch(bestPipeline) : null;
+    const surfacePlan = pipeline ? buildExecutionSurfacePlan({ message: normalized, pipeline, pipelineDecision }) : null;
+    const ledgerPreview = pipeline ? buildAgentRunLedgerPreview({
+      message: normalized,
+      pipeline,
+      pipelineDecision,
+      surfacePlan,
+    }) : null;
+    const risk: ChatAutomationRisk = recoveryPolicy.action === 'stop_and_report' || recoveryPolicy.action === 'request_user_unblock'
+      ? 'safe'
+      : recoveryPolicy.allowRuntimePatch || recoveryPolicy.allowBrowserDesktopRetry
+        ? 'review'
+        : 'review';
+    return {
+      source: 'plain_chat',
+      intent: { kind: 'direct_chat', message: normalized },
+      execution: { kind: 'run_openswan', routeId: null, commandText: normalized },
+      risk,
+      approval: !recoveryPolicy.requiresApproval
+        ? { required: false, reason: null }
+        : { required: true, reason: recoveryPolicy.summary },
+      confidence: 0.94,
+      notes: [
+        `Selected recovery option: ${recoveryOptionSelection.optionId}.`,
+        `Recovery actor: ${recoveryOptionSelection.actor}.`,
+        `Recovery source: ${recoveryOptionSelection.source}.`,
+        `Recovery action: ${recoveryPolicy.action}.`,
+        `Recovery safety mode: ${recoveryPolicy.safetyMode}.`,
+        `Recovery requires fresh evidence: ${recoveryPolicy.requiresFreshEvidence ? 'yes' : 'no'}.`,
+        `Recovery allows connected agent: ${recoveryPolicy.allowConnectedAgent ? 'yes' : 'no'}.`,
+        `Recovery max attempts: ${recoveryPolicy.maxAttempts}.`,
+        `Recovery summary: ${recoveryExecutionPlan.userSummary}.`,
+        recoveryExecutionPlan.stopConditions[0]
+          ? `Recovery first stop condition: ${recoveryExecutionPlan.stopConditions[0]}.`
+          : '',
+        recoveryOptionSelection.context?.messageId
+          ? `Recovery context message: ${recoveryOptionSelection.context.messageId}.`
+          : '',
+        recoveryOptionSelection.context?.runId
+          ? `Recovery context run: ${recoveryOptionSelection.context.runId}.`
+          : '',
+        recoveryOptionSelection.context?.sourceSurface
+          ? `Recovery context source surface: ${recoveryOptionSelection.context.sourceSurface}.`
+          : '',
+        recoveryOptionSelection.context?.failureExcerpt
+          ? `Recovery context failure excerpt: ${recoveryOptionSelection.context.failureExcerpt.slice(0, 260)}.`
+          : '',
+      ].filter(Boolean),
+      pipeline,
+      pipelineDecision,
+      scenarioPolicy: surfacePlan?.policy || null,
+      surfacePlan,
+      ledgerPreview,
+      recoveryPolicy,
+      recoveryExecutionPlan,
+    };
+  }
+
+  const localSequencePlan = buildPlanFromLocalComputerSequence(normalized, bestPipeline, pipelineDecision);
+  if (localSequencePlan) return localSequencePlan;
+
+  const localIntentPlan = buildPlanFromLocalComputerIntent(normalized, bestPipeline, pipelineDecision);
+  if (localIntentPlan) return localIntentPlan;
+
+  if (looksLikeAgentFailureRecoveryRequest(normalized)) {
+    const pipeline = bestPipeline ? summarizeUserTaskPipelineMatch(bestPipeline) : null;
+    const surfacePlan = pipeline ? buildExecutionSurfacePlan({ message: normalized, pipeline, pipelineDecision }) : null;
+    const ledgerPreview = pipeline ? buildAgentRunLedgerPreview({
+      message: normalized,
+      pipeline,
+      pipelineDecision,
+      surfacePlan,
+    }) : null;
+    return {
+      source: 'plain_chat',
+      intent: { kind: 'direct_chat', message: normalized },
+      execution: { kind: 'run_openswan', routeId: null, commandText: normalized },
+      risk: 'review',
+      approval: { required: true, reason: 'Failure recovery may ask a connected agent to patch app/runtime code or retry a desktop/browser workflow.' },
+      confidence: 0.86,
+      notes: ['Detected failed-task recovery request for a connected agent.'],
+      pipeline,
+      pipelineDecision,
+      scenarioPolicy: surfacePlan?.policy || null,
+      surfacePlan,
+      ledgerPreview,
+    };
+  }
+
+  const computerRequestRoute = buildChatComputerRequestRoute(normalized, { pipelineDecision });
+  if (computerRequestRoute) return buildPlanFromComputerRequestRoute(computerRequestRoute, normalized);
+
+  if (looksLikeAgentAssetAcquisition(normalized)) {
+    const pipeline = bestPipeline ? summarizeUserTaskPipelineMatch(bestPipeline) : null;
+    const surfacePlan = pipeline ? buildExecutionSurfacePlan({ message: normalized, pipeline, pipelineDecision }) : null;
+    const ledgerPreview = pipeline ? buildAgentRunLedgerPreview({
+      message: normalized,
+      pipeline,
+      pipelineDecision,
+      surfacePlan,
+    }) : null;
+    return {
+      source: 'plain_chat',
+      intent: { kind: 'direct_chat', message: normalized },
+      execution: { kind: 'run_computer_task', routeId: 'browser', commandText: normalized },
+      risk: 'review',
+      approval: { required: true, reason: 'Codex asset acquisition can download, generate, install, or write local files.' },
+      confidence: 0.87,
+      notes: ['Detected Codex-backed asset acquisition workflow.'],
+      pipeline,
+      pipelineDecision,
+      scenarioPolicy: surfacePlan?.policy || null,
+      surfacePlan,
+      ledgerPreview,
+    };
+  }
+
+  if (looksLikeHybridBrowserFileTransfer(normalized)) {
+    const pipeline = bestPipeline ? summarizeUserTaskPipelineMatch(bestPipeline) : null;
+    const surfacePlan = pipeline ? buildExecutionSurfacePlan({ message: normalized, pipeline, pipelineDecision }) : null;
+    const ledgerPreview = pipeline ? buildAgentRunLedgerPreview({
+      message: normalized,
+      pipeline,
+      pipelineDecision,
+      surfacePlan,
+    }) : null;
+    const risk: ChatAutomationRisk = /\b(publish|submit|send|delete|remove|checkout|pay|purchase|book|reserve|upload|import|attach)\b/i.test(normalized)
+      ? 'external_side_effect'
+      : 'review';
+    return {
+      source: 'plain_chat',
+      intent: { kind: 'direct_chat', message: normalized },
+      execution: { kind: 'run_computer_task', routeId: 'browser', commandText: normalized },
+      risk,
+      approval: risk === 'external_side_effect'
+        ? { required: true, reason: 'Browser/local file transfer can affect external systems.' }
+        : { required: false, reason: null },
+      confidence: 0.86,
+      notes: ['Detected hybrid browser/local-file transfer workflow.'],
+      pipeline,
+      pipelineDecision,
+      scenarioPolicy: surfacePlan?.policy || null,
+      surfacePlan,
+      ledgerPreview,
+    };
+  }
+
   const conversationalIntent = detectPlannerConversationalIntent(normalized, input.attachments);
   if (conversationalIntent.type !== 'none') {
+    // If the matched action is missing a required field, ask instead of
+    // running with a fabricated placeholder.
+    const conversationalClarification = detectConversationalClarification(conversationalIntent, normalized);
+    if (conversationalClarification) {
+      return buildClarificationPlan(normalized, conversationalClarification, pipelineDecision);
+    }
     const routeId = mapConversationalIntentToRouteId(conversationalIntent.type);
     const risk = buildRiskForRoute(routeId);
     return {
@@ -277,31 +854,6 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
     };
   }
 
-  const localComputerIntent = detectLocalComputerAwarenessIntent(normalized);
-  if (localComputerIntent.route) {
-    const localRisk = getLocalComputerAwarenessRisk(localComputerIntent);
-    const risk: ChatAutomationRisk = localRisk === 'external_side_effect'
-      ? 'external_side_effect'
-      : localRisk === 'review'
-        ? 'review'
-        : 'safe';
-    return {
-      source: 'plain_chat',
-      intent: { kind: 'direct_chat', message: normalized },
-      execution: {
-        kind: 'run_openswan',
-        routeId: null,
-        commandText: normalized,
-      },
-      risk,
-      approval: risk === 'safe'
-        ? { required: false, reason: null }
-        : { required: true, reason: `Local desktop ${localComputerIntent.kind || 'action'} requires user-visible bridge approval.` },
-      confidence: 0.92,
-      notes: [`Detected local desktop bridge intent: ${localComputerIntent.kind || localComputerIntent.reason}.`],
-    };
-  }
-
   if (looksLikeBrowserbaseWorkflow(normalized)) {
     return {
       source: 'plain_chat',
@@ -311,13 +863,18 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
         routeId: 'browser',
         commandText: normalized,
       },
-      risk: /\b(delete|remove|overwrite|publish|submit|send|transfer|checkout|pay|apply|register)\b/i.test(normalized)
+      risk: hasReviewLevelMutationIntent(normalized)
         ? 'review'
         : 'safe',
       approval: { required: false, reason: null },
       confidence: 0.82,
       notes: ['Detected as a Browserbase workflow: web data retrieval, Stagehand semantic browser action, or form submission.'],
     };
+  }
+
+  if (bestPipeline && bestPipeline.confidence >= 0.65) {
+    const pipelinePlan = buildPlanFromPipeline(bestPipeline, normalized, pipelineDecision);
+    if (pipelinePlan) return pipelinePlan;
   }
 
   const commandExecution = inferChatCommandExecution(normalized);
@@ -340,6 +897,11 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
     };
   }
 
+  if (bestPipeline) {
+    const pipelinePlan = buildPlanFromPipeline(bestPipeline, normalized, pipelineDecision);
+    if (pipelinePlan) return pipelinePlan;
+  }
+
   const buildish = /\b(build|landing page|website|site|web app|page)\b/i.test(normalized);
   // Explicit page/site/build phrasing should win over the generic
   // computer-task heuristic — otherwise "build me a landing page" gets
@@ -354,7 +916,7 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
         routeId: 'browser',
         commandText: normalized,
       },
-      risk: /\b(delete|remove|overwrite|publish|submit|send|transfer|checkout|pay)\b/i.test(normalized)
+      risk: hasReviewLevelMutationIntent(normalized)
         ? 'review'
         : 'safe',
       approval: { required: false, reason: null },
@@ -380,6 +942,34 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
     };
   }
 
+  // Ambiguous-but-actionable fallback: the request reads like an action we
+  // could take (mutation verbs present) yet the pipeline matcher could not pin
+  // it down. Ask rather than running a low-confidence guess. Gated on the
+  // pipeline decision's own (conservative) needsClarification signal so plain
+  // questions and chit-chat still fall through to direct chat below.
+  if (pipelineDecision?.needsClarification && hasReviewLevelMutationIntent(normalized)) {
+    return buildClarificationPlan(normalized, {
+      question: pipelineDecision.clarificationReason
+        ? `Before I run this I need a bit more detail — ${pipelineDecision.clarificationReason} Could you clarify?`
+        : 'This looks like an action I can take, but I need a bit more to do it right. What exactly should I do, and to what?',
+      missingParams: ['task scope'],
+      reason: pipelineDecision.clarificationReason || 'Ambiguous actionable request matched multiple task pipelines.',
+      pendingIntent: null,
+    }, pipelineDecision);
+  }
+
+  const fallbackPipeline = bestPipeline ? summarizeUserTaskPipelineMatch(bestPipeline) : null;
+  const fallbackSurfacePlan = fallbackPipeline ? buildExecutionSurfacePlan({
+    message: normalized,
+    pipeline: fallbackPipeline,
+    pipelineDecision,
+  }) : null;
+  const fallbackLedgerPreview = fallbackPipeline ? buildAgentRunLedgerPreview({
+    message: normalized,
+    pipeline: fallbackPipeline,
+    pipelineDecision,
+    surfacePlan: fallbackSurfacePlan,
+  }) : null;
   return {
     source: 'plain_chat',
     intent: { kind: 'direct_chat', message: normalized },
@@ -392,6 +982,11 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
     approval: { required: false, reason: null },
     confidence: 0.4,
     notes: ['Default direct chat path.'],
+    pipeline: fallbackPipeline,
+    pipelineDecision,
+    scenarioPolicy: fallbackSurfacePlan?.policy || null,
+    surfacePlan: fallbackSurfacePlan,
+    ledgerPreview: fallbackLedgerPreview,
   };
 }
 
@@ -413,6 +1008,8 @@ const READ_ONLY_EXECUTION_KINDS = new Set<ChatAutomationExecutionKind>([
   'run_plain_chat',
   'open_modal',
   'suggest_automation_conversion',
+  // Asking a clarifying question never mutates external state.
+  'ask_clarification',
 ]);
 
 export function isPlanSafeForPlanMode(plan: ChatAutomationPlan): boolean {
@@ -445,6 +1042,38 @@ export function describePlanModeRefusal(plan: ChatAutomationPlan): string {
   }
 }
 
+function compactTelemetryText(value: unknown, maxChars = 320): string {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length <= maxChars ? text : `${text.slice(0, Math.max(0, maxChars - 16)).trimEnd()}...[truncated]`;
+}
+
+function compactRecoveryPolicyForTelemetry(policy?: ChatFailureRecoveryExecutionPolicy | null): Record<string, unknown> | null {
+  if (!policy) return null;
+  return {
+    action: policy.action,
+    safetyMode: policy.safetyMode,
+    requiresApproval: policy.requiresApproval,
+    requiresFreshEvidence: policy.requiresFreshEvidence,
+    userActionRequired: policy.userActionRequired,
+    allowConnectedAgent: policy.allowConnectedAgent,
+    allowRuntimePatch: policy.allowRuntimePatch,
+    allowBrowserDesktopRetry: policy.allowBrowserDesktopRetry,
+    allowSideEffects: policy.allowSideEffects,
+    maxAttempts: policy.maxAttempts,
+    summary: compactTelemetryText(policy.summary, 360),
+  };
+}
+
+function compactRecoveryExecutionPlanForTelemetry(plan?: ChatFailureRecoveryExecutionPlan | null): Record<string, unknown> | null {
+  if (!plan) return null;
+  return {
+    userSummary: compactTelemetryText(plan.userSummary, 260),
+    nextSteps: plan.nextSteps.slice(0, 5).map((step) => compactTelemetryText(step, 240)),
+    stopConditions: plan.stopConditions.slice(0, 5).map((condition) => compactTelemetryText(condition, 240)),
+    policy: compactRecoveryPolicyForTelemetry(plan.policy),
+  };
+}
+
 export function summarisePlanForTelemetry(plan: ChatAutomationPlan): Record<string, unknown> {
   return {
     source:         plan.source,
@@ -455,5 +1084,31 @@ export function summarisePlanForTelemetry(plan: ChatAutomationPlan): Record<stri
     approvalRequired: plan.approval.required,
     confidence:     plan.confidence,
     notes:          plan.notes,
+    pipeline:       plan.pipeline || null,
+    pipelineDecision: plan.pipelineDecision || null,
+    scenarioPolicy: plan.scenarioPolicy || null,
+    surfacePlan:    plan.surfacePlan || null,
+    ledgerPreview:  plan.ledgerPreview || null,
+    computerRequestRoute: plan.computerRequestRoute
+      ? {
+          kind: plan.computerRequestRoute.kind,
+          routeId: plan.computerRequestRoute.routeId,
+          risk: plan.computerRequestRoute.risk,
+          approvalRequired: plan.computerRequestRoute.approvalRequired,
+          bestPath: compactTelemetryText(plan.computerRequestRoute.bestPath, 280),
+          selectedPipelineId: plan.computerRequestRoute.selectedPipeline?.id || null,
+          appStrategyId: plan.computerRequestRoute.appStrategy?.id || null,
+          designApp: plan.computerRequestRoute.designExecutionPipeline?.appName || null,
+          fallbackPipelineIds: plan.computerRequestRoute.fallbackPipelineIds,
+          recommendedTools: plan.computerRequestRoute.recommendedTools.slice(0, 10),
+          completionProof: plan.computerRequestRoute.completionProof.slice(0, 6),
+          userNotice: summarizeChatComputerRequestUserNotice(plan.computerRequestRoute),
+          evidenceContract: plan.computerRequestRoute.evidenceContract
+            ? summarizeComputerTaskEvidenceContract(plan.computerRequestRoute.evidenceContract)
+            : null,
+        }
+      : null,
+    recoveryPolicy: compactRecoveryPolicyForTelemetry(plan.recoveryPolicy),
+    recoveryExecutionPlan: compactRecoveryExecutionPlanForTelemetry(plan.recoveryExecutionPlan),
   };
 }

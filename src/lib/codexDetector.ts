@@ -64,6 +64,9 @@ export interface CodexSession {
   terminalTitle?: string;
   manageable?: boolean;
   launchError?: string;
+  lastAssistantMessage?: string;
+  appCapabilityResultText?: string;
+  appCapabilityResultStatus?: 'ready_to_retry' | 'blocked' | 'incomplete' | 'unknown' | string;
 }
 
 // Green tones to match OpenAI/Codex branding

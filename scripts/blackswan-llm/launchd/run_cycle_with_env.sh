@@ -21,6 +21,21 @@ fi
 # shellcheck disable=SC1090
 source "${ENV_FILE}"
 
+# Scheduled training must be cost-safe by default. Synthetic data generation
+# uses Anthropic when ANTHROPIC_API_KEY is present, so strip the key from
+# launchd runs unless explicitly opted in from the private env file.
+case "${BLACKSWAN_TRAIN_ALLOW_ANTHROPIC:-false}" in
+    1|true|TRUE|yes|YES|on|ON)
+        echo "BLACKSWAN_TRAIN_ALLOW_ANTHROPIC enabled; scheduled synthetic generation may use Anthropic."
+        ;;
+    *)
+        if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            unset ANTHROPIC_API_KEY
+            echo "ANTHROPIC_API_KEY unset for scheduled BlackSwan training. Set BLACKSWAN_TRAIN_ALLOW_ANTHROPIC=true to opt in."
+        fi
+        ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${SCRIPT_DIR}"
 

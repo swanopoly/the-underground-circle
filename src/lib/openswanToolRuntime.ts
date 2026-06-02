@@ -9,7 +9,14 @@ import { createFilesInRoomFromArtifact, createWorkspaceFromArtifact, type RoomAr
 import { focusRoomWorkspaceFile, primeRoomWorkspaceLaunch } from './roomWorkspaceLauncher';
 import { detectClaudeCodeBridge, execBridgeCommand } from './claudeCodeDetector';
 import { describeComputerUsePlan, toBrowserPlanCardData, type BrowserPlanCardData } from './computerUse';
+import { detectAutomationVerificationGate } from './desktopAutomationSafety';
+import type { DesktopBridgeError, DesktopResult } from './desktopBridgeProtocol';
 import { getPlugin } from './pluginRegistry';
+import {
+  buildOpenSwanToolApprovalKey,
+  resolveOpenSwanRuntimeApprovalDecision,
+  type OpenSwanRuntimeApprovalDecision,
+} from './openswanToolApprovals';
 import {
   buildVaultAgentRunbook,
   findVaultAutomationEntries,
@@ -108,7 +115,24 @@ export type OpenSwanRuntimeToolName =
   | 'desktop.launch_app'
   | 'desktop.focus_app'
   | 'desktop.type_text'
+  | 'desktop.paste_text'
   | 'desktop.press_keys'
+  | 'desktop.menu_click'
+  | 'desktop.indesign_document_status'
+  | 'desktop.indesign_text_inventory'
+  | 'desktop.indesign_set_layer_state'
+  | 'desktop.indesign_batch_find_change'
+  | 'desktop.indesign_batch_update_text_layers'
+  | 'desktop.indesign_update_text_layer'
+  | 'desktop.indesign_relink_asset'
+  | 'desktop.indesign_package_document'
+  | 'desktop.indesign_export_proof'
+  | 'desktop.photoshop_document_status'
+  | 'desktop.photoshop_layer_inventory'
+  | 'desktop.photoshop_set_layer_state'
+  | 'desktop.photoshop_update_text_layer'
+  | 'desktop.photoshop_place_asset'
+  | 'desktop.photoshop_export_proof'
   | 'desktop.list_running_apps'
   | 'desktop.list_browser_tabs'
   | 'desktop.window_state'
@@ -118,11 +142,19 @@ export type OpenSwanRuntimeToolName =
   | 'desktop.file_list'
   | 'desktop.file_read'
   | 'desktop.file_search'
+  | 'desktop.file_stat'
+  | 'desktop.file_rename'
+  | 'desktop.file_write_text'
+  | 'desktop.file_copy'
+  | 'desktop.file_trash'
+  | 'desktop.file_mkdir'
   | 'desktop.shortcuts_list'
   | 'desktop.shortcuts_run'
   | 'desktop.window_manage'
   | 'desktop.mouse_move'
   | 'desktop.mouse_click'
+  | 'desktop.mouse_down'
+  | 'desktop.mouse_up'
   | 'desktop.mouse_drag'
   | 'desktop.mouse_scroll'
   | 'desktop.wait_for_app'
@@ -132,7 +164,8 @@ export type OpenSwanRuntimeToolName =
   | 'desktop.click_at'
   | 'desktop.screen_size'
   | 'desktop.read_a11y_tree'
-  | 'desktop.click_element';
+  | 'desktop.click_element'
+  | 'desktop.set_element_value';
 
 export type OpenSwanToolDefinition = {
   name: OpenSwanRuntimeToolName;
@@ -162,7 +195,8 @@ export type OpenSwanToolPolicyFamily =
   | 'browser'
   | 'workspace'
   | 'approval'
-  | 'vault';
+  | 'vault'
+  | 'agent';
 
 export type OpenSwanToolApprovalMode = 'auto' | 'ask';
 
@@ -274,12 +308,14 @@ export type OpenSwanToolExecutionArgs = {
   'verification.lint': VerificationCommandArgs;
   'verification.preview': { note?: string };
   'browser.plan_task': BrowserPlanTaskArgs;
-  'browser.open_url': { url: string; timeoutMs?: number; waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' };
+  'browser.open_url': { url: string; timeoutMs?: number; waitUntil?: 'load' | 'domcontentloaded' | 'networkidle'; taskContext?: string };
   'browser.dom_snapshot': { maxNodes?: number; interestingOnly?: boolean };
-  'browser.click_role': { role: string; name?: string; selector?: string; exact?: boolean; nth?: number; timeoutMs?: number };
-  'browser.fill_field': { role?: string; name?: string; selector?: string; text: string; submit?: boolean; exact?: boolean; timeoutMs?: number };
-  'browser.select_option': { role?: string; name?: string; selector?: string; value: string; exact?: boolean; timeoutMs?: number };
-  'browser.press_key': { combo: string };
+  'browser.verification_state': Record<string, never>;
+  'browser.click_role': { role: string; name?: string; selector?: string; exact?: boolean; nth?: number; timeoutMs?: number; taskContext?: string };
+  'browser.fill_field': { role?: string; name?: string; selector?: string; text: string; submit?: boolean; exact?: boolean; timeoutMs?: number; taskContext?: string };
+  'browser.select_option': { role?: string; name?: string; selector?: string; value: string; exact?: boolean; timeoutMs?: number; taskContext?: string };
+  'browser.upload_file': { filePath: string; name?: string; selector?: string; buttonRole?: string; buttonName?: string; buttonSelector?: string; exact?: boolean; timeoutMs?: number; taskContext?: string };
+  'browser.press_key': { combo: string; taskContext?: string };
   'browser.screenshot': { fullPage?: boolean };
   'browser.close': Record<string, never>;
   search_memories: SearchMemoriesArgs;
@@ -319,6 +355,9 @@ export type OpenSwanToolExecutionArgs = {
   'rooms.read_file': { fileId: string };
   'integrations.list': Record<string, never>;
   'office.list_agents': Record<string, never>;
+  'agent.codex_acquire_asset': { goal: string; outputDir?: string; expectedFileName?: string; sourceUrl?: string; taskContext?: string; sessionId?: string; launchIfMissing?: boolean };
+  'agent.recover_failed_task': { task: string; failureMessage: string; failureStack?: string; outcomeStatus?: string; executionKind?: string; runId?: string; planSummary?: string; groundingSummary?: string; preflightSummary?: string; source?: string; sessionId?: string; launchIfMissing?: boolean };
+  'agent.build_app_capability': { task: string; appName?: string; capabilityGap?: string; desiredOutcome?: string; currentPlanSummary?: string; sessionId?: string; launchIfMissing?: boolean };
   'approvals.list': Record<string, never>;
   'approvals.request': { runId: string; approvalKind: string; title: string; description?: string; payload?: Record<string, unknown>; timeoutSeconds?: number };
   'approvals.resolve': { approvalId: string; status: 'approved' | 'rejected' };
@@ -332,7 +371,24 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.launch_app':      { appName: string };
   'desktop.focus_app':       { appName: string };
   'desktop.type_text':       { text: string };
+  'desktop.paste_text':      { text: string; appName?: string; restoreClipboard?: boolean };
   'desktop.press_keys':      { combo: string };
+  'desktop.menu_click':      { appName?: string; menuPath: string[] };
+  'desktop.indesign_document_status': { appName?: string; expectedDocumentName?: string; sourceDocumentPath?: string };
+  'desktop.indesign_text_inventory': { appName?: string; query?: string; expectedDocumentName?: string; sourceDocumentPath?: string; maxItems?: number };
+  'desktop.indesign_set_layer_state': { appName?: string; layerName: string; action: 'show' | 'hide' | 'lock' | 'unlock'; expectedDocumentName?: string; sourceDocumentPath?: string };
+  'desktop.indesign_batch_find_change': { appName?: string; pairs: Array<{ findText: string; changeText: string }>; expectedDocumentName?: string; sourceDocumentPath?: string };
+  'desktop.indesign_batch_update_text_layers': { appName?: string; updates: Array<{ fieldName: string; replacementText: string }>; expectedDocumentName?: string; sourceDocumentPath?: string };
+  'desktop.indesign_update_text_layer': { appName?: string; fieldName: string; replacementText: string; expectedDocumentName?: string; sourceDocumentPath?: string };
+  'desktop.indesign_relink_asset': { appName?: string; assetPath: string; linkQuery?: string; expectedDocumentName?: string; sourceDocumentPath?: string };
+  'desktop.indesign_package_document': { appName?: string; outputFolderPath: string; includeIdml?: boolean; includePdf?: boolean; copyFonts?: boolean; copyLinkedGraphics?: boolean; copyProfiles?: boolean; updateGraphics?: boolean; includeHiddenLayers?: boolean; ignorePreflightErrors?: boolean; createReport?: boolean; forceSave?: boolean; pdfStyle?: string; expectedDocumentName?: string; sourceDocumentPath?: string };
+  'desktop.indesign_export_proof': { appName?: string; outputPath: string; format?: 'pdf'; expectedDocumentName?: string; sourceDocumentPath?: string };
+  'desktop.photoshop_document_status': { appName?: string; expectedDocumentName?: string; sourceDocumentPath?: string };
+  'desktop.photoshop_layer_inventory': { appName?: string; query?: string; expectedDocumentName?: string; sourceDocumentPath?: string; maxItems?: number };
+  'desktop.photoshop_set_layer_state': { appName?: string; layerName: string; action: 'show' | 'hide' | 'lock' | 'unlock'; expectedDocumentName?: string; sourceDocumentPath?: string };
+  'desktop.photoshop_update_text_layer': { appName?: string; layerName: string; replacementText: string; expectedDocumentName?: string; sourceDocumentPath?: string };
+  'desktop.photoshop_place_asset': { appName?: string; assetPath: string; layerName?: string; expectedDocumentName?: string; sourceDocumentPath?: string };
+  'desktop.photoshop_export_proof': { appName?: string; outputPath: string; format?: 'png' | 'jpg' | 'jpeg'; quality?: number; expectedDocumentName?: string; sourceDocumentPath?: string };
   'desktop.list_running_apps': Record<string, never>;
   'desktop.list_browser_tabs': { browsers?: string[] };
   'desktop.window_state':      Record<string, never>;
@@ -341,12 +397,20 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.clipboard_clear':   Record<string, never>;
   'desktop.file_list':         { path: string };
   'desktop.file_read':         { path: string; maxBytes?: number };
-  'desktop.file_search':       { rootPath: string; query: string };
+  'desktop.file_search':       { rootPath?: string; rootPaths?: string[]; query: string; maxResults?: number; maxFiles?: number; maxDepth?: number; includeContent?: boolean; extensions?: string[] };
+  'desktop.file_stat':         { path: string };
+  'desktop.file_rename':       { fromPath: string; toPath: string; overwrite?: boolean };
+  'desktop.file_write_text':   { path: string; content: string; append?: boolean; overwrite?: boolean };
+  'desktop.file_copy':         { fromPath: string; toPath: string; overwrite?: boolean };
+  'desktop.file_trash':        { path: string };
+  'desktop.file_mkdir':        { path: string; recursive?: boolean };
   'desktop.shortcuts_list':    Record<string, never>;
   'desktop.shortcuts_run':     { name: string };
   'desktop.window_manage':     { action: 'focus' | 'raise' | 'minimize' | 'unminimize' | 'zoom' | 'resize'; appName?: string; width?: number; height?: number };
   'desktop.mouse_move':        { x: number; y: number };
   'desktop.mouse_click':       { x: number; y: number; button?: 'left' | 'right'; count?: number };
+  'desktop.mouse_down':        { x: number; y: number; button?: 'left' | 'right' };
+  'desktop.mouse_up':          { x?: number; y?: number; button?: 'left' | 'right' };
   'desktop.mouse_drag':        { fromX: number; fromY: number; toX: number; toY: number; durationMs?: number };
   'desktop.mouse_scroll':      { deltaY?: number; deltaX?: number; x?: number; y?: number };
   'desktop.wait_for_app':      { appName: string; timeoutMs?: number };
@@ -357,6 +421,7 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.screen_size':       Record<string, never>;
   'desktop.read_a11y_tree':    { appName?: string; maxDepth?: number; maxNodes?: number };
   'desktop.click_element':     { pid: number; path: string };
+  'desktop.set_element_value': { pid: number; path: string; text: string };
   [key: string]: Record<string, unknown>;
 };
 
@@ -368,6 +433,24 @@ type VerificationExecutionResult = {
   stderr?: string;
   error?: string;
 };
+
+type BrowserToolExecutionResult = {
+  ok: boolean;
+  resultsText: string;
+  errorCode?: DesktopBridgeError;
+  recoveryHint?: string;
+  requiredEvidence?: string[];
+};
+
+function browserToolFailureResult(result: DesktopResult<unknown>, fallback: string): BrowserToolExecutionResult {
+  return {
+    ok: false,
+    resultsText: result.error || fallback,
+    errorCode: result.errorCode,
+    recoveryHint: result.recoveryHint,
+    requiredEvidence: result.requiredEvidence,
+  };
+}
 
 export type OpenSwanToolExecutionResultMap = {
   'workspace.create_room': WorkspaceCreationResult;
@@ -381,14 +464,16 @@ export type OpenSwanToolExecutionResultMap = {
   'verification.lint': VerificationExecutionResult;
   'verification.preview': { ok: true; planned: true };
   'browser.plan_task': { ok: true; summaryText: string; backend: string; actionCount: number; requiresApproval: boolean; plan: BrowserPlanCardData };
-  'browser.open_url': { ok: boolean; resultsText: string };
-  'browser.dom_snapshot': { ok: boolean; resultsText: string };
-  'browser.click_role': { ok: boolean; resultsText: string };
-  'browser.fill_field': { ok: boolean; resultsText: string };
-  'browser.select_option': { ok: boolean; resultsText: string };
-  'browser.press_key': { ok: boolean; resultsText: string };
-  'browser.screenshot': { ok: boolean; resultsText: string; base64?: string; mimeType?: string; sizeBytes?: number };
-  'browser.close': { ok: boolean; resultsText: string };
+  'browser.open_url': BrowserToolExecutionResult;
+  'browser.dom_snapshot': BrowserToolExecutionResult;
+  'browser.verification_state': BrowserToolExecutionResult;
+  'browser.click_role': BrowserToolExecutionResult;
+  'browser.fill_field': BrowserToolExecutionResult;
+  'browser.select_option': BrowserToolExecutionResult;
+  'browser.upload_file': BrowserToolExecutionResult;
+  'browser.press_key': BrowserToolExecutionResult;
+  'browser.screenshot': BrowserToolExecutionResult & { base64?: string; mimeType?: string; sizeBytes?: number };
+  'browser.close': BrowserToolExecutionResult;
   search_memories: { ok: boolean; resultsText: string };
   save_memory: { ok: boolean; resultsText: string };
   'missions.list': { ok: boolean; resultsText: string };
@@ -423,6 +508,9 @@ export type OpenSwanToolExecutionResultMap = {
   'rooms.read_file': { ok: boolean; resultsText: string };
   'integrations.list': { ok: boolean; resultsText: string };
   'office.list_agents': { ok: boolean; resultsText: string };
+  'agent.codex_acquire_asset': { ok: boolean; resultsText: string; provider?: string; sessionId?: string; launched?: boolean };
+  'agent.recover_failed_task': { ok: boolean; resultsText: string; provider?: string; sessionId?: string; launched?: boolean; recoveryAction?: string; recoveryRunbook?: Record<string, unknown> };
+  'agent.build_app_capability': { ok: boolean; resultsText: string; provider?: string; sessionId?: string; launched?: boolean; buildoutKind?: string; risk?: string; appName?: string };
   'circle.update_settings':    { ok: boolean; resultsText: string };
   'circle.update_budget_caps': { ok: boolean; resultsText: string };
   'circle.update_office_theme':{ ok: boolean; resultsText: string };
@@ -458,7 +546,24 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.launch_app':        { ok: boolean; resultsText: string };
   'desktop.focus_app':         { ok: boolean; resultsText: string };
   'desktop.type_text':         { ok: boolean; resultsText: string };
+  'desktop.paste_text':        { ok: boolean; resultsText: string };
   'desktop.press_keys':        { ok: boolean; resultsText: string };
+  'desktop.menu_click':        { ok: boolean; resultsText: string };
+  'desktop.indesign_document_status': { ok: boolean; resultsText: string };
+  'desktop.indesign_text_inventory': { ok: boolean; resultsText: string };
+  'desktop.indesign_set_layer_state': { ok: boolean; resultsText: string };
+  'desktop.indesign_batch_find_change': { ok: boolean; resultsText: string };
+  'desktop.indesign_batch_update_text_layers': { ok: boolean; resultsText: string };
+  'desktop.indesign_update_text_layer': { ok: boolean; resultsText: string };
+  'desktop.indesign_relink_asset': { ok: boolean; resultsText: string };
+  'desktop.indesign_package_document': { ok: boolean; resultsText: string };
+  'desktop.indesign_export_proof': { ok: boolean; resultsText: string };
+  'desktop.photoshop_document_status': { ok: boolean; resultsText: string };
+  'desktop.photoshop_layer_inventory': { ok: boolean; resultsText: string };
+  'desktop.photoshop_set_layer_state': { ok: boolean; resultsText: string };
+  'desktop.photoshop_update_text_layer': { ok: boolean; resultsText: string };
+  'desktop.photoshop_place_asset': { ok: boolean; resultsText: string };
+  'desktop.photoshop_export_proof': { ok: boolean; resultsText: string };
   'desktop.list_running_apps': { ok: boolean; resultsText: string };
   'desktop.list_browser_tabs': { ok: boolean; resultsText: string };
   'desktop.window_state':      { ok: boolean; resultsText: string };
@@ -468,11 +573,19 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.file_list':         { ok: boolean; resultsText: string };
   'desktop.file_read':         { ok: boolean; resultsText: string };
   'desktop.file_search':       { ok: boolean; resultsText: string };
+  'desktop.file_stat':         { ok: boolean; resultsText: string };
+  'desktop.file_rename':       { ok: boolean; resultsText: string };
+  'desktop.file_write_text':   { ok: boolean; resultsText: string };
+  'desktop.file_copy':         { ok: boolean; resultsText: string };
+  'desktop.file_trash':        { ok: boolean; resultsText: string };
+  'desktop.file_mkdir':        { ok: boolean; resultsText: string };
   'desktop.shortcuts_list':    { ok: boolean; resultsText: string };
   'desktop.shortcuts_run':     { ok: boolean; resultsText: string };
   'desktop.window_manage':     { ok: boolean; resultsText: string };
   'desktop.mouse_move':        { ok: boolean; resultsText: string };
   'desktop.mouse_click':       { ok: boolean; resultsText: string };
+  'desktop.mouse_down':        { ok: boolean; resultsText: string };
+  'desktop.mouse_up':          { ok: boolean; resultsText: string };
   'desktop.mouse_drag':        { ok: boolean; resultsText: string };
   'desktop.mouse_scroll':      { ok: boolean; resultsText: string };
   'desktop.wait_for_app':      { ok: boolean; resultsText: string };
@@ -483,6 +596,7 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.screen_size':       { ok: boolean; resultsText: string; width?: number; height?: number };
   'desktop.read_a11y_tree':    { ok: boolean; resultsText: string };
   'desktop.click_element':     { ok: boolean; resultsText: string };
+  'desktop.set_element_value': { ok: boolean; resultsText: string };
   fetch_url: { ok: boolean; content: string; status?: number; statusText?: string; error?: string };
   list_circle_members: { ok: true; resultsText: string };
   schedule_action: { ok: boolean; resultText: string; actionId?: string; error?: string };
@@ -538,6 +652,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
         url: { type: 'string' },
         timeoutMs: { type: 'number' },
         waitUntil: { type: 'string' },
+        taskContext: { type: 'string', description: 'Original user task or action context for guarded browser popup decisions.' },
       },
       required: ['url'],
     },
@@ -556,10 +671,18 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     },
   },
   {
+    name: 'browser.verification_state',
+    label: 'Check Browser Verification Gate',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Read-only check for CAPTCHA, anti-bot, Cloudflare, MFA, or human verification on the current browser page. If detected, pause automation and ask the user to complete it manually.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'browser.click_role',
     label: 'Click Browser Element',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Click a browser element by ARIA role/name or selector using Playwright locator auto-waiting.',
+    description: 'Click a browser element by ARIA role/name or selector using Playwright locator auto-waiting. Never click CAPTCHA, MFA, or "not a robot" verification controls; use browser.verification_state and pause for the human instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -569,6 +692,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
         exact: { type: 'boolean' },
         nth: { type: 'number' },
         timeoutMs: { type: 'number' },
+        taskContext: { type: 'string', description: 'Original user task or action context for guarded browser popup decisions.' },
       },
       required: ['role'],
     },
@@ -577,7 +701,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'browser.fill_field',
     label: 'Fill Browser Field',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Fill a browser field by ARIA role/name or selector in the persistent local browser profile.',
+    description: 'Fill a browser field by ARIA role/name or selector in the persistent local browser profile. Do not fill one-time verification, MFA, CAPTCHA, or bot-check fields; pause for the human instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -588,6 +712,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
         submit: { type: 'boolean' },
         exact: { type: 'boolean' },
         timeoutMs: { type: 'number' },
+        taskContext: { type: 'string', description: 'Original user task or action context for guarded browser popup decisions.' },
       },
       required: ['text'],
     },
@@ -606,8 +731,30 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
         value: { type: 'string' },
         exact: { type: 'boolean' },
         timeoutMs: { type: 'number' },
+        taskContext: { type: 'string', description: 'Original user task or action context for guarded browser popup decisions.' },
       },
       required: ['value'],
+    },
+  },
+  {
+    name: 'browser.upload_file',
+    label: 'Upload Browser File',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Attach a verified local file to a browser file input or file chooser. Requires a local file session grant; do not use for bot verification uploads or credential files.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        filePath: { type: 'string' },
+        name: { type: 'string' },
+        selector: { type: 'string' },
+        buttonRole: { type: 'string' },
+        buttonName: { type: 'string' },
+        buttonSelector: { type: 'string' },
+        exact: { type: 'boolean' },
+        timeoutMs: { type: 'number' },
+        taskContext: { type: 'string', description: 'Original user task or action context for guarded browser popup decisions.' },
+      },
+      required: ['filePath'],
     },
   },
   {
@@ -615,7 +762,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     label: 'Press Browser Key',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
     description: 'Press a key or key combo in the persistent browser page.',
-    inputSchema: { type: 'object', properties: { combo: { type: 'string' } }, required: ['combo'] },
+    inputSchema: { type: 'object', properties: { combo: { type: 'string' }, taskContext: { type: 'string', description: 'Original user task or action context for guarded browser popup decisions.' } }, required: ['combo'] },
   },
   {
     name: 'browser.screenshot',
@@ -1165,6 +1312,71 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     description: 'List published office agents and their current live status.',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'agent.codex_acquire_asset',
+    label: 'Acquire Asset With Codex',
+    surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+    description:
+      'Delegate safe asset/resource acquisition to an attached managed Codex terminal session. Use for downloads, generated assets, packages, templates, datasets, or missing files needed to complete a browser/desktop task. Requires desktop.file_search/stat verification before use.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        goal: { type: 'string', description: 'Exact asset, file, dependency, or resource to acquire or prepare.' },
+        outputDir: { type: 'string', description: 'Scoped local output directory for the acquired artifacts.' },
+        expectedFileName: { type: 'string', description: 'Expected file name when known.' },
+        sourceUrl: { type: 'string', description: 'Known public source URL when provided by the user.' },
+        taskContext: { type: 'string', description: 'Short downstream browser/desktop workflow context.' },
+        sessionId: { type: 'string', description: 'Managed Codex terminal session id to reuse.' },
+        launchIfMissing: { type: 'boolean', description: 'Launch a scoped Codex session when no managed session is available.' },
+      },
+      required: ['goal'],
+    },
+  },
+  {
+    name: 'agent.recover_failed_task',
+    label: 'Recover Failed Task With Codex',
+    surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+    description:
+      'Delegate failed chat/computer/browser/app task diagnosis to an attached managed Codex session. The recovery agent can patch local app/runtime issues, recommend bridge fixes, or produce a safe retry plan without using credentials or bypassing human verification.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'Original user task that failed.' },
+        failureMessage: { type: 'string', description: 'Observed failure, blocker, warning, or stack summary.' },
+        failureStack: { type: 'string', description: 'Optional stack trace or raw diagnostic text.' },
+        outcomeStatus: { type: 'string', description: 'failed, blocked, warning, or completed_with_warnings.' },
+        executionKind: { type: 'string', description: 'Runtime/execution path that failed.' },
+        runId: { type: 'string', description: 'Optional run ledger id.' },
+        planSummary: { type: 'string', description: 'Planner summary when available.' },
+        groundingSummary: { type: 'string', description: 'DOM/a11y/screenshot/file grounding summary when available.' },
+        preflightSummary: { type: 'string', description: 'Preflight summary when available.' },
+        source: { type: 'string', description: 'Failure source identifier.' },
+        sessionId: { type: 'string', description: 'Managed Codex terminal session id to reuse.' },
+        launchIfMissing: { type: 'boolean', description: 'Launch a scoped Codex recovery session when no managed session is available.' },
+      },
+      required: ['task', 'failureMessage'],
+    },
+  },
+  {
+    name: 'agent.build_app_capability',
+    label: 'Build Missing App Capability With Codex',
+    surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+    description:
+      'Delegate a bounded app-capability buildout to an attached managed Codex session when chat/SwanBot does not yet have a pipeline, adapter, recipe, bridge tool, or smoke test for an unfamiliar desktop/native app task.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'Original user task that requires app control.' },
+        appName: { type: 'string', description: 'Target desktop/native app name when known.' },
+        capabilityGap: { type: 'string', description: 'What is missing: app recipe, adapter, bridge tool, planner route, smoke, or fallback.' },
+        desiredOutcome: { type: 'string', description: 'What the chat should be able to do after the buildout.' },
+        currentPlanSummary: { type: 'string', description: 'Planner/preflight/grounding summary or current runtime blocker.' },
+        sessionId: { type: 'string', description: 'Managed Codex terminal session id to reuse.' },
+        launchIfMissing: { type: 'boolean', description: 'Launch a scoped Codex buildout session when no managed session is available.' },
+      },
+      required: ['task'],
+    },
+  },
   // ── Circle / Agent / Office editing tools ────────────────────────
   {
     name: 'circle.update_settings',
@@ -1536,6 +1748,22 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     },
   },
   {
+    name: 'desktop.paste_text',
+    label: 'Paste Text on Desktop',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Pastes text into the focused or named desktop app by temporarily setting the clipboard, sending Cmd+V, then restoring the previous clipboard. Prefer this for long or multiline text.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Text to paste. <=20000 chars per call.' },
+        appName: { type: 'string', description: 'Optional app to focus before pasting.' },
+        restoreClipboard: { type: 'boolean', description: 'Defaults true.' },
+      },
+      required: ['text'],
+    },
+  },
+  {
     name: 'desktop.press_keys',
     label: 'Press Desktop Keys',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
@@ -1547,6 +1775,312 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
       type: 'object',
       properties: { combo: { type: 'string', description: 'Examples: "Cmd+T", "Cmd+Shift+N", "Return", "Escape".' } },
       required: ['combo'],
+    },
+  },
+  {
+    name: 'desktop.menu_click',
+    label: 'Click Desktop Menu',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Clicks a native macOS menu path such as ["File", "Save"] or ["File", "Export", "PNG"]. ' +
+      'Prefer this before coordinate clicks when the requested action is available from the menu bar.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional target app. If omitted, uses the frontmost app.' },
+        menuPath: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 6 },
+      },
+      required: ['menuPath'],
+    },
+  },
+  {
+    name: 'desktop.indesign_document_status',
+    label: 'Inspect InDesign Document',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Read-only InDesign probe for active/open document state, missing fonts, missing/modified links, layers, pages, spreads, and selection count. Prefer this before editing InDesign documents.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional InDesign app name. Defaults to InDesign.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .indd path guard.' },
+      },
+    },
+  },
+  {
+    name: 'desktop.indesign_text_inventory',
+    label: 'Inspect InDesign Text Frames',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Read-only InDesign text-frame inventory. Lists candidate text frames, layers, labels, content previews, overset state, and locked/hidden state so the agent can choose the right deterministic edit target instead of guessing.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional InDesign app name. Defaults to InDesign.' },
+        query: { type: 'string', description: 'Optional field/layer/content query such as "disclaimer", "APR", "price", or "headline".' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .indd path guard.' },
+        maxItems: { type: 'number', description: 'Maximum frames to return. Defaults to 30.' },
+      },
+    },
+  },
+  {
+    name: 'desktop.indesign_set_layer_state',
+    label: 'Set InDesign Layer State',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed InDesign layer show/hide/lock/unlock operation. Use after document status and layer/text inventory; it refuses missing or ambiguous layer matches instead of clicking the Layers panel.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional InDesign app name. Defaults to InDesign.' },
+        layerName: { type: 'string', description: 'Exact target layer name to show, hide, lock, or unlock.' },
+        action: { type: 'string', enum: ['show', 'hide', 'lock', 'unlock'], description: 'Layer state mutation to apply.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .indd path guard.' },
+      },
+      required: ['layerName', 'action'],
+    },
+  },
+  {
+    name: 'desktop.indesign_batch_find_change',
+    label: 'Batch InDesign Find/Change',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed InDesign batch Find/Change for routine dealership/banner copy updates. Runs multiple exact replacements in one bridge call, retries through locked stories/layers when safe, and returns per-pair verification. Prefer this for prompts such as "change 64 to 65, 72 to 84, and APR to 2.9%".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional InDesign app name. Defaults to InDesign.' },
+        pairs: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 20,
+          items: {
+            type: 'object',
+            properties: {
+              findText: { type: 'string', description: 'Exact source text to find.' },
+              changeText: { type: 'string', description: 'Exact replacement text.' },
+            },
+            required: ['findText', 'changeText'],
+          },
+        },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .indd path guard.' },
+      },
+      required: ['pairs'],
+    },
+  },
+  {
+    name: 'desktop.indesign_batch_update_text_layers',
+    label: 'Batch Update InDesign Text Layers',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed InDesign batch text-layer updater for dealership/banner fields. Updates multiple named fields such as headline, price, APR, CTA, dealer info, and disclaimer in one bridge call with per-field verification.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional InDesign app name. Defaults to InDesign.' },
+        updates: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 12,
+          items: {
+            type: 'object',
+            properties: {
+              fieldName: { type: 'string', description: 'Named field/layer to update, for example "Headline", "Price", "APR", or "Disclaimer".' },
+              replacementText: { type: 'string', description: 'Exact replacement copy to write into matching text frame(s).' },
+            },
+            required: ['fieldName', 'replacementText'],
+          },
+        },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .indd path guard.' },
+      },
+      required: ['updates'],
+    },
+  },
+  {
+    name: 'desktop.indesign_update_text_layer',
+    label: 'Update InDesign Text Layer',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed InDesign edit for dealership/banner text fields. Updates matching text frames by layer, frame name, or label aliases such as disclaimer, legal copy, APR, offer, price, CTA, headline, dealer info, or expiration. Prefer this over accessibility clicking for routine banner copy changes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional InDesign app name. Defaults to InDesign.' },
+        fieldName: { type: 'string', description: 'Named field/layer to update, for example "Disclaimer", "APR", "Price", "CTA", or "Headline".' },
+        replacementText: { type: 'string', description: 'Exact replacement copy to write into the matching text frame(s).' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .indd path guard.' },
+      },
+      required: ['fieldName', 'replacementText'],
+    },
+  },
+  {
+    name: 'desktop.indesign_export_proof',
+    label: 'Export InDesign Proof PDF',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Exports the guarded active InDesign document as a PDF proof to an approved local output path. Use after copy/layout edits so the user has a concrete proof file and file_stat verification target.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional InDesign app name. Defaults to InDesign.' },
+        outputPath: { type: 'string', description: 'Approved local output path for the proof PDF.' },
+        format: { type: 'string', enum: ['pdf'], description: 'Proof format. Currently pdf.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .indd path guard.' },
+      },
+      required: ['outputPath'],
+    },
+  },
+  {
+    name: 'desktop.indesign_relink_asset',
+    label: 'Relink InDesign Asset',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed InDesign relink for selected or named placed graphics. Requires a local read grant for the replacement asset and refuses ambiguous multi-link documents unless a selection or linkQuery identifies the target.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional InDesign app name. Defaults to InDesign.' },
+        assetPath: { type: 'string', description: 'Approved local path to the replacement image/graphic asset.' },
+        linkQuery: { type: 'string', description: 'Optional link/name/layer/path fragment to identify the target placed asset when nothing is selected.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .indd path guard.' },
+      },
+      required: ['assetPath'],
+    },
+  },
+  {
+    name: 'desktop.indesign_package_document',
+    label: 'Package InDesign Document',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Packages the guarded active InDesign document into an approved local output folder using InDesign packageForPrint, collecting links/fonts/profiles/report with preflight counts. Use for production handoff after edits and proof checks.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional InDesign app name. Defaults to InDesign.' },
+        outputFolderPath: { type: 'string', description: 'Approved local output folder for the packaged handoff.' },
+        includeIdml: { type: 'boolean', description: 'Also include an IDML file. Defaults false.' },
+        includePdf: { type: 'boolean', description: 'Also include a PDF file. Defaults false; prefer desktop.indesign_export_proof for explicit proof PDFs.' },
+        copyFonts: { type: 'boolean', description: 'Copy fonts into the package. Defaults true.' },
+        copyLinkedGraphics: { type: 'boolean', description: 'Copy linked graphics into the package. Defaults true.' },
+        copyProfiles: { type: 'boolean', description: 'Copy color profiles into the package. Defaults true.' },
+        ignorePreflightErrors: { type: 'boolean', description: 'Defaults false so missing links/fonts stop the package unless explicitly approved.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .indd path guard.' },
+      },
+      required: ['outputFolderPath'],
+    },
+  },
+  {
+    name: 'desktop.photoshop_document_status',
+    label: 'Inspect Photoshop Document',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Read-only Photoshop probe for active/open document state, dimensions, color mode, selection state, layer counts, text layers, smart objects, adjustment layers, and locked/hidden layers. Prefer this before editing Photoshop documents.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .psd/.psb/image path guard.' },
+      },
+    },
+  },
+  {
+    name: 'desktop.photoshop_layer_inventory',
+    label: 'Inspect Photoshop Layers',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Read-only Photoshop layer inventory. Lists layer/group paths, text previews, visibility, locks, masks, bounds, and kind/type so the agent can choose deterministic text, asset, selection, or export targets.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        query: { type: 'string', description: 'Optional layer/text query such as "headline", "logo", "background", or "CTA".' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .psd/.psb/image path guard.' },
+        maxItems: { type: 'number', description: 'Maximum layers to return. Defaults to 40.' },
+      },
+    },
+  },
+  {
+    name: 'desktop.photoshop_set_layer_state',
+    label: 'Set Photoshop Layer State',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed Photoshop layer show/hide/lock/unlock operation. Use after photoshop_document_status and photoshop_layer_inventory; it refuses missing or ambiguous layer matches instead of clicking the Layers panel.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        layerName: { type: 'string', description: 'Exact Photoshop layer/group name or path, for example "Legal", "Hero / Logo", or "Background".' },
+        action: { type: 'string', enum: ['show', 'hide', 'lock', 'unlock'], description: 'Layer state action to apply.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .psd/.psb/image path guard.' },
+      },
+      required: ['layerName', 'action'],
+    },
+  },
+  {
+    name: 'desktop.photoshop_update_text_layer',
+    label: 'Update Photoshop Text Layer',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed Photoshop edit for named text layers. Updates matching text layers by layer/path/name and returns per-document verification. Use after photoshop_document_status and photoshop_layer_inventory.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        layerName: { type: 'string', description: 'Named text layer or query, for example "Headline", "CTA", or "Disclaimer".' },
+        replacementText: { type: 'string', description: 'Exact replacement copy to write into matching Photoshop text layer(s).' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .psd/.psb/image path guard.' },
+      },
+      required: ['layerName', 'replacementText'],
+    },
+  },
+  {
+    name: 'desktop.photoshop_place_asset',
+    label: 'Place Photoshop Asset',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed Photoshop asset placement. Places an approved local image/graphic as a new layer in the guarded active document and returns the placed layer name. Requires approval because it mutates the document.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        assetPath: { type: 'string', description: 'Approved local path to the image/graphic asset to place.' },
+        layerName: { type: 'string', description: 'Optional name for the placed layer.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .psd/.psb/image path guard.' },
+      },
+      required: ['assetPath'],
+    },
+  },
+  {
+    name: 'desktop.photoshop_export_proof',
+    label: 'Export Photoshop Proof',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Exports the guarded active Photoshop document as a PNG/JPEG proof to an approved local output path. Use after edits for visual proof and file_stat verification.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        outputPath: { type: 'string', description: 'Approved local output path for the proof image.' },
+        format: { type: 'string', enum: ['png', 'jpg', 'jpeg'], description: 'Proof format. Defaults from output extension, otherwise png.' },
+        quality: { type: 'number', description: 'JPEG quality 1-12. Ignored for PNG.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        sourceDocumentPath: { type: 'string', description: 'Optional source .psd/.psb/image path guard.' },
+      },
+      required: ['outputPath'],
     },
   },
   {
@@ -1595,22 +2129,109 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'desktop.file_list',
     label: 'List Local Files',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Lists files and folders under a local path. Read-only.',
+    description: 'Lists files and folders under a local path. Read-only. Requires one-time local file verification for the browser session.',
     inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
   },
   {
     name: 'desktop.file_read',
     label: 'Read Local File',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Reads a bounded UTF-8 preview of a local file. Read-only.',
+    description: 'Reads a bounded UTF-8 preview of a local file. Read-only. Requires one-time local file verification for the browser session.',
     inputSchema: { type: 'object', properties: { path: { type: 'string' }, maxBytes: { type: 'number' } }, required: ['path'] },
   },
   {
     name: 'desktop.file_search',
     label: 'Search Local Files',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Searches filenames and small text-file contents under a local folder. Read-only and bounded.',
-    inputSchema: { type: 'object', properties: { rootPath: { type: 'string' }, query: { type: 'string' } }, required: ['rootPath', 'query'] },
+    description: 'Searches filenames and small text-file contents under one or more local folders. Read-only, bounded, and requires one-time local file verification for the browser session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        rootPath: { type: 'string' },
+        rootPaths: { type: 'array', items: { type: 'string' } },
+        query: { type: 'string' },
+        maxResults: { type: 'number' },
+        maxFiles: { type: 'number' },
+        maxDepth: { type: 'number' },
+        includeContent: { type: 'boolean' },
+        extensions: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'desktop.file_stat',
+    label: 'Inspect Local File Metadata',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Checks whether a local path exists and returns bounded metadata such as kind, size, and modified time. Read-only. Requires one-time local file verification for the browser session.',
+    inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+  },
+  {
+    name: 'desktop.file_rename',
+    label: 'Rename Local File',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Renames or moves a local file within approved write-scoped roots. Requires explicit local file write verification for the browser session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fromPath: { type: 'string' },
+        toPath: { type: 'string' },
+        overwrite: { type: 'boolean' },
+      },
+      required: ['fromPath', 'toPath'],
+    },
+  },
+  {
+    name: 'desktop.file_write_text',
+    label: 'Write Local Text File',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Creates, overwrites, or appends bounded UTF-8 text files inside approved write-scoped local roots. Requires explicit local file write verification for the browser session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        content: { type: 'string' },
+        append: { type: 'boolean' },
+        overwrite: { type: 'boolean' },
+      },
+      required: ['path', 'content'],
+    },
+  },
+  {
+    name: 'desktop.file_copy',
+    label: 'Copy Local File',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Copies a local file or folder inside approved write-scoped roots. Requires explicit local file write verification for the browser session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fromPath: { type: 'string' },
+        toPath: { type: 'string' },
+        overwrite: { type: 'boolean' },
+      },
+      required: ['fromPath', 'toPath'],
+    },
+  },
+  {
+    name: 'desktop.file_trash',
+    label: 'Move Local File To Trash',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Moves a local file or folder to macOS Trash instead of permanently deleting it. Requires explicit local file write verification for the browser session.',
+    inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+  },
+  {
+    name: 'desktop.file_mkdir',
+    label: 'Create Local Folder',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Creates a local folder inside approved write-scoped roots. Requires explicit local file write verification for the browser session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string' },
+        recursive: { type: 'boolean' },
+      },
+      required: ['path'],
+    },
   },
   {
     name: 'desktop.shortcuts_list',
@@ -1670,6 +2291,35 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
         count: { type: 'number' },
       },
       required: ['x', 'y'],
+    },
+  },
+  {
+    name: 'desktop.mouse_down',
+    label: 'Hold Desktop Mouse',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Moves to explicit screen coordinates and holds the local mouse button down until desktop.mouse_up is called.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number' },
+        y: { type: 'number' },
+        button: { type: 'string' },
+      },
+      required: ['x', 'y'],
+    },
+  },
+  {
+    name: 'desktop.mouse_up',
+    label: 'Release Desktop Mouse',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Releases a held local mouse button, optionally at explicit screen coordinates.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number' },
+        y: { type: 'number' },
+        button: { type: 'string' },
+      },
     },
   },
   {
@@ -1815,6 +2465,21 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
       required: ['pid', 'path'],
     },
   },
+  {
+    name: 'desktop.set_element_value',
+    label: 'Set Accessibility Field Value',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Sets a text field or editable accessibility element by PID and dotted path from desktop.read_a11y_tree. Prefer this before click+paste when filling named native app fields.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pid: { type: 'number' },
+        path: { type: 'string' },
+        text: { type: 'string' },
+      },
+      required: ['pid', 'path', 'text'],
+    },
+  },
 ];
 
 function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolPolicy {
@@ -1854,6 +2519,7 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
   if (tool.startsWith('browser.')) {
     const readOnlyTools = new Set<OpenSwanRuntimeToolName>([
       'browser.dom_snapshot',
+      'browser.verification_state',
       'browser.screenshot',
     ]);
     const readOnly = readOnlyTools.has(tool);
@@ -1883,6 +2549,39 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     };
   }
 
+  if (tool === 'agent.codex_acquire_asset') {
+    return {
+      family: 'agent',
+      approvalMode: 'ask',
+      mutatesState: true,
+      externalSideEffect: true,
+      approvalKind: 'file_write',
+      summary: 'Delegates Codex agent work that may download, generate, install, or write local artifacts.',
+    };
+  }
+
+  if (tool === 'agent.recover_failed_task') {
+    return {
+      family: 'agent',
+      approvalMode: 'ask',
+      mutatesState: true,
+      externalSideEffect: false,
+      approvalKind: 'privileged_action',
+      summary: 'Delegates failed-task diagnosis and bounded app/runtime repair to a connected Codex agent.',
+    };
+  }
+
+  if (tool === 'agent.build_app_capability') {
+    return {
+      family: 'agent',
+      approvalMode: 'ask',
+      mutatesState: true,
+      externalSideEffect: false,
+      approvalKind: 'privileged_action',
+      summary: 'Delegates missing unfamiliar-app capability buildout to a connected Codex agent.',
+    };
+  }
+
   if (tool.startsWith('desktop.')) {
     // Read-only tools (list apps, screen size, screenshot, wait_for_app)
     // auto-approve — they observe state, they don't change it. Every
@@ -1897,24 +2596,36 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
       'desktop.file_list',
       'desktop.file_read',
       'desktop.file_search',
+      'desktop.file_stat',
       'desktop.shortcuts_list',
       'desktop.screen_size',
       'desktop.screenshot',
       'desktop.wait_for_app',
       'desktop.read_a11y_tree',
-    ]);
-    const readOnly = readOnlyTools.has(tool);
-    return {
-      family: 'browser',  // re-use the browser family so existing banners render
-      approvalMode: readOnly ? 'auto' : 'ask',
-      mutatesState: !readOnly,
-      externalSideEffect: !readOnly,
-      approvalKind: readOnly ? undefined : 'browser_action',
-      summary: readOnly
-        ? 'Observes local desktop state via the Claude Code bridge (list apps, screen size, screenshot, wait).'
-        : 'Drives the user\'s local desktop (launch / focus / type / keys / click / open) via the Claude Code bridge. HITL-gated.',
-    };
-  }
+      'desktop.indesign_document_status',
+      'desktop.indesign_text_inventory',
+      'desktop.photoshop_document_status',
+      'desktop.photoshop_layer_inventory',
+	    ]);
+	    const readOnly = readOnlyTools.has(tool);
+	    const fileWrite = tool === 'desktop.file_rename'
+	      || tool === 'desktop.file_write_text'
+	      || tool === 'desktop.file_copy'
+	      || tool === 'desktop.file_trash'
+	      || tool === 'desktop.file_mkdir';
+	    return {
+	      family: 'browser',  // re-use the browser family so existing banners render
+	      approvalMode: readOnly ? 'auto' : 'ask',
+	      mutatesState: !readOnly,
+	      externalSideEffect: !readOnly,
+	      approvalKind: readOnly ? undefined : fileWrite ? 'file_write' : 'browser_action',
+	      summary: readOnly
+	        ? 'Observes local desktop state via the Claude Code bridge (list apps, screen size, screenshot, wait).'
+	        : fileWrite
+	          ? 'Changes local files through the scoped desktop bridge file-write surface. HITL-gated.'
+	          : 'Drives the user\'s local desktop (launch / focus / type / keys / click / open) via the Claude Code bridge. HITL-gated.',
+	    };
+	  }
 
   if (tool === 'workspace.create_room' || tool === 'workspace.apply_artifacts' || tool === 'workspace.open_preview') {
     return {
@@ -2049,6 +2760,11 @@ export function getOpenSwanToolPolicy(
 const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   // Code generation — not in review (audit mode), research, talk, or support.
   'code.generate': ['build', 'execute', 'plan', 'design'],
+  // Agent-acquired assets can download/generate/write local files and must
+  // only be exposed in action-oriented modes.
+  'agent.codex_acquire_asset': ['execute', 'build'],
+  'agent.recover_failed_task': ['execute', 'support', 'build'],
+  'agent.build_app_capability': ['execute', 'build', 'support'],
   // Circle-wide settings — only when user explicitly wants to change them.
   'circle.update_settings':     ['execute', 'build'],
   'circle.update_budget_caps':  ['execute'],
@@ -2085,6 +2801,7 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'browser.click_role': ['execute'],
   'browser.fill_field': ['execute'],
   'browser.select_option': ['execute'],
+  'browser.upload_file': ['execute'],
   'browser.press_key': ['execute'],
   'browser.close': ['execute', 'support'],
   // Desktop write/control actions only belong in execute mode. Read-only
@@ -2092,19 +2809,40 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'desktop.launch_app': ['execute'],
   'desktop.focus_app':  ['execute'],
   'desktop.type_text':  ['execute'],
+  'desktop.paste_text': ['execute'],
   'desktop.press_keys': ['execute'],
+  'desktop.menu_click': ['execute'],
+  'desktop.indesign_set_layer_state': ['execute'],
+  'desktop.indesign_batch_find_change': ['execute'],
+  'desktop.indesign_batch_update_text_layers': ['execute'],
+  'desktop.indesign_update_text_layer': ['execute'],
+  'desktop.indesign_relink_asset': ['execute'],
+  'desktop.indesign_package_document': ['execute'],
+  'desktop.indesign_export_proof': ['execute'],
+  'desktop.photoshop_set_layer_state': ['execute'],
+  'desktop.photoshop_update_text_layer': ['execute'],
+  'desktop.photoshop_place_asset': ['execute'],
+  'desktop.photoshop_export_proof': ['execute'],
   'desktop.open_url':   ['execute'],
   'desktop.open_path':  ['execute'],
   'desktop.click_at':   ['execute'],
   'desktop.clipboard_write': ['execute'],
   'desktop.clipboard_clear': ['execute'],
+  'desktop.file_rename': ['execute'],
+  'desktop.file_write_text': ['execute'],
+  'desktop.file_copy': ['execute'],
+  'desktop.file_trash': ['execute'],
+  'desktop.file_mkdir': ['execute'],
   'desktop.shortcuts_run': ['execute'],
   'desktop.window_manage': ['execute'],
   'desktop.mouse_move': ['execute'],
   'desktop.mouse_click': ['execute'],
+  'desktop.mouse_down': ['execute'],
+  'desktop.mouse_up': ['execute'],
   'desktop.mouse_drag': ['execute'],
   'desktop.mouse_scroll': ['execute'],
   'desktop.click_element': ['execute'],
+  'desktop.set_element_value': ['execute'],
 };
 
 /** Returns the mode list for a tool (inline def wins over the central map). */
@@ -2139,9 +2877,11 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'browser.plan_task',
   'browser.open_url',
   'browser.dom_snapshot',
+  'browser.verification_state',
   'browser.click_role',
   'browser.fill_field',
   'browser.select_option',
+  'browser.upload_file',
   'browser.press_key',
   'browser.screenshot',
   'browser.close',
@@ -2188,6 +2928,9 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'rooms.read_file',
   'integrations.list',
   'office.list_agents',
+  'agent.codex_acquire_asset',
+  'agent.recover_failed_task',
+  'agent.build_app_capability',
   'approvals.list',
   'approvals.request',
   'approvals.resolve',
@@ -2201,7 +2944,24 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'desktop.launch_app',
   'desktop.focus_app',
   'desktop.type_text',
+  'desktop.paste_text',
   'desktop.press_keys',
+  'desktop.menu_click',
+  'desktop.indesign_document_status',
+  'desktop.indesign_text_inventory',
+  'desktop.indesign_set_layer_state',
+  'desktop.indesign_batch_find_change',
+  'desktop.indesign_batch_update_text_layers',
+  'desktop.indesign_update_text_layer',
+  'desktop.indesign_relink_asset',
+  'desktop.indesign_package_document',
+  'desktop.indesign_export_proof',
+  'desktop.photoshop_document_status',
+  'desktop.photoshop_layer_inventory',
+  'desktop.photoshop_set_layer_state',
+  'desktop.photoshop_update_text_layer',
+  'desktop.photoshop_place_asset',
+  'desktop.photoshop_export_proof',
   'desktop.list_running_apps',
   'desktop.list_browser_tabs',
   'desktop.window_state',
@@ -2211,11 +2971,19 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'desktop.file_list',
   'desktop.file_read',
   'desktop.file_search',
+  'desktop.file_stat',
+  'desktop.file_rename',
+  'desktop.file_write_text',
+  'desktop.file_copy',
+  'desktop.file_trash',
+  'desktop.file_mkdir',
   'desktop.shortcuts_list',
   'desktop.shortcuts_run',
   'desktop.window_manage',
   'desktop.mouse_move',
   'desktop.mouse_click',
+  'desktop.mouse_down',
+  'desktop.mouse_up',
   'desktop.mouse_drag',
   'desktop.mouse_scroll',
   'desktop.wait_for_app',
@@ -2226,6 +2994,7 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'desktop.screen_size',
   'desktop.read_a11y_tree',
   'desktop.click_element',
+  'desktop.set_element_value',
   // App-edit tools (Phase 1-4) — let BlackSwan modify anything the user can edit
   'circle.update_settings',
   'circle.update_budget_caps',
@@ -2361,10 +3130,16 @@ function describeDesktopFailure(error?: string, code?: string): string {
       return `${base} The desktop bridge is running but not paired with this browser. Tell the user to tap "Pair Desktop Bridge" in the Chat Actions menu.`;
     case 'permission_denied':
       return `${base} macOS Accessibility permission is required for keystrokes and key combos. Open System Settings → Privacy & Security → Accessibility and enable it for whichever shell/terminal is running the bridge (usually Terminal.app or iTerm). After granting, the user should re-run the same command.`;
+    case 'file_access_not_granted':
+      return `${base} Ask the user to approve one-time local file access in chat for this browser session, then retry the file tool.`;
+    case 'stale_bridge':
+      return `${base} The running desktop bridge is stale and does not have the latest /desktop routes loaded. Restart it with \`npm run bridge\` or restart the app dev server, then retry the same request.`;
     case 'platform_unsupported':
       return `${base} Desktop automation is macOS-only in Phase 1. Windows/Linux support is on the roadmap.`;
     case 'app_not_found':
       return `${base} That app isn't installed under /Applications or the name doesn't match the .app bundle. Call desktop.list_running_apps to see exact names.`;
+    case 'path_not_found':
+      return `${base} The file or folder path does not exist on this Mac. Re-check the staged path, search the parent folder, or ask the user to upload/select the file again.`;
     case 'invalid_input':
       return `${base} Check the tool's argument schema.`;
     default:
@@ -2396,7 +3171,7 @@ async function maybeRequestToolApproval(
   tool: OpenSwanRuntimeToolName,
   args: Record<string, unknown>,
   context: OpenSwanRuntimeToolContext,
-): Promise<{ approvalId: string; message: string } | null> {
+): Promise<{ approvalId: string; message: string; status: 'pending' | 'rejected' | 'failed_to_create' | 'lookup_failed' } | null> {
   const policy = getOpenSwanToolPolicy(tool, context.activePluginIds);
   if (policy.approvalMode !== 'ask' || !context.runId || tool.startsWith('approvals.')) {
     return null;
@@ -2405,18 +3180,45 @@ async function maybeRequestToolApproval(
   const title = `OpenSwan approval required: ${tool}`;
   const { data: existing, error: existingError } = await supabase
     .from('agent_run_approvals')
-    .select('id')
+    .select('id,status,payload')
     .eq('run_id', context.runId)
-    .eq('status', 'pending')
     .eq('title', title)
-    .limit(1);
+    .order('requested_at', { ascending: false })
+    .limit(8);
 
-  if (!existingError && existing && existing.length > 0) {
+  if (existingError) {
     return {
-      approvalId: String(existing[0].id),
-      message: `Approval already pending for ${tool} (id: ${String(existing[0].id).slice(0, 8)}).`,
+      approvalId: '',
+      status: 'lookup_failed',
+      message: `Approval lookup failed for ${tool}: ${existingError.message}. Tool not executed.`,
     };
   }
+
+  const decision: OpenSwanRuntimeApprovalDecision = resolveOpenSwanRuntimeApprovalDecision({
+    tool,
+    args,
+    rows: (existing || []) as any,
+  });
+
+  if (decision.kind === 'pass') {
+    return null;
+  }
+  if (decision.kind === 'defer') {
+    return {
+      approvalId: decision.approvalId,
+      status: 'pending',
+      message: decision.message,
+    };
+  }
+  if (decision.kind === 'block') {
+    return {
+      approvalId: decision.approvalId,
+      status: 'rejected',
+      message: decision.message,
+    };
+  }
+
+  const toolApprovalKey = buildOpenSwanToolApprovalKey(tool, args);
 
   const { requestRunApproval } = await import('./agentRunSystem');
   const approval = await requestRunApproval({
@@ -2429,6 +3231,8 @@ async function maybeRequestToolApproval(
     payload: {
       tool,
       args,
+      toolApprovalKey,
+      toolApprovalKeyVersion: 1,
       policyFamily: policy.family,
       approvalMode: policy.approvalMode,
       mutatesState: policy.mutatesState,
@@ -2439,12 +3243,14 @@ async function maybeRequestToolApproval(
   if (!approval) {
     return {
       approvalId: '',
+      status: 'failed_to_create',
       message: `Approval required for ${tool}, but the request could not be created.`,
     };
   }
 
   return {
     approvalId: approval.id,
+    status: 'pending',
     message: `Approval requested for ${tool} (id: ${approval.id.slice(0, 8)}).`,
   };
 }
@@ -2489,6 +3295,9 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'rooms.read_file':
     case 'integrations.list':
     case 'office.list_agents':
+    case 'agent.codex_acquire_asset':
+    case 'agent.recover_failed_task':
+    case 'agent.build_app_capability':
     case 'circle.update_settings':
     case 'circle.update_budget_caps':
     case 'circle.update_office_theme':
@@ -2523,16 +3332,35 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'vault.resolve_for_task':
     case 'browser.open_url':
     case 'browser.dom_snapshot':
+    case 'browser.verification_state':
     case 'browser.click_role':
     case 'browser.fill_field':
     case 'browser.select_option':
+    case 'browser.upload_file':
     case 'browser.press_key':
     case 'browser.screenshot':
     case 'browser.close':
     case 'desktop.launch_app':
     case 'desktop.focus_app':
     case 'desktop.type_text':
+    case 'desktop.paste_text':
     case 'desktop.press_keys':
+    case 'desktop.menu_click':
+    case 'desktop.indesign_document_status':
+    case 'desktop.indesign_text_inventory':
+    case 'desktop.indesign_set_layer_state':
+    case 'desktop.indesign_batch_find_change':
+    case 'desktop.indesign_batch_update_text_layers':
+    case 'desktop.indesign_update_text_layer':
+    case 'desktop.indesign_relink_asset':
+    case 'desktop.indesign_package_document':
+    case 'desktop.indesign_export_proof':
+    case 'desktop.photoshop_document_status':
+    case 'desktop.photoshop_layer_inventory':
+    case 'desktop.photoshop_set_layer_state':
+    case 'desktop.photoshop_update_text_layer':
+    case 'desktop.photoshop_place_asset':
+    case 'desktop.photoshop_export_proof':
     case 'desktop.list_running_apps':
     case 'desktop.list_browser_tabs':
     case 'desktop.window_state':
@@ -2542,11 +3370,19 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'desktop.file_list':
     case 'desktop.file_read':
     case 'desktop.file_search':
+    case 'desktop.file_stat':
+    case 'desktop.file_rename':
+    case 'desktop.file_write_text':
+    case 'desktop.file_copy':
+    case 'desktop.file_trash':
+    case 'desktop.file_mkdir':
     case 'desktop.shortcuts_list':
     case 'desktop.shortcuts_run':
     case 'desktop.window_manage':
     case 'desktop.mouse_move':
     case 'desktop.mouse_click':
+    case 'desktop.mouse_down':
+    case 'desktop.mouse_up':
     case 'desktop.mouse_drag':
     case 'desktop.mouse_scroll':
     case 'desktop.wait_for_app':
@@ -2557,6 +3393,7 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'desktop.screen_size':
     case 'desktop.read_a11y_tree':
     case 'desktop.click_element':
+    case 'desktop.set_element_value':
       return (result as { resultsText: string }).resultsText;
     case 'browser.plan_task': {
       const browserResult = result as OpenSwanToolExecutionResultMap['browser.plan_task'];
@@ -2661,18 +3498,21 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
 ): Promise<OpenSwanToolExecutionResultMap[T]> {
   const approvalGate = await maybeRequestToolApproval(tool, (args || {}) as Record<string, unknown>, context);
   if (approvalGate) {
+    const approvalRequest = approvalGate.status === 'pending'
+      ? { id: approvalGate.approvalId, required: true, status: approvalGate.status }
+      : undefined;
     if (tool === 'schedule_action') {
       return {
         ok: false,
         resultText: approvalGate.message,
         error: approvalGate.message,
-        approvalRequest: { id: approvalGate.approvalId, required: true },
+        ...(approvalRequest ? { approvalRequest } : {}),
       } as unknown as OpenSwanToolExecutionResultMap[T];
     }
     return {
       ok: false,
       resultsText: approvalGate.message,
-      approvalRequest: { id: approvalGate.approvalId, required: true },
+      ...(approvalRequest ? { approvalRequest } : {}),
     } as unknown as OpenSwanToolExecutionResultMap[T];
   }
 
@@ -2710,8 +3550,8 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
       try {
         const { openUrl } = await import('./browserBridge');
         const a = args as OpenSwanToolExecutionArgs['browser.open_url'];
-        const r = await openUrl(String(a.url || ''), { timeoutMs: a.timeoutMs, waitUntil: a.waitUntil });
-        if (!r.ok) return { ok: false, resultsText: r.error || 'Browser navigation failed.' } as any;
+        const r = await openUrl(String(a.url || ''), { timeoutMs: a.timeoutMs, waitUntil: a.waitUntil, taskContext: a.taskContext });
+        if (!r.ok) return browserToolFailureResult(r, 'Browser navigation failed.') as any;
         return { ok: true, resultsText: `Opened ${r.data?.url || a.url}${r.data?.title ? ` — ${r.data.title}` : ''}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
@@ -2720,7 +3560,7 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         const { domSnapshot, renderBrowserTree } = await import('./browserBridge');
         const a = args as OpenSwanToolExecutionArgs['browser.dom_snapshot'];
         const r = await domSnapshot({ maxNodes: a.maxNodes, interestingOnly: a.interestingOnly });
-        if (!r.ok || !r.data) return { ok: false, resultsText: r.error || 'Browser DOM snapshot failed.' } as any;
+        if (!r.ok || !r.data) return browserToolFailureResult(r, 'Browser DOM snapshot failed.') as any;
         const text = renderBrowserTree(r.data.tree).join('\n');
         return {
           ok: true,
@@ -2728,39 +3568,89 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
+    case 'browser.verification_state': {
+      try {
+        const { verificationState } = await import('./browserBridge');
+        const r = await verificationState();
+        if (!r.ok || !r.data) return browserToolFailureResult(r, 'Browser verification check failed.') as any;
+        if (r.data.verificationDetected && r.data.gate) {
+          return {
+            ok: true,
+            resultsText: `${r.data.gate.label}: ${r.data.gate.reason}\n${r.data.gate.pauseInstruction}\nURL: ${r.data.url}`,
+          } as any;
+        }
+        return { ok: true, resultsText: `No browser bot verification detected on ${r.data.title || r.data.url || 'current page'}.` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
     case 'browser.click_role': {
       try {
-        const { clickRole } = await import('./browserBridge');
         const a = args as OpenSwanToolExecutionArgs['browser.click_role'];
+        const gate = detectAutomationVerificationGate([a.role, a.name, a.selector]);
+        if (gate) {
+          return { ok: false, resultsText: `${gate.label}: ${gate.pauseInstruction}` } as any;
+        }
+        const { clickRole } = await import('./browserBridge');
         const r = await clickRole(a);
-        if (!r.ok) return { ok: false, resultsText: r.error || 'Browser click failed.' } as any;
+        if (!r.ok) return browserToolFailureResult(r, 'Browser click failed.') as any;
         return { ok: true, resultsText: `Clicked browser ${a.role}${a.name ? ` "${a.name}"` : a.selector ? ` selector ${a.selector}` : ''}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'browser.fill_field': {
       try {
-        const { fillField } = await import('./browserBridge');
         const a = args as OpenSwanToolExecutionArgs['browser.fill_field'];
+        const gate = detectAutomationVerificationGate([a.role, a.name, a.selector, a.text]);
+        if (gate) {
+          return { ok: false, resultsText: `${gate.label}: ${gate.pauseInstruction}` } as any;
+        }
+        const { fillField } = await import('./browserBridge');
         const r = await fillField({ ...a, role: a.role || 'textbox' });
-        if (!r.ok) return { ok: false, resultsText: r.error || 'Browser fill failed.' } as any;
+        if (!r.ok) return browserToolFailureResult(r, 'Browser fill failed.') as any;
         return { ok: true, resultsText: `Filled browser field${a.name ? ` "${a.name}"` : a.selector ? ` ${a.selector}` : ''} (${a.text.length} chars${a.submit ? ', submitted' : ''}).` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'browser.select_option': {
       try {
-        const { selectOption } = await import('./browserBridge');
         const a = args as OpenSwanToolExecutionArgs['browser.select_option'];
+        const gate = detectAutomationVerificationGate([a.role, a.name, a.selector, a.value]);
+        if (gate) {
+          return { ok: false, resultsText: `${gate.label}: ${gate.pauseInstruction}` } as any;
+        }
+        const { selectOption } = await import('./browserBridge');
         const r = await selectOption({ ...a, role: a.role || 'combobox' });
-        if (!r.ok) return { ok: false, resultsText: r.error || 'Browser select failed.' } as any;
+        if (!r.ok) return browserToolFailureResult(r, 'Browser select failed.') as any;
         return { ok: true, resultsText: `Selected browser option "${a.value}"${a.name ? ` in "${a.name}"` : a.selector ? ` in ${a.selector}` : ''}.` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'browser.upload_file': {
+      try {
+        const a = args as OpenSwanToolExecutionArgs['browser.upload_file'];
+        const gate = detectAutomationVerificationGate([a.name, a.selector, a.buttonRole, a.buttonName, a.buttonSelector]);
+        if (gate) {
+          return { ok: false, resultsText: `${gate.label}: ${gate.pauseInstruction}` } as any;
+        }
+        const filePath = String(a.filePath || '').trim();
+        const { requestLocalFileSessionGrant } = await import('./desktopBridge');
+        const grant = await requestLocalFileSessionGrant({ roots: [filePath], scope: 'read', reason: `Browser upload ${filePath}` });
+        if (!grant.ok) return { ok: false, resultsText: describeDesktopFailure(grant.error, grant.errorCode) } as any;
+        const { uploadFile } = await import('./browserBridge');
+        const r = await uploadFile(a);
+        if (!r.ok || !r.data) return browserToolFailureResult(r, 'Browser file upload failed.') as any;
+        return {
+          ok: true,
+          resultsText: `Uploaded ${r.data.fileName} (${r.data.sizeBytes} bytes) through browser ${r.data.method || 'file input'}.`,
+        } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'browser.press_key': {
       try {
-        const { pressKey } = await import('./browserBridge');
         const a = args as OpenSwanToolExecutionArgs['browser.press_key'];
-        const r = await pressKey(String(a.combo || ''));
-        if (!r.ok) return { ok: false, resultsText: r.error || 'Browser key press failed.' } as any;
+        const gate = detectAutomationVerificationGate(a.combo);
+        if (gate) {
+          return { ok: false, resultsText: `${gate.label}: ${gate.pauseInstruction}` } as any;
+        }
+        const { pressKey } = await import('./browserBridge');
+        const r = await pressKey(String(a.combo || ''), { taskContext: a.taskContext });
+        if (!r.ok) return browserToolFailureResult(r, 'Browser key press failed.') as any;
         return { ok: true, resultsText: `Pressed browser key ${r.data?.combo || a.combo}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
@@ -2769,7 +3659,7 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         const { screenshot } = await import('./browserBridge');
         const a = args as OpenSwanToolExecutionArgs['browser.screenshot'];
         const r = await screenshot({ fullPage: a.fullPage === true });
-        if (!r.ok || !r.data) return { ok: false, resultsText: r.error || 'Browser screenshot failed.' } as any;
+        if (!r.ok || !r.data) return browserToolFailureResult(r, 'Browser screenshot failed.') as any;
         return {
           ok: true,
           resultsText: `Captured browser screenshot (${Math.round((r.data.sizeBytes || 0) / 1024)} KB PNG). base64 length: ${(r.data.base64 || '').length} chars.`,
@@ -2783,7 +3673,7 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
       try {
         const { closeBrowser } = await import('./browserBridge');
         const r = await closeBrowser();
-        if (!r.ok) return { ok: false, resultsText: r.error || 'Browser close failed.' } as any;
+        if (!r.ok) return browserToolFailureResult(r, 'Browser close failed.') as any;
         return { ok: true, resultsText: 'Closed local browser context.' } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
@@ -3304,6 +4194,217 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         return { ok: true, resultsText: lines.join('\n') } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
+    case 'agent.codex_acquire_asset': {
+      try {
+        const a = args as OpenSwanToolExecutionArgs['agent.codex_acquire_asset'];
+        const goal = String(a.goal || '').trim();
+        if (!goal) return { ok: false, provider: 'codex', resultsText: 'goal is required.' } as any;
+
+        const { buildAgentAssetAcquisitionPolicy, formatAgentAssetAcquisitionPolicySummary } = await import('./agentAssetAcquisitionPolicy');
+        const policy = buildAgentAssetAcquisitionPolicy({
+          goal,
+          outputDir: a.outputDir,
+          expectedFileName: a.expectedFileName,
+          sourceUrl: a.sourceUrl,
+          taskContext: a.taskContext,
+        });
+        const prompt = policy.prompt;
+        const policySummary = formatAgentAssetAcquisitionPolicySummary(policy);
+
+        const { fetchCodexSessions, launchCodexSessions } = await import('./codexDetector');
+        const { sendTerminalAgentSessionMessage } = await import('./bridgeTaskDispatcher');
+        let targetSessionId = String(a.sessionId || '').trim();
+
+        if (!targetSessionId) {
+          const sessions = await fetchCodexSessions().catch(() => []);
+          const managed = sessions.find((session) => Boolean(session.terminalTitle || session.launchId || session.manageable));
+          targetSessionId = managed?.sessionId || '';
+        }
+
+        if (targetSessionId) {
+          const sent = await sendTerminalAgentSessionMessage('codex', targetSessionId, prompt);
+          if (!sent.ok) {
+            return {
+              ok: false,
+              provider: 'codex',
+              sessionId: targetSessionId,
+              resultsText: sent.error || 'Could not send acquisition task to Codex.',
+            } as any;
+          }
+          return {
+            ok: true,
+            provider: 'codex',
+            sessionId: sent.sessionId || targetSessionId,
+            launched: false,
+            resultsText: `Sent Codex asset acquisition task to ${sent.displayName || targetSessionId}. ${policySummary}`,
+          } as any;
+        }
+
+        if (a.launchIfMissing === false) {
+          return {
+            ok: false,
+            provider: 'codex',
+            launched: false,
+            resultsText: 'No managed Codex session is available and launchIfMissing is false.',
+          } as any;
+        }
+
+        const launched = await launchCodexSessions({
+          count: 1,
+          prompt,
+          names: ['Codex Asset Acquisition'],
+          circleId: context.circleId,
+          userId: context.userId,
+        });
+        if (!launched.ok || launched.launched < 1) {
+          const error = launched.error || launched.failed?.[0]?.error || 'Could not launch Codex acquisition session.';
+          return { ok: false, provider: 'codex', launched: false, resultsText: error } as any;
+        }
+
+        const session = launched.sessions[0];
+        return {
+          ok: true,
+          provider: 'codex',
+          sessionId: session?.sessionId,
+          launched: true,
+          resultsText: `Launched Codex asset acquisition session${session?.displayName ? ` (${session.displayName})` : ''}. ${policySummary}`,
+        } as any;
+      } catch (e: any) {
+        return { ok: false, provider: 'codex', resultsText: e.message || 'Codex asset acquisition failed.' } as any;
+      }
+    }
+    case 'agent.recover_failed_task': {
+      try {
+        const a = args as OpenSwanToolExecutionArgs['agent.recover_failed_task'];
+        const task = String(a.task || '').trim();
+        const failureMessage = String(a.failureMessage || '').trim();
+        if (!task) return { ok: false, provider: 'codex', resultsText: 'task is required.' } as any;
+        if (!failureMessage) return { ok: false, provider: 'codex', resultsText: 'failureMessage is required.' } as any;
+
+        const { startConnectedAgentFailureRecovery } = await import('./agentFailureRecovery');
+        const result = await startConnectedAgentFailureRecovery({
+          task,
+          failureMessage,
+          failureStack: a.failureStack,
+          outcomeStatus: a.outcomeStatus,
+          executionKind: a.executionKind,
+          runId: a.runId,
+          planSummary: a.planSummary,
+          groundingSummary: a.groundingSummary,
+          preflightSummary: a.preflightSummary,
+          source: a.source || 'openswan_tool_runtime',
+          sessionId: a.sessionId,
+          launchIfMissing: a.launchIfMissing,
+          circleId: context.circleId,
+          userId: context.userId,
+        });
+        return {
+          ok: result.ok,
+          provider: result.provider,
+          sessionId: result.sessionId,
+          launched: result.launched,
+          recoveryAction: result.recoveryAction,
+          recoveryRunbook: result.runbook as unknown as Record<string, unknown>,
+          resultsText: result.message,
+        } as any;
+      } catch (e: any) {
+        return { ok: false, provider: 'codex', resultsText: e.message || 'Failure recovery handoff failed.' } as any;
+      }
+    }
+    case 'agent.build_app_capability': {
+      try {
+        const a = args as OpenSwanToolExecutionArgs['agent.build_app_capability'];
+        const task = String(a.task || '').trim();
+        if (!task) return { ok: false, provider: 'codex', resultsText: 'task is required.' } as any;
+
+        const {
+          buildAgentAppCapabilityBuildoutPolicy,
+          formatAgentAppCapabilityBuildoutPolicySummary,
+        } = await import('./agentAppCapabilityBuildout');
+        const policy = buildAgentAppCapabilityBuildoutPolicy({
+          task,
+          appName: a.appName,
+          capabilityGap: a.capabilityGap,
+          desiredOutcome: a.desiredOutcome,
+          currentPlanSummary: a.currentPlanSummary,
+        });
+        const prompt = policy.prompt;
+        const policySummary = formatAgentAppCapabilityBuildoutPolicySummary(policy);
+
+        const { fetchCodexSessions, launchCodexSessions } = await import('./codexDetector');
+        const { sendTerminalAgentSessionMessage } = await import('./bridgeTaskDispatcher');
+        let targetSessionId = String(a.sessionId || '').trim();
+
+        if (!targetSessionId) {
+          const sessions = await fetchCodexSessions().catch(() => []);
+          const managed = sessions.find((session) => Boolean(session.terminalTitle || session.launchId || session.manageable));
+          targetSessionId = managed?.sessionId || '';
+        }
+
+        if (targetSessionId) {
+          const sent = await sendTerminalAgentSessionMessage('codex', targetSessionId, prompt);
+          if (!sent.ok) {
+            return {
+              ok: false,
+              provider: 'codex',
+              sessionId: targetSessionId,
+              buildoutKind: policy.kind,
+              risk: policy.risk,
+              appName: policy.appName,
+              resultsText: sent.error || 'Could not send app capability buildout task to Codex.',
+            } as any;
+          }
+          return {
+            ok: true,
+            provider: 'codex',
+            sessionId: sent.sessionId || targetSessionId,
+            launched: false,
+            buildoutKind: policy.kind,
+            risk: policy.risk,
+            appName: policy.appName,
+            resultsText: `Sent Codex app capability buildout task to ${sent.displayName || targetSessionId}. ${policySummary}`,
+          } as any;
+        }
+
+        if (a.launchIfMissing === false) {
+          return {
+            ok: false,
+            provider: 'codex',
+            launched: false,
+            buildoutKind: policy.kind,
+            risk: policy.risk,
+            appName: policy.appName,
+            resultsText: 'No managed Codex session is available and launchIfMissing is false.',
+          } as any;
+        }
+
+        const launched = await launchCodexSessions({
+          count: 1,
+          prompt,
+          names: ['Codex App Capability Buildout'],
+          circleId: context.circleId,
+          userId: context.userId,
+        });
+        if (!launched.ok || launched.launched < 1) {
+          const error = launched.error || launched.failed?.[0]?.error || 'Could not launch Codex app capability buildout session.';
+          return { ok: false, provider: 'codex', launched: false, buildoutKind: policy.kind, risk: policy.risk, appName: policy.appName, resultsText: error } as any;
+        }
+
+        const session = launched.sessions[0];
+        return {
+          ok: true,
+          provider: 'codex',
+          sessionId: session?.sessionId,
+          launched: true,
+          buildoutKind: policy.kind,
+          risk: policy.risk,
+          appName: policy.appName,
+          resultsText: `Launched Codex app capability buildout session${session?.displayName ? ` (${session.displayName})` : ''}. ${policySummary}`,
+        } as any;
+      } catch (e: any) {
+        return { ok: false, provider: 'codex', resultsText: e.message || 'App capability buildout handoff failed.' } as any;
+      }
+    }
     // ── Circle / Agent / Office editing — chat-driven UI mutations ──
     case 'circle.update_settings': {
       try {
@@ -3725,6 +4826,21 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         return { ok: true, resultsText: `Typed ${r.data?.chars ?? 0} chars into focused app.` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
+    case 'desktop.paste_text': {
+      try {
+        const { pasteText, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) {
+          return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        }
+        const a = args as any;
+        const r = await pasteText(String(a.text || ''), {
+          appName: a.appName ? String(a.appName) : undefined,
+          restoreClipboard: a.restoreClipboard !== false,
+        });
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `Pasted ${r.data?.chars ?? 0} chars${r.data?.appName ? ` into ${r.data.appName}` : ''}${r.data?.restoredClipboard ? ' and restored the previous clipboard.' : '.'}` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
     case 'desktop.press_keys': {
       try {
         const { pressKeys, isDesktopBridgeAvailable } = await import('./desktopBridge');
@@ -3734,6 +4850,21 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         const r = await pressKeys(String((args as any).combo || ''));
         if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
         return { ok: true, resultsText: `Pressed ${r.data?.combo || ''}.` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.menu_click': {
+      try {
+        const { clickMenu, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) {
+          return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        }
+        const a = args as any;
+        const r = await clickMenu({
+          appName: a.appName ? String(a.appName) : undefined,
+          menuPath: Array.isArray(a.menuPath) ? a.menuPath.map(String) : [],
+        });
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `Clicked menu ${(r.data?.menuPath || []).join(' > ')}${r.data?.appName ? ` in ${r.data.appName}` : ''}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'desktop.list_running_apps': {
@@ -3824,14 +4955,107 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
       try {
         const { searchFiles, isDesktopBridgeAvailable } = await import('./desktopBridge');
         if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
-        const r = await searchFiles(String((args as any).rootPath || ''), String((args as any).query || ''));
-        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
-        const matches = r.data?.matches || [];
-        const lines = matches.slice(0, 40).map((match, index) => `${index + 1}. ${match.path}${match.snippet ? ` — ${match.snippet}` : ''}`);
-        return { ok: true, resultsText: matches.length ? `File search matches (${matches.length}, visited ${r.data?.visited || 0}):\n${lines.join('\n')}${r.data?.truncated ? '\n...truncated' : ''}` : `No file matches for "${r.data?.query || ''}" under ${r.data?.rootPath || ''}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
-    }
-    case 'desktop.shortcuts_list': {
+        const roots = Array.isArray((args as any).rootPaths) && (args as any).rootPaths.length > 0
+          ? (args as any).rootPaths.map(String)
+          : [String((args as any).rootPath || '~')];
+        const allMatches: string[] = [];
+        let totalVisited = 0;
+        let totalContent = 0;
+        let truncated = false;
+        let query = String((args as any).query || '');
+        for (const root of roots.slice(0, 6)) {
+          const r = await searchFiles(root, query, {
+            maxResults: typeof (args as any).maxResults === 'number' ? (args as any).maxResults : undefined,
+            maxFiles: typeof (args as any).maxFiles === 'number' ? (args as any).maxFiles : undefined,
+            maxDepth: typeof (args as any).maxDepth === 'number' ? (args as any).maxDepth : undefined,
+            includeContent: typeof (args as any).includeContent === 'boolean' ? (args as any).includeContent : undefined,
+            extensions: Array.isArray((args as any).extensions) ? (args as any).extensions.map(String) : undefined,
+          });
+          if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+          query = r.data?.query || query;
+          totalVisited += r.data?.visited || 0;
+          totalContent += r.data?.searchedContent || 0;
+          truncated = truncated || Boolean(r.data?.truncated);
+          (r.data?.matches || []).forEach((match) => {
+            allMatches.push(`${match.path}${match.snippet ? ` — ${match.snippet}` : ''}`);
+          });
+        }
+        const lines = allMatches.slice(0, 60).map((line, index) => `${index + 1}. ${line}`);
+	        return { ok: true, resultsText: allMatches.length ? `File search matches (${allMatches.length}, visited ${totalVisited}, content files ${totalContent}):\n${lines.join('\n')}${truncated ? '\n...truncated' : ''}` : `No file matches for "${query}" under ${roots.join(', ')}.` } as any;
+	      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+	    }
+	    case 'desktop.file_stat': {
+	      try {
+		        const { statFile, isDesktopBridgeAvailable } = await import('./desktopBridge');
+		        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+		        const filePath = String((args as any).path || '');
+		        const r = await statFile(filePath);
+	        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+	        if (!r.data?.exists) return { ok: true, ...(r.data || {}), resultsText: `Path does not exist: ${r.data?.path || filePath}` } as any;
+	        return {
+	          ok: true,
+	          ...r.data,
+	          resultsText: `Path: ${r.data.path}\nKind: ${r.data.kind || 'unknown'}\nSize: ${r.data.size ?? 'unknown'} bytes\nModified: ${r.data.modifiedAt || 'unknown'}\nCreated: ${r.data.createdAt || 'unknown'}`,
+	        } as any;
+	      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+	    }
+	    case 'desktop.file_rename': {
+	      try {
+		        const { renameFile, isDesktopBridgeAvailable } = await import('./desktopBridge');
+		        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+		        const fromPath = String((args as any).fromPath || '');
+		        const toPath = String((args as any).toPath || '');
+		        const r = await renameFile(fromPath, toPath, { overwrite: Boolean((args as any).overwrite) });
+	        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+	        return { ok: true, resultsText: `Renamed ${r.data?.fromPath || fromPath} to ${r.data?.toPath || toPath}.` } as any;
+	      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+	    }
+	    case 'desktop.file_write_text': {
+	      try {
+		        const { writeTextFile, isDesktopBridgeAvailable } = await import('./desktopBridge');
+		        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+		        const filePath = String((args as any).path || '');
+		        const content = String((args as any).content ?? '');
+		        const r = await writeTextFile(filePath, content, {
+	          append: Boolean((args as any).append),
+	          overwrite: Boolean((args as any).overwrite),
+	        });
+	        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+	        return { ok: true, resultsText: `${r.data?.append ? 'Appended' : 'Wrote'} ${r.data?.bytes || 0} bytes to ${r.data?.path || filePath}.` } as any;
+	      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+	    }
+	    case 'desktop.file_copy': {
+	      try {
+		        const { copyFile, isDesktopBridgeAvailable } = await import('./desktopBridge');
+		        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+		        const fromPath = String((args as any).fromPath || '');
+		        const toPath = String((args as any).toPath || '');
+		        const r = await copyFile(fromPath, toPath, { overwrite: Boolean((args as any).overwrite) });
+	        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+	        return { ok: true, resultsText: `Copied ${r.data?.fromPath || fromPath} to ${r.data?.toPath || toPath}.` } as any;
+	      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+	    }
+	    case 'desktop.file_trash': {
+	      try {
+		        const { trashFile, isDesktopBridgeAvailable } = await import('./desktopBridge');
+		        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+		        const filePath = String((args as any).path || '');
+		        const r = await trashFile(filePath);
+	        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+	        return { ok: true, resultsText: `Moved ${r.data?.path || filePath} to Trash${r.data?.trashPath ? ` at ${r.data.trashPath}` : ''}.` } as any;
+	      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+	    }
+	    case 'desktop.file_mkdir': {
+	      try {
+		        const { createDirectory, isDesktopBridgeAvailable } = await import('./desktopBridge');
+		        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+		        const dirPath = String((args as any).path || '');
+		        const r = await createDirectory(dirPath, { recursive: (args as any).recursive !== false });
+	        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+	        return { ok: true, resultsText: `${r.data?.existed ? 'Folder already exists' : 'Created folder'}: ${r.data?.path || dirPath}.` } as any;
+	      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+	    }
+	    case 'desktop.shortcuts_list': {
       try {
         const { listShortcuts, isDesktopBridgeAvailable } = await import('./desktopBridge');
         if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
@@ -3878,6 +5102,31 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         const r = await mouseClick({ x: Number(a.x), y: Number(a.y), button: a.button === 'right' ? 'right' : 'left', count: typeof a.count === 'number' ? a.count : undefined });
         if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
         return { ok: true, resultsText: `${r.data?.button || 'left'} click x${r.data?.count || 1} at (${r.data?.x}, ${r.data?.y}).` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.mouse_down': {
+      try {
+        const { mouseDown, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await mouseDown({ x: Number(a.x), y: Number(a.y), button: a.button === 'right' ? 'right' : 'left' });
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `Held ${r.data?.button || 'left'} mouse down at (${r.data?.x}, ${r.data?.y}).` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.mouse_up': {
+      try {
+        const { mouseUp, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const hasCoords = typeof a.x === 'number' && typeof a.y === 'number';
+        const r = await mouseUp({
+          x: hasCoords ? Number(a.x) : undefined,
+          y: hasCoords ? Number(a.y) : undefined,
+          button: a.button === 'right' ? 'right' : 'left',
+        });
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `Released ${r.data?.button || 'left'} mouse${r.data?.x != null && r.data?.y != null ? ` at (${r.data.x}, ${r.data.y})` : ''}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'desktop.mouse_drag': {
@@ -3973,6 +5222,473 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         return { ok: true, resultsText: `Screen size: ${r.data?.width} × ${r.data?.height}.`, width: r.data?.width, height: r.data?.height } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
+    case 'desktop.indesign_document_status': {
+      try {
+        const { indesignDocumentStatus, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await indesignDocumentStatus({
+          appName: typeof a.appName === 'string' ? a.appName : 'InDesign',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: true, resultsText: `${d.appName || 'InDesign'} is not running.` } as any;
+        if (!d.activeDocumentName) return { ok: true, resultsText: `${d.appName || 'InDesign'} is running with no active document.` } as any;
+        const issueCount = d.missingLinks + d.modifiedLinks + d.missingFonts;
+        const issueText = issueCount > 0
+          ? `Issues: ${d.missingLinks} missing links, ${d.modifiedLinks} modified links, ${d.missingFonts} missing fonts.`
+          : 'No missing fonts or link issues detected.';
+	        return {
+	          ok: true,
+	          ...d,
+	          resultsText: `InDesign document status for ${d.activeDocumentName}: ${d.pageCount} pages, ${d.spreadCount} spreads, ${d.layerCount} layers, ${d.linkCount} links, ${d.fontCount} fonts. ${issueText} Locked layers: ${d.lockedLayers}. Hidden layers: ${d.hiddenLayers}.`,
+	        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.indesign_text_inventory': {
+      try {
+        const { indesignTextInventory, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await indesignTextInventory({
+          appName: typeof a.appName === 'string' ? a.appName : 'InDesign',
+          query: typeof a.query === 'string' ? a.query : undefined,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+          maxItems: Number.isFinite(Number(a.maxItems)) ? Number(a.maxItems) : 30,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: true, resultsText: `${d.appName || 'InDesign'} is not running.` } as any;
+        if (!d.documentName) return { ok: true, resultsText: `${d.appName || 'InDesign'} is running with no active document.` } as any;
+        const candidates = d.frames.slice(0, 8).map((frame, index) => {
+          const target = [frame.layerName, frame.itemName, frame.label].filter(Boolean).join(' / ') || 'unnamed frame';
+          const flags = [frame.overflows ? 'overset' : '', frame.locked ? 'locked' : '', frame.visible ? '' : 'hidden'].filter(Boolean);
+          const matchText = d.query && frame.matchCount > 0 ? ` [${frame.matchCount} match${frame.matchCount === 1 ? '' : 'es'}]` : '';
+          return `${index + 1}. ${target}${flags.length ? ` (${flags.join(', ')})` : ''}${matchText}${frame.contentPreview ? `: ${frame.contentPreview}` : ''}`;
+        });
+        const matchText = d.query ? `, ${d.queryMatches} text occurrence${d.queryMatches === 1 ? '' : 's'}` : '';
+	        return {
+	          ok: true,
+	          ...d,
+	          resultsText: `InDesign text inventory for ${d.documentName}${d.query ? ` matching ${d.query}` : ''}: ${d.textFrameCount} text frames, ${d.matchedFrames} matching frames${matchText}, ${d.oversetFrames} overset. ${candidates.length ? `Candidates:\n${candidates.join('\n')}` : 'No candidates returned.'}`,
+	        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.indesign_set_layer_state': {
+      try {
+        const { indesignSetLayerState, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const layerName = typeof a.layerName === 'string'
+          ? a.layerName.trim()
+          : typeof a.targetLayerName === 'string'
+            ? a.targetLayerName.trim()
+            : '';
+        const action = String(a.action || '').toLowerCase();
+        if (!layerName) return { ok: false, resultsText: 'layerName is required.' } as any;
+        if (!['show', 'hide', 'lock', 'unlock'].includes(action)) return { ok: false, resultsText: 'action must be show, hide, lock, or unlock.' } as any;
+        const r = await indesignSetLayerState({
+          appName: typeof a.appName === 'string' ? a.appName : 'InDesign',
+          layerName,
+          action: action as 'show' | 'hide' | 'lock' | 'unlock',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (d.error || d.matchedLayers !== 1) {
+          const matchText = d.matchedLayers > 1 ? `${d.matchedLayers} layers matched; provide an exact layer name.` : d.error || 'No matching layer was changed.';
+          return {
+            ok: false,
+            ...d,
+            resultsText: `InDesign layer-state update failed for ${layerName}: ${matchText}`,
+          } as any;
+        }
+        const already = d.changedLayers < 1;
+        const stateText = action === 'show' || action === 'hide'
+          ? `visible=${d.afterVisible}`
+          : `locked=${d.afterLocked}`;
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Set InDesign layer ${d.layerName} to ${action}${d.documentName ? ` in ${d.documentName}` : ''} (${stateText}). ${already ? 'It was already in that state.' : 'Layer state changed.'}`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.indesign_batch_find_change': {
+      try {
+        const { indesignBatchFindChange, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const pairs = Array.isArray(a.pairs)
+          ? a.pairs.slice(0, 20).map((pair: any) => ({
+              findText: String(pair?.findText ?? pair?.find ?? '').trim(),
+              changeText: String(pair?.changeText ?? pair?.replaceWith ?? pair?.replacement ?? ''),
+            })).filter((pair: { findText: string }) => pair.findText)
+          : [];
+        if (pairs.length < 1) return { ok: false, resultsText: 'At least one InDesign Find/Change pair is required.' } as any;
+        const r = await indesignBatchFindChange({
+          appName: typeof a.appName === 'string' ? a.appName : 'InDesign',
+          pairs,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        const rows = d.results.slice(0, 12).map((item, index) => {
+          const status = item.changed > 0
+            ? `changed ${item.changed}`
+            : item.remaining < 1 && item.replacementMatches > 0
+              ? 'already applied'
+              : item.matched > 0
+                ? 'matched but not changed'
+                : 'not found';
+          const remaining = item.remaining > 0 ? `, ${item.remaining} source match${item.remaining === 1 ? '' : 'es'} remaining` : '';
+          return `${index + 1}. ${item.findText} -> ${item.changeText}: ${status}${remaining}`;
+        });
+        const failures = d.results.filter((item) => item.changed < 1 && !(item.remaining < 1 && item.replacementMatches > 0));
+        const recovery = d.unlockedCount > 0 ? ` Lock-safe recovery temporarily unlocked ${d.unlockedCount} item${d.unlockedCount === 1 ? '' : 's'}.` : '';
+	        return {
+	          ok: failures.length === 0,
+	          ...d,
+	          resultsText: `Batch InDesign Find/Change${d.documentName ? ` for ${d.documentName}` : ''}: ${d.changed} total changed across ${d.results.length} replacement${d.results.length === 1 ? '' : 's'}.${recovery}${rows.length ? `\n${rows.join('\n')}` : ''}`,
+	        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.indesign_batch_update_text_layers': {
+      try {
+        const { indesignBatchUpdateTextLayers, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const updates = Array.isArray(a.updates)
+          ? a.updates.slice(0, 12).map((update: any) => ({
+              fieldName: String(update?.fieldName ?? update?.field ?? update?.targetLabel ?? '').trim(),
+              replacementText: String(update?.replacementText ?? update?.text ?? update?.value ?? ''),
+            })).filter((update: { fieldName: string }) => update.fieldName)
+          : [];
+        if (updates.length < 1) return { ok: false, resultsText: 'At least one InDesign text-layer update is required.' } as any;
+        const r = await indesignBatchUpdateTextLayers({
+          appName: typeof a.appName === 'string' ? a.appName : 'InDesign',
+          updates,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        const rows = d.results.slice(0, 12).map((item, index) => {
+          const status = item.updatedFrames > 0
+            ? `updated ${item.updatedFrames}`
+            : item.replacementMatches > 0
+              ? 'already applied'
+              : item.matchedFrames > 0
+                ? 'matched but not updated'
+                : 'not found';
+          const layerText = item.layerNames.length > 0 ? ` on ${item.layerNames.join(', ')}` : '';
+          const errorText = item.error ? ` (${item.error})` : '';
+          return `${index + 1}. ${item.fieldName}: ${status}${layerText}${errorText}`;
+        });
+        const failures = d.results.filter((item) => item.matchedFrames < 1 || (item.updatedFrames < 1 && item.replacementMatches < 1));
+        const recovery = d.unlockedCount > 0 ? ` Lock-safe recovery temporarily unlocked ${d.unlockedCount} item${d.unlockedCount === 1 ? '' : 's'}.` : '';
+	        return {
+	          ok: failures.length === 0,
+	          ...d,
+	          resultsText: `Batch InDesign text-layer update${d.documentName ? ` for ${d.documentName}` : ''}: ${d.updatedFrames} total updated frame${d.updatedFrames === 1 ? '' : 's'} across ${d.results.length} field${d.results.length === 1 ? '' : 's'}.${recovery}${rows.length ? `\n${rows.join('\n')}` : ''}`,
+	        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.indesign_update_text_layer': {
+      try {
+        const { indesignUpdateTextLayer, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const fieldName = typeof a.fieldName === 'string' ? a.fieldName.trim() : '';
+        const replacementText = typeof a.replacementText === 'string' ? a.replacementText : '';
+        if (!fieldName) return { ok: false, resultsText: 'fieldName is required.' } as any;
+        const r = await indesignUpdateTextLayer({
+          appName: typeof a.appName === 'string' ? a.appName : 'InDesign',
+          fieldName,
+          replacementText,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+	        if (d.updatedFrames < 1) {
+	          return {
+	            ok: false,
+	            ...d,
+	            resultsText: `No editable InDesign text frame matched ${fieldName}. Checked ${d.matchedLayers} matching layers and ${d.matchedFrames} text frames.${d.error ? ` ${d.error}` : ''}`,
+	          } as any;
+	        }
+        const layerText = d.layerNames.length > 0 ? ` on ${d.layerNames.join(', ')}` : '';
+	        return {
+	          ok: true,
+	          ...d,
+	          resultsText: `Updated ${d.updatedFrames} InDesign text frame${d.updatedFrames === 1 ? '' : 's'} for ${fieldName}${layerText}${d.documentName ? ` in ${d.documentName}` : ''}.`,
+	        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.indesign_export_proof': {
+      try {
+        const { indesignExportProof, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const outputPath = typeof a.outputPath === 'string' ? a.outputPath.trim() : '';
+        if (!outputPath) return { ok: false, resultsText: 'outputPath is required.' } as any;
+        const r = await indesignExportProof({
+          appName: typeof a.appName === 'string' ? a.appName : 'InDesign',
+          outputPath,
+          format: 'pdf',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+	        if (d.error || !d.fileExists) return { ok: false, ...d, resultsText: `InDesign proof export failed: ${d.error || 'output file was not created'}` } as any;
+	        return {
+	          ok: true,
+	          ...d,
+	          resultsText: `Exported InDesign PDF proof for ${d.documentName || 'active document'} to ${d.outputPath} (${Math.round(d.sizeBytes / 1024)} KB, ${d.pageCount} page${d.pageCount === 1 ? '' : 's'}).`,
+	        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.indesign_relink_asset': {
+      try {
+        const { indesignRelinkAsset, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const assetPath = typeof a.assetPath === 'string' ? a.assetPath.trim() : '';
+        if (!assetPath) return { ok: false, resultsText: 'assetPath is required.' } as any;
+        const r = await indesignRelinkAsset({
+          appName: typeof a.appName === 'string' ? a.appName : 'InDesign',
+          assetPath,
+          linkQuery: typeof a.linkQuery === 'string' ? a.linkQuery : undefined,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+	        if (d.error || d.relinkedLinks < 1) return { ok: false, ...d, resultsText: `InDesign asset relink failed: ${d.error || 'no links were relinked'}` } as any;
+	        const relinked = d.linkNames.length > 0 ? ` (${d.linkNames.join(', ')})` : '';
+	        return {
+	          ok: true,
+	          ...d,
+	          resultsText: `Relinked ${d.relinkedLinks} InDesign asset${d.relinkedLinks === 1 ? '' : 's'}${relinked} in ${d.documentName || 'active document'} to ${d.assetPath}.`,
+	        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.indesign_package_document': {
+      try {
+        const { indesignPackageDocument, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const outputFolderPath = typeof a.outputFolderPath === 'string' ? a.outputFolderPath.trim() : '';
+        if (!outputFolderPath) return { ok: false, resultsText: 'outputFolderPath is required.' } as any;
+        const r = await indesignPackageDocument({
+          appName: typeof a.appName === 'string' ? a.appName : 'InDesign',
+          outputFolderPath,
+          includeIdml: a.includeIdml === true,
+          includePdf: a.includePdf === true,
+          copyFonts: a.copyFonts !== false,
+          copyLinkedGraphics: a.copyLinkedGraphics !== false,
+          copyProfiles: a.copyProfiles !== false,
+          updateGraphics: a.updateGraphics !== false,
+          includeHiddenLayers: a.includeHiddenLayers !== false,
+          ignorePreflightErrors: a.ignorePreflightErrors === true,
+          createReport: a.createReport !== false,
+          forceSave: a.forceSave !== false,
+          pdfStyle: typeof a.pdfStyle === 'string' ? a.pdfStyle : undefined,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+	        if (d.error || !d.packageOk) return { ok: false, ...d, resultsText: `InDesign package failed: ${d.error || 'packageForPrint returned false'}` } as any;
+        const preflight: string[] = [];
+        if (d.missingLinksBefore > 0) preflight.push(`${d.missingLinksBefore} missing link${d.missingLinksBefore === 1 ? '' : 's'}`);
+        if (d.modifiedLinksBefore > 0) preflight.push(`${d.modifiedLinksBefore} modified link${d.modifiedLinksBefore === 1 ? '' : 's'}`);
+        if (d.missingFontsBefore > 0) preflight.push(`${d.missingFontsBefore} missing font${d.missingFontsBefore === 1 ? '' : 's'}`);
+	        return {
+	          ok: true,
+	          ...d,
+	          resultsText: `Packaged InDesign document ${d.documentName || 'active document'} to ${d.outputFolderPath} (${d.fileCount} files, ${Math.round(d.sizeBytes / 1024)} KB).${preflight.length > 0 ? ` Preflight before package: ${preflight.join(', ')}.` : ''}`,
+	        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.photoshop_document_status': {
+      try {
+        const { photoshopDocumentStatus, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await photoshopDocumentStatus({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: true, resultsText: `${d.appName || 'Photoshop'} is not running.` } as any;
+        if (!d.activeDocumentName) return { ok: true, resultsText: `${d.appName || 'Photoshop'} is running with no active document.` } as any;
+	        return {
+	          ok: true,
+	          ...d,
+	          resultsText: `Photoshop document status for ${d.activeDocumentName}: ${d.widthPx}x${d.heightPx}px, ${d.resolution || 0}ppi, mode ${d.mode || 'unknown'}, ${d.layerCount} layers (${d.groupCount} groups, ${d.textLayerCount} text, ${d.smartObjectCount} smart objects, ${d.adjustmentLayerCount} adjustments). Locked layers: ${d.lockedLayers}. Hidden layers: ${d.hiddenLayers}. Selection active: ${d.selectionActive ? 'yes' : 'no'}.`,
+	        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.photoshop_layer_inventory': {
+      try {
+        const { photoshopLayerInventory, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await photoshopLayerInventory({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          query: typeof a.query === 'string' ? a.query : undefined,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+          maxItems: Number.isFinite(Number(a.maxItems)) ? Number(a.maxItems) : 40,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: true, resultsText: `${d.appName || 'Photoshop'} is not running.` } as any;
+        if (!d.documentName) return { ok: true, resultsText: `${d.appName || 'Photoshop'} is running with no active document.` } as any;
+        const rows = d.layers.slice(0, 10).map((layer, index) => {
+          const flags = [
+            layer.visible ? '' : 'hidden',
+            layer.locked ? 'locked' : '',
+            layer.hasMask ? 'mask' : '',
+            layer.kind && /text/i.test(layer.kind) ? 'text' : '',
+          ].filter(Boolean);
+          const path = layer.path || layer.name || 'unnamed layer';
+          const preview = layer.textPreview ? `: ${layer.textPreview}` : '';
+          return `${index + 1}. ${path}${flags.length ? ` (${flags.join(', ')})` : ''}${preview}`;
+        });
+	        return {
+	          ok: true,
+	          ...d,
+	          resultsText: `Photoshop layer inventory for ${d.documentName}${d.query ? ` matching ${d.query}` : ''}: ${d.layerCount} layers, ${d.matchedLayers} matching, ${d.textLayerCount} text, ${d.smartObjectCount} smart objects, ${d.adjustmentLayerCount} adjustments, ${d.maskLayerCount} masks. Selection active: ${d.selectionActive ? 'yes' : 'no'}. ${rows.length ? `Candidates:\n${rows.join('\n')}` : 'No layer candidates returned.'}`,
+	        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.photoshop_set_layer_state': {
+      try {
+        const { photoshopSetLayerState, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const layerName = typeof a.layerName === 'string' ? a.layerName.trim() : '';
+        const action = typeof a.action === 'string' ? a.action.trim().toLowerCase() : '';
+        if (!layerName) return { ok: false, resultsText: 'layerName is required.' } as any;
+        if (!['show', 'hide', 'lock', 'unlock'].includes(action)) return { ok: false, resultsText: 'action must be show, hide, lock, or unlock.' } as any;
+        const r = await photoshopSetLayerState({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          layerName,
+          action: action as any,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Photoshop'} is not running.` } as any;
+        if (d.error || d.matchedLayers !== 1) {
+          const matchHint = d.matchedLayers > 1
+            ? `${d.matchedLayers} layers matched; provide an exact layer name or full group path.`
+            : d.error || 'No matching layer was changed.';
+          return { ok: false, ...d, resultsText: `Photoshop did not change layer ${layerName}: ${matchHint}` } as any;
+        }
+        const stateText = action === 'show' || action === 'hide'
+          ? `visible=${d.afterVisible}`
+          : `locked=${d.afterLocked}`;
+        return {
+          ok: true,
+          ...d,
+          resultsText: `${d.changedLayers > 0 ? 'Changed' : 'Confirmed'} Photoshop layer ${d.layerName || layerName}${d.documentName ? ` in ${d.documentName}` : ''} is ${action} (${stateText}).`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.photoshop_update_text_layer': {
+      try {
+        const { photoshopUpdateTextLayer, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const layerName = typeof a.layerName === 'string' ? a.layerName.trim() : '';
+        const replacementText = typeof a.replacementText === 'string' ? a.replacementText : '';
+        if (!layerName) return { ok: false, resultsText: 'layerName is required.' } as any;
+        const r = await photoshopUpdateTextLayer({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          layerName,
+          replacementText,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+	        if (d.updatedLayers < 1) {
+	          return {
+	            ok: false,
+	            ...d,
+	            resultsText: `No editable Photoshop text layer matched ${layerName}. Checked ${d.matchedLayers} matching text layer${d.matchedLayers === 1 ? '' : 's'}.${d.error ? ` ${d.error}` : ''}`,
+	          } as any;
+	        }
+        const layerText = d.layerNames.length > 0 ? ` (${d.layerNames.join(', ')})` : '';
+	        return {
+	          ok: true,
+	          ...d,
+	          resultsText: `Updated ${d.updatedLayers} Photoshop text layer${d.updatedLayers === 1 ? '' : 's'} for ${layerName}${layerText}${d.documentName ? ` in ${d.documentName}` : ''}.`,
+	        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.photoshop_place_asset': {
+      try {
+        const { photoshopPlaceAsset, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const assetPath = typeof a.assetPath === 'string' ? a.assetPath.trim() : '';
+        if (!assetPath) return { ok: false, resultsText: 'assetPath is required.' } as any;
+        const r = await photoshopPlaceAsset({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          assetPath,
+          layerName: typeof a.layerName === 'string' ? a.layerName : undefined,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+	        if (d.error) return { ok: false, ...d, resultsText: `Photoshop asset placement failed: ${d.error}` } as any;
+	        return {
+	          ok: true,
+	          ...d,
+	          resultsText: `Placed asset ${d.assetPath} into ${d.documentName || 'Photoshop document'} as layer ${d.placedLayerName || d.layerName || 'new placed layer'}.`,
+	        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.photoshop_export_proof': {
+      try {
+        const { photoshopExportProof, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const outputPath = typeof a.outputPath === 'string' ? a.outputPath.trim() : '';
+        if (!outputPath) return { ok: false, resultsText: 'outputPath is required.' } as any;
+        const r = await photoshopExportProof({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          outputPath,
+          format: ['png', 'jpg', 'jpeg'].includes(String(a.format || '').toLowerCase()) ? String(a.format).toLowerCase() as any : undefined,
+          quality: Number.isFinite(Number(a.quality)) ? Number(a.quality) : undefined,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          sourceDocumentPath: typeof a.sourceDocumentPath === 'string' ? a.sourceDocumentPath : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+	        if (d.error || !d.fileExists) return { ok: false, ...d, resultsText: `Photoshop proof export failed: ${d.error || 'output file was not created'}` } as any;
+	        return {
+	          ok: true,
+	          ...d,
+	          resultsText: `Exported Photoshop ${d.format.toUpperCase()} proof for ${d.documentName || 'active document'} to ${d.outputPath} (${Math.round(d.sizeBytes / 1024)} KB, ${d.widthPx}x${d.heightPx}px).`,
+	        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
     case 'desktop.read_a11y_tree': {
       try {
         const { readA11yTree, renderA11yTree, isDesktopBridgeAvailable } = await import('./desktopBridge');
@@ -3992,6 +5708,16 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         const r = await clickElement({ pid: Number(a.pid || 0), path: String(a.path || '') });
         if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
         return { ok: true, resultsText: `Clicked accessibility element ${String(a.path || '')} via ${r.data?.method || 'unknown'}.` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.set_element_value': {
+      try {
+        const { setElementValue, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await setElementValue({ pid: Number(a.pid || 0), path: String(a.path || ''), text: String(a.text || '') });
+        if (!r.ok) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        return { ok: true, resultsText: `Set accessibility element ${String(a.path || '')} via ${r.data?.method || 'unknown'} (${r.data?.chars || 0} chars).` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     // ── Memory Save ─────────────────────────────────────────────────────

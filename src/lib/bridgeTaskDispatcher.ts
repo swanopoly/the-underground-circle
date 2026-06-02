@@ -7,14 +7,35 @@
 import { ensureBridgeToken, bridgeAuthHeaders } from './bridgeAuth';
 import { getBridgeUrl } from './bridgeEnvironment';
 import type { TerminalLaunchMode } from './agentIdentity';
+import { applyAgentDevelopmentStandardsToPrompt } from './agentDevelopmentStandards';
 
 const BRIDGE_PORTS: Record<string, number> = {
   'claude-code': 7778,
   'codex': 7779,
   'gemini': 7780,
   'gemini-cli': 7780,
-  'cursor': 7778,   // Routes through Claude Code bridge
+  'cursor': 7781,
+  'cursor-composer': 7781,
 };
+
+function envFlag(name: string): boolean {
+  return String(process.env[name] || '').trim().toLowerCase() === 'true'
+    || String(process.env[name] || '').trim() === '1';
+}
+
+function isClaudeCodeBillingAllowed(): boolean {
+  return envFlag('EXPO_PUBLIC_ALLOW_CLAUDE_CODE_BILLING')
+    || envFlag('EXPO_PUBLIC_ALLOW_CLAUDE_BRIDGE_BILLING');
+}
+
+function claudeBillingDisabledResult(action: string): BridgeTaskResult {
+  return {
+    ok: false,
+    error: `${action} is disabled to prevent Anthropic charges. Set EXPO_PUBLIC_ALLOW_CLAUDE_CODE_BILLING=true and restart the app if you intentionally want the app to launch/message Claude Code.`,
+    dispatchedVia: 'none',
+    provider: 'claude-code',
+  };
+}
 
 export interface BridgeTaskResult {
   ok: boolean;
@@ -54,6 +75,9 @@ async function probeBridge(port: number): Promise<boolean> {
  * Dispatch to Claude Code bridge via /exec — pipes prompt to claude CLI
  */
 async function dispatchToClaudeCode(prompt: string, fileName?: string | null): Promise<BridgeTaskResult> {
+  if (!isClaudeCodeBillingAllowed()) {
+    return claudeBillingDisabledResult('Claude Code bridge dispatch');
+  }
   const port = BRIDGE_PORTS['claude-code'];
   const online = await probeBridge(port);
   if (!online) return { ok: false, error: 'Claude Code bridge not reachable', dispatchedVia: 'none', provider: 'claude-code' };
@@ -136,9 +160,13 @@ export async function sendTerminalAgentSessionMessage(
   message: string,
 ): Promise<TerminalSessionSendResult> {
   const normalized = provider.toLowerCase().replace(/\s+/g, '-');
-  const bridgeProvider = normalized === 'gemini-cli' ? 'gemini' : normalized;
+  const bridgeProvider = normalized === 'gemini-cli'
+    ? 'gemini'
+    : normalized === 'cursor-composer'
+      ? 'cursor'
+      : normalized;
   const port = BRIDGE_PORTS[bridgeProvider];
-  if (!port || !['claude-code', 'codex', 'gemini'].includes(bridgeProvider)) {
+  if (!port || !['claude-code', 'codex', 'gemini', 'cursor'].includes(bridgeProvider)) {
     return { ok: false, error: `Terminal session send is not supported for ${provider}`, dispatchedVia: 'none', provider: normalized };
   }
 
@@ -148,6 +176,9 @@ export async function sendTerminalAgentSessionMessage(
   }
 
   const bridgeUrl = getBridgeUrl(port) || `http://localhost:${port}`;
+  const profiledMessage = applyAgentDevelopmentStandardsToPrompt(message, {
+    label: 'The selected terminal agent must follow these repo standards for this chat handoff.',
+  });
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
@@ -155,7 +186,7 @@ export async function sendTerminalAgentSessionMessage(
     const res = await fetch(`${bridgeUrl}/terminal/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
-      body: JSON.stringify({ sessionId, message }),
+      body: JSON.stringify({ sessionId, message: profiledMessage }),
       signal: controller.signal,
     });
     clearTimeout(timeout);
@@ -185,43 +216,11 @@ export async function sendTerminalAgentSessionMessage(
 }
 
 /**
- * Dispatch to Cursor — routes through Claude bridge /exec
+ * Dispatch to Cursor Composer through the local Cursor bridge.
  */
 async function dispatchToCursor(prompt: string, fileName?: string | null): Promise<BridgeTaskResult> {
-  const port = BRIDGE_PORTS['claude-code'];
-  const online = await probeBridge(port);
-  if (!online) {
-    return { ok: false, error: 'Claude bridge offline — cannot dispatch to Cursor', dispatchedVia: 'none', provider: 'cursor' };
-  }
-  try {
-    const escaped = prompt.replace(/'/g, "'\\''");
-    const fileCtx = fileName ? ` (file: ${fileName})` : '';
-    const command = `echo '${escaped}${fileCtx}' | cursor --quiet 2>&1 | tail -200`;
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120000);
-    const token = await ensureBridgeToken();
-    const res = await fetch(`http://localhost:${port}/exec`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
-      body: JSON.stringify({ command }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
-    const data = await res.json();
-    if (data.ok) {
-      return {
-        ok: true,
-        response: data.stdout || data.stderr || 'Task completed (no output)',
-        dispatchedVia: 'bridge',
-        provider: 'cursor',
-      };
-    }
-    return { ok: false, error: data.error || 'Exec failed', dispatchedVia: 'bridge', provider: 'cursor' };
-  } catch (e: any) {
-    return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'cursor' };
-  }
+  const fileCtx = fileName ? `\n\nFile context: ${fileName}` : '';
+  return spawnNewCursorComposerSession(`${prompt}${fileCtx}`);
 }
 
 /**
@@ -233,26 +232,30 @@ export async function dispatchBridgeTask(
   fileName?: string | null,
 ): Promise<BridgeTaskResult> {
   const normalized = provider.toLowerCase().replace(/\s+/g, '-');
+  const bridgeProvider = normalized === 'cursor-composer' ? 'cursor' : normalized;
+  const profiledPrompt = applyAgentDevelopmentStandardsToPrompt(prompt, {
+    label: 'The selected bridge agent must follow these repo standards for this delegated task.',
+  });
 
   // Check if the direct bridge is reachable
-  const port = BRIDGE_PORTS[normalized];
-  if (port && normalized !== 'codex' && normalized !== 'cursor') {
+  const port = BRIDGE_PORTS[bridgeProvider];
+  if (port && bridgeProvider !== 'codex' && bridgeProvider !== 'cursor') {
     const online = await probeBridge(port);
     if (!online) {
-      return { ok: false, error: `Bridge on port ${port} is not reachable`, dispatchedVia: 'none', provider: normalized };
+      return { ok: false, error: `Bridge on port ${port} is not reachable`, dispatchedVia: 'none', provider: bridgeProvider };
     }
   }
 
-  switch (normalized) {
+  switch (bridgeProvider) {
     case 'claude-code':
-      return dispatchToClaudeCode(prompt, fileName);
+      return dispatchToClaudeCode(profiledPrompt, fileName);
     case 'gemini':
     case 'gemini-cli':
-      return dispatchToGemini(prompt, fileName);
+      return dispatchToGemini(profiledPrompt, fileName);
     case 'codex':
-      return dispatchToCodex(prompt, fileName);
+      return dispatchToCodex(profiledPrompt, fileName);
     case 'cursor':
-      return dispatchToCursor(prompt, fileName);
+      return dispatchToCursor(profiledPrompt, fileName);
     default:
       return { ok: false, error: `Unknown provider: ${provider}`, dispatchedVia: 'none', provider: normalized };
   }
@@ -278,6 +281,9 @@ export async function spawnNewClaudeSession(
   task: string,
   options?: TerminalSpawnOptions,
 ): Promise<BridgeTaskResult> {
+  if (!isClaudeCodeBillingAllowed()) {
+    return claudeBillingDisabledResult('Claude Code terminal launch');
+  }
   const port = BRIDGE_PORTS['claude-code'];
   const bridgeUrl = getBridgeUrl(port) || `http://localhost:${port}`;
   try {
@@ -288,12 +294,15 @@ export async function spawnNewClaudeSession(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     const token = await ensureBridgeToken();
+    const profiledTask = applyAgentDevelopmentStandardsToPrompt(task, {
+      label: 'The launched terminal agent must follow these repo standards for this delegated task.',
+    });
     const res = await fetch(`${bridgeUrl}/launch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
       body: JSON.stringify({
         count: 1,
-        prompts: [task],
+        prompts: [profiledTask],
         names: [options?.sessionName || 'Claude Code #1'],
         model: options?.model,
         projectDir: options?.workdir,
@@ -328,13 +337,16 @@ export async function spawnNewCodexSession(
   try {
     const online = await probeBridge(port);
     if (!online) return { ok: false, error: 'Codex bridge not reachable', dispatchedVia: 'none', provider: 'codex' };
+    const profiledTask = applyAgentDevelopmentStandardsToPrompt(task, {
+      label: 'The launched terminal agent must follow these repo standards for this delegated task.',
+    });
     const token = await ensureBridgeToken();
     const res = await fetch(`${bridgeUrl}/launch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
       body: JSON.stringify({
         count: 1,
-        prompts: [task],
+        prompts: [profiledTask],
         names: [options?.sessionName || 'Codex'],
         model: options?.model,
         projectDir: options?.workdir,
@@ -371,13 +383,16 @@ export async function spawnNewGeminiCliSession(
   try {
     const online = await probeBridge(port);
     if (!online) return { ok: false, error: 'Gemini CLI bridge not reachable', dispatchedVia: 'none', provider: 'gemini' };
+    const profiledTask = applyAgentDevelopmentStandardsToPrompt(task, {
+      label: 'The launched terminal agent must follow these repo standards for this delegated task.',
+    });
     const token = await ensureBridgeToken();
     const res = await fetch(`${bridgeUrl}/launch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
       body: JSON.stringify({
         count: 1,
-        prompts: [task],
+        prompts: [profiledTask],
         names: [options?.sessionName || 'Gemini CLI #1'],
         model: options?.model,
         projectDir: options?.workdir,
@@ -399,6 +414,51 @@ export async function spawnNewGeminiCliSession(
   }
 }
 
+export async function spawnNewCursorComposerSession(
+  task: string,
+  options?: TerminalSpawnOptions,
+): Promise<BridgeTaskResult> {
+  const port = BRIDGE_PORTS['cursor'];
+  const bridgeUrl = getBridgeUrl(port) || `http://localhost:${port}`;
+  try {
+    const online = await probeBridge(port);
+    if (!online) return { ok: false, error: 'Cursor bridge not reachable', dispatchedVia: 'none', provider: 'cursor' };
+    const profiledTask = applyAgentDevelopmentStandardsToPrompt(task, {
+      label: 'The launched terminal agent must follow these repo standards for this delegated task.',
+    });
+    const token = await ensureBridgeToken();
+    const res = await fetch(`${bridgeUrl}/launch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      body: JSON.stringify({
+        count: 1,
+        prompts: [profiledTask],
+        names: [options?.sessionName || 'Cursor Composer'],
+        model: options?.model,
+        projectDir: options?.workdir,
+      }),
+    });
+    const data = await res.json().catch(() => null);
+    if (res.ok && data?.launched > 0) {
+      const session = Array.isArray(data.sessions) ? data.sessions[0] : null;
+      return {
+        ok: true,
+        response: `Cursor Composer task sent${session?.displayName ? ` as ${session.displayName}` : ''}.`,
+        dispatchedVia: 'bridge',
+        provider: 'cursor',
+      };
+    }
+    return {
+      ok: false,
+      error: data?.error || data?.failed?.[0]?.error || `Cursor bridge launch failed with HTTP ${res.status}`,
+      dispatchedVia: 'bridge',
+      provider: 'cursor',
+    };
+  } catch (e: any) {
+    return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'cursor' };
+  }
+}
+
 /**
  * Spawn a new session for any supported provider
  */
@@ -408,7 +468,8 @@ export async function spawnNewSession(
   options?: TerminalSpawnOptions,
 ): Promise<BridgeTaskResult> {
   const normalized = provider.toLowerCase().replace(/\s+/g, '-');
-  switch (normalized) {
+  const bridgeProvider = normalized === 'cursor-composer' ? 'cursor' : normalized;
+  switch (bridgeProvider) {
     case 'claude-code':
       return spawnNewClaudeSession(task, options);
     case 'codex':
@@ -416,6 +477,8 @@ export async function spawnNewSession(
     case 'gemini':
     case 'gemini-cli':
       return spawnNewGeminiCliSession(task, options);
+    case 'cursor':
+      return spawnNewCursorComposerSession(task, options);
     default:
       return { ok: false, error: `Cannot spawn sessions for provider: ${provider}`, dispatchedVia: 'none', provider: normalized };
   }

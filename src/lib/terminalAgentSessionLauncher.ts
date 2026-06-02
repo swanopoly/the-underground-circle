@@ -1,6 +1,8 @@
 import { launchClaudeCodeSessions } from './claudeCodeDetector';
 import { launchCodexSessions } from './codexDetector';
+import { launchCursorComposerSessions } from './cursorDetector';
 import { launchGeminiCliSessions } from './geminiCliDetector';
+import { applyAgentDevelopmentStandardsToPrompt } from './agentDevelopmentStandards';
 import {
   formatTerminalAgentLaunchResponse,
   parseTerminalAgentLaunchRequest,
@@ -29,9 +31,13 @@ async function launchForProvider(
   plan: TerminalAgentLaunchPlan,
   context: { circleId?: string; userId?: string },
 ): Promise<TerminalAgentLaunchResult> {
+  const prompts = plan.prompts.map((prompt) => applyAgentDevelopmentStandardsToPrompt(prompt, {
+    taskDescription: [prompt, plan.basePrompt || '', plan.raw].filter(Boolean).join('\n'),
+    label: 'The launched terminal agent must follow these repo standards for this chat-launched task.',
+  }));
   const input = {
     count: plan.count,
-    prompts: plan.prompts,
+    prompts,
     names: plan.names,
     circleId: context.circleId,
     userId: context.userId,
@@ -39,6 +45,7 @@ async function launchForProvider(
 
   if (plan.provider === 'claude-code') return launchClaudeCodeSessions(input);
   if (plan.provider === 'codex') return launchCodexSessions(input);
+  if (plan.provider === 'cursor') return launchCursorComposerSessions(input);
   return launchGeminiCliSessions(input);
 }
 

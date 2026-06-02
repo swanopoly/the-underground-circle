@@ -10,6 +10,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { exec, execSync, execFile, execFileSync } = require('child_process');
 const {
   clampLaunchCount,
@@ -64,7 +65,7 @@ const CORS = {
   // after the bridge was running + paired, because every authed call
   // died silently at the preflight layer. If you add another custom
   // request header on the client side, list it here too.
-  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token',
+  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token, X-UC-File-Session-Token',
   // Private Network Access (Chrome 116+). When the page is at
   // https://app.chrisswanson.xyz (a public-network origin) and tries
   // to fetch http://localhost:7778 (a private-network address),
@@ -76,6 +77,34 @@ const CORS = {
   'Access-Control-Allow-Private-Network': 'true',
   'Content-Type': 'application/json',
 };
+
+function envFlag(name, fallback = false) {
+  const raw = String(process.env[name] || '').trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
+function isClaudeBridgeBillingAllowed() {
+  return envFlag('UC_ALLOW_CLAUDE_BRIDGE_BILLING')
+    || envFlag('UC_ALLOW_CLAUDE_CODE_BILLING')
+    || envFlag('UC_ALLOW_BILLABLE_CLAUDE_ACTIONS');
+}
+
+function commandInvokesClaudeBilling(command) {
+  return /\bclaude\b/i.test(command)
+    || /@anthropic-ai\/claude-code/i.test(command)
+    || /api\.anthropic\.com\/v1\/messages/i.test(command)
+    || /\bANTHROPIC_API_KEY\b/.test(command);
+}
+
+function sendClaudeBillingBlocked(res, headers, action) {
+  res.writeHead(403, headers);
+  res.end(JSON.stringify({
+    ok: false,
+    code: 'claude_bridge_billing_disabled',
+    error: `${action} is disabled by default to prevent Anthropic charges. Set UC_ALLOW_CLAUDE_BRIDGE_BILLING=1 before starting the bridge to allow billable Claude Code actions.`,
+  }));
+}
 
 function configuredBridgeOrigins() {
   return String(process.env.UC_BRIDGE_ALLOWED_ORIGINS || '')
@@ -125,6 +154,10 @@ function buildCorsHeaders(req) {
 let cachedSessions = [];
 let lastScanTime = '';
 let launchedSessions = loadManagedTerminalSessions('claude-code');
+
+const LOCAL_FILE_GRANT_DEFAULT_TTL_MS = 4 * 60 * 60 * 1000;
+const LOCAL_FILE_GRANT_MAX_TTL_MS = 12 * 60 * 60 * 1000;
+const localFileAccessGrants = new Map();
 
 // ── Device discovery cache (10s TTL) ────────────────────────────────────────
 const deviceCache = { data: null, timestamp: 0 };
@@ -758,6 +791,8 @@ const server = http.createServer(async (req, res) => {
       bridge: 'claude-code',
       version: '1.1.0',
       sessions: cachedSessions.length,
+      mode: isClaudeBridgeBillingAllowed() ? 'billable-actions-enabled' : 'read-only-cost-guard',
+      billableClaudeActionsEnabled: isClaudeBridgeBillingAllowed(),
       capabilities: ['sessions', 'exec', 'desktop', 'browser', 'launch', 'spawn', 'terminal-send'],
     }));
     return;
@@ -770,6 +805,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url === '/launch' && req.method === 'POST') {
+    if (!isClaudeBridgeBillingAllowed()) {
+      sendClaudeBillingBlocked(res, CORS, 'Launching Claude Code sessions');
+      return;
+    }
     if (!isDesktopTokenValid(req)) {
       res.writeHead(401, CORS);
       res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop token. Pair first via POST /desktop/pair.' }));
@@ -789,6 +828,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url === '/terminal/send' && req.method === 'POST') {
+    if (!isClaudeBridgeBillingAllowed()) {
+      sendClaudeBillingBlocked(res, CORS, 'Sending prompts to Claude Code sessions');
+      return;
+    }
     if (!isDesktopTokenValid(req)) {
       res.writeHead(401, CORS);
       res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop token. Pair first via POST /desktop/pair.' }));
@@ -981,6 +1024,11 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      if (commandInvokesClaudeBilling(command) && !isClaudeBridgeBillingAllowed()) {
+        sendClaudeBillingBlocked(res, CORS, 'Running Claude/Anthropic commands through /exec');
+        return;
+      }
+
       // Block dangerous patterns that could damage the system
       const BLOCKED_PATTERNS = [
         /\brm\s+(-[a-zA-Z]*\s+)*\//,     // rm with absolute paths
@@ -1100,6 +1148,10 @@ const server = http.createServer(async (req, res) => {
   //   - tasks: array of { task, model? } to spawn one per entry
   //   - useWorktree: if true, each session gets its own git worktree branch
   if (url === '/spawn' && req.method === 'POST') {
+    if (!isClaudeBridgeBillingAllowed()) {
+      sendClaudeBillingBlocked(res, CORS, 'Spawning Claude Code sessions');
+      return;
+    }
     let body = '';
     req.on('data', c => { body += c; if (body.length > 128000) req.destroy(); });
     req.on('end', async () => {
@@ -2086,9 +2138,12 @@ const server = http.createServer(async (req, res) => {
       supported: process.platform === 'darwin',
       tools: process.platform === 'darwin'
         ? ['launch', 'focus', 'type', 'keys', 'running_apps', 'browser_tabs', 'window_state', 'clipboard', 'clipboard_write', 'clipboard_clear',
-           'file_list', 'file_read', 'file_search', 'shortcuts_list', 'shortcuts_run', 'window_manage', 'mouse_move', 'mouse_click', 'mouse_drag', 'mouse_scroll',
-           'screenshot', 'wait_for_app', 'open_url', 'open_path', 'click_at', 'screen_size',
-           ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper')) ? ['a11y_tree', 'click_element'] : [])]
+           'file_list', 'file_read', 'file_search', 'file_stat', 'file_write', 'file_rename', 'file_write_text', 'file_copy', 'file_trash', 'file_mkdir', 'shortcuts_list', 'shortcuts_run', 'window_manage', 'mouse_move', 'mouse_click', 'mouse_down', 'mouse_up', 'mouse_drag', 'mouse_scroll',
+           'paste_text',
+           'menu_click', 'indesign_find_change', 'indesign_batch_find_change', 'indesign_document_status', 'indesign_text_inventory', 'indesign_set_layer_state', 'indesign_update_text_layer', 'indesign_batch_update_text_layers', 'indesign_relink_asset', 'indesign_export_proof', 'indesign_package_document',
+           'photoshop_document_status', 'photoshop_layer_inventory', 'photoshop_set_layer_state', 'photoshop_update_text_layer', 'photoshop_place_asset', 'photoshop_export_proof',
+           'screenshot', 'wait_for_app', 'open_url', 'open_path', 'stage_attachment', 'stage_attachment_manifest', 'click_at', 'screen_size',
+           ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper')) ? ['a11y_tree', 'click_element', 'set_element_value'] : [])]
         : [],
       // Surface whether the more-reliable click backend is available
       // so clients can decide whether to attempt `click_at` at all.
@@ -2208,12 +2263,166 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url === '/desktop/paste_text' && req.method === 'POST') {
+      readJsonBody(req, 40 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const text = String(parsed?.text ?? '');
+        const appName = String(parsed?.appName || '').trim();
+        const restoreClipboard = parsed?.restoreClipboard !== false;
+        const focusMode = String(parsed?.focusMode || 'require').trim();
+        if (text.length === 0) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'text is required' }));
+          return;
+        }
+        if (text.length > 20_000) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'text too long (max 20000 chars per paste)' }));
+          return;
+        }
+        if (appName && !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (!['require', 'best_effort', 'skip'].includes(focusMode)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid focusMode.' }));
+          return;
+        }
+
+        const focusTarget = (done) => {
+          if (!appName) { done(null, null, null); return; }
+          const resolved = resolveInstalledMacApp(appName);
+          const targetAppName = resolved?.name || appName;
+          if (focusMode === 'skip') {
+            done(null, targetAppName, null);
+            return;
+          }
+          const errors = [];
+          const finishFocus = (err) => {
+            if (!err) {
+              done(null, targetAppName, null);
+              return;
+            }
+            const warning = errors.concat(err?.message ? [err.message] : []).filter(Boolean).join(' | ').slice(0, 500) || 'focus failed before paste';
+            if (focusMode === 'best_effort') {
+              done(null, targetAppName, warning);
+              return;
+            }
+            done(new Error(warning), targetAppName, null);
+          };
+          const trySystemEventsFocus = () => {
+            const script = `
+tell application "System Events"
+  set targetProc to first application process whose name contains "${escapeAppleScriptString(targetAppName)}"
+  set frontmost of targetProc to true
+end tell`;
+            exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 5000 }, (err, _stdout, stderr) => {
+              if (!err) { finishFocus(null); return; }
+              errors.push(String(stderr || err.message || 'System Events focus failed').trim());
+              if (resolved?.appPath) {
+                execFile('open', [resolved.appPath], { timeout: 5000 }, (openErr, _openStdout, openStderr) => {
+                  if (!openErr) { finishFocus(null); return; }
+                  errors.push(String(openStderr || openErr.message || 'open app path focus failed').trim());
+                  finishFocus(openErr);
+                });
+                return;
+              }
+              exec(`open -a ${shellSingleQuote(targetAppName)}`, { timeout: 5000 }, (openErr, _openStdout, openStderr) => {
+                if (!openErr) { finishFocus(null); return; }
+                errors.push(String(openStderr || openErr.message || 'open -a focus failed').trim());
+                finishFocus(openErr);
+              });
+            });
+          };
+          const script = `tell application "${escapeAppleScriptString(targetAppName)}" to activate`;
+          exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 5000 }, (err, _stdout, stderr) => {
+            if (!err) { finishFocus(null); return; }
+            errors.push(String(stderr || err.message || 'activate failed').trim());
+            trySystemEventsFocus();
+          });
+        };
+
+        const finish = (status, payload) => {
+          res.writeHead(status, CORS);
+          res.end(JSON.stringify(payload));
+        };
+
+        execFile('pbpaste', [], { timeout: 3000, maxBuffer: 1024 * 1024 }, (_readErr, oldClipboard) => {
+          focusTarget((focusErr, targetAppName, focusWarning) => {
+            if (focusErr) {
+              finish(400, { ok: false, error: focusErr.message || 'focus failed before paste' });
+              return;
+            }
+            exec(`printf %s ${shellSingleQuote(text)} | pbcopy`, { timeout: 3000 }, (copyErr) => {
+              if (copyErr) {
+                finish(400, { ok: false, error: copyErr.message || 'clipboard write failed before paste' });
+                return;
+              }
+              const script = 'tell application "System Events" to keystroke "v" using command down';
+              exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 5000 }, (pasteErr) => {
+                if (pasteErr) {
+                  finish(400, { ok: false, error: pasteErr.message || 'paste keystroke failed' });
+                  return;
+                }
+                if (!restoreClipboard) {
+                  finish(200, { ok: true, chars: text.length, appName: targetAppName || null, restoredClipboard: false, focusWarning: focusWarning || undefined });
+                  return;
+                }
+                setTimeout(() => {
+                  exec(`printf %s ${shellSingleQuote(String(oldClipboard || ''))} | pbcopy`, { timeout: 3000 }, (restoreErr) => {
+                    finish(200, {
+                      ok: true,
+                      chars: text.length,
+                      appName: targetAppName || null,
+                      restoredClipboard: !restoreErr,
+                      focusWarning: focusWarning || undefined,
+                      restoreError: restoreErr ? String(restoreErr.message || restoreErr).slice(0, 200) : undefined,
+                    });
+                  });
+                }, 350);
+              });
+            });
+          });
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/file_grant' && req.method === 'POST') {
+      readJsonBody(req, 4096, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const result = createLocalFileAccessGrant(parsed || {});
+        if (!result.ok) { res.writeHead(400, CORS); res.end(JSON.stringify(result)); return; }
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify(result));
+      });
+      return;
+    }
+
+    if (url === '/desktop/file_grant/status' && req.method === 'GET') {
+      const parsed = new URL(req.url, 'http://localhost');
+      const grant = getLocalFileAccessGrant(req, parsed);
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({
+        ok: true,
+        granted: !!grant,
+        roots: grant ? grant.roots : [],
+        scope: grant ? grant.scope : null,
+        expiresAt: grant ? new Date(grant.expiresAt).toISOString() : null,
+      }));
+      return;
+    }
+
     if (url === '/desktop/file_list' && req.method === 'GET') {
       const parsed = new URL(req.url, 'http://localhost');
       const validated = validateDesktopPathServer(parsed.searchParams.get('path') || '');
       if (!validated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: validated.error })); return; }
       try {
         const dir = expandDesktopPath(validated.path);
+        const grant = requireLocalFileAccessGrant(req, parsed, dir);
+        if (!grant.ok) { res.writeHead(grant.status, CORS); res.end(JSON.stringify({ ok: false, error: grant.error })); return; }
         const entries = fs.readdirSync(dir, { withFileTypes: true }).slice(0, 250).map((entry) => {
           const full = path.join(dir, entry.name);
           let size = null;
@@ -2240,6 +2449,8 @@ const server = http.createServer(async (req, res) => {
       if (!validated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: validated.error })); return; }
       try {
         const filePath = expandDesktopPath(validated.path);
+        const grant = requireLocalFileAccessGrant(req, parsed, filePath);
+        if (!grant.ok) { res.writeHead(grant.status, CORS); res.end(JSON.stringify({ ok: false, error: grant.error })); return; }
         const stat = fs.statSync(filePath);
         if (!stat.isFile()) throw new Error('path is not a file');
         const maxBytes = Math.max(1024, Math.min(256 * 1024, Number(parsed.searchParams.get('maxBytes') || 128 * 1024)));
@@ -2267,13 +2478,254 @@ const server = http.createServer(async (req, res) => {
       if (!query || query.length > 120) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'query is required and must be <= 120 chars' })); return; }
       try {
         const rootPath = expandDesktopPath(rootValidated.path);
-        const result = searchFiles(rootPath, query);
+        const grant = requireLocalFileAccessGrant(req, parsed, rootPath);
+        if (!grant.ok) { res.writeHead(grant.status, CORS); res.end(JSON.stringify({ ok: false, error: grant.error })); return; }
+        const result = searchFiles(rootPath, query, {
+          maxResults: parsed.searchParams.get('maxResults'),
+          maxVisited: parsed.searchParams.get('maxFiles') || parsed.searchParams.get('maxVisited'),
+          maxDepth: parsed.searchParams.get('maxDepth'),
+          includeContent: parsed.searchParams.get('includeContent'),
+          extensions: parsed.searchParams.get('extensions'),
+        });
         res.writeHead(200, CORS);
         res.end(JSON.stringify({ ok: true, rootPath, query, ...result }));
       } catch (err) {
         res.writeHead(400, CORS);
         res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
       }
+      return;
+    }
+
+    if (url === '/desktop/file_stat' && req.method === 'GET') {
+      const parsed = new URL(req.url, 'http://localhost');
+      const validated = validateDesktopPathServer(parsed.searchParams.get('path') || '');
+      if (!validated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: validated.error })); return; }
+      try {
+        const targetPath = expandDesktopPath(validated.path);
+        const grant = requireLocalFileAccessGrant(req, parsed, targetPath);
+        if (!grant.ok) { res.writeHead(grant.status, CORS); res.end(JSON.stringify({ ok: false, error: grant.error })); return; }
+        let stat = null;
+        try {
+          stat = fs.lstatSync(targetPath);
+        } catch (err) {
+          if (err && err.code === 'ENOENT') {
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({ ok: true, path: targetPath, exists: false }));
+            return;
+          }
+          throw err;
+        }
+        const kind = stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : stat.isSymbolicLink() ? 'symlink' : 'other';
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({
+          ok: true,
+          path: targetPath,
+          exists: true,
+          kind,
+          size: stat.size,
+          modifiedAt: stat.mtime.toISOString(),
+          createdAt: stat.birthtime.toISOString(),
+          mode: stat.mode,
+        }));
+      } catch (err) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+      }
+      return;
+    }
+
+    if (url === '/desktop/file_rename' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 4096, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const fromValidated = validateDesktopPathServer(parsed?.fromPath || '');
+        const toValidated = validateDesktopPathServer(parsed?.toPath || '');
+        if (!fromValidated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: `fromPath: ${fromValidated.error}` })); return; }
+        if (!toValidated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: `toPath: ${toValidated.error}` })); return; }
+        try {
+          const fromPath = expandDesktopPath(fromValidated.path);
+          const toPath = expandDesktopPath(toValidated.path);
+          const fromGrant = requireLocalFileAccessGrant(req, parsedUrl, fromPath, 'write');
+          if (!fromGrant.ok) { res.writeHead(fromGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: fromGrant.error })); return; }
+          const toGrant = requireLocalFileAccessGrant(req, parsedUrl, toPath, 'write');
+          if (!toGrant.ok) { res.writeHead(toGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: toGrant.error })); return; }
+
+          const sourceStat = fs.lstatSync(fromPath);
+          const kind = sourceStat.isDirectory() ? 'directory' : sourceStat.isFile() ? 'file' : 'other';
+          const destParent = path.dirname(toPath);
+          const destParentGrant = requireLocalFileAccessGrant(req, parsedUrl, destParent, 'write');
+          if (!destParentGrant.ok) { res.writeHead(destParentGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: destParentGrant.error })); return; }
+          const parentStat = fs.statSync(destParent);
+          if (!parentStat.isDirectory()) throw new Error('destination parent is not a directory');
+          const overwrite = parseBooleanOption(parsed?.overwrite, false);
+          if (fs.existsSync(toPath) && !overwrite) {
+            res.writeHead(409, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'destination already exists; set overwrite=true to replace it' }));
+            return;
+          }
+          fs.renameSync(fromPath, toPath);
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, fromPath, toPath, kind }));
+        } catch (err) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+        }
+      });
+      return;
+    }
+
+    if (url === '/desktop/file_write_text' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 560 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const pathValidated = validateDesktopPathServer(parsed?.path || '');
+        if (!pathValidated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: pathValidated.error })); return; }
+        const content = parsed?.content;
+        if (typeof content !== 'string') { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'content must be a string' })); return; }
+        const byteLength = Buffer.byteLength(content, 'utf8');
+        if (byteLength > 512 * 1024) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'content exceeds 512 KB per write' })); return; }
+        try {
+          const filePath = expandDesktopPath(pathValidated.path);
+          const writeGrant = requireLocalFileAccessGrant(req, parsedUrl, filePath, 'write');
+          if (!writeGrant.ok) { res.writeHead(writeGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: writeGrant.error })); return; }
+          const parentDir = path.dirname(filePath);
+          const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, parentDir, 'write');
+          if (!parentGrant.ok) { res.writeHead(parentGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: parentGrant.error })); return; }
+          const parentStat = fs.statSync(parentDir);
+          if (!parentStat.isDirectory()) throw new Error('destination parent is not a directory');
+          const append = parseBooleanOption(parsed?.append, false);
+          const overwrite = parseBooleanOption(parsed?.overwrite, false);
+          if (fs.existsSync(filePath)) {
+            const existingStat = fs.lstatSync(filePath);
+            if (!existingStat.isFile()) throw new Error('destination exists and is not a file');
+            if (!append && !overwrite) {
+              res.writeHead(409, CORS);
+              res.end(JSON.stringify({ ok: false, error: 'file already exists; set overwrite=true or append=true' }));
+              return;
+            }
+          }
+          if (append) {
+            fs.appendFileSync(filePath, content, 'utf8');
+          } else {
+            fs.writeFileSync(filePath, content, { encoding: 'utf8', flag: overwrite ? 'w' : 'wx' });
+          }
+          const stat = fs.statSync(filePath);
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, path: filePath, kind: 'file', bytes: byteLength, size: stat.size, append, overwrite }));
+        } catch (err) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+        }
+      });
+      return;
+    }
+
+    if (url === '/desktop/file_mkdir' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 4096, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const pathValidated = validateDesktopPathServer(parsed?.path || '');
+        if (!pathValidated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: pathValidated.error })); return; }
+        try {
+          const dirPath = expandDesktopPath(pathValidated.path);
+          const writeGrant = requireLocalFileAccessGrant(req, parsedUrl, dirPath, 'write');
+          if (!writeGrant.ok) { res.writeHead(writeGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: writeGrant.error })); return; }
+          const parentDir = path.dirname(dirPath);
+          const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, parentDir, 'write');
+          if (!parentGrant.ok) { res.writeHead(parentGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: parentGrant.error })); return; }
+          const recursive = parseBooleanOption(parsed?.recursive, true);
+          if (fs.existsSync(dirPath)) {
+            const stat = fs.statSync(dirPath);
+            if (!stat.isDirectory()) throw new Error('path already exists and is not a directory');
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({ ok: true, path: dirPath, kind: 'directory', existed: true }));
+            return;
+          }
+          if (!recursive && !fs.existsSync(parentDir)) throw new Error('parent directory does not exist');
+          fs.mkdirSync(dirPath, { recursive });
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, path: dirPath, kind: 'directory', existed: false }));
+        } catch (err) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+        }
+      });
+      return;
+    }
+
+    if (url === '/desktop/file_copy' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 4096, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const fromValidated = validateDesktopPathServer(parsed?.fromPath || '');
+        const toValidated = validateDesktopPathServer(parsed?.toPath || '');
+        if (!fromValidated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: `fromPath: ${fromValidated.error}` })); return; }
+        if (!toValidated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: `toPath: ${toValidated.error}` })); return; }
+        try {
+          const fromPath = expandDesktopPath(fromValidated.path);
+          const toPath = expandDesktopPath(toValidated.path);
+          const fromGrant = requireLocalFileAccessGrant(req, parsedUrl, fromPath, 'write');
+          if (!fromGrant.ok) { res.writeHead(fromGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: fromGrant.error })); return; }
+          const toGrant = requireLocalFileAccessGrant(req, parsedUrl, toPath, 'write');
+          if (!toGrant.ok) { res.writeHead(toGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: toGrant.error })); return; }
+          const sourceStat = fs.lstatSync(fromPath);
+          const kind = sourceStat.isDirectory() ? 'directory' : sourceStat.isFile() ? 'file' : 'other';
+          if (kind === 'other') throw new Error('source is not a regular file or directory');
+          const destParent = path.dirname(toPath);
+          const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, destParent, 'write');
+          if (!parentGrant.ok) { res.writeHead(parentGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: parentGrant.error })); return; }
+          const parentStat = fs.statSync(destParent);
+          if (!parentStat.isDirectory()) throw new Error('destination parent is not a directory');
+          const overwrite = parseBooleanOption(parsed?.overwrite, false);
+          if (fs.existsSync(toPath) && !overwrite) {
+            res.writeHead(409, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'destination already exists; set overwrite=true to replace it' }));
+            return;
+          }
+          if (sourceStat.isDirectory()) {
+            fs.cpSync(fromPath, toPath, { recursive: true, force: overwrite, errorOnExist: !overwrite });
+          } else {
+            fs.copyFileSync(fromPath, toPath, overwrite ? 0 : fs.constants.COPYFILE_EXCL);
+          }
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, fromPath, toPath, kind }));
+        } catch (err) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+        }
+      });
+      return;
+    }
+
+    if (url === '/desktop/file_trash' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 4096, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const pathValidated = validateDesktopPathServer(parsed?.path || '');
+        if (!pathValidated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: pathValidated.error })); return; }
+        try {
+          const filePath = expandDesktopPath(pathValidated.path);
+          const writeGrant = requireLocalFileAccessGrant(req, parsedUrl, filePath, 'write');
+          if (!writeGrant.ok) { res.writeHead(writeGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: writeGrant.error })); return; }
+          const sourceStat = fs.lstatSync(filePath);
+          const kind = sourceStat.isDirectory() ? 'directory' : sourceStat.isFile() ? 'file' : 'other';
+          if (kind === 'other') throw new Error('path is not a regular file or directory');
+          const trashDir = path.join(os.homedir(), '.Trash');
+          const parsedPath = path.parse(filePath);
+          let trashPath = path.join(trashDir, path.basename(filePath));
+          let suffix = 0;
+          while (fs.existsSync(trashPath)) {
+            suffix += 1;
+            trashPath = path.join(trashDir, `${parsedPath.name}-${Date.now()}-${suffix}${parsedPath.ext}`);
+          }
+          fs.renameSync(filePath, trashPath);
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, path: filePath, trashPath, kind }));
+        } catch (err) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+        }
+      });
       return;
     }
 
@@ -2400,6 +2852,50 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if ((url === '/desktop/mouse_down' || url === '/desktop/mouse_up') && req.method === 'POST') {
+      readJsonBody(req, 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const isDown = url === '/desktop/mouse_down';
+        const xRaw = parsed?.x;
+        const yRaw = parsed?.y;
+        const x = Number(xRaw);
+        const y = Number(yRaw);
+        const button = String(parsed?.button || 'left').toLowerCase();
+        if (button !== 'left' && button !== 'right') {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'button must be left or right' }));
+          return;
+        }
+        if (isDown || xRaw !== undefined || yRaw !== undefined) {
+          if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x > 20000 || y > 20000) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'x and y must be non-negative integers <= 20000' }));
+            return;
+          }
+        }
+        const helperPath = path.join(__dirname, 'bin', 'uc-input-helper');
+        if (!fs.existsSync(helperPath)) {
+          res.writeHead(503, CORS);
+          res.end(JSON.stringify({ ok: false, error: `uc-input-helper not found. Build or install the helper before using mouse ${isDown ? 'down' : 'up'}.` }));
+          return;
+        }
+        const helperArgs = [isDown ? 'down' : 'up', '--button', button];
+        if (isDown || (xRaw !== undefined && yRaw !== undefined)) {
+          helperArgs.push('--x', String(x), '--y', String(y));
+        }
+        execFile(helperPath, helperArgs, { timeout: 3000 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || `mouse ${isDown ? 'down' : 'up'} failed`).toString().slice(0, 300) }));
+            return;
+          }
+          res.writeHead(200, CORS);
+          res.end(stdout.toString().trim() || JSON.stringify({ ok: true, x: Number.isInteger(x) ? x : null, y: Number.isInteger(y) ? y : null, button }));
+        });
+      });
+      return;
+    }
+
     if (url === '/desktop/mouse_drag' && req.method === 'POST') {
       readJsonBody(req, 1024, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
@@ -2467,7 +2963,8 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ ok: false, error: 'Invalid appName. Letters, numbers, spaces, . - _ ( ) only.' }));
           return;
         }
-        exec(`open -a ${shellSingleQuote(appName)}`, { timeout: 5000 }, (err) => {
+        const resolved = resolveInstalledMacApp(appName);
+        const launchDone = (err) => {
           if (err) {
             const msg = /not found/i.test(err.message) ? 'app_not_found' : err.message;
             res.writeHead(400, CORS);
@@ -2475,8 +2972,18 @@ const server = http.createServer(async (req, res) => {
             return;
           }
           res.writeHead(200, CORS);
-          res.end(JSON.stringify({ ok: true, appName }));
-        });
+          res.end(JSON.stringify({
+            ok: true,
+            appName: resolved?.name || appName,
+            requestedAppName: appName,
+            appPath: resolved?.appPath,
+          }));
+        };
+        if (resolved?.appPath) {
+          execFile('open', [resolved.appPath], { timeout: 5000 }, launchDone);
+        } else {
+          exec(`open -a ${shellSingleQuote(appName)}`, { timeout: 5000 }, launchDone);
+        }
       });
       return;
     }
@@ -2490,7 +2997,10 @@ const server = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
           return;
         }
-        const script = `tell application ${shellSingleQuote('"' + appName + '"')} to activate`;
+        const resolved = resolveInstalledMacApp(appName);
+        const targetAppName = resolved?.name || appName;
+        const escapedAppName = targetAppName.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        const script = `tell application "${escapedAppName}" to activate`;
         exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 5000 }, (err) => {
           if (err) {
             res.writeHead(400, CORS);
@@ -2498,7 +3008,12 @@ const server = http.createServer(async (req, res) => {
             return;
           }
           res.writeHead(200, CORS);
-          res.end(JSON.stringify({ ok: true, appName }));
+          res.end(JSON.stringify({
+            ok: true,
+            appName: targetAppName,
+            requestedAppName: appName,
+            appPath: resolved?.appPath,
+          }));
         });
       });
       return;
@@ -2545,6 +3060,1497 @@ const server = http.createServer(async (req, res) => {
           }
           res.writeHead(200, CORS);
           res.end(JSON.stringify({ ok: true, combo }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/menu_click' && req.method === 'POST') {
+      readJsonBody(req, 2048, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || '').trim();
+        const rawPath = Array.isArray(parsed?.menuPath)
+          ? parsed.menuPath
+          : String(parsed?.menuPath || '').split(/\s*(?:>|→|›)\s*/g);
+        const menuPath = rawPath.map((part) => String(part || '').trim()).filter(Boolean);
+        if (appName && !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (menuPath.length < 2 || menuPath.length > 6 || menuPath.some((part) => part.length > 80 || /[\x00-\x1f]/.test(part))) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'menuPath must contain 2-6 labels, each <= 80 chars.' }));
+          return;
+        }
+        const built = buildMenuClickScript({ appName, menuPath });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not build menu click script.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 7000 }, (err) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: err.message }));
+            return;
+          }
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, appName: built.appName || null, menuPath: built.menuPath }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/indesign_document_status' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'InDesign').trim() || 'InDesign';
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildInDesignDocumentStatusScript({ appName, expectedDocumentName, sourceDocumentPath });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve InDesign app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 10000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'InDesign document status failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const documents = Array.isArray(result?.documents)
+            ? result.documents.slice(0, 12).map((doc) => ({
+                name: doc?.name ? String(doc.name).slice(0, 260) : '',
+                path: doc?.path ? String(doc.path).slice(0, 1024) : null,
+                modified: doc?.modified === true,
+                saved: doc?.saved === true,
+                pageCount: Number.isFinite(Number(doc?.pageCount)) ? Number(doc.pageCount) : 0,
+              })).filter((doc) => doc.name)
+            : [];
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            status: result?.status ? String(result.status).slice(0, 80) : 'unknown',
+            documentCount: Number.isFinite(Number(result?.documentCount)) ? Number(result.documentCount) : 0,
+            activeDocumentName: result?.activeDocumentName ? String(result.activeDocumentName).slice(0, 260) : null,
+            activeDocumentPath: result?.activeDocumentPath ? String(result.activeDocumentPath).slice(0, 1024) : null,
+            activeDocumentModified: result?.activeDocumentModified === true,
+            activeDocumentSaved: result?.activeDocumentSaved === true,
+            pageCount: Number.isFinite(Number(result?.pageCount)) ? Number(result.pageCount) : 0,
+            spreadCount: Number.isFinite(Number(result?.spreadCount)) ? Number(result.spreadCount) : 0,
+            layerCount: Number.isFinite(Number(result?.layerCount)) ? Number(result.layerCount) : 0,
+            lockedLayers: Number.isFinite(Number(result?.lockedLayers)) ? Number(result.lockedLayers) : 0,
+            hiddenLayers: Number.isFinite(Number(result?.hiddenLayers)) ? Number(result.hiddenLayers) : 0,
+            linkCount: Number.isFinite(Number(result?.linkCount)) ? Number(result.linkCount) : 0,
+            missingLinks: Number.isFinite(Number(result?.missingLinks)) ? Number(result.missingLinks) : 0,
+            modifiedLinks: Number.isFinite(Number(result?.modifiedLinks)) ? Number(result.modifiedLinks) : 0,
+            problemLinks: Number.isFinite(Number(result?.problemLinks)) ? Number(result.problemLinks) : 0,
+            fontCount: Number.isFinite(Number(result?.fontCount)) ? Number(result.fontCount) : 0,
+            missingFonts: Number.isFinite(Number(result?.missingFonts)) ? Number(result.missingFonts) : 0,
+            selectionCount: Number.isFinite(Number(result?.selectionCount)) ? Number(result.selectionCount) : 0,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            documents,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/indesign_text_inventory' && req.method === 'POST') {
+      readJsonBody(req, 12 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'InDesign').trim() || 'InDesign';
+        const query = String(parsed?.query || '').trim();
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        const maxItems = Math.max(1, Math.min(80, Math.trunc(Number(parsed?.maxItems || 30))));
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (query.length > 160 || /[\x00-\x1F]/.test(query)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'query must be <= 160 chars and cannot contain control chars.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildInDesignTextInventoryScript({ appName, query, expectedDocumentName, sourceDocumentPath, maxItems });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve InDesign app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 12000, maxBuffer: 768 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'InDesign text inventory failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const frames = Array.isArray(result?.frames)
+            ? result.frames.slice(0, maxItems).map((frame) => ({
+                layerName: frame?.layerName ? String(frame.layerName).slice(0, 160) : '',
+                itemName: frame?.itemName ? String(frame.itemName).slice(0, 160) : '',
+                label: frame?.label ? String(frame.label).slice(0, 160) : '',
+                pageName: frame?.pageName ? String(frame.pageName).slice(0, 80) : '',
+                contentPreview: frame?.contentPreview ? String(frame.contentPreview).slice(0, 240) : '',
+                chars: Number.isFinite(Number(frame?.chars)) ? Number(frame.chars) : 0,
+                matchCount: Number.isFinite(Number(frame?.matchCount)) ? Number(frame.matchCount) : 0,
+                overflows: frame?.overflows === true,
+                locked: frame?.locked === true,
+                visible: frame?.visible !== false,
+              }))
+            : [];
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            query,
+            textFrameCount: Number.isFinite(Number(result?.textFrameCount)) ? Number(result.textFrameCount) : 0,
+            matchedFrames: Number.isFinite(Number(result?.matchedFrames)) ? Number(result.matchedFrames) : 0,
+            oversetFrames: Number.isFinite(Number(result?.oversetFrames)) ? Number(result.oversetFrames) : 0,
+            lockedLayers: Number.isFinite(Number(result?.lockedLayers)) ? Number(result.lockedLayers) : 0,
+            hiddenLayers: Number.isFinite(Number(result?.hiddenLayers)) ? Number(result.hiddenLayers) : 0,
+            queryMatches: Number.isFinite(Number(result?.queryMatches)) ? Number(result.queryMatches) : 0,
+            layerNames: Array.isArray(result?.layerNames) ? result.layerNames.slice(0, 80).map((name) => String(name || '').slice(0, 160)).filter(Boolean) : [],
+            frames,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/indesign_set_layer_state' && req.method === 'POST') {
+      readJsonBody(req, 12 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'InDesign').trim() || 'InDesign';
+        const layerName = String(parsed?.layerName || parsed?.targetLayerName || '').trim();
+        const action = String(parsed?.action || '').trim().toLowerCase();
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (!layerName || layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'layerName must be 1-160 chars and cannot contain control characters.' }));
+          return;
+        }
+        if (!['show', 'hide', 'lock', 'unlock'].includes(action)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'action must be show, hide, lock, or unlock.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildInDesignSetLayerStateScript({ appName, layerName, action, expectedDocumentName, sourceDocumentPath });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve InDesign app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 15000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'InDesign layer-state update failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const matches = Array.isArray(result?.matches)
+            ? result.matches.slice(0, 12).map((item) => ({
+                name: item?.name ? String(item.name).slice(0, 160) : '',
+                visible: item?.visible !== false,
+                locked: item?.locked === true,
+                printable: item?.printable === true,
+              })).filter((item) => item.name)
+            : [];
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            layerName,
+            action,
+            matchedLayers: Number.isFinite(Number(result?.matchedLayers)) ? Number(result.matchedLayers) : 0,
+            changedLayers: Number.isFinite(Number(result?.changedLayers)) ? Number(result.changedLayers) : 0,
+            beforeVisible: result?.beforeVisible === true,
+            afterVisible: result?.afterVisible === true,
+            beforeLocked: result?.beforeLocked === true,
+            afterLocked: result?.afterLocked === true,
+            beforePrintable: result?.beforePrintable === true,
+            afterPrintable: result?.afterPrintable === true,
+            docWasModified: result?.docWasModified === true,
+            docModified: result?.docModified === true,
+            docSaved: result?.docSaved === true,
+            matches,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+	    if (url === '/desktop/indesign_update_text_layer' && req.method === 'POST') {
+	      readJsonBody(req, 16 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'InDesign').trim() || 'InDesign';
+        const fieldName = String(parsed?.fieldName || '').trim();
+        const replacementText = String(parsed?.replacementText ?? '');
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (!fieldName || fieldName.length > 160 || /[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(fieldName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'fieldName must be 1-160 chars and cannot contain control chars.' }));
+          return;
+        }
+        if (replacementText.length > 5000 || /[\x00]/.test(replacementText)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'replacementText must be <= 5000 chars and cannot contain NUL.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildInDesignUpdateTextLayerScript({ appName, fieldName, replacementText, expectedDocumentName, sourceDocumentPath });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve InDesign app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'InDesign text layer update failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const layerNames = Array.isArray(result?.layerNames)
+            ? result.layerNames.slice(0, 20).map((name) => String(name || '').slice(0, 160)).filter(Boolean)
+            : [];
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            fieldName,
+            replacementText,
+            matchedLayers: Number.isFinite(Number(result?.matchedLayers)) ? Number(result.matchedLayers) : 0,
+            matchedFrames: Number.isFinite(Number(result?.matchedFrames)) ? Number(result.matchedFrames) : 0,
+            updatedFrames: Number.isFinite(Number(result?.updatedFrames)) ? Number(result.updatedFrames) : 0,
+            replacementMatches: Number.isFinite(Number(result?.replacementMatches)) ? Number(result.replacementMatches) : 0,
+            layerNames,
+            unlockedCount: Number.isFinite(Number(result?.unlockedCount)) ? Number(result.unlockedCount) : 0,
+            docWasModified: result?.docWasModified === true,
+            docModified: result?.docModified === true,
+            docSaved: result?.docSaved === true,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+	      });
+	      return;
+	    }
+
+	    if (url === '/desktop/indesign_batch_update_text_layers' && req.method === 'POST') {
+	      readJsonBody(req, 96 * 1024, (parsed, bodyErr) => {
+	        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+	        const appName = String(parsed?.appName || 'InDesign').trim() || 'InDesign';
+	        const rawUpdates = Array.isArray(parsed?.updates) ? parsed.updates : Array.isArray(parsed?.fieldUpdates) ? parsed.fieldUpdates : [];
+	        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+	        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+	        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+	          res.writeHead(400, CORS);
+	          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+	          return;
+	        }
+	        const updates = rawUpdates.slice(0, 12).map((update) => ({
+	          fieldName: String(update?.fieldName ?? update?.field ?? update?.targetLabel ?? '').trim(),
+	          replacementText: String(update?.replacementText ?? update?.text ?? update?.value ?? ''),
+	        })).filter((update) => update.fieldName);
+	        if (
+	          updates.length < 1 ||
+	          rawUpdates.length > 12 ||
+	          updates.some((update) => !update.fieldName || update.fieldName.length > 160 || /[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(update.fieldName) || update.replacementText.length > 5000 || /[\x00]/.test(update.replacementText))
+	        ) {
+	          res.writeHead(400, CORS);
+	          res.end(JSON.stringify({ ok: false, error: 'updates must contain 1-12 valid field/replacement values.' }));
+	          return;
+	        }
+	        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+	          res.writeHead(400, CORS);
+	          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+	          return;
+	        }
+	        let sourceDocumentPath = '';
+	        if (rawSourceDocumentPath) {
+	          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+	          if (!validatedSource.ok) {
+	            res.writeHead(400, CORS);
+	            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+	            return;
+	          }
+	          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+	        }
+	        const built = buildInDesignBatchUpdateTextLayersScript({ appName, updates, expectedDocumentName, sourceDocumentPath });
+	        if (!built) {
+	          res.writeHead(400, CORS);
+	          res.end(JSON.stringify({ ok: false, error: 'Could not resolve InDesign app.' }));
+	          return;
+	        }
+	        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 45000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+	          if (err) {
+	            res.writeHead(400, CORS);
+	            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'InDesign batch text-layer update failed').toString().slice(0, 1000) }));
+	            return;
+	          }
+	          let result = null;
+	          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+	          const itemResults = Array.isArray(result?.results)
+	            ? result.results.slice(0, updates.length).map((item, index) => ({
+	                fieldName: item?.fieldName ? String(item.fieldName).slice(0, 160) : updates[index]?.fieldName || '',
+	                replacementText: item?.replacementText !== undefined ? String(item.replacementText).slice(0, 5000) : updates[index]?.replacementText || '',
+	                matchedLayers: Number.isFinite(Number(item?.matchedLayers)) ? Number(item.matchedLayers) : 0,
+	                matchedFrames: Number.isFinite(Number(item?.matchedFrames)) ? Number(item.matchedFrames) : 0,
+	                updatedFrames: Number.isFinite(Number(item?.updatedFrames)) ? Number(item.updatedFrames) : 0,
+	                replacementMatches: Number.isFinite(Number(item?.replacementMatches)) ? Number(item.replacementMatches) : 0,
+	                layerNames: Array.isArray(item?.layerNames) ? item.layerNames.slice(0, 20).map((name) => String(name || '').slice(0, 160)).filter(Boolean) : [],
+	                unlockedCount: Number.isFinite(Number(item?.unlockedCount)) ? Number(item.unlockedCount) : 0,
+	                error: item?.error ? String(item.error).slice(0, 500) : null,
+	              }))
+	            : updates.map((update) => ({
+	                fieldName: update.fieldName,
+	                replacementText: update.replacementText,
+	                matchedLayers: 0,
+	                matchedFrames: 0,
+	                updatedFrames: 0,
+	                replacementMatches: 0,
+	                layerNames: [],
+	                unlockedCount: 0,
+	                error: 'Bridge returned no per-field result.',
+	              }));
+	          res.writeHead(200, CORS);
+	          res.end(JSON.stringify({
+	            ok: true,
+	            appName: built.appName,
+	            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+	            expectedDocumentName: expectedDocumentName || null,
+	            sourceDocumentPath: sourceDocumentPath || null,
+	            fieldCount: itemResults.length,
+	            matchedLayers: itemResults.reduce((sum, item) => sum + item.matchedLayers, 0),
+	            matchedFrames: itemResults.reduce((sum, item) => sum + item.matchedFrames, 0),
+	            updatedFrames: itemResults.reduce((sum, item) => sum + item.updatedFrames, 0),
+	            replacementMatches: itemResults.reduce((sum, item) => sum + item.replacementMatches, 0),
+	            unlockedCount: itemResults.reduce((sum, item) => sum + item.unlockedCount, 0),
+	            docWasModified: result?.docWasModified === true,
+	            docModified: result?.docModified === true,
+	            docSaved: result?.docSaved === true,
+	            results: itemResults,
+	            error: result?.error ? String(result.error).slice(0, 500) : null,
+	          }));
+	        });
+	      });
+	      return;
+	    }
+
+	    if (url === '/desktop/indesign_find_change' && req.method === 'POST') {
+      readJsonBody(req, 16 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'InDesign').trim() || 'InDesign';
+        const findText = String(parsed?.findText ?? '');
+        const changeText = String(parsed?.changeText ?? '');
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (!findText || findText.length > 5000 || changeText.length > 5000 || /[\x00]/.test(findText + changeText)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'findText/changeText must be 1-5000 chars and cannot contain NUL.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildInDesignFindChangeScript({ appName, findText, changeText, expectedDocumentName, sourceDocumentPath });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve InDesign app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'InDesign Find/Change failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            documentName: result?.documentName || null,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            findText,
+            changeText,
+            matched: Number.isFinite(Number(result?.matched)) ? Number(result.matched) : 0,
+            changed: Number.isFinite(Number(result?.changed)) ? Number(result.changed) : 0,
+	            remaining: Number.isFinite(Number(result?.remaining)) ? Number(result.remaining) : 0,
+	            replacementMatches: Number.isFinite(Number(result?.replacementMatches)) ? Number(result.replacementMatches) : 0,
+	            method: result?.method ? String(result.method) : 'find-change',
+	            unlockedCount: Number.isFinite(Number(result?.unlockedCount)) ? Number(result.unlockedCount) : 0,
+	            lockedLayers: Number.isFinite(Number(result?.lockedLayers)) ? Number(result.lockedLayers) : 0,
+	            hiddenLayers: Number.isFinite(Number(result?.hiddenLayers)) ? Number(result.hiddenLayers) : 0,
+	            lockedPageItems: Number.isFinite(Number(result?.lockedPageItems)) ? Number(result.lockedPageItems) : 0,
+	            docWasModified: result?.docWasModified === true,
+	            docModified: result?.docModified === true,
+	            docSaved: result?.docSaved === true,
+	            fallbackReason: result?.fallbackReason ? String(result.fallbackReason).slice(0, 500) : null,
+	            error: result?.error ? String(result.error).slice(0, 500) : null,
+	          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/indesign_batch_find_change' && req.method === 'POST') {
+      readJsonBody(req, 64 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'InDesign').trim() || 'InDesign';
+        const rawPairs = Array.isArray(parsed?.pairs) ? parsed.pairs : Array.isArray(parsed?.replacements) ? parsed.replacements : [];
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        const pairs = rawPairs.slice(0, 20).map((pair) => ({
+          findText: String(pair?.findText ?? pair?.find ?? ''),
+          changeText: String(pair?.changeText ?? pair?.replaceWith ?? pair?.replacement ?? ''),
+        })).filter((pair) => pair.findText);
+        if (pairs.length < 1 || rawPairs.length > 20 || pairs.some((pair) => !pair.findText || pair.findText.length > 5000 || pair.changeText.length > 5000 || /[\x00]/.test(pair.findText + pair.changeText))) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'pairs must contain 1-20 find/change values, each <= 5000 chars and without NUL.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildInDesignBatchFindChangeScript({ appName, pairs, expectedDocumentName, sourceDocumentPath });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve InDesign app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 45000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'InDesign batch Find/Change failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const itemResults = Array.isArray(result?.results)
+            ? result.results.slice(0, pairs.length).map((item, index) => ({
+                findText: item?.findText ? String(item.findText) : pairs[index]?.findText || '',
+                changeText: item?.changeText !== undefined ? String(item.changeText) : pairs[index]?.changeText || '',
+                matched: Number.isFinite(Number(item?.matched)) ? Number(item.matched) : 0,
+                changed: Number.isFinite(Number(item?.changed)) ? Number(item.changed) : 0,
+                remaining: Number.isFinite(Number(item?.remaining)) ? Number(item.remaining) : 0,
+                replacementMatches: Number.isFinite(Number(item?.replacementMatches)) ? Number(item.replacementMatches) : 0,
+                method: item?.method ? String(item.method).slice(0, 80) : 'find-change',
+                unlockedCount: Number.isFinite(Number(item?.unlockedCount)) ? Number(item.unlockedCount) : 0,
+                fallbackReason: item?.fallbackReason ? String(item.fallbackReason).slice(0, 500) : null,
+                error: item?.error ? String(item.error).slice(0, 500) : null,
+              }))
+            : pairs.map((pair) => ({
+                findText: pair.findText,
+                changeText: pair.changeText,
+                matched: 0,
+                changed: 0,
+                remaining: 0,
+                replacementMatches: 0,
+                method: 'find-change',
+                unlockedCount: 0,
+                fallbackReason: null,
+                error: 'Bridge returned no per-pair result.',
+              }));
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            documentName: result?.documentName || null,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            pairCount: itemResults.length,
+            matched: itemResults.reduce((sum, item) => sum + item.matched, 0),
+            changed: itemResults.reduce((sum, item) => sum + item.changed, 0),
+            remaining: itemResults.reduce((sum, item) => sum + item.remaining, 0),
+            replacementMatches: itemResults.reduce((sum, item) => sum + item.replacementMatches, 0),
+            unlockedCount: itemResults.reduce((sum, item) => sum + item.unlockedCount, 0),
+            docWasModified: result?.docWasModified === true,
+            docModified: result?.docModified === true,
+            docSaved: result?.docSaved === true,
+            results: itemResults,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/indesign_export_proof' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 16 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'InDesign').trim() || 'InDesign';
+        const rawOutputPath = String(parsed?.outputPath || '').trim();
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        const format = String(parsed?.format || '').trim().toLowerCase() || 'pdf';
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        if (format !== 'pdf') {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'format must be pdf.' }));
+          return;
+        }
+        const outputValidated = validateDesktopPathServer(rawOutputPath);
+        if (!outputValidated.ok) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `outputPath: ${outputValidated.error}` }));
+          return;
+        }
+        const outputPath = expandDesktopPath(outputValidated.path);
+        if (!/\.pdf$/i.test(outputPath)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'outputPath must end in .pdf for InDesign proof export.' }));
+          return;
+        }
+        const outputGrant = requireLocalFileAccessGrant(req, parsedUrl, outputPath, 'write');
+        if (!outputGrant.ok) {
+          res.writeHead(outputGrant.status, CORS);
+          res.end(JSON.stringify({ ok: false, error: outputGrant.error }));
+          return;
+        }
+        const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, path.dirname(outputPath), 'write');
+        if (!parentGrant.ok) {
+          res.writeHead(parentGrant.status, CORS);
+          res.end(JSON.stringify({ ok: false, error: parentGrant.error }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildInDesignExportProofScript({ appName, outputPath, expectedDocumentName, sourceDocumentPath });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve InDesign app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 45000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'InDesign proof export failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          let fileExists = false;
+          let sizeBytes = 0;
+          try {
+            const stat = fs.statSync(outputPath);
+            fileExists = stat.isFile();
+            sizeBytes = stat.size;
+          } catch {}
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            outputPath,
+            format: 'pdf',
+            pageCount: Number.isFinite(Number(result?.pageCount)) ? Number(result.pageCount) : 0,
+            spreadCount: Number.isFinite(Number(result?.spreadCount)) ? Number(result.spreadCount) : 0,
+            fileExists,
+            sizeBytes,
+            docWasModified: result?.docWasModified === true,
+            docModified: result?.docModified === true,
+            docSaved: result?.docSaved === true,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/indesign_relink_asset' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 24 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'InDesign').trim() || 'InDesign';
+        const rawAssetPath = String(parsed?.assetPath || '').trim();
+        const linkQuery = String(parsed?.linkQuery || '').trim();
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (linkQuery.length > 240 || /[\x00-\x1f]/.test(linkQuery)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'linkQuery must be <= 240 chars and cannot contain control characters.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        const assetValidated = validateDesktopPathServer(rawAssetPath);
+        if (!assetValidated.ok) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `assetPath: ${assetValidated.error}` }));
+          return;
+        }
+        const assetPath = expandDesktopPath(assetValidated.path);
+        try {
+          const stat = fs.statSync(assetPath);
+          if (!stat.isFile()) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'assetPath must point to a local file.' }));
+            return;
+          }
+        } catch {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'assetPath does not exist.' }));
+          return;
+        }
+        const assetGrant = requireLocalFileAccessGrant(req, parsedUrl, assetPath, 'read');
+        if (!assetGrant.ok) {
+          res.writeHead(assetGrant.status, CORS);
+          res.end(JSON.stringify({ ok: false, error: assetGrant.error }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildInDesignRelinkAssetScript({ appName, assetPath, linkQuery, expectedDocumentName, sourceDocumentPath });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve InDesign app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 45000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'InDesign asset relink failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            assetPath,
+            linkQuery: linkQuery || null,
+            matchedLinks: Number.isFinite(Number(result?.matchedLinks)) ? Number(result.matchedLinks) : 0,
+            relinkedLinks: Number.isFinite(Number(result?.relinkedLinks)) ? Number(result.relinkedLinks) : 0,
+            missingBefore: Number.isFinite(Number(result?.missingBefore)) ? Number(result.missingBefore) : 0,
+            missingAfter: Number.isFinite(Number(result?.missingAfter)) ? Number(result.missingAfter) : 0,
+            linkNames: Array.isArray(result?.linkNames) ? result.linkNames.map((name) => String(name).slice(0, 260)).slice(0, 20) : [],
+            docWasModified: result?.docWasModified === true,
+            docModified: result?.docModified === true,
+            docSaved: result?.docSaved === true,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/indesign_package_document' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 24 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'InDesign').trim() || 'InDesign';
+        const rawOutputFolderPath = String(parsed?.outputFolderPath || '').trim();
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        const includeIdml = parseBooleanOption(parsed?.includeIdml, false);
+        const includePdf = parseBooleanOption(parsed?.includePdf, false);
+        const copyFonts = parseBooleanOption(parsed?.copyFonts, true);
+        const copyLinkedGraphics = parseBooleanOption(parsed?.copyLinkedGraphics, true);
+        const copyProfiles = parseBooleanOption(parsed?.copyProfiles, true);
+        const updateGraphics = parseBooleanOption(parsed?.updateGraphics, true);
+        const includeHiddenLayers = parseBooleanOption(parsed?.includeHiddenLayers, true);
+        const ignorePreflightErrors = parseBooleanOption(parsed?.ignorePreflightErrors, false);
+        const createReport = parseBooleanOption(parsed?.createReport, true);
+        const forceSave = parseBooleanOption(parsed?.forceSave, true);
+        const pdfStyle = String(parsed?.pdfStyle || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        if (pdfStyle.length > 180 || /[\x00-\x1f]/.test(pdfStyle)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'pdfStyle must be <= 180 chars and cannot contain control characters.' }));
+          return;
+        }
+        const outputValidated = validateDesktopPathServer(rawOutputFolderPath);
+        if (!outputValidated.ok) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `outputFolderPath: ${outputValidated.error}` }));
+          return;
+        }
+        const outputFolderPath = expandDesktopPath(outputValidated.path);
+        try {
+          if (fs.existsSync(outputFolderPath) && !fs.statSync(outputFolderPath).isDirectory()) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'outputFolderPath must be a directory path.' }));
+            return;
+          }
+        } catch {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not inspect outputFolderPath.' }));
+          return;
+        }
+        const outputGrant = requireLocalFileAccessGrant(req, parsedUrl, outputFolderPath, 'write');
+        if (!outputGrant.ok) {
+          res.writeHead(outputGrant.status, CORS);
+          res.end(JSON.stringify({ ok: false, error: outputGrant.error }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        try { fs.mkdirSync(outputFolderPath, { recursive: true }); } catch (e) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `Could not create outputFolderPath: ${(e && e.message) || e}` }));
+          return;
+        }
+        const built = buildInDesignPackageDocumentScript({
+          appName,
+          outputFolderPath,
+          expectedDocumentName,
+          sourceDocumentPath,
+          includeIdml,
+          includePdf,
+          copyFonts,
+          copyLinkedGraphics,
+          copyProfiles,
+          updateGraphics,
+          includeHiddenLayers,
+          ignorePreflightErrors,
+          createReport,
+          forceSave,
+          pdfStyle,
+        });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve InDesign app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 90000, maxBuffer: 768 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'InDesign package failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const summary = summarizeDesktopDirectory(outputFolderPath);
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            outputFolderPath,
+            packageOk: result?.packageOk === true,
+            includeIdml,
+            includePdf,
+            copyFonts,
+            copyLinkedGraphics,
+            copyProfiles,
+            createReport,
+            fileCount: summary.fileCount,
+            folderCount: summary.folderCount,
+            sizeBytes: summary.sizeBytes,
+            sampleFiles: summary.sampleFiles,
+            missingLinksBefore: Number.isFinite(Number(result?.missingLinksBefore)) ? Number(result.missingLinksBefore) : 0,
+            modifiedLinksBefore: Number.isFinite(Number(result?.modifiedLinksBefore)) ? Number(result.modifiedLinksBefore) : 0,
+            missingFontsBefore: Number.isFinite(Number(result?.missingFontsBefore)) ? Number(result.missingFontsBefore) : 0,
+            linkCount: Number.isFinite(Number(result?.linkCount)) ? Number(result.linkCount) : 0,
+            fontCount: Number.isFinite(Number(result?.fontCount)) ? Number(result.fontCount) : 0,
+            docWasModified: result?.docWasModified === true,
+            docModified: result?.docModified === true,
+            docSaved: result?.docSaved === true,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/photoshop_document_status' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildPhotoshopDocumentStatusScript({ appName, expectedDocumentName, sourceDocumentPath });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 10000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop document status failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const documents = Array.isArray(result?.documents)
+            ? result.documents.slice(0, 12).map((doc) => ({
+                name: doc?.name ? String(doc.name).slice(0, 260) : '',
+                path: doc?.path ? String(doc.path).slice(0, 1024) : null,
+                modified: doc?.modified === true,
+                saved: doc?.saved === true,
+                widthPx: Number.isFinite(Number(doc?.widthPx)) ? Number(doc.widthPx) : 0,
+                heightPx: Number.isFinite(Number(doc?.heightPx)) ? Number(doc.heightPx) : 0,
+              })).filter((doc) => doc.name)
+            : [];
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            status: result?.status ? String(result.status).slice(0, 80) : 'unknown',
+            documentCount: Number.isFinite(Number(result?.documentCount)) ? Number(result.documentCount) : 0,
+            activeDocumentName: result?.activeDocumentName ? String(result.activeDocumentName).slice(0, 260) : null,
+            activeDocumentPath: result?.activeDocumentPath ? String(result.activeDocumentPath).slice(0, 1024) : null,
+            activeDocumentModified: result?.activeDocumentModified === true,
+            activeDocumentSaved: result?.activeDocumentSaved === true,
+            widthPx: Number.isFinite(Number(result?.widthPx)) ? Number(result.widthPx) : 0,
+            heightPx: Number.isFinite(Number(result?.heightPx)) ? Number(result.heightPx) : 0,
+            resolution: Number.isFinite(Number(result?.resolution)) ? Number(result.resolution) : 0,
+            mode: result?.mode ? String(result.mode).slice(0, 80) : null,
+            bitsPerChannel: result?.bitsPerChannel ? String(result.bitsPerChannel).slice(0, 80) : null,
+            layerCount: Number.isFinite(Number(result?.layerCount)) ? Number(result.layerCount) : 0,
+            groupCount: Number.isFinite(Number(result?.groupCount)) ? Number(result.groupCount) : 0,
+            textLayerCount: Number.isFinite(Number(result?.textLayerCount)) ? Number(result.textLayerCount) : 0,
+            smartObjectCount: Number.isFinite(Number(result?.smartObjectCount)) ? Number(result.smartObjectCount) : 0,
+            adjustmentLayerCount: Number.isFinite(Number(result?.adjustmentLayerCount)) ? Number(result.adjustmentLayerCount) : 0,
+            lockedLayers: Number.isFinite(Number(result?.lockedLayers)) ? Number(result.lockedLayers) : 0,
+            hiddenLayers: Number.isFinite(Number(result?.hiddenLayers)) ? Number(result.hiddenLayers) : 0,
+            selectionActive: result?.selectionActive === true,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            documents,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/photoshop_layer_inventory' && req.method === 'POST') {
+      readJsonBody(req, 12 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        const query = String(parsed?.query || '').trim();
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        const maxItems = Math.max(1, Math.min(120, Math.trunc(Number(parsed?.maxItems || 40))));
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (query.length > 160 || /[\x00-\x1F]/.test(query)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'query must be <= 160 chars and cannot contain control chars.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildPhotoshopLayerInventoryScript({ appName, query, expectedDocumentName, sourceDocumentPath, maxItems });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 12000, maxBuffer: 768 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop layer inventory failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const layers = Array.isArray(result?.layers)
+            ? result.layers.slice(0, maxItems).map((layer) => ({
+                name: layer?.name ? String(layer.name).slice(0, 160) : '',
+                path: layer?.path ? String(layer.path).slice(0, 300) : '',
+                type: layer?.type ? String(layer.type).slice(0, 80) : '',
+                kind: layer?.kind ? String(layer.kind).slice(0, 80) : '',
+                visible: layer?.visible !== false,
+                locked: layer?.locked === true,
+                opacity: Number.isFinite(Number(layer?.opacity)) ? Number(layer.opacity) : 0,
+                textPreview: layer?.textPreview ? String(layer.textPreview).slice(0, 240) : '',
+                hasMask: layer?.hasMask === true,
+                bounds: Array.isArray(layer?.bounds) ? layer.bounds.slice(0, 4).map((value) => Number.isFinite(Number(value)) ? Number(value) : 0) : [],
+                depth: Number.isFinite(Number(layer?.depth)) ? Number(layer.depth) : 0,
+              }))
+            : [];
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            query,
+            layerCount: Number.isFinite(Number(result?.layerCount)) ? Number(result.layerCount) : 0,
+            matchedLayers: Number.isFinite(Number(result?.matchedLayers)) ? Number(result.matchedLayers) : 0,
+            textLayerCount: Number.isFinite(Number(result?.textLayerCount)) ? Number(result.textLayerCount) : 0,
+            smartObjectCount: Number.isFinite(Number(result?.smartObjectCount)) ? Number(result.smartObjectCount) : 0,
+            adjustmentLayerCount: Number.isFinite(Number(result?.adjustmentLayerCount)) ? Number(result.adjustmentLayerCount) : 0,
+            groupCount: Number.isFinite(Number(result?.groupCount)) ? Number(result.groupCount) : 0,
+            lockedLayers: Number.isFinite(Number(result?.lockedLayers)) ? Number(result.lockedLayers) : 0,
+            hiddenLayers: Number.isFinite(Number(result?.hiddenLayers)) ? Number(result.hiddenLayers) : 0,
+            selectionActive: result?.selectionActive === true,
+            maskLayerCount: Number.isFinite(Number(result?.maskLayerCount)) ? Number(result.maskLayerCount) : 0,
+            layers,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/photoshop_set_layer_state' && req.method === 'POST') {
+      readJsonBody(req, 12 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        const layerName = String(parsed?.layerName || parsed?.targetLayerName || '').trim();
+        const action = String(parsed?.action || '').trim().toLowerCase();
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (!layerName || layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'layerName must be 1-160 chars and cannot contain control characters.' }));
+          return;
+        }
+        if (!['show', 'hide', 'lock', 'unlock'].includes(action)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'action must be show, hide, lock, or unlock.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildPhotoshopSetLayerStateScript({ appName, layerName, action, expectedDocumentName, sourceDocumentPath });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 15000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop layer-state update failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const matches = Array.isArray(result?.matches)
+            ? result.matches.slice(0, 12).map((item) => ({
+                name: item?.name ? String(item.name).slice(0, 160) : '',
+                path: item?.path ? String(item.path).slice(0, 300) : '',
+                type: item?.type ? String(item.type).slice(0, 80) : '',
+                kind: item?.kind ? String(item.kind).slice(0, 80) : '',
+                visible: item?.visible !== false,
+                locked: item?.locked === true,
+              })).filter((item) => item.name || item.path)
+            : [];
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            layerName,
+            action,
+            matchedLayers: Number.isFinite(Number(result?.matchedLayers)) ? Number(result.matchedLayers) : 0,
+            changedLayers: Number.isFinite(Number(result?.changedLayers)) ? Number(result.changedLayers) : 0,
+            beforeVisible: result?.beforeVisible === true,
+            afterVisible: result?.afterVisible === true,
+            beforeLocked: result?.beforeLocked === true,
+            afterLocked: result?.afterLocked === true,
+            docWasModified: result?.docWasModified === true,
+            docModified: result?.docModified === true,
+            docSaved: result?.docSaved === true,
+            matches,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/photoshop_update_text_layer' && req.method === 'POST') {
+      readJsonBody(req, 16 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        const layerName = String(parsed?.layerName || '').trim();
+        const replacementText = String(parsed?.replacementText ?? '');
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (!layerName || layerName.length > 160 || /[\x00-\x08\x0B\x0C\x0E-\x1F]/.test(layerName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'layerName must be 1-160 chars and cannot contain control chars.' }));
+          return;
+        }
+        if (replacementText.length > 5000 || /[\x00]/.test(replacementText)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'replacementText must be <= 5000 chars and cannot contain NUL.' }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildPhotoshopUpdateTextLayerScript({ appName, layerName, replacementText, expectedDocumentName, sourceDocumentPath });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop text layer update failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            layerName,
+            replacementText,
+            matchedLayers: Number.isFinite(Number(result?.matchedLayers)) ? Number(result.matchedLayers) : 0,
+            updatedLayers: Number.isFinite(Number(result?.updatedLayers)) ? Number(result.updatedLayers) : 0,
+            replacementMatches: Number.isFinite(Number(result?.replacementMatches)) ? Number(result.replacementMatches) : 0,
+            layerNames: Array.isArray(result?.layerNames) ? result.layerNames.slice(0, 20).map((name) => String(name || '').slice(0, 160)).filter(Boolean) : [],
+            docWasModified: result?.docWasModified === true,
+            docModified: result?.docModified === true,
+            docSaved: result?.docSaved === true,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/photoshop_place_asset' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 16 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        const rawAssetPath = String(parsed?.assetPath || '').trim();
+        const layerName = String(parsed?.layerName || '').trim();
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (layerName.length > 160 || /[\x00-\x1F]/.test(layerName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'layerName must be <= 160 chars and cannot contain control chars.' }));
+          return;
+        }
+        const assetValidated = validateDesktopPathServer(rawAssetPath);
+        if (!assetValidated.ok) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `assetPath: ${assetValidated.error}` }));
+          return;
+        }
+        const assetPath = expandDesktopPath(assetValidated.path);
+        if (!fs.existsSync(assetPath)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'assetPath does not exist.' }));
+          return;
+        }
+        const assetGrant = requireLocalFileAccessGrant(req, parsedUrl, assetPath, 'read');
+        if (!assetGrant.ok) {
+          res.writeHead(assetGrant.status, CORS);
+          res.end(JSON.stringify({ ok: false, error: assetGrant.error }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildPhotoshopPlaceAssetScript({ appName, assetPath, layerName, expectedDocumentName, sourceDocumentPath });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 25000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop place asset failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            assetPath,
+            layerName: layerName || null,
+            placedLayerName: result?.placedLayerName ? String(result.placedLayerName).slice(0, 160) : null,
+            docWasModified: result?.docWasModified === true,
+            docModified: result?.docModified === true,
+            docSaved: result?.docSaved === true,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/photoshop_export_proof' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 16 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        const rawOutputPath = String(parsed?.outputPath || '').trim();
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawSourceDocumentPath = String(parsed?.sourceDocumentPath || '').trim();
+        const format = String(parsed?.format || '').trim().toLowerCase() || (/\.jpe?g$/i.test(rawOutputPath) ? 'jpg' : 'png');
+        const quality = Math.max(1, Math.min(12, Math.trunc(Number(parsed?.quality || 10))));
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (!['png', 'jpg', 'jpeg'].includes(format)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'format must be png, jpg, or jpeg.' }));
+          return;
+        }
+        const outputValidated = validateDesktopPathServer(rawOutputPath);
+        if (!outputValidated.ok) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `outputPath: ${outputValidated.error}` }));
+          return;
+        }
+        const outputPath = expandDesktopPath(outputValidated.path);
+        const outputGrant = requireLocalFileAccessGrant(req, parsedUrl, outputPath, 'write');
+        if (!outputGrant.ok) {
+          res.writeHead(outputGrant.status, CORS);
+          res.end(JSON.stringify({ ok: false, error: outputGrant.error }));
+          return;
+        }
+        const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, path.dirname(outputPath), 'write');
+        if (!parentGrant.ok) {
+          res.writeHead(parentGrant.status, CORS);
+          res.end(JSON.stringify({ ok: false, error: parentGrant.error }));
+          return;
+        }
+        let sourceDocumentPath = '';
+        if (rawSourceDocumentPath) {
+          const validatedSource = validateDesktopPathServer(rawSourceDocumentPath);
+          if (!validatedSource.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `sourceDocumentPath: ${validatedSource.error}` }));
+            return;
+          }
+          sourceDocumentPath = expandDesktopPath(validatedSource.path);
+        }
+        const built = buildPhotoshopExportProofScript({ appName, outputPath, format, quality, expectedDocumentName, sourceDocumentPath });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 25000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop proof export failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          let fileExists = false;
+          let sizeBytes = 0;
+          try {
+            const stat = fs.statSync(outputPath);
+            fileExists = stat.isFile();
+            sizeBytes = stat.size;
+          } catch {}
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            sourceDocumentPath: sourceDocumentPath || null,
+            outputPath,
+            format,
+            quality: format === 'png' ? null : quality,
+            widthPx: Number.isFinite(Number(result?.widthPx)) ? Number(result.widthPx) : 0,
+            heightPx: Number.isFinite(Number(result?.heightPx)) ? Number(result.heightPx) : 0,
+            fileExists,
+            sizeBytes,
+            docModified: result?.docModified === true,
+            docSaved: result?.docSaved === true,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
         });
       });
       return;
@@ -2623,21 +4629,99 @@ const server = http.createServer(async (req, res) => {
       readJsonBody(req, 4096, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
         const raw = String(parsed?.path || '').trim();
+        const appName = String(parsed?.appName || '').trim();
         const validated = validateDesktopPathServer(raw);
         if (!validated.ok) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: validated.error }));
           return;
         }
-        exec(`open ${shellSingleQuote(validated.path)}`, { timeout: 5000 }, (err) => {
+        if (appName && !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        const resolved = appName ? resolveInstalledMacApp(appName) : null;
+        const targetAppName = resolved?.name || appName || null;
+        const openArgs = targetAppName
+          ? ['-a', resolved?.appPath || targetAppName, validated.path]
+          : [validated.path];
+        execFile('open', openArgs, { timeout: 5000 }, (err) => {
           if (err) {
             res.writeHead(400, CORS);
             res.end(JSON.stringify({ ok: false, error: /does not exist|no such file/i.test(err.message) ? 'path_not_found' : err.message }));
             return;
           }
           res.writeHead(200, CORS);
-          res.end(JSON.stringify({ ok: true, path: validated.path }));
+          res.end(JSON.stringify({ ok: true, path: validated.path, appName: targetAppName }));
         });
+      });
+      return;
+    }
+
+    if (url === '/desktop/stage_attachment' && req.method === 'POST') {
+      readJsonBody(req, 140 * 1024 * 1024, (parsed, bodyErr) => {
+        void (async () => {
+          if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+          try {
+            const filename = safeAttachmentFilename(parsed?.filename);
+            const groupId = String(parsed?.groupId || '').trim();
+            const targetPath = uniqueAttachmentPath(filename, groupId);
+            const buffer = await bufferFromAttachmentSource(parsed);
+            const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+            fs.writeFileSync(targetPath, buffer, { mode: 0o600 });
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({
+              ok: true,
+              path: targetPath,
+              directory: path.dirname(targetPath),
+              filename: path.basename(targetPath),
+              sizeBytes: buffer.length,
+              sha256,
+              mimeType: String(parsed?.mimeType || 'application/octet-stream').slice(0, 120),
+            }));
+          } catch (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: err.message || 'attachment staging failed' }));
+          }
+        })();
+      });
+      return;
+    }
+
+    if (url === '/desktop/stage_attachment_manifest' && req.method === 'POST') {
+      readJsonBody(req, 2 * 1024 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        try {
+          const groupId = String(parsed?.groupId || '').trim();
+          if (!groupId) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'groupId is required' }));
+            return;
+          }
+          const dir = attachmentGroupDirectory(groupId);
+          fs.mkdirSync(dir, { recursive: true });
+          const targetPath = path.join(dir, '_underground-circle-upload-manifest.json');
+          const content = JSON.stringify(parsed?.manifest || {}, null, 2);
+          if (Buffer.byteLength(content, 'utf8') > 1024 * 1024) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'manifest exceeds 1 MB limit' }));
+            return;
+          }
+          const sha256 = crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+          fs.writeFileSync(targetPath, `${content}\n`, { mode: 0o600 });
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            path: targetPath,
+            directory: dir,
+            sizeBytes: Buffer.byteLength(content, 'utf8') + 1,
+            sha256,
+          }));
+        } catch (err) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: err.message || 'attachment manifest staging failed' }));
+        }
       });
       return;
     }
@@ -2825,6 +4909,46 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url === '/desktop/set_element_value' && req.method === 'POST') {
+      readJsonBody(req, 40 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const pid = Number(parsed?.pid);
+        const p = String(parsed?.path || '').trim();
+        const text = String(parsed?.text ?? '');
+        if (!Number.isInteger(pid) || pid <= 0) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'pid required' }));
+          return;
+        }
+        if (!/^[0-9]+(\.[0-9]+)*$/.test(p)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'path must be dotted integers' }));
+          return;
+        }
+        if (text.length === 0 || text.length > 20_000) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'text must be 1-20000 chars' }));
+          return;
+        }
+        const helper = path.join(__dirname, 'bin', 'uc-ax-helper');
+        if (!fs.existsSync(helper)) {
+          res.writeHead(503, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'uc-ax-helper not compiled. Run npm run bridge once after installing Xcode CLT.' }));
+          return;
+        }
+        execFile(helper, ['set-value', '--pid', String(pid), '--path', p, '--text', text], { timeout: 7000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || stdout || err.message || 'set value failed').toString().slice(0, 500) }));
+            return;
+          }
+          res.writeHead(200, CORS);
+          res.end(stdout.toString().trim() || JSON.stringify({ ok: true, method: 'ax_set_value', chars: text.length }));
+        });
+      });
+      return;
+    }
+
     res.writeHead(404, CORS);
     res.end(JSON.stringify({ ok: false, error: 'Unknown /desktop endpoint. Try /desktop/health.' }));
     return;
@@ -2858,9 +4982,11 @@ const server = http.createServer(async (req, res) => {
     try {
       if (p === '/browser/open_url' && req.method === 'POST') return browserBridge.handleOpenUrl(req, res, CORS);
       if (p === '/browser/dom_snapshot' && req.method === 'GET') return browserBridge.handleDomSnapshot(req, res, CORS, parsedUrl);
+      if (p === '/browser/verification_state' && req.method === 'GET') return browserBridge.handleVerificationState(req, res, CORS);
       if (p === '/browser/click_role' && req.method === 'POST') return browserBridge.handleClickRole(req, res, CORS);
       if (p === '/browser/fill' && req.method === 'POST') return browserBridge.handleFill(req, res, CORS);
       if (p === '/browser/select' && req.method === 'POST') return browserBridge.handleSelect(req, res, CORS);
+      if (p === '/browser/upload_file' && req.method === 'POST') return browserBridge.handleUploadFile(req, res, CORS);
       if (p === '/browser/press' && req.method === 'POST') return browserBridge.handlePress(req, res, CORS);
       if (p === '/browser/screenshot' && req.method === 'POST') return browserBridge.handleScreenshot(req, res, CORS);
       if (p === '/browser/close' && req.method === 'POST') return browserBridge.handleClose(req, res, CORS);
@@ -2908,6 +5034,318 @@ function shellSingleQuote(s) {
   return `'${String(s).replace(/'/g, "'\\''")}'`;
 }
 
+function escapeAppleScriptString(s) {
+  return String(s ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+const MAC_APP_SEARCH_ROOTS = [
+  '/Applications',
+  path.join(os.homedir(), 'Applications'),
+  '/System/Applications',
+  '/System/Applications/Utilities',
+];
+const macAppResolveCache = new Map();
+const runningInDesignResolveCache = new Map();
+const runningPhotoshopResolveCache = new Map();
+
+function normalizeMacAppName(value) {
+  return String(value || '')
+    .replace(/\.app$/i, '')
+    .toLowerCase()
+    .replace(/\b(inc|llc|app|application)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function stripMacAppVersion(value) {
+  return normalizeMacAppName(value)
+    .replace(/\b(20\d{2}|19\d{2}|v?\d+(?:\.\d+){0,3})\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function macAppVersionRank(value) {
+  const text = String(value || '');
+  const yearMatch = text.match(/\b(20\d{2}|19\d{2})\b/);
+  if (yearMatch) return Number(yearMatch[1]);
+  const semverMatch = text.match(/\bv?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?\b/i);
+  if (!semverMatch) return 0;
+  return semverMatch
+    .slice(1, 5)
+    .map((part) => Number(part || 0))
+    .reduce((rank, part) => (rank * 1000) + Math.min(part, 999), 0);
+}
+
+function walkMacAppBundles(root, depth = 0, out = []) {
+  if (depth > 3 || !root || !fs.existsSync(root)) return out;
+  let entries;
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const fullPath = path.join(root, entry.name);
+    if (/\.app$/i.test(entry.name)) {
+      out.push({
+        name: entry.name.replace(/\.app$/i, ''),
+        appPath: fullPath,
+      });
+      continue;
+    }
+    if (entry.name === 'Contents' || entry.name.startsWith('.')) continue;
+    walkMacAppBundles(fullPath, depth + 1, out);
+  }
+  return out;
+}
+
+function scoreMacAppCandidate(query, candidateName) {
+  const q = normalizeMacAppName(query);
+  const c = normalizeMacAppName(candidateName);
+  if (!q || !c) return 0;
+  if (c === q) return 120;
+  const qNoVersion = stripMacAppVersion(query);
+  const cNoVersion = stripMacAppVersion(candidateName);
+  if (qNoVersion && cNoVersion && cNoVersion === qNoVersion) return 112;
+  if (c.includes(q)) return 96 + Math.min(q.length, 24);
+  if (q.includes(c)) return 82 + Math.min(c.length, 18);
+  if (qNoVersion && cNoVersion && cNoVersion.includes(qNoVersion)) return 88 + Math.min(qNoVersion.length, 18);
+  const qWords = qNoVersion.split(' ').filter(Boolean);
+  if (qWords.length > 0 && qWords.every((word) => cNoVersion.split(' ').includes(word))) {
+    return 72 + qWords.join('').length;
+  }
+  return 0;
+}
+
+function resolveInstalledMacApp(appName) {
+  if (process.platform !== 'darwin') return null;
+  const query = String(appName || '').trim();
+  if (!query) return null;
+  const cacheKey = normalizeMacAppName(query);
+  const cached = macAppResolveCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  const candidates = [];
+  for (const root of MAC_APP_SEARCH_ROOTS) {
+    walkMacAppBundles(root, 0, candidates);
+  }
+  let best = null;
+  for (const candidate of candidates) {
+    const score = scoreMacAppCandidate(query, candidate.name);
+    if (score < 70) continue;
+    const versionRank = macAppVersionRank(candidate.name);
+    if (!best || score > best.score || (score === best.score && versionRank > best.versionRank)) {
+      best = { ...candidate, score, versionRank };
+    }
+  }
+  const value = best
+    ? { name: best.name, appPath: best.appPath, score: best.score, versionRank: best.versionRank }
+    : null;
+  macAppResolveCache.set(cacheKey, { value, expiresAt: Date.now() + 60_000 });
+  return value;
+}
+
+function summarizeDesktopDirectory(root) {
+  const summary = {
+    fileCount: 0,
+    folderCount: 0,
+    sizeBytes: 0,
+    sampleFiles: [],
+  };
+  const rootPath = String(root || '');
+  const maxEntries = 5000;
+  function visit(current, depth) {
+    if (summary.fileCount + summary.folderCount >= maxEntries || depth > 8) return;
+    let entries = [];
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (summary.fileCount + summary.folderCount >= maxEntries) return;
+      const fullPath = path.join(current, entry.name);
+      let stat = null;
+      try { stat = fs.statSync(fullPath); } catch { continue; }
+      if (entry.isDirectory() || stat.isDirectory()) {
+        summary.folderCount += 1;
+        visit(fullPath, depth + 1);
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      summary.fileCount += 1;
+      summary.sizeBytes += stat.size;
+      if (summary.sampleFiles.length < 40) {
+        let rel = fullPath;
+        try { rel = path.relative(rootPath, fullPath) || entry.name; } catch {}
+        summary.sampleFiles.push(rel);
+      }
+    }
+  }
+  visit(rootPath, 0);
+  return summary;
+}
+
+function getRunningInDesignAppRows() {
+  if (process.platform !== 'darwin') return [];
+  const script = `
+tell application "System Events"
+  set out to ""
+  repeat with p in (application processes whose background only is false)
+    set pname to name of p as text
+    if pname contains "InDesign" then
+      set out to out & pname & tab & ((frontmost of p) as text) & linefeed
+    end if
+  end repeat
+  return out
+end tell
+`;
+  try {
+    return execFileSync('osascript', ['-e', script], { encoding: 'utf8', timeout: 3000 })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [name, frontmost] = line.split(/\t/);
+        return {
+          name: String(name || '').trim(),
+          frontmost: /^true$/i.test(String(frontmost || '').trim()),
+        };
+      })
+      .filter((row) => row.name);
+  } catch {
+    return [];
+  }
+}
+
+function getRunningInDesignDocumentCount(appName) {
+  const script = `
+tell application "${escapeAppleScriptString(appName)}"
+  return (count documents) as text
+end tell
+`;
+  try {
+    const raw = execFileSync('osascript', ['-e', script], { encoding: 'utf8', timeout: 3000 }).trim();
+    const count = Number(raw);
+    return Number.isFinite(count) ? count : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function resolveInDesignMacApp(appName) {
+  if (process.platform !== 'darwin') return null;
+  const query = String(appName || 'InDesign').trim() || 'InDesign';
+  if (!/indesign/i.test(query)) return null;
+  const cacheKey = normalizeMacAppName(query);
+  const cached = runningInDesignResolveCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  let best = null;
+  for (const row of getRunningInDesignAppRows()) {
+    const score = scoreMacAppCandidate(query, row.name);
+    if (score < 70) continue;
+    const documentCount = getRunningInDesignDocumentCount(row.name);
+    const versionRank = macAppVersionRank(row.name);
+    const rank = (documentCount > 0 ? 100000 : 0) + (row.frontmost ? 10000 : 0) + score + versionRank;
+    if (!best || rank > best.rank) best = { ...row, score, documentCount, versionRank, rank };
+  }
+
+  const installed = best ? resolveInstalledMacApp(best.name) : null;
+  const value = best
+    ? {
+        name: best.name,
+        appPath: installed?.appPath || null,
+        score: best.score,
+        versionRank: best.versionRank,
+        running: true,
+        frontmost: best.frontmost,
+        documentCount: best.documentCount,
+      }
+    : null;
+  runningInDesignResolveCache.set(cacheKey, { value, expiresAt: Date.now() + 10_000 });
+  return value;
+}
+
+function getRunningPhotoshopAppRows() {
+  if (process.platform !== 'darwin') return [];
+  const script = `
+tell application "System Events"
+  set out to ""
+  repeat with p in (application processes whose background only is false)
+    set pname to name of p as text
+    if pname contains "Photoshop" then
+      set out to out & pname & tab & ((frontmost of p) as text) & linefeed
+    end if
+  end repeat
+  return out
+end tell
+`;
+  try {
+    return execFileSync('osascript', ['-e', script], { encoding: 'utf8', timeout: 3000 })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [name, frontmost] = line.split(/\t/);
+        return {
+          name: String(name || '').trim(),
+          frontmost: /^true$/i.test(String(frontmost || '').trim()),
+        };
+      })
+      .filter((row) => row.name);
+  } catch {
+    return [];
+  }
+}
+
+function getRunningPhotoshopDocumentCount(appName) {
+  const script = `
+tell application "${escapeAppleScriptString(appName)}"
+  return (count documents) as text
+end tell
+`;
+  try {
+    const raw = execFileSync('osascript', ['-e', script], { encoding: 'utf8', timeout: 3000 }).trim();
+    const count = Number(raw);
+    return Number.isFinite(count) ? count : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function resolvePhotoshopMacApp(appName) {
+  if (process.platform !== 'darwin') return null;
+  const query = String(appName || 'Photoshop').trim() || 'Photoshop';
+  if (!/photoshop/i.test(query)) return null;
+  const cacheKey = normalizeMacAppName(query);
+  const cached = runningPhotoshopResolveCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  let best = null;
+  for (const row of getRunningPhotoshopAppRows()) {
+    const score = scoreMacAppCandidate(query, row.name);
+    if (score < 70) continue;
+    const documentCount = getRunningPhotoshopDocumentCount(row.name);
+    const versionRank = macAppVersionRank(row.name);
+    const rank = (documentCount > 0 ? 100000 : 0) + (row.frontmost ? 10000 : 0) + score + versionRank;
+    if (!best || rank > best.rank) best = { ...row, score, documentCount, versionRank, rank };
+  }
+
+  const installed = best ? resolveInstalledMacApp(best.name) : null;
+  const value = best
+    ? {
+        name: best.name,
+        appPath: installed?.appPath || null,
+        score: best.score,
+        versionRank: best.versionRank,
+        running: true,
+        frontmost: best.frontmost,
+        documentCount: best.documentCount,
+      }
+    : null;
+  runningPhotoshopResolveCache.set(cacheKey, { value, expiresAt: Date.now() + 10_000 });
+  return value;
+}
+
 // Keys supported in combos. Extend as needed; each map entry must be
 // a valid AppleScript identifier.
 const MODIFIER_TOKENS = {
@@ -2922,9 +5360,11 @@ const MODIFIER_TOKENS = {
 const NAMED_KEY_CODES = {
   return: 36, enter: 36, tab: 48, space: 49, delete: 51, escape: 53, esc: 53,
   left: 123, right: 124, down: 125, up: 126,
+  home: 115, end: 119, pageup: 116, 'page-up': 116, pagedown: 121, 'page-down': 121,
   f1: 122, f2: 120, f3: 99, f4: 118, f5: 96, f6: 97, f7: 98, f8: 100,
   f9: 101, f10: 109, f11: 103, f12: 111,
 };
+const PUNCTUATION_KEYS = new Set([',', '.', '-', '=', '`', '[', ']']);
 
 function keyComboToAppleScript(combo) {
   if (!combo || typeof combo !== 'string') return null;
@@ -2944,7 +5384,7 @@ function keyComboToAppleScript(combo) {
   if (Object.prototype.hasOwnProperty.call(NAMED_KEY_CODES, lowerKey)) {
     return `key code ${NAMED_KEY_CODES[lowerKey]}${usingClause}`;
   }
-  if (/^[a-zA-Z0-9]$/.test(key)) {
+  if (/^[a-zA-Z0-9]$/.test(key) || PUNCTUATION_KEYS.has(key)) {
     return `keystroke "${key}"${usingClause}`;
   }
   return null;
@@ -3020,6 +5460,271 @@ function expandDesktopPath(raw) {
   if (trimmed.startsWith('./') || trimmed.startsWith('../')) return path.resolve(process.cwd(), trimmed);
   if (!path.isAbsolute(trimmed) && /^[A-Za-z0-9 ._-]+$/.test(trimmed)) return path.join(home, trimmed);
   return trimmed;
+}
+
+function safeAttachmentFilename(raw) {
+  const fallback = 'chat-attachment.bin';
+  const base = path.basename(String(raw || fallback))
+    .replace(/[\x00-\x1f]/g, '')
+    .replace(/[/:\\]/g, '_')
+    .replace(/[^A-Za-z0-9._ ()@+#-]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 160);
+  if (!base || base === '.' || base === '..') return fallback;
+  return base;
+}
+
+function safeAttachmentFolderName(raw) {
+  const fallback = 'desktop-file-task';
+  const folder = safeAttachmentFilename(raw || fallback)
+    .replace(/^\.+/, '')
+    .replace(/\.+$/, '')
+    .slice(0, 120);
+  return folder || fallback;
+}
+
+function attachmentGroupDirectory(groupId) {
+  const root = path.join(os.homedir(), 'Downloads', 'Underground Circle Attachments');
+  return groupId ? path.join(root, safeAttachmentFolderName(groupId)) : root;
+}
+
+function uniqueAttachmentPath(filename, groupId) {
+  const dir = attachmentGroupDirectory(groupId);
+  fs.mkdirSync(dir, { recursive: true });
+  const safe = safeAttachmentFilename(filename);
+  const ext = path.extname(safe);
+  const stem = path.basename(safe, ext) || 'chat-attachment';
+  let candidate = path.join(dir, safe);
+  if (!fs.existsSync(candidate)) return candidate;
+  const stamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 14);
+  candidate = path.join(dir, `${stem}-${stamp}${ext}`);
+  let index = 2;
+  while (fs.existsSync(candidate)) {
+    candidate = path.join(dir, `${stem}-${stamp}-${index}${ext}`);
+    index += 1;
+  }
+  return candidate;
+}
+
+async function bufferFromAttachmentSource(parsed) {
+  const maxBytes = 100 * 1024 * 1024;
+  const sourceUrl = String(parsed?.sourceUrl || '').trim();
+  const base64 = String(parsed?.base64 || '').trim();
+  if (sourceUrl) {
+    const validated = validateDesktopUrlServer(sourceUrl);
+    if (!validated.ok) throw new Error(validated.error);
+    if (!/^https?$/i.test(validated.scheme)) throw new Error('sourceUrl must use http or https');
+    if (typeof fetch !== 'function') throw new Error('This Node runtime does not support fetch for attachment staging.');
+    const response = await fetch(validated.url);
+    if (!response.ok) throw new Error(`download failed with HTTP ${response.status}`);
+    const contentLength = Number(response.headers.get('content-length') || 0);
+    if (contentLength > maxBytes) throw new Error('attachment exceeds 100 MB staging limit');
+    const arrayBuffer = await response.arrayBuffer();
+    if (arrayBuffer.byteLength > maxBytes) throw new Error('attachment exceeds 100 MB staging limit');
+    return Buffer.from(arrayBuffer);
+  }
+  if (base64) {
+    const normalized = base64.replace(/^data:[^,]+,/, '');
+    const estimated = Math.ceil(normalized.length * 3 / 4);
+    if (estimated > maxBytes) throw new Error('attachment exceeds 100 MB staging limit');
+    return Buffer.from(normalized, 'base64');
+  }
+  throw new Error('sourceUrl or base64 is required');
+}
+
+function clampInt(raw, fallback, min, max) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+function parseBooleanOption(raw, fallback) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const value = String(raw).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  return fallback;
+}
+
+function realpathOrResolve(targetPath) {
+  try {
+    return fs.realpathSync.native ? fs.realpathSync.native(targetPath) : fs.realpathSync(targetPath);
+  } catch {
+    return path.resolve(targetPath);
+  }
+}
+
+function isPathInsideRoot(targetPath, rootPath) {
+  const target = realpathOrResolve(targetPath);
+  const root = realpathOrResolve(rootPath);
+  if (target === root) return true;
+  const rel = path.relative(root, target);
+  return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+function cleanupLocalFileAccessGrants() {
+  const now = Date.now();
+  for (const [token, grant] of localFileAccessGrants.entries()) {
+    if (!grant || grant.expiresAt <= now) localFileAccessGrants.delete(token);
+  }
+}
+
+function normalizeGrantRoot(raw) {
+  const validated = validateDesktopPathServer(raw);
+  if (!validated.ok) return { ok: false, error: validated.error };
+  const expanded = expandDesktopPath(validated.path);
+  const parent = path.dirname(expanded);
+  try {
+    const stat = fs.statSync(expanded);
+    if (!stat.isDirectory()) {
+      const parentStat = fs.statSync(parent);
+      if (!parentStat.isDirectory()) return { ok: false, error: `${parent} is not a directory` };
+      return { ok: true, root: realpathOrResolve(parent) };
+    }
+  } catch (err) {
+    try {
+      const parentStat = fs.statSync(parent);
+      if (parentStat.isDirectory()) return { ok: true, root: realpathOrResolve(parent) };
+    } catch {}
+    return { ok: false, error: err.message || String(err) };
+  }
+  return { ok: true, root: realpathOrResolve(expanded) };
+}
+
+function createLocalFileAccessGrant(input) {
+  cleanupLocalFileAccessGrants();
+  const rawRoots = Array.isArray(input.roots) && input.roots.length > 0 ? input.roots : ['~'];
+  if (rawRoots.length > 12) return { ok: false, error: 'too many roots requested (max 12)' };
+  const scope = String(input.scope || 'read').toLowerCase() === 'write' ? 'write' : 'read';
+  const roots = [];
+  for (const raw of rawRoots) {
+    const normalized = normalizeGrantRoot(String(raw || ''));
+    if (!normalized.ok) return { ok: false, error: normalized.error };
+    if (!roots.includes(normalized.root)) roots.push(normalized.root);
+  }
+  const ttlMs = clampInt(input.ttlMs, LOCAL_FILE_GRANT_DEFAULT_TTL_MS, 60 * 1000, LOCAL_FILE_GRANT_MAX_TTL_MS);
+  const token = crypto.randomBytes(24).toString('hex');
+  const grant = {
+    token,
+    roots,
+    scope,
+    reason: String(input.reason || '').slice(0, 500),
+    createdAt: Date.now(),
+    expiresAt: Date.now() + ttlMs,
+  };
+  localFileAccessGrants.set(token, grant);
+  return {
+    ok: true,
+    token,
+    roots,
+    scope: grant.scope,
+    expiresAt: new Date(grant.expiresAt).toISOString(),
+  };
+}
+
+function getLocalFileAccessToken(req, parsedUrl) {
+  const fromHeader = req.headers['x-uc-file-session-token'];
+  if (Array.isArray(fromHeader)) return fromHeader[0] || '';
+  if (fromHeader) return String(fromHeader);
+  return parsedUrl ? String(parsedUrl.searchParams.get('fileSessionToken') || '') : '';
+}
+
+function getLocalFileAccessGrant(req, parsedUrl) {
+  cleanupLocalFileAccessGrants();
+  const token = getLocalFileAccessToken(req, parsedUrl);
+  if (!token) return null;
+  const grant = localFileAccessGrants.get(token);
+  if (!grant || grant.expiresAt <= Date.now()) {
+    localFileAccessGrants.delete(token);
+    return null;
+  }
+  return grant;
+}
+
+function requireLocalFileAccessGrant(req, parsedUrl, targetPath, requiredScope = 'read') {
+  const grant = getLocalFileAccessGrant(req, parsedUrl);
+	  if (!grant) {
+	    return {
+	      ok: false,
+	      status: 403,
+	      error: 'Local file access requires a scoped session token. Retry through the chat runtime so it can prepare scoped file access before using file tools.',
+	    };
+	  }
+  const allowed = grant.roots.some((root) => isPathInsideRoot(targetPath, root));
+  if (!allowed) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'Local file access grant does not cover this path.',
+    };
+  }
+  if (requiredScope === 'write' && grant.scope !== 'write') {
+    return {
+      ok: false,
+      status: 403,
+      error: 'Local file write access requires one-time write-scoped session verification. Approve file changes in the chat before using file write tools.',
+    };
+  }
+  return { ok: true, grant };
+}
+
+const SEARCH_SKIP_DIRS = new Set([
+  '.git',
+  '.hg',
+  '.svn',
+  'node_modules',
+  '.next',
+  '.expo',
+  '.turbo',
+  'dist',
+  'build',
+  'DerivedData',
+  '.Trash',
+  'Library',
+  'Applications',
+  'System',
+  'Volumes',
+  'Photos Library.photoslibrary',
+]);
+
+const TEXT_SEARCH_EXTENSIONS = new Set([
+  '.txt', '.md', '.markdown', '.json', '.jsonl', '.csv', '.tsv', '.xml', '.html', '.htm', '.css', '.scss',
+  '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.py', '.rb', '.go', '.rs', '.java', '.kt', '.swift',
+  '.c', '.h', '.cpp', '.hpp', '.cs', '.php', '.sql', '.yaml', '.yml', '.toml', '.ini', '.log', '.env',
+  '.sh', '.zsh', '.bash', '.fish', '.applescript',
+]);
+
+function parseSearchExtensions(raw) {
+  if (!raw) return null;
+  const values = String(raw)
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean)
+    .map((item) => item.startsWith('.') ? item : `.${item}`);
+  return values.length ? new Set(values) : null;
+}
+
+function shouldSearchFileContent(filePath, stat, includeContent) {
+  if (!includeContent) return false;
+  if (stat.size > 768 * 1024) return false;
+  const ext = path.extname(filePath).toLowerCase();
+  return TEXT_SEARCH_EXTENSIONS.has(ext) || ext === '';
+}
+
+function buildSearchNeedles(query) {
+  const lower = query.toLowerCase();
+  const tokens = lower.split(/[^a-z0-9._-]+/i).map((part) => part.trim()).filter((part) => part.length >= 2);
+  return {
+    lower,
+    tokens: Array.from(new Set(tokens)),
+  };
+}
+
+function matchesNeedles(value, needles) {
+  const lowerValue = String(value || '').toLowerCase();
+  if (lowerValue.includes(needles.lower)) return true;
+  return needles.tokens.length > 0 && needles.tokens.every((token) => lowerValue.includes(token));
 }
 
 const BROWSER_TAB_APPS = {
@@ -3129,42 +5834,63 @@ end tell
   });
 }
 
-function searchFiles(rootPath, query) {
-  const lower = query.toLowerCase();
+function searchFiles(rootPath, query, options = {}) {
+  const needles = buildSearchNeedles(query);
   const matches = [];
   let visited = 0;
+  let searchedContent = 0;
   let truncated = false;
-  const maxVisited = 2500;
-  const maxMatches = 100;
+  const maxVisited = clampInt(options.maxVisited, 15000, 250, 50000);
+  const maxMatches = clampInt(options.maxResults, 200, 10, 500);
+  const maxDepth = clampInt(options.maxDepth, 9, 1, 20);
+  const includeContent = parseBooleanOption(options.includeContent, true);
+  const extensions = parseSearchExtensions(options.extensions);
+
   function visit(current, depth) {
-    if (visited >= maxVisited || matches.length >= maxMatches || depth > 5) {
+    if (visited >= maxVisited || matches.length >= maxMatches || depth > maxDepth) {
       truncated = true;
       return;
     }
     visited += 1;
     let stat;
-    try { stat = fs.statSync(current); } catch { return; }
+    try { stat = fs.lstatSync(current); } catch { return; }
+    if (stat.isSymbolicLink()) {
+      try { stat = fs.statSync(current); } catch { return; }
+    }
     const base = path.basename(current);
-    if (base.startsWith('.') && depth > 0) return;
     if (stat.isDirectory()) {
+      if (depth > 0 && (base.startsWith('.') || SEARCH_SKIP_DIRS.has(base))) return;
       let entries = [];
       try { entries = fs.readdirSync(current); } catch { return; }
-      for (const entry of entries) visit(path.join(current, entry), depth + 1);
+      entries
+        .sort((a, b) => {
+          const aMatch = matchesNeedles(a, needles) ? 0 : 1;
+          const bMatch = matchesNeedles(b, needles) ? 0 : 1;
+          return aMatch - bMatch || a.localeCompare(b);
+        })
+        .forEach((entry) => visit(path.join(current, entry), depth + 1));
       return;
     }
     if (!stat.isFile()) return;
+    const ext = path.extname(base).toLowerCase();
+    if (extensions && !extensions.has(ext)) return;
     let reason = '';
     let snippet = '';
-    if (base.toLowerCase().includes(lower)) {
+    if (matchesNeedles(base, needles)) {
       reason = 'name';
-    } else if (stat.size <= 512 * 1024) {
+    } else if (shouldSearchFileContent(current, stat, includeContent)) {
       try {
         const text = fs.readFileSync(current, 'utf8');
         if (!text.includes('\u0000')) {
-          const idx = text.toLowerCase().indexOf(lower);
+          searchedContent += 1;
+          const textLower = text.toLowerCase();
+          let idx = textLower.indexOf(needles.lower);
+          if (idx < 0 && needles.tokens.length > 0) {
+            idx = textLower.indexOf(needles.tokens[0]);
+          }
           if (idx >= 0) {
             reason = 'content';
-            snippet = text.slice(Math.max(0, idx - 80), Math.min(text.length, idx + lower.length + 160)).replace(/\s+/g, ' ').trim();
+            snippet = text.slice(Math.max(0, idx - 80), Math.min(text.length, idx + needles.lower.length + 160)).replace(/\s+/g, ' ').trim();
           }
         }
       } catch {}
@@ -3172,7 +5898,7 @@ function searchFiles(rootPath, query) {
     if (reason) matches.push({ path: current, name: base, reason, size: stat.size, modifiedAt: stat.mtime.toISOString(), snippet });
   }
   visit(rootPath, 0);
-  return { matches, visited, truncated };
+  return { matches, visited, searchedContent, truncated };
 }
 
 function buildWindowManageScript({ action, appName, width, height }) {
@@ -3200,6 +5926,3844 @@ tell application "System Events"
   ${actionScript}
 end tell
 `;
+}
+
+function menuLabelVariants(label) {
+  const raw = String(label || '').trim();
+  const variants = new Set([raw]);
+  const withoutDots = raw.replace(/(\.\.\.|…)$/u, '').trim();
+  if (withoutDots && withoutDots !== raw) variants.add(withoutDots);
+  if (withoutDots) {
+    variants.add(`${withoutDots}...`);
+    variants.add(`${withoutDots}…`);
+  }
+  return Array.from(variants).filter(Boolean).slice(0, 6);
+}
+
+function appleScriptStringList(values) {
+  return `{${values.map((value) => `"${escapeAppleScriptString(value)}"`).join(', ')}}`;
+}
+
+function buildMenuClickScript({ appName, menuPath }) {
+  const cleanPath = Array.isArray(menuPath)
+    ? menuPath.map((part) => String(part || '').trim()).filter(Boolean)
+    : [];
+  if (cleanPath.length < 2 || cleanPath.length > 6) return null;
+  if (cleanPath.some((part) => part.length > 80 || /[\x00-\x1f]/.test(part))) return null;
+  if (appName && !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) return null;
+  const resolved = appName ? resolveInstalledMacApp(appName) : null;
+  const targetName = resolved?.name || String(appName || '').trim();
+  const target = targetName
+    ? `set targetProc to first application process whose name contains "${escapeAppleScriptString(targetName)}"`
+    : `set targetProc to first application process whose frontmost is true`;
+  const activate = targetName
+    ? `try
+  tell application "${escapeAppleScriptString(targetName)}" to activate
+end try
+delay 0.15`
+    : '';
+  let menuAccessor = `menu "${escapeAppleScriptString(cleanPath[0])}" of menu bar 1 of targetProc`;
+  for (let i = 1; i < cleanPath.length - 1; i += 1) {
+    menuAccessor = `menu 1 of menu item "${escapeAppleScriptString(cleanPath[i])}" of ${menuAccessor}`;
+  }
+  const finalItem = cleanPath[cleanPath.length - 1];
+  const finalItemVariants = appleScriptStringList(menuLabelVariants(finalItem));
+  return {
+    appName: targetName || null,
+    menuPath: cleanPath,
+    script: `
+${activate}
+tell application "System Events"
+  ${target}
+  set frontmost of targetProc to true
+  set clickedMenuItem to false
+  repeat with candidateMenuItem in ${finalItemVariants}
+    try
+      click menu item (candidateMenuItem as text) of ${menuAccessor}
+      set clickedMenuItem to true
+      exit repeat
+    end try
+  end repeat
+  if clickedMenuItem is false then error "menu item not found: ${escapeAppleScriptString(finalItem)}"
+end tell
+`,
+  };
+}
+
+function buildInDesignDocumentStatusScript({ appName, expectedDocumentName, sourceDocumentPath }) {
+  const resolved = resolveInDesignMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp('Adobe InDesign') ||
+    resolveInstalledMacApp('InDesign');
+  const targetName = resolved?.name || String(appName || 'InDesign').trim();
+  if (!targetName || !/indesign/i.test(targetName)) return null;
+  const notRunning = JSON.stringify({
+    appRunning: false,
+    appName: targetName,
+    status: 'not_running',
+    documentCount: 0,
+    activeDocumentName: null,
+    activeDocumentPath: null,
+    activeDocumentModified: false,
+    activeDocumentSaved: false,
+    pageCount: 0,
+    spreadCount: 0,
+    layerCount: 0,
+    lockedLayers: 0,
+    hiddenLayers: 0,
+    linkCount: 0,
+    missingLinks: 0,
+    modifiedLinks: 0,
+    problemLinks: 0,
+    fontCount: 0,
+    missingFonts: 0,
+    selectionCount: 0,
+    documents: [],
+    error: null,
+  });
+  const jsx = `
+(function () {
+  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+
+  function normalizeDocName(value) {
+    return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
+  }
+
+  function normalizeDocPath(value) {
+    try { return File(String(value || "")).fsName.toLowerCase(); } catch (_) {}
+    return String(value || "").toLowerCase();
+  }
+
+  function documentPath(value) {
+    try { return value.fullName.fsName; } catch (_) { return ""; }
+  }
+
+  function collectionLength(value) {
+    try { return value ? value.length : 0; } catch (_) { return 0; }
+  }
+
+  function documentMatches(value) {
+    if (!value || value.isValid === false) return false;
+    var docName = String(value.name || "");
+    if (sourceDocumentPath) {
+      var targetPath = normalizeDocPath(sourceDocumentPath);
+      var currentPath = normalizeDocPath(documentPath(value));
+      if (currentPath && currentPath === targetPath) return true;
+      if (normalizeDocName(docName) === normalizeDocName(sourceDocumentPath.split("/").pop())) return true;
+    }
+    if (expectedDocumentName && normalizeDocName(docName) === normalizeDocName(expectedDocumentName)) return true;
+    return !sourceDocumentPath && !expectedDocumentName;
+  }
+
+  function findTargetDocument() {
+    try {
+      for (var i = 0; i < app.documents.length; i += 1) {
+        if (documentMatches(app.documents[i])) return app.documents[i];
+      }
+    } catch (_) {}
+    if (!sourceDocumentPath && !expectedDocumentName && collectionLength(app.documents) > 0) {
+      try { return app.activeDocument; } catch (_) {}
+    }
+    return null;
+  }
+
+  function jsonEscape(value) {
+    return String(value === undefined || value === null ? "" : value)
+      .replace(/\\\\/g, "\\\\\\\\")
+      .replace(/"/g, "\\\\\\"")
+      .replace(/\\r/g, "\\\\r")
+      .replace(/\\n/g, "\\\\n")
+      .replace(/\\t/g, "\\\\t");
+  }
+
+  function jsonString(value) {
+    return "\\"" + jsonEscape(value) + "\\"";
+  }
+
+  function jsonNullableString(value) {
+    return value === undefined || value === null || value === "" ? "null" : jsonString(value);
+  }
+
+  function jsonNumber(value) {
+    var parsed = Number(value);
+    return isFinite(parsed) ? String(parsed) : "0";
+  }
+
+  function jsonBoolean(value) {
+    return value === true ? "true" : "false";
+  }
+
+  function jsonArray(values) {
+    return "[" + values.join(",") + "]";
+  }
+
+  function documentSummaryJson(doc) {
+    return "{" + [
+      "\\"name\\":" + jsonString(doc.name),
+      "\\"path\\":" + jsonNullableString(doc.path),
+      "\\"modified\\":" + jsonBoolean(doc.modified),
+      "\\"saved\\":" + jsonBoolean(doc.saved),
+      "\\"pageCount\\":" + jsonNumber(doc.pageCount)
+    ].join(",") + "}";
+  }
+
+  function stringifyInDesignStatus(value) {
+    var docs = [];
+    try {
+      for (var i = 0; i < value.documents.length; i += 1) docs.push(documentSummaryJson(value.documents[i]));
+    } catch (_) {}
+    return "{" + [
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"status\\":" + jsonString(value.status),
+      "\\"documentCount\\":" + jsonNumber(value.documentCount),
+      "\\"activeDocumentName\\":" + jsonNullableString(value.activeDocumentName),
+      "\\"activeDocumentPath\\":" + jsonNullableString(value.activeDocumentPath),
+      "\\"activeDocumentModified\\":" + jsonBoolean(value.activeDocumentModified),
+      "\\"activeDocumentSaved\\":" + jsonBoolean(value.activeDocumentSaved),
+      "\\"pageCount\\":" + jsonNumber(value.pageCount),
+      "\\"spreadCount\\":" + jsonNumber(value.spreadCount),
+      "\\"layerCount\\":" + jsonNumber(value.layerCount),
+      "\\"lockedLayers\\":" + jsonNumber(value.lockedLayers),
+      "\\"hiddenLayers\\":" + jsonNumber(value.hiddenLayers),
+      "\\"linkCount\\":" + jsonNumber(value.linkCount),
+      "\\"missingLinks\\":" + jsonNumber(value.missingLinks),
+      "\\"modifiedLinks\\":" + jsonNumber(value.modifiedLinks),
+      "\\"problemLinks\\":" + jsonNumber(value.problemLinks),
+      "\\"fontCount\\":" + jsonNumber(value.fontCount),
+      "\\"missingFonts\\":" + jsonNumber(value.missingFonts),
+      "\\"selectionCount\\":" + jsonNumber(value.selectionCount),
+      "\\"documents\\":" + jsonArray(docs),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  function makeDocumentSummary(doc) {
+    return {
+      name: String(doc && doc.name ? doc.name : ""),
+      path: documentPath(doc),
+      modified: (function () { try { return doc.modified === true; } catch (_) { return false; } }()),
+      saved: (function () { try { return doc.saved === true; } catch (_) { return false; } }()),
+      pageCount: (function () { try { return collectionLength(doc.pages); } catch (_) { return 0; } }())
+    };
+  }
+
+  function getLayerDiagnostics(doc) {
+    var out = { layerCount: 0, lockedLayers: 0, hiddenLayers: 0 };
+    try {
+      out.layerCount = collectionLength(doc.layers);
+      for (var i = 0; i < doc.layers.length; i += 1) {
+        try { if (doc.layers[i].locked === true) out.lockedLayers += 1; } catch (_) {}
+        try { if (doc.layers[i].visible === false) out.hiddenLayers += 1; } catch (_) {}
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  function getLinkDiagnostics(doc) {
+    var out = { linkCount: 0, missingLinks: 0, modifiedLinks: 0, problemLinks: 0 };
+    try {
+      out.linkCount = collectionLength(doc.links);
+      for (var i = 0; i < doc.links.length; i += 1) {
+        var link = doc.links[i];
+        var statusText = "";
+        var isMissing = false;
+        var isModified = false;
+        try { statusText = String(link.status || ""); } catch (_) {}
+        var lower = statusText.toLowerCase();
+        if (/missing/.test(lower)) isMissing = true;
+        if (/modified|out.?of.?date|changed/.test(lower)) isModified = true;
+        try { if (link.status === LinkStatus.LINK_MISSING) isMissing = true; } catch (_) {}
+        try { if (link.status === LinkStatus.LINK_OUT_OF_DATE) isModified = true; } catch (_) {}
+        if (isMissing) out.missingLinks += 1;
+        if (isModified) out.modifiedLinks += 1;
+        if (isMissing || isModified) out.problemLinks += 1;
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  function getFontDiagnostics(doc) {
+    var out = { fontCount: 0, missingFonts: 0 };
+    try {
+      out.fontCount = collectionLength(doc.fonts);
+      for (var i = 0; i < doc.fonts.length; i += 1) {
+        var font = doc.fonts[i];
+        var statusText = "";
+        var isMissing = false;
+        try { statusText = String(font.status || ""); } catch (_) {}
+        if (/missing|not.?available|substitut/.test(statusText.toLowerCase())) isMissing = true;
+        try { if (font.status === FontStatus.NOT_AVAILABLE) isMissing = true; } catch (_) {}
+        if (isMissing) out.missingFonts += 1;
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  var out = {
+    appRunning: true,
+    appName: String(app.name || "InDesign"),
+    status: "unknown",
+    documentCount: collectionLength(app.documents),
+    activeDocumentName: null,
+    activeDocumentPath: null,
+    activeDocumentModified: false,
+    activeDocumentSaved: false,
+    pageCount: 0,
+    spreadCount: 0,
+    layerCount: 0,
+    lockedLayers: 0,
+    hiddenLayers: 0,
+    linkCount: 0,
+    missingLinks: 0,
+    modifiedLinks: 0,
+    problemLinks: 0,
+    fontCount: 0,
+    missingFonts: 0,
+    selectionCount: 0,
+    documents: [],
+    error: null
+  };
+
+  try {
+    var maxDocs = Math.min(collectionLength(app.documents), 12);
+    for (var docIndex = 0; docIndex < maxDocs; docIndex += 1) {
+      out.documents.push(makeDocumentSummary(app.documents[docIndex]));
+    }
+  } catch (_) {}
+
+  if (out.documentCount < 1) {
+    out.status = "no_document";
+    return stringifyInDesignStatus(out);
+  }
+
+  var doc = findTargetDocument();
+  if (!doc) {
+    out.status = "document_mismatch";
+    try { out.activeDocumentName = String(app.activeDocument.name || ""); } catch (_) {}
+    out.error = "Expected InDesign document is not active or open.";
+    return stringifyInDesignStatus(out);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+
+  out.activeDocumentName = String(doc.name || "");
+  out.activeDocumentPath = documentPath(doc);
+  try { out.activeDocumentModified = doc.modified === true; } catch (_) {}
+  try { out.activeDocumentSaved = doc.saved === true; } catch (_) {}
+  try { out.pageCount = collectionLength(doc.pages); } catch (_) {}
+  try { out.spreadCount = collectionLength(doc.spreads); } catch (_) {}
+  try { out.selectionCount = collectionLength(app.selection); } catch (_) {}
+  var layers = getLayerDiagnostics(doc);
+  out.layerCount = layers.layerCount;
+  out.lockedLayers = layers.lockedLayers;
+  out.hiddenLayers = layers.hiddenLayers;
+  var links = getLinkDiagnostics(doc);
+  out.linkCount = links.linkCount;
+  out.missingLinks = links.missingLinks;
+  out.modifiedLinks = links.modifiedLinks;
+  out.problemLinks = links.problemLinks;
+  var fonts = getFontDiagnostics(doc);
+  out.fontCount = fonts.fontCount;
+  out.missingFonts = fonts.missingFonts;
+  out.status = (out.missingLinks + out.modifiedLinks + out.missingFonts) > 0 ? "needs_attention" : "ready";
+  return stringifyInDesignStatus(out);
+}());
+`;
+  return {
+    appName: targetName,
+    script: `
+if application "${escapeAppleScriptString(targetName)}" is running then
+  tell application "${escapeAppleScriptString(targetName)}"
+    set _ucResult to do script "${escapeAppleScriptString(jsx)}" language javascript
+  end tell
+  return _ucResult
+else
+  return ${JSON.stringify(notRunning)}
+end if
+`,
+  };
+}
+
+function buildInDesignTextInventoryScript({ appName, query, expectedDocumentName, sourceDocumentPath, maxItems }) {
+  const resolved = resolveInDesignMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp('Adobe InDesign') ||
+    resolveInstalledMacApp('InDesign');
+  const targetName = resolved?.name || String(appName || 'InDesign').trim();
+  if (!targetName || !/indesign/i.test(targetName)) return null;
+  const notRunning = JSON.stringify({
+    appRunning: false,
+    appName: targetName,
+    documentName: null,
+    query: String(query || ''),
+    textFrameCount: 0,
+    matchedFrames: 0,
+    oversetFrames: 0,
+    lockedLayers: 0,
+    hiddenLayers: 0,
+    queryMatches: 0,
+    layerNames: [],
+    frames: [],
+    error: null,
+  });
+  const jsx = `
+(function () {
+  var query = ${JSON.stringify(String(query ?? ''))};
+  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  var maxItems = ${JSON.stringify(Math.max(1, Math.min(80, Math.trunc(Number(maxItems || 30)))))};
+
+  function normalizeDocName(value) {
+    return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
+  }
+
+  function normalizeDocPath(value) {
+    try { return File(String(value || "")).fsName.toLowerCase(); } catch (_) {}
+    return String(value || "").toLowerCase();
+  }
+
+  function documentPath(value) {
+    try { return value.fullName.fsName; } catch (_) { return ""; }
+  }
+
+  function collectionLength(value) {
+    try { return value ? value.length : 0; } catch (_) { return 0; }
+  }
+
+  function documentMatches(value) {
+    if (!value || value.isValid === false) return false;
+    var docName = String(value.name || "");
+    if (sourceDocumentPath) {
+      var targetPath = normalizeDocPath(sourceDocumentPath);
+      var currentPath = normalizeDocPath(documentPath(value));
+      if (currentPath && currentPath === targetPath) return true;
+      if (normalizeDocName(docName) === normalizeDocName(sourceDocumentPath.split("/").pop())) return true;
+    }
+    if (expectedDocumentName && normalizeDocName(docName) === normalizeDocName(expectedDocumentName)) return true;
+    return !sourceDocumentPath && !expectedDocumentName;
+  }
+
+  function findTargetDocument() {
+    try {
+      for (var i = 0; i < app.documents.length; i += 1) {
+        if (documentMatches(app.documents[i])) return app.documents[i];
+      }
+    } catch (_) {}
+    if (!sourceDocumentPath && !expectedDocumentName && collectionLength(app.documents) > 0) {
+      try { return app.activeDocument; } catch (_) {}
+    }
+    return null;
+  }
+
+  function jsonEscape(value) {
+    return String(value === undefined || value === null ? "" : value)
+      .replace(/\\\\/g, "\\\\\\\\")
+      .replace(/"/g, "\\\\\\"")
+      .replace(/\\r/g, "\\\\r")
+      .replace(/\\n/g, "\\\\n")
+      .replace(/\\t/g, "\\\\t");
+  }
+
+  function jsonString(value) {
+    return "\\"" + jsonEscape(value) + "\\"";
+  }
+
+  function jsonNullableString(value) {
+    return value === undefined || value === null || value === "" ? "null" : jsonString(value);
+  }
+
+  function jsonNumber(value) {
+    var parsed = Number(value);
+    return isFinite(parsed) ? String(parsed) : "0";
+  }
+
+  function jsonBoolean(value) {
+    return value === true ? "true" : "false";
+  }
+
+  function jsonArray(values) {
+    return "[" + values.join(",") + "]";
+  }
+
+  function frameSummaryJson(frame) {
+    return "{" + [
+      "\\"layerName\\":" + jsonString(frame.layerName),
+      "\\"itemName\\":" + jsonString(frame.itemName),
+      "\\"label\\":" + jsonString(frame.label),
+      "\\"pageName\\":" + jsonString(frame.pageName),
+      "\\"contentPreview\\":" + jsonString(frame.contentPreview),
+      "\\"chars\\":" + jsonNumber(frame.chars),
+      "\\"matchCount\\":" + jsonNumber(frame.matchCount),
+      "\\"overflows\\":" + jsonBoolean(frame.overflows),
+      "\\"locked\\":" + jsonBoolean(frame.locked),
+      "\\"visible\\":" + jsonBoolean(frame.visible)
+    ].join(",") + "}";
+  }
+
+  function stringifyInDesignTextInventory(value) {
+    var layerParts = [];
+    var frameParts = [];
+    try {
+      for (var i = 0; i < value.layerNames.length; i += 1) layerParts.push(jsonString(value.layerNames[i]));
+      for (var j = 0; j < value.frames.length; j += 1) frameParts.push(frameSummaryJson(value.frames[j]));
+    } catch (_) {}
+    return "{" + [
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"query\\":" + jsonString(value.query),
+      "\\"textFrameCount\\":" + jsonNumber(value.textFrameCount),
+      "\\"matchedFrames\\":" + jsonNumber(value.matchedFrames),
+      "\\"oversetFrames\\":" + jsonNumber(value.oversetFrames),
+      "\\"lockedLayers\\":" + jsonNumber(value.lockedLayers),
+      "\\"hiddenLayers\\":" + jsonNumber(value.hiddenLayers),
+      "\\"queryMatches\\":" + jsonNumber(value.queryMatches),
+      "\\"layerNames\\":" + jsonArray(layerParts),
+      "\\"frames\\":" + jsonArray(frameParts),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  function normalizeText(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/&/g, " and ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/^\\s+|\\s+$/g, "")
+      .replace(/\\s+/g, " ");
+  }
+
+  function addUnique(values, value) {
+    value = String(value || "");
+    if (!value) return;
+    for (var i = 0; i < values.length; i += 1) {
+      if (values[i] === value) return;
+    }
+    values.push(value);
+  }
+
+  function containsQuery() {
+    var q = normalizeText(query);
+    if (!q) return true;
+    for (var i = 0; i < arguments.length; i += 1) {
+      if (normalizeText(arguments[i]).indexOf(q) >= 0) return true;
+    }
+    return false;
+  }
+
+  function countLiteralOccurrences(contents, needle) {
+    contents = String(contents || "");
+    needle = String(needle || "");
+    if (!contents || !needle) return 0;
+    var count = 0;
+    var from = 0;
+    while (true) {
+      var index = contents.indexOf(needle, from);
+      if (index < 0) break;
+      count += 1;
+      from = index + Math.max(1, needle.length);
+    }
+    if (count > 0) return count;
+    var lowerContents = contents.toLowerCase();
+    var lowerNeedle = needle.toLowerCase();
+    from = 0;
+    while (true) {
+      var lowerIndex = lowerContents.indexOf(lowerNeedle, from);
+      if (lowerIndex < 0) break;
+      count += 1;
+      from = lowerIndex + Math.max(1, lowerNeedle.length);
+    }
+    if (count > 0) return count;
+    return normalizeText(contents).indexOf(normalizeText(needle)) >= 0 ? 1 : 0;
+  }
+
+  function safeString(value) {
+    try { return String(value || ""); } catch (_) { return ""; }
+  }
+
+  function itemLayerName(item) {
+    try { return safeString(item.itemLayer.name); } catch (_) { return ""; }
+  }
+
+  function itemPageName(item) {
+    try {
+      if (item.parentPage && item.parentPage.isValid !== false) return safeString(item.parentPage.name);
+    } catch (_) {}
+    try {
+      if (item.parent && item.parent.parentPage && item.parent.parentPage.isValid !== false) return safeString(item.parent.parentPage.name);
+    } catch (_) {}
+    return "";
+  }
+
+  function itemTextContents(item) {
+    try {
+      var contents = item.contents;
+      if (contents !== undefined && contents !== null) return String(contents || "");
+    } catch (_) {}
+    try {
+      if (item.parentStory && item.parentStory.isValid !== false) return String(item.parentStory.contents || "");
+    } catch (_) {}
+    return "";
+  }
+
+  function itemOverflows(item) {
+    try { if (item.overflows === true) return true; } catch (_) {}
+    try { if (item.parentStory && item.parentStory.overflows === true) return true; } catch (_) {}
+    return false;
+  }
+
+  function itemLocked(item) {
+    try { if (item.locked === true) return true; } catch (_) {}
+    try { if (item.itemLayer && item.itemLayer.locked === true) return true; } catch (_) {}
+    try { if (item.parentStory && item.parentStory.locked === true) return true; } catch (_) {}
+    return false;
+  }
+
+  function itemVisible(item) {
+    try { if (item.visible === false) return false; } catch (_) {}
+    try { if (item.itemLayer && item.itemLayer.visible === false) return false; } catch (_) {}
+    return true;
+  }
+
+  var out = {
+    appRunning: true,
+    appName: safeString(app.name || "InDesign"),
+    documentName: null,
+    query: query,
+    textFrameCount: 0,
+    matchedFrames: 0,
+    oversetFrames: 0,
+    lockedLayers: 0,
+    hiddenLayers: 0,
+    queryMatches: 0,
+    layerNames: [],
+    frames: [],
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    out.error = "No active InDesign document.";
+    return stringifyInDesignTextInventory(out);
+  }
+
+  var doc = findTargetDocument();
+  if (!doc) {
+    out.error = "Expected InDesign document is not active or open.";
+    try { out.documentName = safeString(app.activeDocument.name || ""); } catch (_) {}
+    return stringifyInDesignTextInventory(out);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  out.documentName = safeString(doc.name || "");
+
+  try {
+    for (var layerIndex = 0; layerIndex < doc.layers.length; layerIndex += 1) {
+      var layer = doc.layers[layerIndex];
+      addUnique(out.layerNames, safeString(layer.name || ""));
+      try { if (layer.locked === true) out.lockedLayers += 1; } catch (_) {}
+      try { if (layer.visible === false) out.hiddenLayers += 1; } catch (_) {}
+    }
+  } catch (_) {}
+
+  try {
+    var items = doc.allPageItems;
+    for (var itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+      var item = items[itemIndex];
+      if (!item || item.isValid === false) continue;
+      var contents = itemTextContents(item);
+      if (!contents) continue;
+      out.textFrameCount += 1;
+      var layerName = itemLayerName(item);
+      var itemName = "";
+      var label = "";
+      try { itemName = safeString(item.name); } catch (_) {}
+      try { label = safeString(item.label); } catch (_) {}
+      var overflow = itemOverflows(item);
+      if (overflow) out.oversetFrames += 1;
+      if (!containsQuery(layerName, itemName, label, contents)) continue;
+      out.matchedFrames += 1;
+      var matchCount = countLiteralOccurrences(contents, query);
+      out.queryMatches += matchCount;
+      if (out.frames.length < maxItems) {
+        out.frames.push({
+          layerName: layerName,
+          itemName: itemName,
+          label: label,
+          pageName: itemPageName(item),
+          contentPreview: contents.replace(/[\\r\\n\\t]+/g, " ").replace(/\\s+/g, " ").slice(0, 220),
+          chars: contents.length,
+          matchCount: matchCount,
+          overflows: overflow,
+          locked: itemLocked(item),
+          visible: itemVisible(item)
+        });
+      }
+    }
+  } catch (err) {
+    out.error = err && err.message ? err.message : String(err);
+  }
+
+  return stringifyInDesignTextInventory(out);
+}());
+`;
+  return {
+    appName: targetName,
+    script: `
+if application "${escapeAppleScriptString(targetName)}" is running then
+  tell application "${escapeAppleScriptString(targetName)}"
+    set _ucResult to do script "${escapeAppleScriptString(jsx)}" language javascript
+  end tell
+  return _ucResult
+else
+  return ${JSON.stringify(notRunning)}
+end if
+`,
+  };
+}
+
+function buildInDesignBatchUpdateTextLayersScript({ appName, updates, expectedDocumentName, sourceDocumentPath }) {
+  const resolved = resolveInDesignMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp('Adobe InDesign') ||
+    resolveInstalledMacApp('InDesign');
+  const targetName = resolved?.name || String(appName || 'InDesign').trim();
+  if (!targetName || !/indesign/i.test(targetName)) return null;
+  const safeUpdates = (Array.isArray(updates) ? updates : [])
+    .slice(0, 12)
+    .map((update) => ({
+      fieldName: String(update?.fieldName ?? ''),
+      replacementText: String(update?.replacementText ?? ''),
+    }))
+    .filter((update) => update.fieldName);
+  const jsx = `
+(function () {
+  var updates = ${JSON.stringify(safeUpdates)};
+  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  if (!updates || updates.length < 1) throw new Error("Missing text layer updates");
+
+  function normalizeDocName(value) {
+    return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
+  }
+  function normalizeDocPath(value) {
+    try { return File(String(value || "")).fsName.toLowerCase(); } catch (_) {}
+    return String(value || "").toLowerCase();
+  }
+  function documentPath(value) {
+    try { return value.fullName.fsName; } catch (_) { return ""; }
+  }
+  function collectionLength(value) {
+    try { return value ? value.length : 0; } catch (_) { return 0; }
+  }
+  function documentMatches(value) {
+    if (!value || value.isValid === false) return false;
+    var docName = String(value.name || "");
+    if (sourceDocumentPath) {
+      var targetPath = normalizeDocPath(sourceDocumentPath);
+      var currentPath = normalizeDocPath(documentPath(value));
+      if (currentPath && currentPath === targetPath) return true;
+      if (normalizeDocName(docName) === normalizeDocName(sourceDocumentPath.split("/").pop())) return true;
+    }
+    if (expectedDocumentName && normalizeDocName(docName) === normalizeDocName(expectedDocumentName)) return true;
+    return !sourceDocumentPath && !expectedDocumentName;
+  }
+  function findTargetDocument() {
+    try {
+      for (var i = 0; i < app.documents.length; i += 1) {
+        if (documentMatches(app.documents[i])) return app.documents[i];
+      }
+    } catch (_) {}
+    if (!sourceDocumentPath && !expectedDocumentName && collectionLength(app.documents) > 0) {
+      try { return app.activeDocument; } catch (_) {}
+    }
+    return null;
+  }
+  function waitForTargetDocument(ms) {
+    var deadline = (new Date()).getTime() + ms;
+    while ((new Date()).getTime() < deadline) {
+      var found = findTargetDocument();
+      if (found) return found;
+      $.sleep(250);
+    }
+    return findTargetDocument();
+  }
+  function openSourceDocument() {
+    if (!sourceDocumentPath) return null;
+    var file = File(sourceDocumentPath);
+    if (!file.exists) throw new Error("Source InDesign file no longer exists: " + sourceDocumentPath);
+    try { return app.open(file); } catch (err) {
+      throw new Error("Could not open source InDesign file " + sourceDocumentPath + ": " + (err && err.message ? err.message : err));
+    }
+  }
+
+  function jsonEscape(value) {
+    return String(value === undefined || value === null ? "" : value)
+      .replace(/\\\\/g, "\\\\\\\\")
+      .replace(/"/g, "\\\\\\"")
+      .replace(/\\r/g, "\\\\r")
+      .replace(/\\n/g, "\\\\n")
+      .replace(/\\t/g, "\\\\t");
+  }
+  function jsonString(value) { return "\\"" + jsonEscape(value) + "\\""; }
+  function jsonNumber(value) {
+    var parsed = Number(value);
+    return isFinite(parsed) ? String(parsed) : "0";
+  }
+  function jsonBoolean(value) { return value === true ? "true" : "false"; }
+  function jsonArrayOfStrings(values) {
+    var parts = [];
+    for (var i = 0; i < values.length; i += 1) parts.push(jsonString(values[i]));
+    return "[" + parts.join(",") + "]";
+  }
+  function stringifyFieldResult(value) {
+    return "{" + [
+      "\\"fieldName\\":" + jsonString(value.fieldName),
+      "\\"replacementText\\":" + jsonString(value.replacementText),
+      "\\"matchedLayers\\":" + jsonNumber(value.matchedLayers),
+      "\\"matchedFrames\\":" + jsonNumber(value.matchedFrames),
+      "\\"updatedFrames\\":" + jsonNumber(value.updatedFrames),
+      "\\"replacementMatches\\":" + jsonNumber(value.replacementMatches),
+      "\\"layerNames\\":" + jsonArrayOfStrings(value.layerNames),
+      "\\"unlockedCount\\":" + jsonNumber(value.unlockedCount),
+      "\\"error\\":" + jsonString(value.error)
+    ].join(",") + "}";
+  }
+  function stringifyBatchTextLayerResult(value) {
+    var resultParts = [];
+    for (var i = 0; i < value.results.length; i += 1) resultParts.push(stringifyFieldResult(value.results[i]));
+    return "{" + [
+      "\\"documentName\\":" + jsonString(value.documentName),
+      "\\"docWasModified\\":" + jsonBoolean(value.docWasModified),
+      "\\"docModified\\":" + jsonBoolean(value.docModified),
+      "\\"docSaved\\":" + jsonBoolean(value.docSaved),
+      "\\"results\\":[" + resultParts.join(",") + "]",
+      "\\"error\\":" + jsonString(value.error)
+    ].join(",") + "}";
+  }
+
+  function normalizeText(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/&/g, " and ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/^\\s+|\\s+$/g, "")
+      .replace(/\\s+/g, " ");
+  }
+  function addUnique(values, value) {
+    value = normalizeText(value);
+    if (!value) return;
+    for (var i = 0; i < values.length; i += 1) {
+      if (values[i] === value) return;
+    }
+    values.push(value);
+  }
+  function addAliasGroup(values, group) {
+    for (var i = 0; i < group.length; i += 1) addUnique(values, group[i]);
+  }
+  function fieldAliases(raw) {
+    var key = normalizeText(raw);
+    var aliases = [];
+    addUnique(aliases, key);
+    if (/\\b(disclaimer|legal|fine print|terms?|condition|copy)\\b/.test(key)) {
+      addAliasGroup(aliases, ["disclaimer", "legal", "legal copy", "fine print", "terms", "terms and conditions", "disclosures", "copy"]);
+    }
+    if (/\\b(apr|rate|finance|payment|lease|offer|rebate|incentive|cash)\\b/.test(key)) {
+      addAliasGroup(aliases, ["offer", "apr", "rate", "finance", "financing", "payment", "lease", "rebate", "incentive", "cash offer"]);
+    }
+    if (/\\b(price|sale|msrp|amount|monthly)\\b/.test(key)) {
+      addAliasGroup(aliases, ["price", "sale price", "msrp", "amount", "monthly payment"]);
+    }
+    if (/\\b(vehicle|model|trim|year|stock|vin)\\b/.test(key)) {
+      addAliasGroup(aliases, ["vehicle", "model", "trim", "year", "stock", "stock number", "vin"]);
+    }
+    if (/\\b(dealer|phone|website|url|address|location)\\b/.test(key)) {
+      addAliasGroup(aliases, ["dealer", "dealer info", "dealer information", "phone", "website", "url", "address", "location"]);
+    }
+    if (/\\b(cta|button|call to action|shop|learn more|view inventory)\\b/.test(key)) {
+      addAliasGroup(aliases, ["cta", "button", "call to action", "shop now", "learn more", "view inventory"]);
+    }
+    if (/\\b(headline|title|main)\\b/.test(key)) {
+      addAliasGroup(aliases, ["headline", "title", "main headline", "primary headline"]);
+    }
+    if (/\\b(subheadline|subtitle|subhead)\\b/.test(key)) {
+      addAliasGroup(aliases, ["subheadline", "subhead", "subtitle", "secondary headline"]);
+    }
+    if (/\\b(expir|expires|date|deadline)\\b/.test(key)) {
+      addAliasGroup(aliases, ["expiration", "expires", "expiration date", "deadline", "offer ends"]);
+    }
+    return aliases;
+  }
+  function nameMatchesAliases(name, aliases) {
+    var normalized = normalizeText(name);
+    if (!normalized) return false;
+    for (var i = 0; i < aliases.length; i += 1) {
+      var alias = aliases[i];
+      if (!alias) continue;
+      if (normalized === alias) return true;
+      if (alias.length > 3 && normalized.indexOf(alias) >= 0) return true;
+      if (alias.length > 3 && alias.indexOf(normalized) >= 0) return true;
+      var tokenPattern = new RegExp("(^|\\\\s)" + alias.replace(/[.*+?^\${}()|[\\]\\\\]/g, "\\\\$&") + "(\\\\s|$)");
+      if (tokenPattern.test(normalized)) return true;
+    }
+    return false;
+  }
+  function layerName(item) {
+    try { return String(item.itemLayer.name || ""); } catch (_) { return ""; }
+  }
+  function itemLabelOrName(item) {
+    var parts = [];
+    try { if (item.name) parts.push(String(item.name)); } catch (_) {}
+    try { if (item.label) parts.push(String(item.label)); } catch (_) {}
+    return parts.join(" ");
+  }
+  function getTextTarget(item) {
+    try {
+      var contents = item.contents;
+      if (contents !== undefined && contents !== null) return item;
+    } catch (_) {}
+    try {
+      if (item.parentStory && item.parentStory.isValid !== false) {
+        var storyContents = item.parentStory.contents;
+        if (storyContents !== undefined && storyContents !== null) return item.parentStory;
+      }
+    } catch (_) {}
+    return null;
+  }
+  function targetKey(target, item) {
+    try { if (target && target.id !== undefined) return "t:" + String(target.id); } catch (_) {}
+    try { if (item && item.id !== undefined) return "i:" + String(item.id); } catch (_) {}
+    return String(Math.random());
+  }
+  function unlockTarget(target, prop, desiredValue, unlocked) {
+    try {
+      if (!target || target.isValid === false) return;
+      var current = target[prop];
+      if (current !== desiredValue) {
+        unlocked.push({ target: target, prop: prop, value: current });
+        target[prop] = desiredValue;
+      }
+    } catch (_) {}
+  }
+  function prepareTextItem(item, unlocked) {
+    try { unlockTarget(item.itemLayer, "locked", false, unlocked); } catch (_) {}
+    try { unlockTarget(item.itemLayer, "visible", true, unlocked); } catch (_) {}
+    try { unlockTarget(item, "locked", false, unlocked); } catch (_) {}
+    try { unlockTarget(item.parentStory, "locked", false, unlocked); } catch (_) {}
+  }
+  function restoreUnlocks(unlocked) {
+    for (var i = unlocked.length - 1; i >= 0; i -= 1) {
+      try {
+        if (unlocked[i].target && unlocked[i].target.isValid !== false) {
+          unlocked[i].target[unlocked[i].prop] = unlocked[i].value;
+        }
+      } catch (_) {}
+    }
+  }
+  function readContents(target) {
+    try { return String(target.contents || ""); } catch (_) { return ""; }
+  }
+  function writeContents(target, value) {
+    try { target.contents = value; return true; } catch (_) {}
+    return false;
+  }
+  function countReplacementMatchesInDoc(doc, value) {
+    if (!value) return 0;
+    var count = 0;
+    try {
+      for (var i = 0; i < doc.stories.length; i += 1) {
+        var contents = String(doc.stories[i].contents || "");
+        var from = 0;
+        while (true) {
+          var index = contents.indexOf(value, from);
+          if (index < 0) break;
+          count += 1;
+          from = index + Math.max(1, value.length);
+        }
+      }
+    } catch (_) {}
+    return count;
+  }
+  function applyFieldUpdate(doc, update) {
+    var fieldName = String(update.fieldName || "");
+    var replacementText = String(update.replacementText || "");
+    var aliases = fieldAliases(fieldName);
+    var matchedLayerNames = [];
+    var matchedLayerMap = {};
+    try {
+      for (var layerIndex = 0; layerIndex < doc.layers.length; layerIndex += 1) {
+        var layer = doc.layers[layerIndex];
+        var currentLayerName = String(layer.name || "");
+        if (nameMatchesAliases(currentLayerName, aliases)) {
+          var normalizedLayer = normalizeText(currentLayerName);
+          if (!matchedLayerMap[normalizedLayer]) matchedLayerNames.push(currentLayerName);
+          matchedLayerMap[normalizedLayer] = true;
+        }
+      }
+    } catch (_) {}
+    var seen = {};
+    var matchedFrames = 0;
+    var updatedFrames = 0;
+    var unlocked = [];
+    var error = "";
+    try {
+      var items = doc.allPageItems;
+      for (var itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+        var item = items[itemIndex];
+        if (!item || item.isValid === false) continue;
+        var currentLayerName = layerName(item);
+        var matchedByLayer = matchedLayerMap[normalizeText(currentLayerName)] === true || nameMatchesAliases(currentLayerName, aliases);
+        var matchedByItem = nameMatchesAliases(itemLabelOrName(item), aliases);
+        if (!matchedByLayer && !matchedByItem) continue;
+        var target = getTextTarget(item);
+        if (!target) continue;
+        var key = targetKey(target, item);
+        if (seen[key]) continue;
+        seen[key] = true;
+        matchedFrames += 1;
+        prepareTextItem(item, unlocked);
+        var before = readContents(target);
+        if (before !== replacementText) {
+          if (writeContents(target, replacementText)) updatedFrames += 1;
+        }
+      }
+    } catch (err) {
+      error = err && err.message ? err.message : String(err);
+    }
+    restoreUnlocks(unlocked);
+    if (!error && matchedFrames < 1) {
+      error = "No editable text frame matched field aliases for " + fieldName;
+    } else if (!error && updatedFrames < 1) {
+      error = "Matching text frames already contained the requested replacement or could not be edited.";
+    }
+    return {
+      fieldName: fieldName,
+      replacementText: replacementText,
+      matchedLayers: matchedLayerNames.length,
+      matchedFrames: matchedFrames,
+      updatedFrames: updatedFrames,
+      replacementMatches: countReplacementMatchesInDoc(doc, replacementText),
+      layerNames: matchedLayerNames,
+      unlockedCount: unlocked.length,
+      error: error
+    };
+  }
+
+  var doc = waitForTargetDocument(12000);
+  if (!doc && sourceDocumentPath) {
+    doc = openSourceDocument();
+    $.sleep(750);
+    doc = waitForTargetDocument(8000) || doc;
+  }
+  if (!doc) {
+    if (collectionLength(app.documents) < 1) throw new Error("No active InDesign document and source file could not be opened");
+    var activeDocName = "";
+    try { activeDocName = String(app.activeDocument.name || ""); } catch (_) {}
+    throw new Error("Active InDesign document mismatch: expected " + (expectedDocumentName || sourceDocumentPath || "target document") + ", got " + activeDocName);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  var docWasModified = false;
+  try { docWasModified = doc.modified === true; } catch (_) {}
+  var results = [];
+  for (var updateIndex = 0; updateIndex < updates.length; updateIndex += 1) {
+    results.push(applyFieldUpdate(doc, updates[updateIndex]));
+  }
+  var docModified = false;
+  var docSaved = false;
+  try { docModified = doc.modified === true; } catch (_) {}
+  try { docSaved = doc.saved === true; } catch (_) {}
+  return stringifyBatchTextLayerResult({
+    documentName: String(doc.name || ""),
+    docWasModified: docWasModified,
+    docModified: docModified,
+    docSaved: docSaved,
+    results: results,
+    error: ""
+  });
+}());
+`;
+  return {
+    appName: targetName,
+    script: `
+tell application "${escapeAppleScriptString(targetName)}"
+  activate
+  set _ucResult to do script "${escapeAppleScriptString(jsx)}" language javascript
+end tell
+return _ucResult
+`,
+  };
+}
+
+function buildInDesignSetLayerStateScript({ appName, layerName, action, expectedDocumentName, sourceDocumentPath }) {
+  const resolved = resolveInDesignMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp('Adobe InDesign') ||
+    resolveInstalledMacApp('InDesign');
+  const targetName = resolved?.name || String(appName || 'InDesign').trim();
+  if (!targetName || !/indesign/i.test(targetName)) return null;
+  const jsx = `
+(function () {
+  var layerName = ${JSON.stringify(String(layerName ?? ''))};
+  var action = ${JSON.stringify(String(action ?? ''))};
+  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  if (!layerName) throw new Error("Missing layerName");
+  if (!/^(show|hide|lock|unlock)$/.test(action)) throw new Error("Invalid layer action");
+
+  function normalizeDocName(value) {
+    return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
+  }
+
+  function normalizeDocPath(value) {
+    try { return File(String(value || "")).fsName.toLowerCase(); } catch (_) {}
+    return String(value || "").toLowerCase();
+  }
+
+  function normalizeLayerName(value) {
+    return String(value || "").toLowerCase().replace(/^\\s+|\\s+$/g, "").replace(/\\s+/g, " ");
+  }
+
+  function documentPath(value) {
+    try { return value.fullName.fsName; } catch (_) { return ""; }
+  }
+
+  function collectionLength(value) {
+    try { return value ? value.length : 0; } catch (_) { return 0; }
+  }
+
+  function documentMatches(value) {
+    if (!value || value.isValid === false) return false;
+    var docName = String(value.name || "");
+    if (sourceDocumentPath) {
+      var targetPath = normalizeDocPath(sourceDocumentPath);
+      var currentPath = normalizeDocPath(documentPath(value));
+      if (currentPath && currentPath === targetPath) return true;
+      if (normalizeDocName(docName) === normalizeDocName(sourceDocumentPath.split("/").pop())) return true;
+    }
+    if (expectedDocumentName && normalizeDocName(docName) === normalizeDocName(expectedDocumentName)) return true;
+    return !sourceDocumentPath && !expectedDocumentName;
+  }
+
+  function findTargetDocument() {
+    try {
+      for (var i = 0; i < app.documents.length; i += 1) {
+        if (documentMatches(app.documents[i])) return app.documents[i];
+      }
+    } catch (_) {}
+    if (!sourceDocumentPath && !expectedDocumentName && collectionLength(app.documents) > 0) {
+      try { return app.activeDocument; } catch (_) {}
+    }
+    return null;
+  }
+
+  function waitForTargetDocument(ms) {
+    var deadline = (new Date()).getTime() + ms;
+    while ((new Date()).getTime() < deadline) {
+      var found = findTargetDocument();
+      if (found) return found;
+      $.sleep(250);
+    }
+    return findTargetDocument();
+  }
+
+  function openSourceDocument() {
+    if (!sourceDocumentPath) return null;
+    var file = File(sourceDocumentPath);
+    if (!file.exists) throw new Error("Source InDesign file no longer exists: " + sourceDocumentPath);
+    try { return app.open(file); } catch (err) {
+      throw new Error("Could not open source InDesign file " + sourceDocumentPath + ": " + (err && err.message ? err.message : err));
+    }
+  }
+
+  function jsonEscape(value) {
+    return String(value === undefined || value === null ? "" : value)
+      .replace(/\\\\/g, "\\\\\\\\")
+      .replace(/"/g, "\\\\\\"")
+      .replace(/\\r/g, "\\\\r")
+      .replace(/\\n/g, "\\\\n")
+      .replace(/\\t/g, "\\\\t");
+  }
+
+  function jsonString(value) {
+    return "\\"" + jsonEscape(value) + "\\"";
+  }
+
+  function jsonNullableString(value) {
+    return value === undefined || value === null || value === "" ? "null" : jsonString(value);
+  }
+
+  function jsonNumber(value) {
+    var parsed = Number(value);
+    return isFinite(parsed) ? String(parsed) : "0";
+  }
+
+  function jsonBoolean(value) {
+    return value === true ? "true" : "false";
+  }
+
+  function jsonArray(values) {
+    return "[" + values.join(",") + "]";
+  }
+
+  function safeLayerSnapshot(layer) {
+    return {
+      name: (function () { try { return String(layer.name || ""); } catch (_) { return ""; } }()),
+      visible: (function () { try { return layer.visible !== false; } catch (_) { return false; } }()),
+      locked: (function () { try { return layer.locked === true; } catch (_) { return false; } }()),
+      printable: (function () { try { return layer.printable === true; } catch (_) { return false; } }())
+    };
+  }
+
+  function layerSnapshotJson(value) {
+    return "{" + [
+      "\\"name\\":" + jsonString(value.name),
+      "\\"visible\\":" + jsonBoolean(value.visible),
+      "\\"locked\\":" + jsonBoolean(value.locked),
+      "\\"printable\\":" + jsonBoolean(value.printable)
+    ].join(",") + "}";
+  }
+
+  function stringifyResult(value) {
+    var matches = [];
+    try {
+      for (var i = 0; i < value.matches.length; i += 1) matches.push(layerSnapshotJson(value.matches[i]));
+    } catch (_) {}
+    return "{" + [
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"layerName\\":" + jsonString(value.layerName),
+      "\\"action\\":" + jsonString(value.action),
+      "\\"matchedLayers\\":" + jsonNumber(value.matchedLayers),
+      "\\"changedLayers\\":" + jsonNumber(value.changedLayers),
+      "\\"beforeVisible\\":" + jsonBoolean(value.beforeVisible),
+      "\\"afterVisible\\":" + jsonBoolean(value.afterVisible),
+      "\\"beforeLocked\\":" + jsonBoolean(value.beforeLocked),
+      "\\"afterLocked\\":" + jsonBoolean(value.afterLocked),
+      "\\"beforePrintable\\":" + jsonBoolean(value.beforePrintable),
+      "\\"afterPrintable\\":" + jsonBoolean(value.afterPrintable),
+      "\\"docWasModified\\":" + jsonBoolean(value.docWasModified),
+      "\\"docModified\\":" + jsonBoolean(value.docModified),
+      "\\"docSaved\\":" + jsonBoolean(value.docSaved),
+      "\\"matches\\":" + jsonArray(matches),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  function collectLayerMatches(doc) {
+    var exact = [];
+    var fuzzy = [];
+    var needle = normalizeLayerName(layerName);
+    try {
+      for (var i = 0; i < doc.layers.length; i += 1) {
+        var layer = doc.layers[i];
+        var name = "";
+        try { name = String(layer.name || ""); } catch (_) {}
+        var normalized = normalizeLayerName(name);
+        if (normalized === needle) exact.push(layer);
+        else if (normalized.indexOf(needle) >= 0 || needle.indexOf(normalized) >= 0) fuzzy.push(layer);
+      }
+    } catch (_) {}
+    return exact.length > 0 ? exact : fuzzy;
+  }
+
+  function applyAction(layer) {
+    var before = safeLayerSnapshot(layer);
+    if (action === "show") layer.visible = true;
+    if (action === "hide") layer.visible = false;
+    if (action === "lock") layer.locked = true;
+    if (action === "unlock") layer.locked = false;
+    var after = safeLayerSnapshot(layer);
+    return {
+      before: before,
+      after: after,
+      changed: before.visible !== after.visible || before.locked !== after.locked || before.printable !== after.printable
+    };
+  }
+
+  var doc = findTargetDocument();
+  if (!doc && sourceDocumentPath) {
+    openSourceDocument();
+    doc = waitForTargetDocument(3000);
+  }
+  if (!doc) throw new Error("Active InDesign document mismatch or no document open.");
+  try { app.activeDocument = doc; } catch (_) {}
+
+  var out = {
+    documentName: String(doc.name || ""),
+    layerName: layerName,
+    action: action,
+    matchedLayers: 0,
+    changedLayers: 0,
+    beforeVisible: false,
+    afterVisible: false,
+    beforeLocked: false,
+    afterLocked: false,
+    beforePrintable: false,
+    afterPrintable: false,
+    docWasModified: (function () { try { return doc.modified === true; } catch (_) { return false; } }()),
+    docModified: false,
+    docSaved: (function () { try { return doc.saved === true; } catch (_) { return false; } }()),
+    matches: [],
+    error: null
+  };
+
+  var matches = collectLayerMatches(doc);
+  out.matchedLayers = matches.length;
+  for (var m = 0; m < Math.min(matches.length, 12); m += 1) out.matches.push(safeLayerSnapshot(matches[m]));
+  if (matches.length < 1) {
+    out.error = "No InDesign layer matched " + layerName + ".";
+    try { out.docModified = doc.modified === true; } catch (_) {}
+    try { out.docSaved = doc.saved === true; } catch (_) {}
+    return stringifyResult(out);
+  }
+  if (matches.length > 1) {
+    out.error = "Layer target is ambiguous; matched " + matches.length + " layers.";
+    try { out.docModified = doc.modified === true; } catch (_) {}
+    try { out.docSaved = doc.saved === true; } catch (_) {}
+    return stringifyResult(out);
+  }
+
+  var applied = applyAction(matches[0]);
+  out.changedLayers = applied.changed ? 1 : 0;
+  out.beforeVisible = applied.before.visible;
+  out.afterVisible = applied.after.visible;
+  out.beforeLocked = applied.before.locked;
+  out.afterLocked = applied.after.locked;
+  out.beforePrintable = applied.before.printable;
+  out.afterPrintable = applied.after.printable;
+  out.matches = [applied.after];
+  try { out.docModified = doc.modified === true; } catch (_) {}
+  try { out.docSaved = doc.saved === true; } catch (_) {}
+  return stringifyResult(out);
+}());
+`;
+  return {
+    appName: targetName,
+    script: `
+tell application "${escapeAppleScriptString(targetName)}"
+  activate
+  set _ucResult to do script "${escapeAppleScriptString(jsx)}" language javascript
+end tell
+return _ucResult
+`,
+  };
+}
+
+function buildInDesignUpdateTextLayerScript({ appName, fieldName, replacementText, expectedDocumentName, sourceDocumentPath }) {
+  const resolved = resolveInDesignMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp('Adobe InDesign') ||
+    resolveInstalledMacApp('InDesign');
+  const targetName = resolved?.name || String(appName || 'InDesign').trim();
+  if (!targetName || !/indesign/i.test(targetName)) return null;
+  const jsx = `
+(function () {
+  var fieldName = ${JSON.stringify(String(fieldName ?? ''))};
+  var replacementText = ${JSON.stringify(String(replacementText ?? ''))};
+  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  if (!fieldName) throw new Error("Missing fieldName");
+
+  function normalizeDocName(value) {
+    return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
+  }
+
+  function normalizeDocPath(value) {
+    try { return File(String(value || "")).fsName.toLowerCase(); } catch (_) {}
+    return String(value || "").toLowerCase();
+  }
+
+  function documentPath(value) {
+    try { return value.fullName.fsName; } catch (_) { return ""; }
+  }
+
+  function collectionLength(value) {
+    try { return value ? value.length : 0; } catch (_) { return 0; }
+  }
+
+  function documentMatches(value) {
+    if (!value || value.isValid === false) return false;
+    var docName = String(value.name || "");
+    if (sourceDocumentPath) {
+      var targetPath = normalizeDocPath(sourceDocumentPath);
+      var currentPath = normalizeDocPath(documentPath(value));
+      if (currentPath && currentPath === targetPath) return true;
+      if (normalizeDocName(docName) === normalizeDocName(sourceDocumentPath.split("/").pop())) return true;
+    }
+    if (expectedDocumentName && normalizeDocName(docName) === normalizeDocName(expectedDocumentName)) return true;
+    return !sourceDocumentPath && !expectedDocumentName;
+  }
+
+  function findTargetDocument() {
+    try {
+      for (var i = 0; i < app.documents.length; i += 1) {
+        if (documentMatches(app.documents[i])) return app.documents[i];
+      }
+    } catch (_) {}
+    if (!sourceDocumentPath && !expectedDocumentName && collectionLength(app.documents) > 0) {
+      try { return app.activeDocument; } catch (_) {}
+    }
+    return null;
+  }
+
+  function waitForTargetDocument(ms) {
+    var deadline = (new Date()).getTime() + ms;
+    while ((new Date()).getTime() < deadline) {
+      var found = findTargetDocument();
+      if (found) return found;
+      $.sleep(250);
+    }
+    return findTargetDocument();
+  }
+
+  function openSourceDocument() {
+    if (!sourceDocumentPath) return null;
+    var file = File(sourceDocumentPath);
+    if (!file.exists) throw new Error("Source InDesign file no longer exists: " + sourceDocumentPath);
+    try { return app.open(file); } catch (err) {
+      throw new Error("Could not open source InDesign file " + sourceDocumentPath + ": " + (err && err.message ? err.message : err));
+    }
+  }
+
+  function jsonEscape(value) {
+    return String(value === undefined || value === null ? "" : value)
+      .replace(/\\\\/g, "\\\\\\\\")
+      .replace(/"/g, "\\\\\\"")
+      .replace(/\\r/g, "\\\\r")
+      .replace(/\\n/g, "\\\\n")
+      .replace(/\\t/g, "\\\\t");
+  }
+
+  function jsonString(value) {
+    return "\\"" + jsonEscape(value) + "\\"";
+  }
+
+  function jsonNumber(value) {
+    var parsed = Number(value);
+    return isFinite(parsed) ? String(parsed) : "0";
+  }
+
+  function jsonBoolean(value) {
+    return value === true ? "true" : "false";
+  }
+
+  function jsonArrayOfStrings(values) {
+    var parts = [];
+    for (var i = 0; i < values.length; i += 1) parts.push(jsonString(values[i]));
+    return "[" + parts.join(",") + "]";
+  }
+
+  function stringifyInDesignTextLayerResult(value) {
+    return "{" + [
+      "\\"documentName\\":" + jsonString(value.documentName),
+      "\\"fieldName\\":" + jsonString(value.fieldName),
+      "\\"replacementText\\":" + jsonString(value.replacementText),
+      "\\"matchedLayers\\":" + jsonNumber(value.matchedLayers),
+      "\\"matchedFrames\\":" + jsonNumber(value.matchedFrames),
+      "\\"updatedFrames\\":" + jsonNumber(value.updatedFrames),
+      "\\"replacementMatches\\":" + jsonNumber(value.replacementMatches),
+      "\\"layerNames\\":" + jsonArrayOfStrings(value.layerNames),
+      "\\"unlockedCount\\":" + jsonNumber(value.unlockedCount),
+      "\\"docWasModified\\":" + jsonBoolean(value.docWasModified),
+      "\\"docModified\\":" + jsonBoolean(value.docModified),
+      "\\"docSaved\\":" + jsonBoolean(value.docSaved),
+      "\\"error\\":" + jsonString(value.error)
+    ].join(",") + "}";
+  }
+
+  function normalizeText(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/&/g, " and ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/^\\s+|\\s+$/g, "")
+      .replace(/\\s+/g, " ");
+  }
+
+  function addUnique(values, value) {
+    value = normalizeText(value);
+    if (!value) return;
+    for (var i = 0; i < values.length; i += 1) {
+      if (values[i] === value) return;
+    }
+    values.push(value);
+  }
+
+  function addAliasGroup(values, group) {
+    for (var i = 0; i < group.length; i += 1) addUnique(values, group[i]);
+  }
+
+  function fieldAliases(raw) {
+    var key = normalizeText(raw);
+    var aliases = [];
+    addUnique(aliases, key);
+    if (/\\b(disclaimer|legal|fine print|terms?|condition|copy)\\b/.test(key)) {
+      addAliasGroup(aliases, ["disclaimer", "legal", "legal copy", "fine print", "terms", "terms and conditions", "disclosures", "copy"]);
+    }
+    if (/\\b(apr|rate|finance|payment|lease|offer|rebate|incentive|cash)\\b/.test(key)) {
+      addAliasGroup(aliases, ["offer", "apr", "rate", "finance", "financing", "payment", "lease", "rebate", "incentive", "cash offer"]);
+    }
+    if (/\\b(price|sale|msrp|amount|monthly)\\b/.test(key)) {
+      addAliasGroup(aliases, ["price", "sale price", "msrp", "amount", "monthly payment"]);
+    }
+    if (/\\b(vehicle|model|trim|year|stock|vin)\\b/.test(key)) {
+      addAliasGroup(aliases, ["vehicle", "model", "trim", "year", "stock", "stock number", "vin"]);
+    }
+    if (/\\b(dealer|phone|website|url|address|location)\\b/.test(key)) {
+      addAliasGroup(aliases, ["dealer", "dealer info", "dealer information", "phone", "website", "url", "address", "location"]);
+    }
+    if (/\\b(cta|button|call to action|shop|learn more|view inventory)\\b/.test(key)) {
+      addAliasGroup(aliases, ["cta", "button", "call to action", "shop now", "learn more", "view inventory"]);
+    }
+    if (/\\b(headline|title|main)\\b/.test(key)) {
+      addAliasGroup(aliases, ["headline", "title", "main headline", "primary headline"]);
+    }
+    if (/\\b(subheadline|subtitle|subhead)\\b/.test(key)) {
+      addAliasGroup(aliases, ["subheadline", "subhead", "subtitle", "secondary headline"]);
+    }
+    if (/\\b(expir|expires|date|deadline)\\b/.test(key)) {
+      addAliasGroup(aliases, ["expiration", "expires", "expiration date", "deadline", "offer ends"]);
+    }
+    return aliases;
+  }
+
+  function nameMatchesAliases(name, aliases) {
+    var normalized = normalizeText(name);
+    if (!normalized) return false;
+    for (var i = 0; i < aliases.length; i += 1) {
+      var alias = aliases[i];
+      if (!alias) continue;
+      if (normalized === alias) return true;
+      if (alias.length > 3 && normalized.indexOf(alias) >= 0) return true;
+      if (alias.length > 3 && alias.indexOf(normalized) >= 0) return true;
+      var tokenPattern = new RegExp("(^|\\\\s)" + alias.replace(/[.*+?^\${}()|[\\]\\\\]/g, "\\\\$&") + "(\\\\s|$)");
+      if (tokenPattern.test(normalized)) return true;
+    }
+    return false;
+  }
+
+  function layerName(item) {
+    try { return String(item.itemLayer.name || ""); } catch (_) { return ""; }
+  }
+
+  function itemLabelOrName(item) {
+    var parts = [];
+    try { if (item.name) parts.push(String(item.name)); } catch (_) {}
+    try { if (item.label) parts.push(String(item.label)); } catch (_) {}
+    return parts.join(" ");
+  }
+
+  function getTextTarget(item) {
+    try {
+      var contents = item.contents;
+      if (contents !== undefined && contents !== null) return item;
+    } catch (_) {}
+    try {
+      if (item.parentStory && item.parentStory.isValid !== false) {
+        var storyContents = item.parentStory.contents;
+        if (storyContents !== undefined && storyContents !== null) return item.parentStory;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function targetKey(target, item) {
+    try { if (target && target.id !== undefined) return "t:" + String(target.id); } catch (_) {}
+    try { if (item && item.id !== undefined) return "i:" + String(item.id); } catch (_) {}
+    return String(Math.random());
+  }
+
+  function unlockTarget(target, prop, desiredValue, unlocked) {
+    try {
+      if (!target || target.isValid === false) return;
+      var current = target[prop];
+      if (current !== desiredValue) {
+        unlocked.push({ target: target, prop: prop, value: current });
+        target[prop] = desiredValue;
+      }
+    } catch (_) {}
+  }
+
+  function prepareTextItem(item, unlocked) {
+    try { unlockTarget(item.itemLayer, "locked", false, unlocked); } catch (_) {}
+    try { unlockTarget(item.itemLayer, "visible", true, unlocked); } catch (_) {}
+    try { unlockTarget(item, "locked", false, unlocked); } catch (_) {}
+    try { unlockTarget(item.parentStory, "locked", false, unlocked); } catch (_) {}
+  }
+
+  function restoreUnlocks(unlocked) {
+    for (var i = unlocked.length - 1; i >= 0; i -= 1) {
+      try {
+        if (unlocked[i].target && unlocked[i].target.isValid !== false) {
+          unlocked[i].target[unlocked[i].prop] = unlocked[i].value;
+        }
+      } catch (_) {}
+    }
+  }
+
+  function readContents(target) {
+    try { return String(target.contents || ""); } catch (_) { return ""; }
+  }
+
+  function writeContents(target, value) {
+    try { target.contents = value; return true; } catch (_) {}
+    return false;
+  }
+
+  function countReplacementMatchesInDoc(doc, value) {
+    if (!value) return 0;
+    var count = 0;
+    try {
+      for (var i = 0; i < doc.stories.length; i += 1) {
+        var contents = String(doc.stories[i].contents || "");
+        var from = 0;
+        while (true) {
+          var index = contents.indexOf(value, from);
+          if (index < 0) break;
+          count += 1;
+          from = index + Math.max(1, value.length);
+        }
+      }
+    } catch (_) {}
+    return count;
+  }
+
+  var doc = waitForTargetDocument(12000);
+  if (!doc && sourceDocumentPath) {
+    doc = openSourceDocument();
+    $.sleep(750);
+    doc = waitForTargetDocument(8000) || doc;
+  }
+  if (!doc) {
+    if (collectionLength(app.documents) < 1) throw new Error("No active InDesign document and source file could not be opened");
+    var activeDocName = "";
+    try { activeDocName = String(app.activeDocument.name || ""); } catch (_) {}
+    throw new Error("Active InDesign document mismatch: expected " + (expectedDocumentName || sourceDocumentPath || "target document") + ", got " + activeDocName);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+
+  var docWasModified = false;
+  try { docWasModified = doc.modified === true; } catch (_) {}
+  var aliases = fieldAliases(fieldName);
+  var matchedLayerNames = [];
+  var matchedLayerMap = {};
+  try {
+    for (var layerIndex = 0; layerIndex < doc.layers.length; layerIndex += 1) {
+      var layer = doc.layers[layerIndex];
+      var currentLayerName = String(layer.name || "");
+      if (nameMatchesAliases(currentLayerName, aliases)) {
+        var normalizedLayer = normalizeText(currentLayerName);
+        matchedLayerMap[normalizedLayer] = true;
+        matchedLayerNames.push(currentLayerName);
+      }
+    }
+  } catch (_) {}
+
+  var seen = {};
+  var matchedFrames = 0;
+  var updatedFrames = 0;
+  var unlocked = [];
+  var error = "";
+  try {
+    var items = doc.allPageItems;
+    for (var itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+      var item = items[itemIndex];
+      if (!item || item.isValid === false) continue;
+      var currentLayerName = layerName(item);
+      var matchedByLayer = matchedLayerMap[normalizeText(currentLayerName)] === true || nameMatchesAliases(currentLayerName, aliases);
+      var matchedByItem = nameMatchesAliases(itemLabelOrName(item), aliases);
+      if (!matchedByLayer && !matchedByItem) continue;
+      var target = getTextTarget(item);
+      if (!target) continue;
+      var key = targetKey(target, item);
+      if (seen[key]) continue;
+      seen[key] = true;
+      matchedFrames += 1;
+      prepareTextItem(item, unlocked);
+      var before = readContents(target);
+      if (before !== replacementText) {
+        if (writeContents(target, replacementText)) updatedFrames += 1;
+      }
+    }
+  } catch (err) {
+    error = err && err.message ? err.message : String(err);
+  }
+  restoreUnlocks(unlocked);
+
+  if (!error && matchedFrames < 1) {
+    error = "No editable text frame matched field aliases for " + fieldName;
+  } else if (!error && updatedFrames < 1) {
+    error = "Matching text frames already contained the requested replacement or could not be edited.";
+  }
+
+  var out = {
+    documentName: String(doc.name || ""),
+    fieldName: fieldName,
+    replacementText: replacementText,
+    matchedLayers: matchedLayerNames.length,
+    matchedFrames: matchedFrames,
+    updatedFrames: updatedFrames,
+    replacementMatches: countReplacementMatchesInDoc(doc, replacementText),
+    layerNames: matchedLayerNames,
+    unlockedCount: unlocked.length,
+    docWasModified: docWasModified,
+    docModified: false,
+    docSaved: false,
+    error: error
+  };
+  try { out.docModified = doc.modified === true; } catch (_) {}
+  try { out.docSaved = doc.saved === true; } catch (_) {}
+  return stringifyInDesignTextLayerResult(out);
+}());
+`;
+  return {
+    appName: targetName,
+    script: `
+tell application "${escapeAppleScriptString(targetName)}"
+  activate
+  set _ucResult to do script "${escapeAppleScriptString(jsx)}" language javascript
+end tell
+return _ucResult
+`,
+  };
+}
+
+function buildInDesignBatchFindChangeScript({ appName, pairs, expectedDocumentName, sourceDocumentPath }) {
+  const resolved = resolveInDesignMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp('Adobe InDesign') ||
+    resolveInstalledMacApp('InDesign');
+  const targetName = resolved?.name || String(appName || 'InDesign').trim();
+  if (!targetName || !/indesign/i.test(targetName)) return null;
+  const safePairs = (Array.isArray(pairs) ? pairs : [])
+    .slice(0, 20)
+    .map((pair) => ({
+      findText: String(pair?.findText ?? ''),
+      changeText: String(pair?.changeText ?? ''),
+    }))
+    .filter((pair) => pair.findText);
+  const jsx = `
+(function () {
+  var pairs = ${JSON.stringify(safePairs)};
+  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  if (!pairs || pairs.length < 1) throw new Error("Missing Find/Change pairs");
+
+  function normalizeDocName(value) {
+    return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
+  }
+  function normalizeDocPath(value) {
+    try { return File(String(value || "")).fsName.toLowerCase(); } catch (_) {}
+    return String(value || "").toLowerCase();
+  }
+  function documentPath(value) {
+    try { return value.fullName.fsName; } catch (_) { return ""; }
+  }
+  function documentMatches(value) {
+    if (!value || value.isValid === false) return false;
+    var docName = String(value.name || "");
+    if (sourceDocumentPath) {
+      var targetPath = normalizeDocPath(sourceDocumentPath);
+      var currentPath = normalizeDocPath(documentPath(value));
+      if (currentPath && currentPath === targetPath) return true;
+      if (normalizeDocName(docName) === normalizeDocName(sourceDocumentPath.split("/").pop())) return true;
+    }
+    if (expectedDocumentName && normalizeDocName(docName) === normalizeDocName(expectedDocumentName)) return true;
+    return !sourceDocumentPath && !expectedDocumentName;
+  }
+  function findTargetDocument() {
+    try {
+      for (var i = 0; i < app.documents.length; i += 1) {
+        if (documentMatches(app.documents[i])) return app.documents[i];
+      }
+    } catch (_) {}
+    if (!sourceDocumentPath && !expectedDocumentName && app.documents.length > 0) return app.activeDocument;
+    return null;
+  }
+  function waitForTargetDocument(ms) {
+    var deadline = (new Date()).getTime() + ms;
+    while ((new Date()).getTime() < deadline) {
+      var found = findTargetDocument();
+      if (found) return found;
+      $.sleep(250);
+    }
+    return findTargetDocument();
+  }
+  function openSourceDocument() {
+    if (!sourceDocumentPath) return null;
+    var file = File(sourceDocumentPath);
+    if (!file.exists) throw new Error("Source InDesign file no longer exists: " + sourceDocumentPath);
+    try { return app.open(file); } catch (err) {
+      throw new Error("Could not open source InDesign file " + sourceDocumentPath + ": " + (err && err.message ? err.message : err));
+    }
+  }
+
+  function jsonEscape(value) {
+    return String(value === undefined || value === null ? "" : value)
+      .replace(/\\\\/g, "\\\\\\\\")
+      .replace(/"/g, "\\\\\\"")
+      .replace(/\\r/g, "\\\\r")
+      .replace(/\\n/g, "\\\\n")
+      .replace(/\\t/g, "\\\\t");
+  }
+  function jsonString(value) { return "\\"" + jsonEscape(value) + "\\""; }
+  function jsonNumber(value) {
+    var parsed = Number(value);
+    return isFinite(parsed) ? String(parsed) : "0";
+  }
+  function jsonBoolean(value) { return value === true ? "true" : "false"; }
+  function collectionLength(value) {
+    try { return value ? value.length : 0; } catch (_) { return 0; }
+  }
+  function stringifyPairResult(value) {
+    return "{" + [
+      "\\"findText\\":" + jsonString(value.findText),
+      "\\"changeText\\":" + jsonString(value.changeText),
+      "\\"matched\\":" + jsonNumber(value.matched),
+      "\\"changed\\":" + jsonNumber(value.changed),
+      "\\"remaining\\":" + jsonNumber(value.remaining),
+      "\\"replacementMatches\\":" + jsonNumber(value.replacementMatches),
+      "\\"method\\":" + jsonString(value.method),
+      "\\"unlockedCount\\":" + jsonNumber(value.unlockedCount),
+      "\\"fallbackReason\\":" + jsonString(value.fallbackReason),
+      "\\"error\\":" + jsonString(value.error)
+    ].join(",") + "}";
+  }
+  function stringifyBatchResult(value) {
+    var resultParts = [];
+    for (var i = 0; i < value.results.length; i += 1) resultParts.push(stringifyPairResult(value.results[i]));
+    return "{" + [
+      "\\"documentName\\":" + jsonString(value.documentName),
+      "\\"docWasModified\\":" + jsonBoolean(value.docWasModified),
+      "\\"docModified\\":" + jsonBoolean(value.docModified),
+      "\\"docSaved\\":" + jsonBoolean(value.docSaved),
+      "\\"results\\":[" + resultParts.join(",") + "]",
+      "\\"error\\":" + jsonString(value.error)
+    ].join(",") + "}";
+  }
+
+  var nothing = NothingEnum.NOTHING;
+  if (nothing === undefined) nothing = NothingEnum.nothing;
+  function resetFindChange() {
+    app.findTextPreferences = nothing;
+    app.changeTextPreferences = nothing;
+  }
+  function enableInclusiveSearchOptions() {
+    try { app.findChangeTextOptions.includeFootnotes = true; } catch (_) {}
+    try { app.findChangeTextOptions.includeHiddenLayers = true; } catch (_) {}
+    try { app.findChangeTextOptions.includeLockedLayersForFind = true; } catch (_) {}
+    try { app.findChangeTextOptions.includeLockedStoriesForFind = true; } catch (_) {}
+    try { app.findChangeTextOptions.includeMasterPages = true; } catch (_) {}
+  }
+  function unlockTarget(target, prop, unlocked) {
+    try {
+      if (target && target.isValid !== false && target[prop] === true) {
+        unlocked.push({ target: target, prop: prop, value: true });
+        target[prop] = false;
+      }
+    } catch (_) {}
+  }
+  function temporarilyUnlockDocument(doc) {
+    var unlocked = [];
+    try {
+      for (var i = 0; i < doc.layers.length; i += 1) unlockTarget(doc.layers[i], "locked", unlocked);
+    } catch (_) {}
+    try {
+      for (var j = 0; j < doc.stories.length; j += 1) unlockTarget(doc.stories[j], "locked", unlocked);
+    } catch (_) {}
+    try {
+      var pageItems = doc.allPageItems;
+      for (var k = 0; k < pageItems.length; k += 1) unlockTarget(pageItems[k], "locked", unlocked);
+    } catch (_) {}
+    return unlocked;
+  }
+  function restoreUnlocks(unlocked) {
+    for (var i = unlocked.length - 1; i >= 0; i -= 1) {
+      try {
+        if (unlocked[i].target && unlocked[i].target.isValid !== false) {
+          unlocked[i].target[unlocked[i].prop] = unlocked[i].value;
+        }
+      } catch (_) {}
+    }
+  }
+  function countCurrentMatches(doc, value) {
+    if (!value) return 0;
+    var matches = [];
+    resetFindChange();
+    enableInclusiveSearchOptions();
+    try {
+      app.findTextPreferences.findWhat = value;
+      matches = doc.findText();
+    } catch (_) {
+      matches = [];
+    } finally {
+      resetFindChange();
+    }
+    return collectionLength(matches);
+  }
+  function runChangeAll(doc, pair, mode) {
+    var unlocked = [];
+    var matches = [];
+    var changed = [];
+    var error = "";
+    resetFindChange();
+    enableInclusiveSearchOptions();
+    app.findTextPreferences.findWhat = pair.findText;
+    app.changeTextPreferences.changeTo = pair.changeText;
+    try { matches = doc.findText(); } catch (_) {}
+    try {
+      if (mode === "unlocked") unlocked = temporarilyUnlockDocument(doc);
+      changed = doc.changeText();
+    } catch (err) {
+      error = String(err && err.message ? err.message : err);
+    } finally {
+      restoreUnlocks(unlocked);
+      resetFindChange();
+    }
+    return {
+      findText: pair.findText,
+      changeText: pair.changeText,
+      matched: collectionLength(matches),
+      changed: collectionLength(changed),
+      method: mode === "unlocked" ? "find-change-unlocked" : "find-change",
+      unlockedCount: collectionLength(unlocked),
+      fallbackReason: "",
+      error: error
+    };
+  }
+
+  var doc = waitForTargetDocument(12000);
+  if (!doc && sourceDocumentPath) {
+    doc = openSourceDocument();
+    $.sleep(750);
+    doc = waitForTargetDocument(8000) || doc;
+  }
+  if (!doc) {
+    if (app.documents.length < 1) throw new Error("No active InDesign document and source file could not be opened");
+    var activeDocName = "";
+    try { activeDocName = String(app.activeDocument.name || ""); } catch (_) {}
+    throw new Error("Active InDesign document mismatch: expected " + (expectedDocumentName || sourceDocumentPath || "target document") + ", got " + activeDocName);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  var docWasModified = false;
+  try { docWasModified = doc.modified === true; } catch (_) {}
+  var results = [];
+  var topError = "";
+  for (var pairIndex = 0; pairIndex < pairs.length; pairIndex += 1) {
+    var pair = {
+      findText: String(pairs[pairIndex].findText || ""),
+      changeText: String(pairs[pairIndex].changeText || "")
+    };
+    var first = runChangeAll(doc, pair, "normal");
+    var result = first;
+    var shouldRetryUnlocked = (first.matched > 0 && first.changed < first.matched) || (first.changed < 1 && first.error);
+    if (shouldRetryUnlocked) {
+      var second = runChangeAll(doc, pair, "unlocked");
+      if (second.changed > 0 || (first.error && !second.error)) {
+        second.changed = first.changed + second.changed;
+        second.matched = Math.max(first.matched, first.changed + second.matched);
+        second.fallbackReason = first.error || "some matched text could not be changed while locked";
+        result = second;
+      }
+    }
+    result.remaining = countCurrentMatches(doc, pair.findText);
+    result.replacementMatches = countCurrentMatches(doc, pair.changeText);
+    results.push(result);
+  }
+  var docModified = false;
+  var docSaved = false;
+  try { docModified = doc.modified === true; } catch (_) {}
+  try { docSaved = doc.saved === true; } catch (_) {}
+  return stringifyBatchResult({
+    documentName: String(doc.name || ""),
+    docWasModified: docWasModified,
+    docModified: docModified,
+    docSaved: docSaved,
+    results: results,
+    error: topError
+  });
+}());
+`;
+  return {
+    appName: targetName,
+    script: `
+tell application "${escapeAppleScriptString(targetName)}"
+  activate
+  set _ucResult to do script "${escapeAppleScriptString(jsx)}" language javascript
+end tell
+return _ucResult
+`,
+  };
+}
+
+function buildInDesignFindChangeScript({ appName, findText, changeText, expectedDocumentName, sourceDocumentPath }) {
+  const resolved = resolveInDesignMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp('Adobe InDesign') ||
+    resolveInstalledMacApp('InDesign');
+  const targetName = resolved?.name || String(appName || 'InDesign').trim();
+  if (!targetName || !/indesign/i.test(targetName)) return null;
+  const jsx = `
+(function () {
+		  var findText = ${JSON.stringify(String(findText ?? ''))};
+		  var changeText = ${JSON.stringify(String(changeText ?? ''))};
+		  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+		  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+		  if (!findText) throw new Error("Missing findText");
+		  function normalizeDocName(value) {
+		    return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
+		  }
+		  function normalizeDocPath(value) {
+		    try { return File(String(value || "")).fsName.toLowerCase(); } catch (_) {}
+		    return String(value || "").toLowerCase();
+		  }
+		  function documentPath(value) {
+		    try { return value.fullName.fsName; } catch (_) { return ""; }
+		  }
+		  function documentMatches(value) {
+		    if (!value || value.isValid === false) return false;
+		    var docName = String(value.name || "");
+		    if (sourceDocumentPath) {
+		      var targetPath = normalizeDocPath(sourceDocumentPath);
+		      var currentPath = normalizeDocPath(documentPath(value));
+		      if (currentPath && currentPath === targetPath) return true;
+		      if (normalizeDocName(docName) === normalizeDocName(sourceDocumentPath.split("/").pop())) return true;
+		    }
+		    if (expectedDocumentName && normalizeDocName(docName) === normalizeDocName(expectedDocumentName)) return true;
+		    return !sourceDocumentPath && !expectedDocumentName;
+		  }
+		  function findTargetDocument() {
+		    try {
+		      for (var i = 0; i < app.documents.length; i += 1) {
+		        if (documentMatches(app.documents[i])) return app.documents[i];
+		      }
+		    } catch (_) {}
+		    if (!sourceDocumentPath && !expectedDocumentName && app.documents.length > 0) return app.activeDocument;
+		    return null;
+		  }
+		  function waitForTargetDocument(ms) {
+		    var deadline = (new Date()).getTime() + ms;
+		    while ((new Date()).getTime() < deadline) {
+		      var found = findTargetDocument();
+		      if (found) return found;
+		      $.sleep(250);
+		    }
+		    return findTargetDocument();
+		  }
+		  function openSourceDocument() {
+		    if (!sourceDocumentPath) return null;
+		    var file = File(sourceDocumentPath);
+		    if (!file.exists) throw new Error("Source InDesign file no longer exists: " + sourceDocumentPath);
+		    try { return app.open(file); } catch (err) {
+		      throw new Error("Could not open source InDesign file " + sourceDocumentPath + ": " + (err && err.message ? err.message : err));
+		    }
+		  }
+		  var doc = waitForTargetDocument(12000);
+		  if (!doc && sourceDocumentPath) {
+		    doc = openSourceDocument();
+		    $.sleep(750);
+		    doc = waitForTargetDocument(8000) || doc;
+		  }
+		  if (!doc) {
+		    if (app.documents.length < 1) throw new Error("No active InDesign document and source file could not be opened");
+		    var activeDocName = "";
+		    try { activeDocName = String(app.activeDocument.name || ""); } catch (_) {}
+		    throw new Error("Active InDesign document mismatch: expected " + (expectedDocumentName || sourceDocumentPath || "target document") + ", got " + activeDocName);
+		  }
+		  try { app.activeDocument = doc; } catch (_) {}
+		  var nothing = NothingEnum.NOTHING;
+  if (nothing === undefined) nothing = NothingEnum.nothing;
+  var docWasModified = false;
+  try { docWasModified = doc.modified === true; } catch (_) {}
+
+  function collectionLength(value) {
+    try { return value ? value.length : 0; } catch (_) { return 0; }
+  }
+
+  function jsonEscape(value) {
+    return String(value === undefined || value === null ? "" : value)
+      .replace(/\\\\/g, "\\\\\\\\")
+      .replace(/"/g, "\\\\\\"")
+      .replace(/\\r/g, "\\\\r")
+      .replace(/\\n/g, "\\\\n")
+      .replace(/\\t/g, "\\\\t");
+  }
+
+  function jsonString(value) {
+    return "\\"" + jsonEscape(value) + "\\"";
+  }
+
+  function jsonNumber(value) {
+    var parsed = Number(value);
+    return isFinite(parsed) ? String(parsed) : "0";
+  }
+
+  function jsonBoolean(value) {
+    return value === true ? "true" : "false";
+  }
+
+  function stringifyInDesignResult(value) {
+    return "{" + [
+      "\\"documentName\\":" + jsonString(value.documentName),
+      "\\"matched\\":" + jsonNumber(value.matched),
+      "\\"changed\\":" + jsonNumber(value.changed),
+      "\\"remaining\\":" + jsonNumber(value.remaining),
+      "\\"replacementMatches\\":" + jsonNumber(value.replacementMatches),
+      "\\"method\\":" + jsonString(value.method),
+      "\\"unlockedCount\\":" + jsonNumber(value.unlockedCount),
+      "\\"lockedLayers\\":" + jsonNumber(value.lockedLayers),
+      "\\"hiddenLayers\\":" + jsonNumber(value.hiddenLayers),
+      "\\"lockedPageItems\\":" + jsonNumber(value.lockedPageItems),
+      "\\"docWasModified\\":" + jsonBoolean(value.docWasModified),
+      "\\"docModified\\":" + jsonBoolean(value.docModified),
+      "\\"docSaved\\":" + jsonBoolean(value.docSaved),
+      "\\"fallbackReason\\":" + jsonString(value.fallbackReason),
+      "\\"error\\":" + jsonString(value.error)
+    ].join(",") + "}";
+  }
+
+  function resetFindChange() {
+    app.findTextPreferences = nothing;
+    app.changeTextPreferences = nothing;
+  }
+
+  function enableInclusiveSearchOptions() {
+    try { app.findChangeTextOptions.includeFootnotes = true; } catch (_) {}
+    try { app.findChangeTextOptions.includeHiddenLayers = true; } catch (_) {}
+    try { app.findChangeTextOptions.includeLockedLayersForFind = true; } catch (_) {}
+    try { app.findChangeTextOptions.includeLockedStoriesForFind = true; } catch (_) {}
+    try { app.findChangeTextOptions.includeMasterPages = true; } catch (_) {}
+  }
+
+  function getDocumentDiagnostics() {
+    var out = {
+      lockedLayers: 0,
+      hiddenLayers: 0,
+      lockedPageItems: 0,
+      docModified: false,
+      docSaved: false
+    };
+    try { out.docModified = doc.modified === true; } catch (_) {}
+    try { out.docSaved = doc.saved === true; } catch (_) {}
+    try {
+      for (var i = 0; i < doc.layers.length; i += 1) {
+        try { if (doc.layers[i].locked === true) out.lockedLayers += 1; } catch (_) {}
+        try { if (doc.layers[i].visible === false) out.hiddenLayers += 1; } catch (_) {}
+      }
+    } catch (_) {}
+    try {
+      var pageItems = doc.allPageItems;
+      for (var j = 0; j < pageItems.length; j += 1) {
+        try { if (pageItems[j].locked === true) out.lockedPageItems += 1; } catch (_) {}
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  function unlockTarget(target, prop, unlocked) {
+    try {
+      if (target && target.isValid !== false && target[prop] === true) {
+        unlocked.push({ target: target, prop: prop, value: true });
+        target[prop] = false;
+      }
+    } catch (_) {}
+  }
+
+  function temporarilyUnlockDocument() {
+    var unlocked = [];
+    try {
+      for (var i = 0; i < doc.layers.length; i += 1) {
+        unlockTarget(doc.layers[i], "locked", unlocked);
+      }
+    } catch (_) {}
+    try {
+      for (var j = 0; j < doc.stories.length; j += 1) {
+        unlockTarget(doc.stories[j], "locked", unlocked);
+      }
+    } catch (_) {}
+    try {
+      var pageItems = doc.allPageItems;
+      for (var k = 0; k < pageItems.length; k += 1) {
+        unlockTarget(pageItems[k], "locked", unlocked);
+      }
+    } catch (_) {}
+    return unlocked;
+  }
+
+  function restoreUnlocks(unlocked) {
+    for (var i = unlocked.length - 1; i >= 0; i -= 1) {
+      try {
+        if (unlocked[i].target && unlocked[i].target.isValid !== false) {
+          unlocked[i].target[unlocked[i].prop] = unlocked[i].value;
+        }
+      } catch (_) {}
+    }
+  }
+
+  function runChangeAll(mode) {
+    var unlocked = [];
+    var matches = [];
+    var changed = [];
+    var error = "";
+    resetFindChange();
+    enableInclusiveSearchOptions();
+    app.findTextPreferences.findWhat = findText;
+    app.changeTextPreferences.changeTo = changeText;
+    try { matches = doc.findText(); } catch (_) {}
+    try {
+      if (mode === "unlocked") unlocked = temporarilyUnlockDocument();
+      changed = doc.changeText();
+    } catch (err) {
+      error = String(err && err.message ? err.message : err);
+    } finally {
+      restoreUnlocks(unlocked);
+      resetFindChange();
+    }
+    return {
+      documentName: String(doc.name || ""),
+      matched: collectionLength(matches),
+      changed: collectionLength(changed),
+      method: mode === "unlocked" ? "find-change-unlocked" : "find-change",
+      unlockedCount: collectionLength(unlocked),
+      error: error
+    };
+  }
+
+  function countCurrentMatches(value) {
+    if (!value) return 0;
+    var matches = [];
+    resetFindChange();
+    enableInclusiveSearchOptions();
+    try {
+      app.findTextPreferences.findWhat = value;
+      matches = doc.findText();
+    } catch (_) {
+      matches = [];
+    } finally {
+      resetFindChange();
+    }
+    return collectionLength(matches);
+  }
+
+  var diagnosticsBefore = getDocumentDiagnostics();
+  var first = runChangeAll("normal");
+  var result = first;
+  var shouldRetryUnlocked = (first.matched > 0 && first.changed < first.matched) || (first.changed < 1 && first.error);
+  if (shouldRetryUnlocked) {
+    var second = runChangeAll("unlocked");
+    if (second.changed > 0 || (first.error && !second.error)) {
+      second.changed = first.changed + second.changed;
+      second.matched = Math.max(first.matched, first.changed + second.matched);
+      second.fallbackReason = first.error || "some matched text could not be changed while locked";
+      result = second;
+    }
+  }
+  var diagnosticsAfter = getDocumentDiagnostics();
+  result.remaining = countCurrentMatches(findText);
+  result.replacementMatches = countCurrentMatches(changeText);
+  result.lockedLayers = diagnosticsBefore.lockedLayers;
+  result.hiddenLayers = diagnosticsBefore.hiddenLayers;
+  result.lockedPageItems = diagnosticsBefore.lockedPageItems;
+  result.docWasModified = docWasModified;
+  result.docModified = diagnosticsAfter.docModified;
+  result.docSaved = diagnosticsAfter.docSaved;
+  return stringifyInDesignResult(result);
+}());
+`;
+  return {
+    appName: targetName,
+    script: `
+tell application "${escapeAppleScriptString(targetName)}"
+  activate
+  set _ucResult to do script "${escapeAppleScriptString(jsx)}" language javascript
+end tell
+return _ucResult
+`,
+  };
+}
+
+function buildInDesignExportProofScript({ appName, outputPath, expectedDocumentName, sourceDocumentPath }) {
+  const resolved = resolveInDesignMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp('Adobe InDesign') ||
+    resolveInstalledMacApp('InDesign');
+  const targetName = resolved?.name || String(appName || 'InDesign').trim();
+  if (!targetName || !/indesign/i.test(targetName)) return null;
+  const jsx = `
+(function () {
+  var outputPath = ${JSON.stringify(String(outputPath ?? ''))};
+  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  if (!outputPath) throw new Error("Missing outputPath");
+
+  function normalizeDocName(value) {
+    return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
+  }
+  function normalizeDocPath(value) {
+    try { return File(String(value || "")).fsName.toLowerCase(); } catch (_) {}
+    return String(value || "").toLowerCase();
+  }
+  function documentPath(value) {
+    try { return value.fullName.fsName; } catch (_) { return ""; }
+  }
+  function documentMatches(value) {
+    if (!value || value.isValid === false) return false;
+    var docName = String(value.name || "");
+    if (sourceDocumentPath) {
+      var targetPath = normalizeDocPath(sourceDocumentPath);
+      var currentPath = normalizeDocPath(documentPath(value));
+      if (currentPath && currentPath === targetPath) return true;
+      if (normalizeDocName(docName) === normalizeDocName(sourceDocumentPath.split("/").pop())) return true;
+    }
+    if (expectedDocumentName && normalizeDocName(docName) === normalizeDocName(expectedDocumentName)) return true;
+    return !sourceDocumentPath && !expectedDocumentName;
+  }
+  function findTargetDocument() {
+    try {
+      for (var i = 0; i < app.documents.length; i += 1) {
+        if (documentMatches(app.documents[i])) return app.documents[i];
+      }
+    } catch (_) {}
+    if (!sourceDocumentPath && !expectedDocumentName && app.documents.length > 0) return app.activeDocument;
+    return null;
+  }
+  function waitForTargetDocument(ms) {
+    var deadline = (new Date()).getTime() + ms;
+    while ((new Date()).getTime() < deadline) {
+      var found = findTargetDocument();
+      if (found) return found;
+      $.sleep(250);
+    }
+    return findTargetDocument();
+  }
+  function openSourceDocument() {
+    if (!sourceDocumentPath) return null;
+    var file = File(sourceDocumentPath);
+    if (!file.exists) throw new Error("Source InDesign file no longer exists: " + sourceDocumentPath);
+    try { return app.open(file); } catch (err) {
+      throw new Error("Could not open source InDesign file " + sourceDocumentPath + ": " + (err && err.message ? err.message : err));
+    }
+  }
+  function jsonEscape(value) {
+    return String(value === undefined || value === null ? "" : value)
+      .replace(/\\\\/g, "\\\\\\\\")
+      .replace(/"/g, "\\\\\\"")
+      .replace(/\\r/g, "\\\\r")
+      .replace(/\\n/g, "\\\\n")
+      .replace(/\\t/g, "\\\\t");
+  }
+  function jsonString(value) { return "\\"" + jsonEscape(value) + "\\""; }
+  function jsonNumber(value) {
+    var parsed = Number(value);
+    return isFinite(parsed) ? String(parsed) : "0";
+  }
+  function jsonBoolean(value) { return value === true ? "true" : "false"; }
+  function stringifyExportResult(value) {
+    return "{" + [
+      "\\"documentName\\":" + jsonString(value.documentName),
+      "\\"pageCount\\":" + jsonNumber(value.pageCount),
+      "\\"spreadCount\\":" + jsonNumber(value.spreadCount),
+      "\\"docWasModified\\":" + jsonBoolean(value.docWasModified),
+      "\\"docModified\\":" + jsonBoolean(value.docModified),
+      "\\"docSaved\\":" + jsonBoolean(value.docSaved),
+      "\\"error\\":" + jsonString(value.error)
+    ].join(",") + "}";
+  }
+
+  var doc = waitForTargetDocument(12000);
+  if (!doc && sourceDocumentPath) {
+    doc = openSourceDocument();
+    $.sleep(750);
+    doc = waitForTargetDocument(8000) || doc;
+  }
+  if (!doc) {
+    if (app.documents.length < 1) throw new Error("No active InDesign document and source file could not be opened");
+    var activeDocName = "";
+    try { activeDocName = String(app.activeDocument.name || ""); } catch (_) {}
+    throw new Error("Active InDesign document mismatch: expected " + (expectedDocumentName || sourceDocumentPath || "target document") + ", got " + activeDocName);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+
+  var docWasModified = false;
+  try { docWasModified = doc.modified === true; } catch (_) {}
+  var result = {
+    documentName: String(doc.name || ""),
+    pageCount: 0,
+    spreadCount: 0,
+    docWasModified: docWasModified,
+    docModified: false,
+    docSaved: false,
+    error: ""
+  };
+  try { result.pageCount = doc.pages.length; } catch (_) {}
+  try { result.spreadCount = doc.spreads.length; } catch (_) {}
+  try {
+    var outputFile = File(outputPath);
+    var pdfType = ExportFormat.PDF_TYPE;
+    if (pdfType === undefined) pdfType = ExportFormat.pdfType;
+    doc.exportFile(pdfType, outputFile, false);
+  } catch (err) {
+    result.error = err && err.message ? err.message : String(err);
+  }
+  try { result.docModified = doc.modified === true; } catch (_) {}
+  try { result.docSaved = doc.saved === true; } catch (_) {}
+  return stringifyExportResult(result);
+}());
+`;
+  return {
+    appName: targetName,
+    script: `
+tell application "${escapeAppleScriptString(targetName)}"
+  activate
+  set _ucResult to do script "${escapeAppleScriptString(jsx)}" language javascript
+end tell
+return _ucResult
+`,
+  };
+}
+
+function buildInDesignRelinkAssetScript({ appName, assetPath, linkQuery, expectedDocumentName, sourceDocumentPath }) {
+  const resolved = resolveInDesignMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp('Adobe InDesign') ||
+    resolveInstalledMacApp('InDesign');
+  const targetName = resolved?.name || String(appName || 'InDesign').trim();
+  if (!targetName || !/indesign/i.test(targetName)) return null;
+  const jsx = `
+(function () {
+  var assetPath = ${JSON.stringify(String(assetPath ?? ''))};
+  var linkQuery = ${JSON.stringify(String(linkQuery ?? ''))};
+  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  if (!assetPath) throw new Error("Missing assetPath");
+
+  function normalizeDocName(value) {
+    return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
+  }
+  function normalizeDocPath(value) {
+    try { return File(String(value || "")).fsName.toLowerCase(); } catch (_) {}
+    return String(value || "").toLowerCase();
+  }
+  function documentPath(value) {
+    try { return value.fullName.fsName; } catch (_) { return ""; }
+  }
+  function documentMatches(value) {
+    if (!value || value.isValid === false) return false;
+    var docName = String(value.name || "");
+    if (sourceDocumentPath) {
+      var targetPath = normalizeDocPath(sourceDocumentPath);
+      var currentPath = normalizeDocPath(documentPath(value));
+      if (currentPath && currentPath === targetPath) return true;
+      if (normalizeDocName(docName) === normalizeDocName(sourceDocumentPath.split("/").pop())) return true;
+    }
+    if (expectedDocumentName && normalizeDocName(docName) === normalizeDocName(expectedDocumentName)) return true;
+    return !sourceDocumentPath && !expectedDocumentName;
+  }
+  function findTargetDocument() {
+    try {
+      for (var i = 0; i < app.documents.length; i += 1) {
+        if (documentMatches(app.documents[i])) return app.documents[i];
+      }
+    } catch (_) {}
+    if (!sourceDocumentPath && !expectedDocumentName && app.documents.length > 0) return app.activeDocument;
+    return null;
+  }
+  function waitForTargetDocument(ms) {
+    var deadline = (new Date()).getTime() + ms;
+    while ((new Date()).getTime() < deadline) {
+      var found = findTargetDocument();
+      if (found) return found;
+      $.sleep(250);
+    }
+    return findTargetDocument();
+  }
+  function openSourceDocument() {
+    if (!sourceDocumentPath) return null;
+    var file = File(sourceDocumentPath);
+    if (!file.exists) throw new Error("Source InDesign file no longer exists: " + sourceDocumentPath);
+    try { return app.open(file); } catch (err) {
+      throw new Error("Could not open source InDesign file " + sourceDocumentPath + ": " + (err && err.message ? err.message : err));
+    }
+  }
+  function collectionLength(value) {
+    try { return value ? value.length : 0; } catch (_) { return 0; }
+  }
+  function pushUniqueLink(list, link) {
+    if (!link || link.isValid === false) return;
+    for (var i = 0; i < list.length; i += 1) {
+      if (list[i] === link) return;
+    }
+    list.push(link);
+  }
+  function collectItemLinks(item, out) {
+    if (!item || item.isValid === false) return;
+    try { if (item.itemLink && item.itemLink.isValid !== false) pushUniqueLink(out, item.itemLink); } catch (_) {}
+    try {
+      for (var i = 0; i < collectionLength(item.graphics); i += 1) {
+        try { if (item.graphics[i].itemLink) pushUniqueLink(out, item.graphics[i].itemLink); } catch (_) {}
+      }
+    } catch (_) {}
+    try {
+      for (var j = 0; j < collectionLength(item.allGraphics); j += 1) {
+        try { if (item.allGraphics[j].itemLink) pushUniqueLink(out, item.allGraphics[j].itemLink); } catch (_) {}
+      }
+    } catch (_) {}
+    try { if (item.parent && item.parent.itemLink) pushUniqueLink(out, item.parent.itemLink); } catch (_) {}
+  }
+  function linkStatusText(link) {
+    try { return String(link.status || ""); } catch (_) {}
+    return "";
+  }
+  function isProblemLink(link) {
+    try { if (link.status === LinkStatus.NORMAL) return false; } catch (_) {}
+    try { if (link.status === LinkStatus.LINK_UP_TO_DATE) return false; } catch (_) {}
+    var status = linkStatusText(link).toLowerCase();
+    if (!status) return false;
+    return status.indexOf("normal") < 0 && status.indexOf("up") < 0 && status.indexOf("ok") < 0;
+  }
+  function linkIdentity(link) {
+    var parts = [];
+    try { parts.push(String(link.name || "")); } catch (_) {}
+    try { parts.push(String(link.filePath || "")); } catch (_) {}
+    try { parts.push(String(link.parent.name || "")); } catch (_) {}
+    try { parts.push(String(link.parent.label || "")); } catch (_) {}
+    try { parts.push(String(link.parent.itemLayer.name || "")); } catch (_) {}
+    return parts.join(" ").toLowerCase();
+  }
+  function jsonEscape(value) {
+    return String(value === undefined || value === null ? "" : value)
+      .replace(/\\\\/g, "\\\\\\\\")
+      .replace(/"/g, "\\\\\\"")
+      .replace(/\\r/g, "\\\\r")
+      .replace(/\\n/g, "\\\\n")
+      .replace(/\\t/g, "\\\\t");
+  }
+  function jsonString(value) { return "\\"" + jsonEscape(value) + "\\""; }
+  function jsonNumber(value) {
+    var parsed = Number(value);
+    return isFinite(parsed) ? String(parsed) : "0";
+  }
+  function jsonBoolean(value) { return value === true ? "true" : "false"; }
+  function jsonArray(values) {
+    var out = [];
+    for (var i = 0; i < values.length; i += 1) out.push(jsonString(values[i]));
+    return "[" + out.join(",") + "]";
+  }
+  function stringifyRelinkResult(value) {
+    return "{" + [
+      "\\"documentName\\":" + jsonString(value.documentName),
+      "\\"matchedLinks\\":" + jsonNumber(value.matchedLinks),
+      "\\"relinkedLinks\\":" + jsonNumber(value.relinkedLinks),
+      "\\"missingBefore\\":" + jsonNumber(value.missingBefore),
+      "\\"missingAfter\\":" + jsonNumber(value.missingAfter),
+      "\\"linkNames\\":" + jsonArray(value.linkNames || []),
+      "\\"docWasModified\\":" + jsonBoolean(value.docWasModified),
+      "\\"docModified\\":" + jsonBoolean(value.docModified),
+      "\\"docSaved\\":" + jsonBoolean(value.docSaved),
+      "\\"error\\":" + jsonString(value.error)
+    ].join(",") + "}";
+  }
+
+  var doc = waitForTargetDocument(12000);
+  if (!doc && sourceDocumentPath) {
+    doc = openSourceDocument();
+    $.sleep(750);
+    doc = waitForTargetDocument(8000) || doc;
+  }
+  if (!doc) {
+    if (app.documents.length < 1) throw new Error("No active InDesign document and source file could not be opened");
+    var activeDocName = "";
+    try { activeDocName = String(app.activeDocument.name || ""); } catch (_) {}
+    throw new Error("Active InDesign document mismatch: expected " + (expectedDocumentName || sourceDocumentPath || "target document") + ", got " + activeDocName);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+
+  var docWasModified = false;
+  try { docWasModified = doc.modified === true; } catch (_) {}
+  var result = {
+    documentName: String(doc.name || ""),
+    matchedLinks: 0,
+    relinkedLinks: 0,
+    missingBefore: 0,
+    missingAfter: 0,
+    linkNames: [],
+    docWasModified: docWasModified,
+    docModified: false,
+    docSaved: false,
+    error: ""
+  };
+  var selectedLinks = [];
+  try {
+    for (var s = 0; s < collectionLength(app.selection); s += 1) collectItemLinks(app.selection[s], selectedLinks);
+  } catch (_) {}
+  var allLinks = [];
+  try {
+    for (var l = 0; l < collectionLength(doc.links); l += 1) {
+      pushUniqueLink(allLinks, doc.links[l]);
+      if (isProblemLink(doc.links[l])) result.missingBefore += 1;
+    }
+  } catch (_) {}
+  var targets = [];
+  var normalizedQuery = String(linkQuery || "").toLowerCase();
+  if (selectedLinks.length > 0) {
+    targets = selectedLinks;
+  } else if (normalizedQuery) {
+    for (var q = 0; q < allLinks.length; q += 1) {
+      if (linkIdentity(allLinks[q]).indexOf(normalizedQuery) >= 0) pushUniqueLink(targets, allLinks[q]);
+    }
+  } else {
+    var problemLinks = [];
+    for (var p = 0; p < allLinks.length; p += 1) {
+      if (isProblemLink(allLinks[p])) pushUniqueLink(problemLinks, allLinks[p]);
+    }
+    if (problemLinks.length === 1) targets = problemLinks;
+    else if (allLinks.length === 1) targets = [allLinks[0]];
+    else result.error = "Ambiguous InDesign relink target: select one placed asset or provide linkQuery. Links: " + allLinks.length + ", problem links: " + problemLinks.length + ".";
+  }
+  if (!result.error && targets.length < 1) {
+    result.error = normalizedQuery ? ("No InDesign link matched " + linkQuery) : "No relinkable InDesign link was found.";
+  }
+  if (!result.error && targets.length > 20) {
+    result.error = "Refusing to relink more than 20 InDesign assets at once.";
+  }
+  if (!result.error) {
+    var newFile = File(assetPath);
+    if (!newFile.exists) result.error = "Replacement asset no longer exists: " + assetPath;
+    else {
+      result.matchedLinks = targets.length;
+      for (var t = 0; t < targets.length; t += 1) {
+        try {
+          var beforeName = "";
+          try { beforeName = String(targets[t].name || ""); } catch (_) {}
+          targets[t].relink(newFile);
+          try { targets[t].update(); } catch (_) {}
+          result.relinkedLinks += 1;
+          var afterName = beforeName;
+          try { afterName = String(targets[t].name || beforeName); } catch (_) {}
+          if (result.linkNames.length < 20) result.linkNames.push(afterName || beforeName || assetPath.split("/").pop());
+        } catch (err) {
+          result.error = err && err.message ? err.message : String(err);
+          break;
+        }
+      }
+    }
+  }
+  try {
+    for (var m = 0; m < collectionLength(doc.links); m += 1) {
+      if (isProblemLink(doc.links[m])) result.missingAfter += 1;
+    }
+  } catch (_) {}
+  try { result.docModified = doc.modified === true; } catch (_) {}
+  try { result.docSaved = doc.saved === true; } catch (_) {}
+  return stringifyRelinkResult(result);
+}());
+`;
+  return {
+    appName: targetName,
+    script: `
+tell application "${escapeAppleScriptString(targetName)}"
+  activate
+  set _ucResult to do script "${escapeAppleScriptString(jsx)}" language javascript
+end tell
+return _ucResult
+`,
+  };
+}
+
+function buildInDesignPackageDocumentScript({
+  appName,
+  outputFolderPath,
+  expectedDocumentName,
+  sourceDocumentPath,
+  includeIdml,
+  includePdf,
+  copyFonts,
+  copyLinkedGraphics,
+  copyProfiles,
+  updateGraphics,
+  includeHiddenLayers,
+  ignorePreflightErrors,
+  createReport,
+  forceSave,
+  pdfStyle,
+}) {
+  const resolved = resolveInDesignMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp(appName || 'InDesign') ||
+    resolveInstalledMacApp('Adobe InDesign') ||
+    resolveInstalledMacApp('InDesign');
+  const targetName = resolved?.name || String(appName || 'InDesign').trim();
+  if (!targetName || !/indesign/i.test(targetName)) return null;
+  const jsx = `
+(function () {
+  var outputFolderPath = ${JSON.stringify(String(outputFolderPath ?? ''))};
+  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  var includeIdml = ${includeIdml ? 'true' : 'false'};
+  var includePdf = ${includePdf ? 'true' : 'false'};
+  var copyFonts = ${copyFonts ? 'true' : 'false'};
+  var copyLinkedGraphics = ${copyLinkedGraphics ? 'true' : 'false'};
+  var copyProfiles = ${copyProfiles ? 'true' : 'false'};
+  var updateGraphics = ${updateGraphics ? 'true' : 'false'};
+  var includeHiddenLayers = ${includeHiddenLayers ? 'true' : 'false'};
+  var ignorePreflightErrors = ${ignorePreflightErrors ? 'true' : 'false'};
+  var createReport = ${createReport ? 'true' : 'false'};
+  var forceSave = ${forceSave ? 'true' : 'false'};
+  var pdfStyle = ${JSON.stringify(String(pdfStyle ?? ''))};
+  if (!outputFolderPath) throw new Error("Missing outputFolderPath");
+
+  function normalizeDocName(value) {
+    return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
+  }
+  function normalizeDocPath(value) {
+    try { return File(String(value || "")).fsName.toLowerCase(); } catch (_) {}
+    return String(value || "").toLowerCase();
+  }
+  function documentPath(value) {
+    try { return value.fullName.fsName; } catch (_) { return ""; }
+  }
+  function documentMatches(value) {
+    if (!value || value.isValid === false) return false;
+    var docName = String(value.name || "");
+    if (sourceDocumentPath) {
+      var targetPath = normalizeDocPath(sourceDocumentPath);
+      var currentPath = normalizeDocPath(documentPath(value));
+      if (currentPath && currentPath === targetPath) return true;
+      if (normalizeDocName(docName) === normalizeDocName(sourceDocumentPath.split("/").pop())) return true;
+    }
+    if (expectedDocumentName && normalizeDocName(docName) === normalizeDocName(expectedDocumentName)) return true;
+    return !sourceDocumentPath && !expectedDocumentName;
+  }
+  function findTargetDocument() {
+    try {
+      for (var i = 0; i < app.documents.length; i += 1) {
+        if (documentMatches(app.documents[i])) return app.documents[i];
+      }
+    } catch (_) {}
+    if (!sourceDocumentPath && !expectedDocumentName && app.documents.length > 0) return app.activeDocument;
+    return null;
+  }
+  function waitForTargetDocument(ms) {
+    var deadline = (new Date()).getTime() + ms;
+    while ((new Date()).getTime() < deadline) {
+      var found = findTargetDocument();
+      if (found) return found;
+      $.sleep(250);
+    }
+    return findTargetDocument();
+  }
+  function openSourceDocument() {
+    if (!sourceDocumentPath) return null;
+    var file = File(sourceDocumentPath);
+    if (!file.exists) throw new Error("Source InDesign file no longer exists: " + sourceDocumentPath);
+    try { return app.open(file); } catch (err) {
+      throw new Error("Could not open source InDesign file " + sourceDocumentPath + ": " + (err && err.message ? err.message : err));
+    }
+  }
+  function collectionLength(value) {
+    try { return value ? value.length : 0; } catch (_) { return 0; }
+  }
+  function linkStatusText(link) {
+    try { return String(link.status || ""); } catch (_) {}
+    return "";
+  }
+  function isProblemLink(link) {
+    try { if (link.status === LinkStatus.NORMAL) return false; } catch (_) {}
+    try { if (link.status === LinkStatus.LINK_UP_TO_DATE) return false; } catch (_) {}
+    var status = linkStatusText(link).toLowerCase();
+    if (!status) return false;
+    return status.indexOf("normal") < 0 && status.indexOf("up") < 0 && status.indexOf("ok") < 0;
+  }
+  function isModifiedLink(link) {
+    try { if (link.status === LinkStatus.LINK_OUT_OF_DATE) return true; } catch (_) {}
+    var status = linkStatusText(link).toLowerCase();
+    return status.indexOf("modified") >= 0 || status.indexOf("out") >= 0;
+  }
+  function fontStatusText(font) {
+    try { return String(font.status || ""); } catch (_) {}
+    return "";
+  }
+  function isMissingFont(font) {
+    try { if (font.status === FontStatus.INSTALLED) return false; } catch (_) {}
+    var status = fontStatusText(font).toLowerCase();
+    if (!status) return false;
+    return status.indexOf("installed") < 0 && status.indexOf("ok") < 0;
+  }
+  function jsonEscape(value) {
+    return String(value === undefined || value === null ? "" : value)
+      .replace(/\\\\/g, "\\\\\\\\")
+      .replace(/"/g, "\\\\\\"")
+      .replace(/\\r/g, "\\\\r")
+      .replace(/\\n/g, "\\\\n")
+      .replace(/\\t/g, "\\\\t");
+  }
+  function jsonString(value) { return "\\"" + jsonEscape(value) + "\\""; }
+  function jsonNumber(value) {
+    var parsed = Number(value);
+    return isFinite(parsed) ? String(parsed) : "0";
+  }
+  function jsonBoolean(value) { return value === true ? "true" : "false"; }
+  function stringifyPackageResult(value) {
+    return "{" + [
+      "\\"documentName\\":" + jsonString(value.documentName),
+      "\\"packageOk\\":" + jsonBoolean(value.packageOk),
+      "\\"missingLinksBefore\\":" + jsonNumber(value.missingLinksBefore),
+      "\\"modifiedLinksBefore\\":" + jsonNumber(value.modifiedLinksBefore),
+      "\\"missingFontsBefore\\":" + jsonNumber(value.missingFontsBefore),
+      "\\"linkCount\\":" + jsonNumber(value.linkCount),
+      "\\"fontCount\\":" + jsonNumber(value.fontCount),
+      "\\"docWasModified\\":" + jsonBoolean(value.docWasModified),
+      "\\"docModified\\":" + jsonBoolean(value.docModified),
+      "\\"docSaved\\":" + jsonBoolean(value.docSaved),
+      "\\"error\\":" + jsonString(value.error)
+    ].join(",") + "}";
+  }
+
+  var doc = waitForTargetDocument(12000);
+  if (!doc && sourceDocumentPath) {
+    doc = openSourceDocument();
+    $.sleep(750);
+    doc = waitForTargetDocument(8000) || doc;
+  }
+  if (!doc) {
+    if (app.documents.length < 1) throw new Error("No active InDesign document and source file could not be opened");
+    var activeDocName = "";
+    try { activeDocName = String(app.activeDocument.name || ""); } catch (_) {}
+    throw new Error("Active InDesign document mismatch: expected " + (expectedDocumentName || sourceDocumentPath || "target document") + ", got " + activeDocName);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+
+  var docWasModified = false;
+  try { docWasModified = doc.modified === true; } catch (_) {}
+  var result = {
+    documentName: String(doc.name || ""),
+    packageOk: false,
+    missingLinksBefore: 0,
+    modifiedLinksBefore: 0,
+    missingFontsBefore: 0,
+    linkCount: 0,
+    fontCount: 0,
+    docWasModified: docWasModified,
+    docModified: false,
+    docSaved: false,
+    error: ""
+  };
+  try {
+    result.linkCount = collectionLength(doc.links);
+    for (var l = 0; l < collectionLength(doc.links); l += 1) {
+      if (isProblemLink(doc.links[l])) result.missingLinksBefore += 1;
+      if (isModifiedLink(doc.links[l])) result.modifiedLinksBefore += 1;
+    }
+  } catch (_) {}
+  try {
+    result.fontCount = collectionLength(doc.fonts);
+    for (var f = 0; f < collectionLength(doc.fonts); f += 1) {
+      if (isMissingFont(doc.fonts[f])) result.missingFontsBefore += 1;
+    }
+  } catch (_) {}
+  try {
+    var packageFolder = Folder(outputFolderPath);
+    if (!packageFolder.exists) packageFolder.create();
+    var ok;
+    try {
+      ok = doc.packageForPrint(
+        packageFolder,
+        copyFonts,
+        copyLinkedGraphics,
+        copyProfiles,
+        updateGraphics,
+        includeHiddenLayers,
+        ignorePreflightErrors,
+        createReport,
+        includeIdml,
+        includePdf,
+        pdfStyle,
+        true,
+        "Packaged by Underground Circle desktop bridge",
+        forceSave
+      );
+    } catch (modernErr) {
+      ok = doc.packageForPrint(
+        packageFolder,
+        copyFonts,
+        copyLinkedGraphics,
+        copyProfiles,
+        updateGraphics,
+        includeHiddenLayers,
+        ignorePreflightErrors,
+        createReport,
+        "Packaged by Underground Circle desktop bridge",
+        forceSave
+      );
+    }
+    result.packageOk = ok !== false;
+  } catch (err) {
+    result.error = err && err.message ? err.message : String(err);
+  }
+  try { result.docModified = doc.modified === true; } catch (_) {}
+  try { result.docSaved = doc.saved === true; } catch (_) {}
+  return stringifyPackageResult(result);
+}());
+`;
+  return {
+    appName: targetName,
+    script: `
+tell application "${escapeAppleScriptString(targetName)}"
+  activate
+  set _ucResult to do script "${escapeAppleScriptString(jsx)}" language javascript
+end tell
+return _ucResult
+`,
+  };
+}
+
+function resolvePhotoshopScriptTarget(appName) {
+  const resolved = resolvePhotoshopMacApp(appName || 'Photoshop') ||
+    resolveInstalledMacApp(appName || 'Photoshop') ||
+    resolveInstalledMacApp('Adobe Photoshop') ||
+    resolveInstalledMacApp('Photoshop');
+  const targetName = resolved?.name || String(appName || 'Photoshop').trim();
+  if (!targetName || !/photoshop/i.test(targetName)) return null;
+  return targetName;
+}
+
+function buildPhotoshopAppleScript(targetName, jsx, notRunning) {
+  return {
+    appName: targetName,
+    script: `
+if application "${escapeAppleScriptString(targetName)}" is running then
+  tell application "${escapeAppleScriptString(targetName)}"
+    set _ucResult to do javascript "${escapeAppleScriptString(jsx)}"
+  end tell
+  return _ucResult
+else
+  return ${JSON.stringify(notRunning)}
+end if
+`,
+  };
+}
+
+function photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath }) {
+  return `
+var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+
+function normalizeDocName(value) {
+  return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
+}
+
+function normalizeDocPath(value) {
+  try { return File(String(value || "")).fsName.toLowerCase(); } catch (_) {}
+  return String(value || "").toLowerCase();
+}
+
+function documentPath(value) {
+  try { return value.fullName.fsName; } catch (_) { return ""; }
+}
+
+function collectionLength(value) {
+  try { return value ? value.length : 0; } catch (_) { return 0; }
+}
+
+function unitPx(value) {
+  try { return Math.round(Number(value.as("px"))); } catch (_) {}
+  try { return Math.round(Number(value)); } catch (_) {}
+  return 0;
+}
+
+function documentMatches(value) {
+  if (!value) return false;
+  var docName = String(value.name || "");
+  if (sourceDocumentPath) {
+    var targetPath = normalizeDocPath(sourceDocumentPath);
+    var currentPath = normalizeDocPath(documentPath(value));
+    if (currentPath && currentPath === targetPath) return true;
+    if (normalizeDocName(docName) === normalizeDocName(sourceDocumentPath.split("/").pop())) return true;
+  }
+  if (expectedDocumentName && normalizeDocName(docName) === normalizeDocName(expectedDocumentName)) return true;
+  return !sourceDocumentPath && !expectedDocumentName;
+}
+
+function findTargetDocument() {
+  try {
+    for (var i = 0; i < app.documents.length; i += 1) {
+      if (documentMatches(app.documents[i])) return app.documents[i];
+    }
+  } catch (_) {}
+  if (!sourceDocumentPath && !expectedDocumentName && collectionLength(app.documents) > 0) {
+    try { return app.activeDocument; } catch (_) {}
+  }
+  return null;
+}
+
+function jsonEscape(value) {
+  return String(value === undefined || value === null ? "" : value)
+    .replace(/\\\\/g, "\\\\\\\\")
+    .replace(/"/g, "\\\\\\"")
+    .replace(/\\r/g, "\\\\r")
+    .replace(/\\n/g, "\\\\n")
+    .replace(/\\t/g, "\\\\t");
+}
+
+function jsonString(value) { return "\\"" + jsonEscape(value) + "\\""; }
+function jsonNullableString(value) { return value === undefined || value === null || value === "" ? "null" : jsonString(value); }
+function jsonNumber(value) { var parsed = Number(value); return isFinite(parsed) ? String(parsed) : "0"; }
+function jsonBoolean(value) { return value === true ? "true" : "false"; }
+function jsonArray(values) { return "[" + values.join(",") + "]"; }
+
+function hasActiveSelection(doc) {
+  try {
+    var bounds = doc.selection.bounds;
+    return bounds && bounds.length === 4;
+  } catch (_) {
+    return false;
+  }
+}
+
+function layerKindText(layer) {
+  try { return String(layer.kind || ""); } catch (_) { return ""; }
+}
+
+function isTextLayer(layer) {
+  return /text/i.test(layerKindText(layer));
+}
+
+function isSmartObjectLayer(layer) {
+  return /smart/i.test(layerKindText(layer));
+}
+
+function isAdjustmentLayer(layer) {
+  var kind = layerKindText(layer).toLowerCase();
+  return /(brightness|contrast|curves|levels|exposure|hue|saturation|colorbalance|gradientmap|selectivecolor|threshold|posterize|channelmixer|photofilter|vibrance|blackandwhite|solidfill|gradientfill|patternfill)/.test(kind);
+}
+
+function layerLocked(layer) {
+  try { if (layer.allLocked === true) return true; } catch (_) {}
+  try { if (layer.pixelsLocked === true || layer.positionLocked === true || layer.transparentPixelsLocked === true) return true; } catch (_) {}
+  return false;
+}
+
+function layerHasMask(layer) {
+  try {
+    if (!layer.id) return false;
+    var ref = new ActionReference();
+    ref.putIdentifier(charIDToTypeID("Lyr "), layer.id);
+    var desc = executeActionGet(ref);
+    if (desc.hasKey(charIDToTypeID("UsrM"))) return true;
+    if (desc.hasKey(stringIDToTypeID("hasUserMask"))) return true;
+    if (desc.hasKey(stringIDToTypeID("hasVectorMask"))) return true;
+  } catch (_) {}
+  return false;
+}
+
+function layerBounds(layer) {
+  var out = [];
+  try {
+    var bounds = layer.bounds;
+    for (var i = 0; i < Math.min(4, bounds.length); i += 1) out.push(unitPx(bounds[i]));
+  } catch (_) {}
+  return out;
+}
+
+function textPreview(layer) {
+  if (!isTextLayer(layer)) return "";
+  try { return String(layer.textItem.contents || "").replace(/\\s+/g, " ").slice(0, 240); } catch (_) {}
+  return "";
+}
+
+function layerMatches(layer, pathText, query) {
+  if (!query) return true;
+  var q = String(query || "").toLowerCase();
+  var haystack = [
+    String(layer && layer.name ? layer.name : ""),
+    String(pathText || ""),
+    textPreview(layer),
+    layerKindText(layer)
+  ].join(" ").toLowerCase();
+  return haystack.indexOf(q) >= 0;
+}
+
+function walkLayers(parent, prefix, query, maxItems, stats, out, collect) {
+  var layers;
+  try { layers = parent.layers; } catch (_) { return; }
+  var len = collectionLength(layers);
+  for (var i = 0; i < len; i += 1) {
+    var layer = layers[i];
+    var name = "";
+    try { name = String(layer.name || ""); } catch (_) {}
+    var pathText = prefix ? prefix + " / " + name : name;
+    var typename = "";
+    try { typename = String(layer.typename || ""); } catch (_) {}
+    var kind = layerKindText(layer);
+    var isGroup = /LayerSet/i.test(typename);
+    var isText = isTextLayer(layer);
+    var isSmart = isSmartObjectLayer(layer);
+    var isAdjustment = isAdjustmentLayer(layer);
+    var hasMask = layerHasMask(layer);
+    stats.layerCount += 1;
+    if (isGroup) stats.groupCount += 1;
+    if (isText) stats.textLayerCount += 1;
+    if (isSmart) stats.smartObjectCount += 1;
+    if (isAdjustment) stats.adjustmentLayerCount += 1;
+    if (hasMask) stats.maskLayerCount += 1;
+    try { if (layer.visible === false) stats.hiddenLayers += 1; } catch (_) {}
+    if (layerLocked(layer)) stats.lockedLayers += 1;
+    if (layerMatches(layer, pathText, query)) {
+      stats.matchedLayers += 1;
+      if (collect && out.length < maxItems) {
+        var bounds = layerBounds(layer);
+        var boundValues = [];
+        for (var b = 0; b < bounds.length; b += 1) boundValues.push(jsonNumber(bounds[b]));
+        out.push("{" + [
+          "\\"name\\":" + jsonString(name),
+          "\\"path\\":" + jsonString(pathText),
+          "\\"type\\":" + jsonString(isGroup ? "group" : "layer"),
+          "\\"kind\\":" + jsonString(kind),
+          "\\"visible\\":" + jsonBoolean((function () { try { return layer.visible !== false; } catch (_) { return true; } }())),
+          "\\"locked\\":" + jsonBoolean(layerLocked(layer)),
+          "\\"opacity\\":" + jsonNumber((function () { try { return layer.opacity; } catch (_) { return 0; } }())),
+          "\\"textPreview\\":" + jsonString(textPreview(layer)),
+          "\\"hasMask\\":" + jsonBoolean(hasMask),
+          "\\"bounds\\":" + jsonArray(boundValues),
+          "\\"depth\\":" + jsonNumber(prefix ? prefix.split(" / ").length : 0)
+        ].join(",") + "}");
+      }
+    }
+    if (isGroup) walkLayers(layer, pathText, query, maxItems, stats, out, collect);
+  }
+}
+
+function blankLayerStats() {
+  return {
+    layerCount: 0,
+    matchedLayers: 0,
+    textLayerCount: 0,
+    smartObjectCount: 0,
+    adjustmentLayerCount: 0,
+    groupCount: 0,
+    lockedLayers: 0,
+    hiddenLayers: 0,
+    maskLayerCount: 0
+  };
+}
+
+function getLayerStats(doc) {
+  var stats = blankLayerStats();
+  walkLayers(doc, "", "", 0, stats, [], false);
+  return stats;
+}
+`;
+}
+
+function photoshopNotRunningJson(targetName, kind) {
+  const base = {
+    appRunning: false,
+    appName: targetName,
+    status: 'not_running',
+    documentCount: 0,
+    activeDocumentName: null,
+    activeDocumentPath: null,
+    activeDocumentModified: false,
+    activeDocumentSaved: false,
+    widthPx: 0,
+    heightPx: 0,
+    resolution: 0,
+    mode: null,
+    bitsPerChannel: null,
+    layerCount: 0,
+    groupCount: 0,
+    textLayerCount: 0,
+    smartObjectCount: 0,
+    adjustmentLayerCount: 0,
+    lockedLayers: 0,
+    hiddenLayers: 0,
+    selectionActive: false,
+    documents: [],
+    error: null,
+  };
+  if (kind === 'inventory') {
+    return JSON.stringify({
+      appRunning: false,
+      appName: targetName,
+      documentName: null,
+      query: '',
+      layerCount: 0,
+      matchedLayers: 0,
+      textLayerCount: 0,
+      smartObjectCount: 0,
+      adjustmentLayerCount: 0,
+      groupCount: 0,
+      lockedLayers: 0,
+      hiddenLayers: 0,
+      selectionActive: false,
+      maskLayerCount: 0,
+      layers: [],
+      error: null,
+    });
+  }
+  if (kind === 'layer_state') {
+    return JSON.stringify({
+      appRunning: false,
+      appName: targetName,
+      documentName: null,
+      layerName: '',
+      action: '',
+      matchedLayers: 0,
+      changedLayers: 0,
+      beforeVisible: false,
+      afterVisible: false,
+      beforeLocked: false,
+      afterLocked: false,
+      docWasModified: false,
+      docModified: false,
+      docSaved: false,
+      matches: [],
+      error: 'Photoshop is not running.',
+    });
+  }
+  return JSON.stringify(base);
+}
+
+function buildPhotoshopDocumentStatusScript({ appName, expectedDocumentName, sourceDocumentPath }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
+
+  function documentSummaryJson(doc) {
+    return "{" + [
+      "\\"name\\":" + jsonString(doc.name),
+      "\\"path\\":" + jsonNullableString(doc.path),
+      "\\"modified\\":" + jsonBoolean(doc.modified),
+      "\\"saved\\":" + jsonBoolean(doc.saved),
+      "\\"widthPx\\":" + jsonNumber(doc.widthPx),
+      "\\"heightPx\\":" + jsonNumber(doc.heightPx)
+    ].join(",") + "}";
+  }
+
+  function makeDocumentSummary(doc) {
+    return {
+      name: String(doc && doc.name ? doc.name : ""),
+      path: documentPath(doc),
+      modified: (function () { try { return doc.saved !== true; } catch (_) { return false; } }()),
+      saved: (function () { try { return doc.saved === true; } catch (_) { return false; } }()),
+      widthPx: (function () { try { return unitPx(doc.width); } catch (_) { return 0; } }()),
+      heightPx: (function () { try { return unitPx(doc.height); } catch (_) { return 0; } }())
+    };
+  }
+
+  function stringifyPhotoshopStatus(value) {
+    var docs = [];
+    try {
+      for (var i = 0; i < value.documents.length; i += 1) docs.push(documentSummaryJson(value.documents[i]));
+    } catch (_) {}
+    return "{" + [
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"status\\":" + jsonString(value.status),
+      "\\"documentCount\\":" + jsonNumber(value.documentCount),
+      "\\"activeDocumentName\\":" + jsonNullableString(value.activeDocumentName),
+      "\\"activeDocumentPath\\":" + jsonNullableString(value.activeDocumentPath),
+      "\\"activeDocumentModified\\":" + jsonBoolean(value.activeDocumentModified),
+      "\\"activeDocumentSaved\\":" + jsonBoolean(value.activeDocumentSaved),
+      "\\"widthPx\\":" + jsonNumber(value.widthPx),
+      "\\"heightPx\\":" + jsonNumber(value.heightPx),
+      "\\"resolution\\":" + jsonNumber(value.resolution),
+      "\\"mode\\":" + jsonNullableString(value.mode),
+      "\\"bitsPerChannel\\":" + jsonNullableString(value.bitsPerChannel),
+      "\\"layerCount\\":" + jsonNumber(value.layerCount),
+      "\\"groupCount\\":" + jsonNumber(value.groupCount),
+      "\\"textLayerCount\\":" + jsonNumber(value.textLayerCount),
+      "\\"smartObjectCount\\":" + jsonNumber(value.smartObjectCount),
+      "\\"adjustmentLayerCount\\":" + jsonNumber(value.adjustmentLayerCount),
+      "\\"lockedLayers\\":" + jsonNumber(value.lockedLayers),
+      "\\"hiddenLayers\\":" + jsonNumber(value.hiddenLayers),
+      "\\"selectionActive\\":" + jsonBoolean(value.selectionActive),
+      "\\"documents\\":" + jsonArray(docs),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var out = {
+    appRunning: true,
+    appName: String(app.name || "Photoshop"),
+    status: "unknown",
+    documentCount: collectionLength(app.documents),
+    activeDocumentName: null,
+    activeDocumentPath: null,
+    activeDocumentModified: false,
+    activeDocumentSaved: false,
+    widthPx: 0,
+    heightPx: 0,
+    resolution: 0,
+    mode: null,
+    bitsPerChannel: null,
+    layerCount: 0,
+    groupCount: 0,
+    textLayerCount: 0,
+    smartObjectCount: 0,
+    adjustmentLayerCount: 0,
+    lockedLayers: 0,
+    hiddenLayers: 0,
+    selectionActive: false,
+    documents: [],
+    error: null
+  };
+
+  try {
+    var maxDocs = Math.min(collectionLength(app.documents), 12);
+    for (var docIndex = 0; docIndex < maxDocs; docIndex += 1) out.documents.push(makeDocumentSummary(app.documents[docIndex]));
+  } catch (_) {}
+
+  if (out.documentCount < 1) {
+    out.status = "no_document";
+    return stringifyPhotoshopStatus(out);
+  }
+
+  var doc = findTargetDocument();
+  if (!doc) {
+    out.status = "document_mismatch";
+    try { out.activeDocumentName = String(app.activeDocument.name || ""); } catch (_) {}
+    out.error = "Expected Photoshop document is not active or open.";
+    return stringifyPhotoshopStatus(out);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+
+  out.activeDocumentName = String(doc.name || "");
+  out.activeDocumentPath = documentPath(doc);
+  try { out.activeDocumentModified = doc.saved !== true; } catch (_) {}
+  try { out.activeDocumentSaved = doc.saved === true; } catch (_) {}
+  try { out.widthPx = unitPx(doc.width); } catch (_) {}
+  try { out.heightPx = unitPx(doc.height); } catch (_) {}
+  try { out.resolution = Number(doc.resolution || 0); } catch (_) {}
+  try { out.mode = String(doc.mode || ""); } catch (_) {}
+  try { out.bitsPerChannel = String(doc.bitsPerChannel || ""); } catch (_) {}
+  out.selectionActive = hasActiveSelection(doc);
+  var stats = getLayerStats(doc);
+  out.layerCount = stats.layerCount;
+  out.groupCount = stats.groupCount;
+  out.textLayerCount = stats.textLayerCount;
+  out.smartObjectCount = stats.smartObjectCount;
+  out.adjustmentLayerCount = stats.adjustmentLayerCount;
+  out.lockedLayers = stats.lockedLayers;
+  out.hiddenLayers = stats.hiddenLayers;
+  out.status = "ready";
+  return stringifyPhotoshopStatus(out);
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'status'));
+}
+
+function buildPhotoshopLayerInventoryScript({ appName, query, expectedDocumentName, sourceDocumentPath, maxItems }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
+  var query = ${JSON.stringify(String(query ?? ''))};
+  var maxItems = Math.max(1, Math.min(120, Number(${JSON.stringify(Number(maxItems || 40))}) || 40));
+
+  function stringifyInventory(value) {
+    return "{" + [
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"query\\":" + jsonString(value.query),
+      "\\"layerCount\\":" + jsonNumber(value.layerCount),
+      "\\"matchedLayers\\":" + jsonNumber(value.matchedLayers),
+      "\\"textLayerCount\\":" + jsonNumber(value.textLayerCount),
+      "\\"smartObjectCount\\":" + jsonNumber(value.smartObjectCount),
+      "\\"adjustmentLayerCount\\":" + jsonNumber(value.adjustmentLayerCount),
+      "\\"groupCount\\":" + jsonNumber(value.groupCount),
+      "\\"lockedLayers\\":" + jsonNumber(value.lockedLayers),
+      "\\"hiddenLayers\\":" + jsonNumber(value.hiddenLayers),
+      "\\"selectionActive\\":" + jsonBoolean(value.selectionActive),
+      "\\"maskLayerCount\\":" + jsonNumber(value.maskLayerCount),
+      "\\"layers\\":" + jsonArray(value.layers),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var out = {
+    appRunning: true,
+    appName: String(app.name || "Photoshop"),
+    documentName: null,
+    query: query,
+    layerCount: 0,
+    matchedLayers: 0,
+    textLayerCount: 0,
+    smartObjectCount: 0,
+    adjustmentLayerCount: 0,
+    groupCount: 0,
+    lockedLayers: 0,
+    hiddenLayers: 0,
+    selectionActive: false,
+    maskLayerCount: 0,
+    layers: [],
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    out.error = "Photoshop is running with no active document.";
+    return stringifyInventory(out);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { out.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    out.error = "Expected Photoshop document is not active or open.";
+    return stringifyInventory(out);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  out.documentName = String(doc.name || "");
+  out.selectionActive = hasActiveSelection(doc);
+  var stats = blankLayerStats();
+  walkLayers(doc, "", query, maxItems, stats, out.layers, true);
+  out.layerCount = stats.layerCount;
+  out.matchedLayers = stats.matchedLayers;
+  out.textLayerCount = stats.textLayerCount;
+  out.smartObjectCount = stats.smartObjectCount;
+  out.adjustmentLayerCount = stats.adjustmentLayerCount;
+  out.groupCount = stats.groupCount;
+  out.lockedLayers = stats.lockedLayers;
+  out.hiddenLayers = stats.hiddenLayers;
+  out.maskLayerCount = stats.maskLayerCount;
+  return stringifyInventory(out);
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'inventory'));
+}
+
+function buildPhotoshopSetLayerStateScript({ appName, layerName, action, expectedDocumentName, sourceDocumentPath }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
+  var layerName = ${JSON.stringify(String(layerName ?? ''))};
+  var action = ${JSON.stringify(String(action ?? ''))};
+  if (!layerName) throw new Error("Missing layerName");
+  if (!/^(show|hide|lock|unlock)$/.test(action)) throw new Error("Invalid layer action");
+
+  function normalizeLayerName(value) {
+    return String(value || "").toLowerCase().replace(/^\\s+|\\s+$/g, "").replace(/\\s+/g, " ");
+  }
+
+  function snapshotLayer(layer, pathText) {
+    var typename = "";
+    try { typename = String(layer.typename || ""); } catch (_) {}
+    return {
+      name: (function () { try { return String(layer.name || ""); } catch (_) { return ""; } }()),
+      path: String(pathText || ""),
+      type: /LayerSet/i.test(typename) ? "group" : "layer",
+      kind: layerKindText(layer),
+      visible: (function () { try { return layer.visible !== false; } catch (_) { return true; } }()),
+      locked: layerLocked(layer)
+    };
+  }
+
+  function layerSnapshotJson(value) {
+    return "{" + [
+      "\\"name\\":" + jsonString(value.name),
+      "\\"path\\":" + jsonString(value.path),
+      "\\"type\\":" + jsonString(value.type),
+      "\\"kind\\":" + jsonString(value.kind),
+      "\\"visible\\":" + jsonBoolean(value.visible),
+      "\\"locked\\":" + jsonBoolean(value.locked)
+    ].join(",") + "}";
+  }
+
+  function stringifyResult(value) {
+    var matches = [];
+    try {
+      for (var i = 0; i < value.matches.length; i += 1) matches.push(layerSnapshotJson(value.matches[i]));
+    } catch (_) {}
+    return "{" + [
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"layerName\\":" + jsonString(value.layerName),
+      "\\"action\\":" + jsonString(value.action),
+      "\\"matchedLayers\\":" + jsonNumber(value.matchedLayers),
+      "\\"changedLayers\\":" + jsonNumber(value.changedLayers),
+      "\\"beforeVisible\\":" + jsonBoolean(value.beforeVisible),
+      "\\"afterVisible\\":" + jsonBoolean(value.afterVisible),
+      "\\"beforeLocked\\":" + jsonBoolean(value.beforeLocked),
+      "\\"afterLocked\\":" + jsonBoolean(value.afterLocked),
+      "\\"docWasModified\\":" + jsonBoolean(value.docWasModified),
+      "\\"docModified\\":" + jsonBoolean(value.docModified),
+      "\\"docSaved\\":" + jsonBoolean(value.docSaved),
+      "\\"matches\\":" + jsonArray(matches),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  function collectMatches(parent, prefix, result) {
+    var layers;
+    try { layers = parent.layers; } catch (_) { return; }
+    var needle = normalizeLayerName(layerName);
+    for (var i = 0; i < collectionLength(layers); i += 1) {
+      var layer = layers[i];
+      var name = "";
+      try { name = String(layer.name || ""); } catch (_) {}
+      var pathText = prefix ? prefix + " / " + name : name;
+      var normalizedName = normalizeLayerName(name);
+      var normalizedPath = normalizeLayerName(pathText);
+      var row = { layer: layer, path: pathText };
+      if (normalizedName === needle || normalizedPath === needle) result.exact.push(row);
+      else if (normalizedName.indexOf(needle) >= 0 || normalizedPath.indexOf(needle) >= 0 || (normalizedName && needle.indexOf(normalizedName) >= 0)) result.fuzzy.push(row);
+      var typename = "";
+      try { typename = String(layer.typename || ""); } catch (_) {}
+      if (/LayerSet/i.test(typename)) collectMatches(layer, pathText, result);
+    }
+  }
+
+  function setLayerLocked(layer, desired) {
+    if (desired) {
+      try { layer.allLocked = true; return true; } catch (_) {}
+      try { layer.pixelsLocked = true; return true; } catch (_) {}
+      return false;
+    }
+    var changed = false;
+    try { layer.allLocked = false; changed = true; } catch (_) {}
+    try { layer.pixelsLocked = false; changed = true; } catch (_) {}
+    try { layer.positionLocked = false; changed = true; } catch (_) {}
+    try { layer.transparentPixelsLocked = false; changed = true; } catch (_) {}
+    return changed || !layerLocked(layer);
+  }
+
+  function applyAction(layer) {
+    var before = snapshotLayer(layer, "");
+    var error = "";
+    try {
+      if (action === "show") layer.visible = true;
+      if (action === "hide") layer.visible = false;
+      if (action === "lock" && !setLayerLocked(layer, true)) error = "Photoshop could not lock the matched layer.";
+      if (action === "unlock" && !setLayerLocked(layer, false)) error = "Photoshop could not unlock the matched layer.";
+    } catch (err) {
+      error = String(err && err.message ? err.message : err);
+    }
+    var after = snapshotLayer(layer, "");
+    return {
+      before: before,
+      after: after,
+      changed: before.visible !== after.visible || before.locked !== after.locked,
+      error: error
+    };
+  }
+
+  var out = {
+    appRunning: true,
+    appName: String(app.name || "Photoshop"),
+    documentName: null,
+    layerName: layerName,
+    action: action,
+    matchedLayers: 0,
+    changedLayers: 0,
+    beforeVisible: false,
+    afterVisible: false,
+    beforeLocked: false,
+    afterLocked: false,
+    docWasModified: false,
+    docModified: false,
+    docSaved: false,
+    matches: [],
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    out.error = "Photoshop is running with no active document.";
+    return stringifyResult(out);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { out.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    out.error = "Expected Photoshop document is not active or open.";
+    return stringifyResult(out);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  out.documentName = String(doc.name || "");
+  try { out.docWasModified = doc.saved !== true; } catch (_) {}
+  try { out.docSaved = doc.saved === true; } catch (_) {}
+
+  var matchBuckets = { exact: [], fuzzy: [] };
+  collectMatches(doc, "", matchBuckets);
+  var matches = matchBuckets.exact.length > 0 ? matchBuckets.exact : matchBuckets.fuzzy;
+  out.matchedLayers = matches.length;
+  for (var m = 0; m < Math.min(matches.length, 12); m += 1) out.matches.push(snapshotLayer(matches[m].layer, matches[m].path));
+  if (matches.length < 1) {
+    out.error = "No Photoshop layer matched " + layerName + ".";
+    try { out.docModified = doc.saved !== true; } catch (_) {}
+    try { out.docSaved = doc.saved === true; } catch (_) {}
+    return stringifyResult(out);
+  }
+  if (matches.length > 1) {
+    out.error = "Layer target is ambiguous; matched " + matches.length + " layers.";
+    try { out.docModified = doc.saved !== true; } catch (_) {}
+    try { out.docSaved = doc.saved === true; } catch (_) {}
+    return stringifyResult(out);
+  }
+
+  var applied = applyAction(matches[0].layer);
+  out.changedLayers = applied.changed ? 1 : 0;
+  out.beforeVisible = applied.before.visible;
+  out.afterVisible = applied.after.visible;
+  out.beforeLocked = applied.before.locked;
+  out.afterLocked = applied.after.locked;
+  out.matches = [snapshotLayer(matches[0].layer, matches[0].path)];
+  if (applied.error) out.error = applied.error;
+  try { out.docModified = doc.saved !== true; } catch (_) {}
+  try { out.docSaved = doc.saved === true; } catch (_) {}
+  return stringifyResult(out);
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'layer_state'));
+}
+
+function buildPhotoshopUpdateTextLayerScript({ appName, layerName, replacementText, expectedDocumentName, sourceDocumentPath }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
+  var layerName = ${JSON.stringify(String(layerName ?? ''))};
+  var replacementText = ${JSON.stringify(String(replacementText ?? ''))};
+
+  function layerNamesJson(values) {
+    var out = [];
+    for (var i = 0; i < values.length; i += 1) out.push(jsonString(values[i]));
+    return jsonArray(out);
+  }
+
+  function stringifyResult(value) {
+    return "{" + [
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"layerName\\":" + jsonString(value.layerName),
+      "\\"replacementText\\":" + jsonString(value.replacementText),
+      "\\"matchedLayers\\":" + jsonNumber(value.matchedLayers),
+      "\\"updatedLayers\\":" + jsonNumber(value.updatedLayers),
+      "\\"replacementMatches\\":" + jsonNumber(value.replacementMatches),
+      "\\"layerNames\\":" + layerNamesJson(value.layerNames),
+      "\\"docWasModified\\":" + jsonBoolean(value.docWasModified),
+      "\\"docModified\\":" + jsonBoolean(value.docModified),
+      "\\"docSaved\\":" + jsonBoolean(value.docSaved),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  function updateMatchingTextLayers(parent, prefix, result) {
+    var layers;
+    try { layers = parent.layers; } catch (_) { return; }
+    var q = String(layerName || "").toLowerCase();
+    for (var i = 0; i < collectionLength(layers); i += 1) {
+      var layer = layers[i];
+      var name = "";
+      try { name = String(layer.name || ""); } catch (_) {}
+      var pathText = prefix ? prefix + " / " + name : name;
+      var typename = "";
+      try { typename = String(layer.typename || ""); } catch (_) {}
+      if (/LayerSet/i.test(typename)) {
+        updateMatchingTextLayers(layer, pathText, result);
+        continue;
+      }
+      if (!isTextLayer(layer)) continue;
+      var preview = textPreview(layer);
+      var haystack = (name + " " + pathText + " " + preview).toLowerCase();
+      if (haystack.indexOf(q) < 0) continue;
+      result.matchedLayers += 1;
+      result.layerNames.push(pathText);
+      try {
+        layer.textItem.contents = replacementText;
+        result.updatedLayers += 1;
+      } catch (err) {
+        result.error = String(err && err.message ? err.message : err);
+      }
+    }
+  }
+
+  function countTextLayersWithContents(parent, expectedText) {
+    var count = 0;
+    var layers;
+    try { layers = parent.layers; } catch (_) { return 0; }
+    for (var i = 0; i < collectionLength(layers); i += 1) {
+      var layer = layers[i];
+      var typename = "";
+      try { typename = String(layer.typename || ""); } catch (_) {}
+      if (/LayerSet/i.test(typename)) {
+        count += countTextLayersWithContents(layer, expectedText);
+        continue;
+      }
+      if (!isTextLayer(layer)) continue;
+      try {
+        if (String(layer.textItem.contents || "") === String(expectedText || "")) count += 1;
+      } catch (_) {}
+    }
+    return count;
+  }
+
+  var result = {
+    documentName: null,
+    layerName: layerName,
+    replacementText: replacementText,
+    matchedLayers: 0,
+    updatedLayers: 0,
+    replacementMatches: 0,
+    layerNames: [],
+    docWasModified: false,
+    docModified: false,
+    docSaved: false,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "Photoshop is running with no active document.";
+    return stringifyResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "Expected Photoshop document is not active or open.";
+    return stringifyResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+  try { result.docWasModified = doc.saved !== true; } catch (_) {}
+  updateMatchingTextLayers(doc, "", result);
+  result.replacementMatches = countTextLayersWithContents(doc, replacementText);
+  try { result.docModified = doc.saved !== true; } catch (_) {}
+  try { result.docSaved = doc.saved === true; } catch (_) {}
+  return stringifyResult(result);
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'status'));
+}
+
+function buildPhotoshopPlaceAssetScript({ appName, assetPath, layerName, expectedDocumentName, sourceDocumentPath }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
+  var assetPath = ${JSON.stringify(String(assetPath ?? ''))};
+  var layerName = ${JSON.stringify(String(layerName ?? ''))};
+
+  function stringifyResult(value) {
+    return "{" + [
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"placedLayerName\\":" + jsonNullableString(value.placedLayerName),
+      "\\"docWasModified\\":" + jsonBoolean(value.docWasModified),
+      "\\"docModified\\":" + jsonBoolean(value.docModified),
+      "\\"docSaved\\":" + jsonBoolean(value.docSaved),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    documentName: null,
+    placedLayerName: null,
+    docWasModified: false,
+    docModified: false,
+    docSaved: false,
+    error: null
+  };
+  if (collectionLength(app.documents) < 1) {
+    result.error = "Photoshop is running with no active document.";
+    return stringifyResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "Expected Photoshop document is not active or open.";
+    return stringifyResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+  try { result.docWasModified = doc.saved !== true; } catch (_) {}
+  try {
+    var file = new File(assetPath);
+    if (!file.exists) {
+      result.error = "Asset file does not exist.";
+      return stringifyResult(result);
+    }
+    var desc = new ActionDescriptor();
+    desc.putPath(charIDToTypeID("null"), file);
+    executeAction(charIDToTypeID("Plc "), desc, DialogModes.NO);
+    try {
+      if (layerName) app.activeDocument.activeLayer.name = layerName;
+      result.placedLayerName = String(app.activeDocument.activeLayer.name || layerName || file.displayName || file.name || "Placed asset");
+    } catch (_) {
+      result.placedLayerName = layerName || file.displayName || file.name || "Placed asset";
+    }
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  try { result.docModified = doc.saved !== true; } catch (_) {}
+  try { result.docSaved = doc.saved === true; } catch (_) {}
+  return stringifyResult(result);
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'status'));
+}
+
+function buildPhotoshopExportProofScript({ appName, outputPath, format, quality, expectedDocumentName, sourceDocumentPath }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
+  var outputPath = ${JSON.stringify(String(outputPath ?? ''))};
+  var format = ${JSON.stringify(String(format || 'png').toLowerCase())};
+  var quality = Math.max(1, Math.min(12, Number(${JSON.stringify(Number(quality || 10))}) || 10));
+
+  function stringifyResult(value) {
+    return "{" + [
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"widthPx\\":" + jsonNumber(value.widthPx),
+      "\\"heightPx\\":" + jsonNumber(value.heightPx),
+      "\\"docModified\\":" + jsonBoolean(value.docModified),
+      "\\"docSaved\\":" + jsonBoolean(value.docSaved),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    documentName: null,
+    widthPx: 0,
+    heightPx: 0,
+    docModified: false,
+    docSaved: false,
+    error: null
+  };
+  if (collectionLength(app.documents) < 1) {
+    result.error = "Photoshop is running with no active document.";
+    return stringifyResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "Expected Photoshop document is not active or open.";
+    return stringifyResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+  try { result.widthPx = unitPx(doc.width); } catch (_) {}
+  try { result.heightPx = unitPx(doc.height); } catch (_) {}
+  try {
+    var outFile = new File(outputPath);
+    if (format === "jpg" || format === "jpeg") {
+      var jpg = new JPEGSaveOptions();
+      jpg.quality = quality;
+      doc.saveAs(outFile, jpg, true, Extension.LOWERCASE);
+    } else {
+      var png = new PNGSaveOptions();
+      doc.saveAs(outFile, png, true, Extension.LOWERCASE);
+    }
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  try { result.docModified = doc.saved !== true; } catch (_) {}
+  try { result.docSaved = doc.saved === true; } catch (_) {}
+  return stringifyResult(result);
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'status'));
 }
 
 function getOrCreateDesktopToken() {

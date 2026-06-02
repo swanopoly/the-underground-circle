@@ -38,6 +38,16 @@ import {
 } from '../src/lib/chatRecording';
 // eslint-disable-next-line import/first
 import { findInTree } from '../src/lib/recordingChatCommands';
+// eslint-disable-next-line import/first
+import {
+  collectChatSessionArchiveRecoveryReliabilityTouched,
+  deriveChatSessionArchiveRecoveryRecommendations,
+  summarizeChatSessionArchiveRecoveryReliability,
+} from '../src/lib/chatSessionArchiveRecovery';
+// eslint-disable-next-line import/first
+import {
+  formatChatSessionArchiveRecommendationPromptLines,
+} from '../src/lib/chatSessionArchivePrompt';
 
 // ─── Runner ──────────────────────────────────────────────────────────
 let failures = 0;
@@ -51,7 +61,7 @@ function resetStore() {
   (globalThis as any).localStorage.clear();
 }
 
-function main() {
+async function main() {
   // ─── Slug ───────────────────────────────────────────────────────
   assert(slugifyRecordingName('Open Zoom') === 'open-zoom', 'slug: words');
   assert(slugifyRecordingName('  Close the deal!  ') === 'close-the-deal', 'slug: trim + strip !');
@@ -61,6 +71,7 @@ function main() {
 
   // ─── isRecordable ──────────────────────────────────────────────
   assert(isRecordable('desktop.launch_app'), 'recordable: desktop.launch_app');
+  assert(isRecordable('desktop.set_element_value'), 'recordable: desktop.set_element_value');
   assert(isRecordable('browser.click_role'), 'recordable: browser.click_role');
   assert(!isRecordable('desktop.read_a11y_tree'), 'recordable: read_a11y_tree excluded (read-only)');
   assert(!isRecordable('desktop.screenshot'), 'recordable: screenshot excluded (verification only)');
@@ -181,6 +192,22 @@ function main() {
     assert(plan.note?.includes('Join meeting'), 'plan: note mentions label');
   }
 
+  // ─── set_element_value: semantic override via _target ──────────
+  {
+    const step = buildStep({
+      tool: 'desktop.set_element_value',
+      input: { pid: 1234, path: '0.0.1.0.11', text: 'hello@example.com' },
+      result: { ok: true },
+      a11yTarget: { role: 'AXTextField', label: 'Email', app: 'TextEdit' },
+    });
+    assert(step.outcome.summary === 'Set "Email" to 17 chars', 'append: set field summary has target + char count');
+    const plan = planReplayStep(step);
+    assert(plan.tool === 'desktop.set_element_value', 'plan: set_element_value kept');
+    assert((plan.input as any)._target.label === 'Email', 'plan: set target carried');
+    assert((plan.input as any).text === 'hello@example.com', 'plan: set text carried');
+    assert(plan.note?.includes('Email'), 'plan: set note mentions label');
+  }
+
   // ─── findInTree ─────────────────────────────────────────────────
   const treeText = [
     '[0] AXApplication "Safari"',
@@ -222,6 +249,112 @@ function main() {
   // Fractional seconds floor correctly
   assert(formatElapsedSec(12.9) === '12s', 'elapsed: fractional floored');
 
+  // ─── Session archive recovery reliability ─────────────────────
+  {
+    const recoveryReliability = {
+      surfaceKind: 'desktop_app',
+      targetName: 'Universal App Control',
+      taskFamily: 'desktop_workflow',
+      failureArea: 'fresh_evidence',
+      retryAllowed: true,
+      userActionRequired: false,
+      connectedAgentAllowed: true,
+      recommendedOptionId: 'retry_with_fresh_evidence',
+      readinessStatus: 'missing',
+      nextEvidenceTools: ['desktop.window_state', 'desktop.read_a11y_tree'],
+      requiredEvidenceTools: ['desktop.window_state'],
+      requiredFreshEvidence: ['active window state'],
+      requiredProof: ['post-action screenshot'],
+      approvalBoundaries: ['no destructive app changes without approval'],
+      failClosedRules: ['stop after repeated stale evidence'],
+      routeDecisionStatus: 'route_ready',
+      routeDecisionSurface: 'desktop_app',
+      selectedRecoveryOptionId: 'retry_with_fresh_evidence',
+      verificationCommands: ['npm run smoke:desktop-runtime-wiring'],
+    };
+    const summaries = summarizeChatSessionArchiveRecoveryReliability(recoveryReliability);
+    const touched = collectChatSessionArchiveRecoveryReliabilityTouched(recoveryReliability);
+    assert(
+      summaries[0]?.includes('Desktop App recovery'),
+      'archive: recovery reliability summary stored',
+    );
+    assert(
+      summaries[0]?.includes('desktop.window_state'),
+      'archive: recovery reliability summary includes evidence tool',
+    );
+    assert(
+      touched.includes('recovery_surface:desktop_app'),
+      'archive: recovery reliability touched surface stored',
+    );
+    assert(
+      touched.includes('recovery_tool:desktop.window_state'),
+      'archive: recovery evidence tool touch stored',
+    );
+    assert(
+      touched.includes('recovery_option:retry_with_fresh_evidence'),
+      'archive: selected recovery option touch stored',
+    );
+    const recoveryRecommendations = deriveChatSessionArchiveRecoveryRecommendations({
+      threadId: 't1',
+      messages: [
+        {
+          messageId: 'm-recovery-1',
+          content: 'Desktop task failed.',
+          timestamp: 1,
+          recoveryReliabilitySummaries: summaries,
+          touched,
+        },
+        {
+          messageId: 'm-recovery-2',
+          content: 'Desktop task failed again.',
+          timestamp: 2,
+          recoveryReliabilitySummaries: summaries,
+          touched,
+        },
+      ],
+    });
+    assert(
+      recoveryRecommendations[0]?.kind === 'recovery_pattern',
+      'archive: repeated recovery reliability becomes recommendation',
+    );
+    assert(
+      recoveryRecommendations[0]?.content.includes('desktop.window_state'),
+      'archive: recovery recommendation preserves evidence tool',
+    );
+    assert(
+      deriveChatSessionArchiveRecoveryRecommendations({
+        threadId: 't1',
+        messages: [
+          {
+            messageId: 'm-recovery-1',
+            recoveryReliabilitySummaries: summaries,
+            touched,
+          },
+          {
+            messageId: 'm-recovery-2',
+            recoveryReliabilitySummaries: summaries,
+            touched,
+          },
+        ],
+        handledRecommendationIds: { [recoveryRecommendations[0]?.id || 'missing']: { status: 'dismissed' } },
+      }).length === 0,
+      'archive: handled recovery recommendation stays hidden',
+    );
+    const promptLines = formatChatSessionArchiveRecommendationPromptLines(recoveryRecommendations, 1);
+    assert(
+      promptLines.some((line) => line.includes('Reusable archive patterns')),
+      'archive: recovery recommendation prompt section is formatted',
+    );
+    assert(
+      promptLines.some((line) => line.includes('Evidence tools: desktop.window_state')),
+      'archive: prompt section prioritizes evidence tools',
+    );
+    assert(
+      promptLines.some((line) => line.includes('Readiness: missing')),
+      'archive: prompt section includes readiness state',
+    );
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} chat-recording smoke-test failure(s)`);
     process.exit(1);
@@ -229,4 +362,7 @@ function main() {
   console.log('\nAll chat-recording smoke cases passed.');
 }
 
-main();
+main().catch((error) => {
+  console.error('chat-recording smoke-test crashed:', error);
+  process.exit(1);
+});

@@ -4,7 +4,8 @@ import { Platform } from 'react-native';
 import { readLocalSecret, writeLocalSecret } from './localSecrets';
 
 export type ProviderType =
-  | 'openswan' | 'claude-code' | 'generic-agent' | 'codex' | 'gemini' | 'cursor' | 'blackswan-local'
+  | 'openswan' | 'claude-code' | 'generic-agent' | 'codex' | 'gemini' | 'cursor' | 'opencode'
+  | 'aider' | 'cline' | 'windsurf' | 'copilot' | 'continue' | 'amp' | 'blackswan-local'
   | 'openai' | 'anthropic' | 'openrouter' | 'groq' | 'ollama' | 'replicate' | 'figma' | 'zai' | 'minimax'
   | 'github-models' | 'huggingface';
 
@@ -31,6 +32,13 @@ export const PROVIDER_META: Record<ProviderType, { icon: string; label: string; 
   'claude-code':    { icon: '🤖', label: 'Claude Code',    color: '#f59e0b', defaultEndpoint: 'http://localhost:8080' },
   'generic-agent':  { icon: '⚡', label: 'Generic Agent',  color: '#10b981', defaultEndpoint: 'https://' },
   'cursor':         { icon: '🎯', label: 'Cursor',         color: '#8b5cf6', defaultEndpoint: 'http://localhost:2087' },
+  'opencode':       { icon: 'OC', label: 'OpenCode',       color: '#38bdf8', defaultEndpoint: 'https://' },
+  'aider':          { icon: 'AI', label: 'Aider',          color: '#f97316', defaultEndpoint: 'https://' },
+  'cline':          { icon: 'CL', label: 'Cline',          color: '#ec4899', defaultEndpoint: 'https://' },
+  'windsurf':       { icon: 'WS', label: 'Windsurf',       color: '#06b6d4', defaultEndpoint: 'https://' },
+  'copilot':        { icon: 'CP', label: 'Copilot',        color: '#1f6feb', defaultEndpoint: 'https://' },
+  'continue':       { icon: 'CN', label: 'Continue',       color: '#22c55e', defaultEndpoint: 'https://' },
+  'amp':            { icon: 'AM', label: 'Amp',            color: '#a78bfa', defaultEndpoint: 'https://' },
   'blackswan-local':{ icon: '🦢', label: 'BlackSwan LLM',  color: '#22d3ee', defaultEndpoint: 'http://localhost:7779' },
   // ── BYO LLM API providers ──
   'openai':         { icon: '🟢', label: 'OpenAI',         color: '#10a37f', defaultEndpoint: 'https://api.openai.com/v1',      isLLM: true },

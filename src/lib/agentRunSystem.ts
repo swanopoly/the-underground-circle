@@ -10,6 +10,7 @@
 import { supabase } from './supabase';
 import type { BrowserPlanEvent } from './computerUse';
 import { devLog } from './devLog';
+import { mapLegacyToolEventToLedgerStatus, persistAgentRunToolEvent } from './agentRunLedgerPersistence';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -256,6 +257,7 @@ export async function appendRunToolEvent(opts: {
   };
 }): Promise<boolean> {
   const stepIndex = await getNextRunStepIndex(opts.runId);
+  const stepStatus = mapLegacyToolEventToLedgerStatus(opts.event.status).rowStatus;
   const added = await addStep({
     runId: opts.runId,
     circleId: opts.circleId,
@@ -265,9 +267,21 @@ export async function appendRunToolEvent(opts: {
     body: opts.event.summary,
     toolName: opts.event.tool,
     toolOutput: opts.event.command,
-    status: opts.event.status,
+    status: stepStatus,
     metadata: opts.event.metadata,
   });
+  if (added) {
+    const metadata = opts.event.metadata || {};
+    void persistAgentRunToolEvent({
+      runId: opts.runId,
+      circleId: opts.circleId,
+      stepId: added.id,
+      scenarioId: typeof metadata.scenarioId === 'string' ? metadata.scenarioId : null,
+      surface: typeof metadata.surface === 'string' ? metadata.surface : null,
+      risk: typeof metadata.risk === 'string' ? metadata.risk : null,
+      event: opts.event,
+    });
+  }
   return !!added;
 }
 

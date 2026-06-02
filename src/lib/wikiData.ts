@@ -1,6 +1,7 @@
 // =============================================================================
-// AI Wiki Data Layer
-// Educational content about AI agents, tools, models, and design techniques.
+// Wiki Data Layer
+// Educational content about AI, technology, systems, science, cities, design,
+// and durable operating patterns.
 // Connects to the Schools education section via relatedLessonIds.
 // =============================================================================
 import { buildImpactDomainCoverageSummary, buildImpactDomainGuidance, inferImpactDomain } from './impactDomains';
@@ -8,7 +9,20 @@ import { getSpiritById } from './agentSpirits';
 import { getSpiritCareerProfile } from './spiritCareerProfiles';
 import { getSpiritOperationsProfile } from './spiritOperationsProfiles';
 
-export type WikiCategory = 'agents' | 'models' | 'frameworks' | 'design' | 'open-source' | 'mcp' | 'foundations' | 'landscape';
+export type WikiCategory =
+  | 'agents'
+  | 'models'
+  | 'frameworks'
+  | 'design'
+  | 'open-source'
+  | 'mcp'
+  | 'foundations'
+  | 'landscape'
+  | 'future-cities'
+  | 'science'
+  | 'infrastructure'
+  | 'health'
+  | 'energy-materials';
 
 export interface WikiArticle {
   id: string;
@@ -109,6 +123,41 @@ export const WIKI_CATEGORIES: Omit<WikiCategoryInfo, 'articleCount'>[] = [
     icon: '>>',
     color: '#84cc16',
   },
+  {
+    id: 'future-cities',
+    title: 'Future Cities',
+    subtitle: 'Retrofuturism, EPCOT, mobility, civic systems, and built-world prototypes',
+    icon: 'CT',
+    color: '#f59e0b',
+  },
+  {
+    id: 'science',
+    title: 'Science + Universe',
+    subtitle: 'Space, cosmology, physics, biology, discovery systems, and scientific method',
+    icon: 'SC',
+    color: '#a855f7',
+  },
+  {
+    id: 'infrastructure',
+    title: 'Infrastructure',
+    subtitle: 'Civil systems, transportation, utilities, resilient operations, and public works',
+    icon: 'IF',
+    color: '#38bdf8',
+  },
+  {
+    id: 'health',
+    title: 'Health + Biotech',
+    subtitle: 'Medical AI, clinical decision support, biotechnology, and human health systems',
+    icon: 'HX',
+    color: '#ef4444',
+  },
+  {
+    id: 'energy-materials',
+    title: 'Energy + Materials',
+    subtitle: 'Renewables, batteries, manufacturing, materials science, and climate technology',
+    icon: 'EM',
+    color: '#22c55e',
+  },
 ];
 
 // =============================================================================
@@ -116,6 +165,456 @@ export const WIKI_CATEGORIES: Omit<WikiCategoryInfo, 'articleCount'>[] = [
 // =============================================================================
 
 export const WIKI_ARTICLES: WikiArticle[] = [
+  {
+    id: 'future-cities-epcot-systems',
+    title: 'Future Cities: EPCOT as a Systems Blueprint',
+    subtitle: 'How Walt Disney style future-city thinking maps into transit, civic technology, logistics, public learning, and digital-brain design.',
+    category: 'future-cities',
+    icon: 'CT',
+    color: '#f59e0b',
+    tags: ['future-cities', 'epcot', 'urban-design', 'transportation', 'systems-design', 'retrofuturism'],
+    content: [
+      {
+        title: 'Why Future Cities Belong In The Wiki',
+        content:
+          'The Wiki should not only explain AI tools. It should help users reason about whole systems. Future-city design is useful because it forces every layer to interact: movement, energy, housing, work, education, entertainment, logistics, governance, and public experience.',
+        bulletPoints: [
+          'A future city is an operating system for physical life',
+          'Transportation, utilities, interfaces, and governance have to be designed together',
+          'The same systems thinking applies to OpenSwan, Digital Brain, and multi-agent workflows',
+        ],
+      },
+      {
+        title: 'Disney Pattern: Prototype, Transit, Separation Of Flows',
+        content:
+          'The durable lesson from the original EPCOT idea is not a single building style. It is the concept of a continuously updated prototype community with clear movement layers. Pedestrians, transit, cars, deliveries, services, and public experiences should not fight for the same path.',
+        bulletPoints: [
+          'Use radial or hub-and-spoke maps when users need legible movement through a complex system',
+          'Separate high-trust/private flows from public-facing flows',
+          'Make infrastructure visible enough to teach, but hidden enough not to overwhelm daily use',
+        ],
+      },
+      {
+        title: 'How This Maps To The App',
+        content:
+          'The Digital Brain System Flow can use future-city language directly. Site surfaces are districts. Agents are workers. Database tables are utilities. Vault credentials are secure infrastructure. Chat is the transit terminal. Wiki and Backpack are public learning plus private memory.',
+        bulletPoints: [
+          'Map every feature into a district with clear inbound and outbound flows',
+          'Show data movement as transit instead of as static tables',
+          'Let users inspect the system like a city map before they automate work',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'universe-science-field-map',
+    title: 'Universe Science Field Map',
+    subtitle: 'A practical map for tracking space, cosmology, planetary science, and scientific uncertainty in the Digital Brain.',
+    category: 'science',
+    icon: 'SC',
+    color: '#a855f7',
+    tags: ['universe', 'science', 'space', 'cosmology', 'astronomy', 'scientific-method'],
+    content: [
+      {
+        title: 'Why Broad Science Matters',
+        content:
+          'A useful knowledge system needs broad exploratory memory, not just work-specific facts. Space science, cosmology, biology, physics, and systems research create analogies that can improve product design, agent architecture, and long-range planning.',
+        bulletPoints: [
+          'Separate observations, models, hypotheses, and speculation',
+          'Track source quality and publication date',
+          'Use science notes as inspiration unless they are validated for an operational decision',
+        ],
+      },
+      {
+        title: 'Good Intake Shape',
+        content:
+          'A science intake note should capture the question, evidence, method, uncertainty, and possible analogy. For example: what was observed, how it was measured, what changed from prior understanding, and what design idea it could inspire.',
+        bulletPoints: [
+          'Question: what does this source try to explain?',
+          'Evidence: what data or method supports it?',
+          'Uncertainty: what would falsify or weaken it?',
+          'Transfer: what analogy might help app, agent, or city design?',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'infrastructure-public-systems',
+    title: 'Infrastructure And Public Systems',
+    subtitle: 'How roads, utilities, drainage, transport, maintenance, and operations thinking improve software and agent systems.',
+    category: 'infrastructure',
+    icon: 'IF',
+    color: '#38bdf8',
+    tags: ['infrastructure', 'civil', 'transportation', 'resilience', 'operations', 'maintenance'],
+    content: [
+      {
+        title: 'Infrastructure Is Long-Term Software',
+        content:
+          'Infrastructure disciplines are useful for agent products because they optimize for safety, maintainability, capacity, inspection, and failure recovery. Those are the same properties needed when automations can touch real accounts, credentials, browsers, and computers.',
+        bulletPoints: [
+          'Design for inspection before autonomy',
+          'Track capacity, bottlenecks, and failure modes',
+          'Make maintenance routines explicit instead of relying on hero debugging',
+        ],
+      },
+      {
+        title: 'Operational Lessons',
+        content:
+          'A resilient system has routes, utilities, controls, maintenance schedules, permits, escalation paths, and shutoff valves. The app should mirror that: task routing, API budgets, vault controls, review queues, cron logs, and human approval boundaries.',
+        bulletPoints: [
+          'Every automation should have a clear owner and rollback path',
+          'Every repeated job should have observability and cost caps',
+          'Every critical credential path should be permissioned and auditable',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'health-biotech-knowledge-safety',
+    title: 'Health, Biotech, And Knowledge Safety',
+    subtitle: 'How to store medical and biotech knowledge without pretending research notes are clinical advice.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['health', 'biotech', 'medical-ai', 'clinical-safety', 'research', 'evidence'],
+    content: [
+      {
+        title: 'Use The Right Safety Boundary',
+        content:
+          'Health and biotech knowledge can be valuable in the Wiki, but it needs a hard boundary. The system can summarize research, organize hypotheses, help compare evidence, and support workflow design. It should not make diagnosis, treatment, or medication decisions.',
+        bulletPoints: [
+          'Label research support separately from clinical guidance',
+          'Keep human experts in the loop',
+          'Track evidence quality, source, date, and uncertainty',
+        ],
+      },
+      {
+        title: 'What To Capture',
+        content:
+          'Good notes include the research question, population or dataset, method, results, limitations, and practical relevance. Weak notes skip limitations. Dangerous notes turn early findings into confident instructions.',
+        bulletPoints: [
+          'Capture limitations as first-class data',
+          'Prefer review status and evidence score over raw excitement',
+          'Escalate high-stakes claims for human review',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'energy-materials-systems',
+    title: 'Energy And Materials Systems',
+    subtitle: 'A non-AI knowledge lane for batteries, renewables, manufacturing, materials, and climate technology.',
+    category: 'energy-materials',
+    icon: 'EM',
+    color: '#22c55e',
+    tags: ['energy', 'materials', 'renewables', 'batteries', 'manufacturing', 'climate-tech'],
+    content: [
+      {
+        title: 'Why This Domain Belongs Here',
+        content:
+          'Energy and materials shape what is physically possible. They also teach product teams to reason about constraints: cost, manufacturability, supply chains, lifecycle impact, safety, reliability, and deployment environment.',
+        bulletPoints: [
+          'Track performance and cost together',
+          'Separate lab results from deployable systems',
+          'Connect material constraints to manufacturing and infrastructure',
+        ],
+      },
+      {
+        title: 'How Agents Should Use It',
+        content:
+          'Agents can use this lane for research comparison, opportunity mapping, design inspiration, and technical learning. They should avoid presenting unreviewed material claims as validated engineering recommendations.',
+        bulletPoints: [
+          'Use source-backed summaries',
+          'Flag experimental maturity',
+          'Prefer review queues before operational use',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'nikola-tesla-projects-planetary-impact',
+    title: 'Nikola Tesla Projects And Planetary Impact',
+    subtitle: 'A grounded map of Tesla work in AC power, induction motors, high-frequency systems, wireless communication, remote control, and turbines.',
+    category: 'energy-materials',
+    icon: 'EM',
+    color: '#22c55e',
+    tags: [
+      'nikola tesla',
+      'tesla',
+      'electricity',
+      'ac power',
+      'induction motors',
+      'wireless power',
+      'remote control',
+      'grid',
+      'climate tech',
+      'energy',
+      'infrastructure',
+    ],
+    content: [
+      {
+        title: 'Core Thesis',
+        content:
+          'The useful lesson from Nikola Tesla is systems engineering, not mythology. His strongest work connected generation, transmission, motors, lighting, high-frequency electronics, wireless signals, and remote control into whole operating systems. That same style of thinking helps modern teams build cleaner energy, resilient infrastructure, public technology, and safer automation.',
+        bulletPoints: [
+          'Build electrical systems end to end, from source to useful work',
+          'Use efficient motors because motor-driven systems are a major global electricity load',
+          'Treat wireless communication as public infrastructure for education, health, safety, and coordination',
+          'Use remote control and robotics to keep people out of dangerous work',
+          'Reject over-unity or free-energy claims unless they survive measurement, safety review, and independent replication',
+        ],
+      },
+      {
+        title: 'Project Map',
+        content:
+          'Tesla projects are most valuable when mapped to practical modern levers. AC power and induction motors are proven infrastructure. Wardenclyffe-scale wireless power remains unproven as a grid replacement, but wireless communication, targeted wireless power, and remote control became durable technology families.',
+        tableData: {
+          headers: ['Project', 'What It Explored', 'Modern Planetary Lever'],
+          rows: [
+            ['Polyphase AC power', 'Generators, transformers, transmission, motors, and lighting as one system', 'Move clean electricity from renewable and low-carbon sources to real demand'],
+            ['Induction motor', 'Rotating magnetic fields and brushless AC motor operation', 'Improve pumps, fans, compressors, HVAC, appliances, irrigation, and factory drives'],
+            ['Tesla coil and high-frequency systems', 'Resonance, high voltage, high frequency, lighting, and RF experiments', 'Teach electricity, improve RF/power-electronics literacy, and support targeted wireless-power research'],
+            ['Wardenclyffe and wireless transmission', 'Global wireless communication and attempted wireless energy transmission', 'Build universal connectivity, emergency communications, low-power sensor networks, and carefully bounded wireless charging'],
+            ['Radio-controlled teleautomaton', 'Remote control of a vessel with radio signals', 'Use robots and drones for inspection, disaster response, precision agriculture, and hazardous-site work'],
+            ['Bladeless turbine and pump', 'Boundary-layer fluid behavior in disk turbines and pumps', 'Study niche low-maintenance pumps, microturbines, and waste-heat experiments with real efficiency data'],
+          ],
+        },
+      },
+      {
+        title: 'How It Improves Lives',
+        content:
+          'The clearest Tesla-to-planet pathway is practical electrification. Cleaner grids, efficient motor systems, resilient communications, and remote inspection can reduce pollution, lower operating costs, improve safety, and bring useful infrastructure to underserved places.',
+        bulletPoints: [
+          'Expand clean power transmission and microgrids for schools, clinics, farms, homes, and transit',
+          'Retrofit motor systems with efficient motors, variable-speed drives, better controls, and predictive maintenance',
+          'Use wireless communication for rural access, public alerts, telemedicine, education, and disaster coordination',
+          'Deploy supervised robots for dangerous inspection and repair work',
+          'Teach the difference between inspiration, hypothesis, prototype, and deployable engineering',
+        ],
+      },
+      {
+        title: 'Evidence Boundary',
+        content:
+          'Tesla research attracts bad claims. The wiki should keep the real breakthroughs while filtering unsupported stories. Wardenclyffe was ambitious and historically important, but it was not completed as an industrial wireless power grid. Free energy should mean abundant renewable energy and fair access, not energy without source, loss, or cost.',
+        bulletPoints: [
+          'Cite patents, museum records, government energy data, standards bodies, and peer-reviewed engineering sources',
+          'Distinguish wireless communication from wireless power',
+          'Distinguish short-range resonant wireless power from planetary power broadcast',
+          'Mark uncompleted projects as uncompleted',
+          'Avoid using Tesla quotes unless the original publication is known',
+        ],
+      },
+      {
+        title: 'What To Build Or Research Next',
+        content:
+          'A Tesla-inspired Underground Circle program should focus on measurable public benefit: clean electrification maps, motor-efficiency retrofits, grid resilience planning, public communication infrastructure, robotics for inspection, and safe science education.',
+        bulletPoints: [
+          'Build a school lesson that maps AC grids, motors, wireless, robotics, and energy equity',
+          'Create student projects for motor retrofits, microgrids, and remote inspection workflows',
+          'Add research cards that label claims as proven, experimental, speculative, or false',
+          'Let agents produce climate-impact checklists for electrification and motor-efficiency opportunities',
+          'Use source, transmission, control, user benefit, safety, economics, and maintenance as the evaluation frame',
+        ],
+      },
+      {
+        title: 'Sources To Recheck',
+        content:
+          'The full dated report lives at docs/wiki/nikola-tesla-projects-planetary-impact-2026-06-01.md. Recheck these source families before expanding the article.',
+        bulletPoints: [
+          'Smithsonian AC induction motor: https://americanhistory.si.edu/collections/object/nmah_713594',
+          'EIA electricity and Tesla history: https://www.eia.gov/energyexplained/electricity/ and https://www.eia.gov/kids/history-of-energy/famous-people/tesla.php',
+          'Tesla Museum patents: https://tesla-museum.org/en/nikola-tesla-2/patents/',
+          'Google Patents: US381968A, US382280A, US454622A, US645576A, US1119732A, US613809A, US1061206A',
+          'Tesla Science Center Wardenclyffe: https://teslasciencecenter.org/history/tower/',
+          'IEA motor-driven systems: https://www.iea.org/reports/energy-efficiency-policy-opportunities-for-electric-motor-driven-systems',
+          'NREL transmission planning: https://www.nrel.gov/grid/transmission-planning.html',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'nikola-tesla-systems-buildout-roadmap',
+    title: 'Nikola Tesla Systems Buildout Roadmap',
+    subtitle: 'A practical roadmap for turning Tesla-inspired systems thinking into motor audits, clean electrification, resilient grids, emergency communications, robotics, and safe science labs.',
+    category: 'energy-materials',
+    icon: 'EM',
+    color: '#22c55e',
+    tags: [
+      'nikola tesla',
+      'tesla systems',
+      'motor audit',
+      'electrification',
+      'microgrid',
+      'wireless power',
+      'emergency communications',
+      'robotics',
+      'science education',
+      'climate tech',
+    ],
+    content: [
+      {
+        title: 'Buildout Principle',
+        content:
+          'Tesla-inspired work should make useful energy, communication, motion, sensing, and automation cheaper, safer, cleaner, more resilient, and more available. The roadmap turns the historical research into practical projects with measurement, safety, and claim hygiene built in.',
+        bulletPoints: [
+          'Use proven AC, motor, communication, and remote-control ideas as infrastructure patterns',
+          'Treat uncompleted wireless-power ambitions as research questions, not deployment claims',
+          'Measure source energy, useful output, losses, safety, reliability, and public benefit',
+          'Prefer projects that reduce bills, emissions, downtime, and danger for real communities',
+        ],
+      },
+      {
+        title: 'Seven Buildout Pillars',
+        content:
+          'The roadmap organizes Tesla-inspired work into seven practical pillars. Each pillar connects a historical Tesla theme to a modern public-benefit target.',
+        tableData: {
+          headers: ['Pillar', 'Modern Target', 'Public Benefit'],
+          rows: [
+            ['Clean electrification', 'Electrify heat, transport, tools, farms, schools, clinics, and industry where the grid is ready', 'Less pollution and better controllability'],
+            ['Motor efficiency', 'Audit motors, pumps, fans, compressors, HVAC, controls, and maintenance', 'Lower bills, lower emissions, less downtime'],
+            ['Grid reach and resilience', 'Transmission planning, HVDC where appropriate, microgrids, storage, demand response', 'Clean power reaches people reliably'],
+            ['Universal communication', 'Rural broadband, public alerts, emergency mesh, local knowledge mirrors', 'Better access to education, health, coordination, and safety'],
+            ['Targeted wireless power', 'Charging docks, sensors, robots, medical devices, and controlled power-beaming research', 'Power where wires or batteries are limiting'],
+            ['Remote inspection robotics', 'Drones, underwater robots, field robots, and supervised autonomy', 'Fewer people in hazardous work'],
+            ['Public science labs', 'Safe motors, fields, radio, wireless power, and grid simulations', 'Better technical literacy and fewer false claims'],
+          ],
+        },
+      },
+      {
+        title: 'First Project: Motor Efficiency Audit Kit',
+        content:
+          'The fastest practical project is a motor audit kit. Electric motor-driven systems are a large electricity load, so even small improvements across pumps, fans, compressors, HVAC, irrigation, and factory drives can compound into major savings.',
+        bulletPoints: [
+          'Inventory motor horsepower or kW, load type, runtime, controls, utility rate, and criticality',
+          'Flag variable-load systems as candidates for variable-frequency drives or better controls',
+          'Check belts, bearings, alignment, lubrication, heat, vibration, trips, and process throttling',
+          'Output a ranked action: meter, inspect, tune, add controls, replace, repair mechanical load, or leave unchanged',
+          'Label savings confidence as measured, estimated, or unknown',
+        ],
+      },
+      {
+        title: 'Claim Triage',
+        content:
+          'Tesla topics should be classified before they are recommended. Proven inventions, evolved modern technologies, plausible niche ideas, experimental systems, uncompleted historical projects, unsupported claims, and false or unsafe claims should not be mixed together.',
+        bulletPoints: [
+          'Proven: AC induction motor, polyphase concepts, radio remote control patent',
+          'Proven but evolved: AC transmission, high-frequency circuits, remote-control systems',
+          'Experimental: optical power beaming, dynamic wireless EV charging, some wireless-power applications',
+          'Uncompleted: Wardenclyffe as promised global wireless power infrastructure',
+          'Unsupported or false: over-unity machines, unlimited free-energy extraction, perpetual motion',
+        ],
+      },
+      {
+        title: 'App Build Targets',
+        content:
+          'The full roadmap lives at docs/wiki/nikola-tesla-systems-buildout-roadmap-2026-06-01.md. The best next product work is to make the roadmap interactive in the wiki, schools, and agent research tools.',
+        bulletPoints: [
+          'Add a Tesla Systems Lab school path',
+          'Add a motor-audit worksheet and calculator',
+          'Add a source-backed Tesla claim checker',
+          'Add microgrid and emergency-communications scenario templates',
+          'Add prompt blocks for agents to produce electrification and motor-efficiency checklists',
+        ],
+      },
+      {
+        title: 'Sources To Recheck',
+        content:
+          'Use official and primary sources first. The buildout should stay tied to the companion report, energy agencies, patents, museums, standards, and serious engineering programs.',
+        bulletPoints: [
+          'Companion report: docs/wiki/nikola-tesla-projects-planetary-impact-2026-06-01.md',
+          'Buildout roadmap: docs/wiki/nikola-tesla-systems-buildout-roadmap-2026-06-01.md',
+          'IEA motor-driven systems: https://www.iea.org/reports/energy-efficiency-policy-opportunities-for-electric-motor-driven-systems',
+          'EIA machine drives: https://www.eia.gov/todayinenergy/detail.php?id=13431',
+          'NREL transmission planning: https://www.nrel.gov/grid/transmission-planning.html',
+          'DARPA POWER: https://www.darpa.mil/news/2025/darpa-program-distance-record-power-beaming',
+          'Tesla Science Center Wardenclyffe: https://teslasciencecenter.org/history/tower/',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'nikola-tesla-operational-kits',
+    title: 'Nikola Tesla Operational Kits',
+    subtitle: 'Motor audits, claim triage, and a Tesla Systems Lab path for turning energy history into practical, safe, measurable projects.',
+    category: 'energy-materials',
+    icon: 'EM',
+    color: '#22c55e',
+    tags: [
+      'nikola tesla',
+      'tesla systems lab',
+      'motor efficiency',
+      'motor audit',
+      'claim checker',
+      'source checker',
+      'wireless power safety',
+      'schools',
+      'energy education',
+      'climate projects',
+    ],
+    content: [
+      {
+        title: 'What Was Added',
+        content:
+          'The Tesla wiki now has three operational kits that move beyond history: a motor efficiency audit worksheet, a claim triage and source checker, and a Tesla Systems Lab school path. The goal is to make Tesla-inspired work measurable, safe, source-backed, and useful for real communities.',
+        bulletPoints: [
+          'Motor audit kit: inventory motors, runtime, controls, symptoms, and savings opportunities',
+          'Claim checker: classify Tesla claims as proven, evolved, niche, experimental, uncompleted, unsupported, or false/unsafe',
+          'Systems Lab path: teach source-to-load thinking, motors, grids, wireless boundaries, robotics safety, and claim hygiene',
+        ],
+      },
+      {
+        title: 'Motor Audit Output',
+        content:
+          'The motor audit kit turns Tesla induction-motor history into a practical facility worksheet. It focuses on the whole motor system, including pumps, fans, compressors, controls, maintenance, load profile, and runtime.',
+        bulletPoints: [
+          'Collect motor rating, load type, runtime, load pattern, existing control, symptoms, utility rate, and criticality',
+          'Score runtime, load variability, control mismatch, mechanical symptoms, energy exposure, and criticality',
+          'Recommend meter, inspect, tune, add controls, replace, repair mechanical load, or leave unchanged',
+          'Require qualified workers and lockout/tagout boundaries for electrical or maintenance work',
+        ],
+      },
+      {
+        title: 'Claim Checker Output',
+        content:
+          'The claim checker prevents Tesla content from collapsing into myth. It asks what was built, what was measured, what losses were included, whether replication exists, and which safety limits apply.',
+        tableData: {
+          headers: ['Class', 'Use'],
+          rows: [
+            ['Proven', 'Use as a reliable historical or engineering foundation'],
+            ['Proven but evolved', 'Use with notes about how modern systems differ'],
+            ['Plausible niche', 'Study in bounded cases with measurement'],
+            ['Experimental', 'Track as research, not broad deployment'],
+            ['Uncompleted', 'Study as history, do not present as delivered infrastructure'],
+            ['Unsupported', 'Reject until stronger evidence exists'],
+            ['False or unsafe', 'Reject and warn'],
+          ],
+        },
+      },
+      {
+        title: 'Tesla Systems Lab',
+        content:
+          'The school path organizes the topic into eight lessons: source to useful work, AC and rotating fields, motor audits, grid resilience, wireless communication versus wireless power, remote-control robotics, claim triage, and a planetary benefit project.',
+        bulletPoints: [
+          'Keep activities low-voltage or simulated unless trained supervision exists',
+          'Require source lists and evidence classes for claims',
+          'Use local facilities as living systems: energy, safety, maintenance, people, cost, and resilience',
+          'Export the final project as a research document with problem, people helped, measurement plan, safety boundary, and next step',
+        ],
+      },
+      {
+        title: 'Files',
+        content:
+          'These docs are the canonical operational extensions for the Tesla wiki cluster.',
+        bulletPoints: [
+          'docs/wiki/nikola-tesla-motor-efficiency-audit-kit-2026-06-01.md',
+          'docs/wiki/nikola-tesla-claim-triage-and-source-checker-2026-06-01.md',
+          'docs/wiki/nikola-tesla-systems-lab-school-path-2026-06-01.md',
+          'docs/wiki/nikola-tesla-systems-buildout-roadmap-2026-06-01.md',
+          'docs/wiki/nikola-tesla-projects-planetary-impact-2026-06-01.md',
+        ],
+      },
+    ],
+  },
   // ===========================================================================
   // FOUNDATIONS
   // ===========================================================================
@@ -292,6 +791,703 @@ export const WIKI_ARTICLES: WikiArticle[] = [
           'Add a language-strategy lesson for product design decisions',
           'Teach users how app, agent, and infrastructure layers use different tools',
           'Tie wiki articles directly to school lessons so the app feels like a connected learning system',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'typescript-agent-best-practices',
+    title: 'TypeScript Best Practices For Agents',
+    subtitle: 'How contributing agents should write, review, and verify TypeScript in The Underground Circle.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#f59e0b',
+    tags: ['typescript', 'typescript strict', 'strict-mode', 'agents', 'react-native', 'expo', 'type-safety', 'verification'],
+    content: [
+      {
+        title: 'Baseline For This App',
+        content:
+          'The Underground Circle uses Expo / React Native with TypeScript strict mode for the app. Agents should treat strict typing as the floor, keep pure runtime modules testable from smoke scripts, and run the narrow typecheck before handing work back.',
+        bulletPoints: [
+          'Keep `strict` enabled and do not loosen TypeScript settings to make an edit pass',
+          'Use `npm run typecheck:app` for app-side changes',
+          'Use `npm run typecheck:functions` when Supabase function or shared edge code changes',
+          'Finish TypeScript changes with `git diff --check`',
+        ],
+      },
+      {
+        title: 'Type Safety Rules',
+        content:
+          'Agent code should make bad states difficult to represent. The strongest patterns are precise domain types, discriminated unions, boundary parsers, exhaustiveness checks, and type-only imports. Free-form strings should not be the only source of truth for route, bridge, provider, approval, or recovery state.',
+        bulletPoints: [
+          'Use `unknown` for untrusted input until it is narrowed',
+          'Prefer discriminated unions for planner, bridge, approval, recovery, and execution states',
+          'Use `satisfies` for checked config maps without losing literal inference',
+          'Avoid `any`, `as any`, double casts, and non-null assertions unless the invariant is local and obvious',
+          'Design indexed and optional access as if `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` were enabled',
+        ],
+      },
+      {
+        title: 'Boundary Parsing Pattern',
+        content:
+          'Every bridge response, provider payload, file upload manifest, URL param, local-storage read, or JSON parse should be validated once at the boundary. After that, downstream code should receive a typed value and should not repeat stringly typed checks.',
+        codeExample: `type Surface = 'browser' | 'desktop' | 'file' | 'hybrid';
+
+interface AutomationRequest {
+  surface: Surface;
+  userText: string;
+  requiresApproval: boolean;
+}
+
+function isSurface(value: unknown): value is Surface {
+  return value === 'browser' || value === 'desktop' || value === 'file' || value === 'hybrid';
+}
+
+function parseAutomationRequest(input: unknown): AutomationRequest | null {
+  if (!input || typeof input !== 'object') return null;
+  const value = input as { surface?: unknown; userText?: unknown; requiresApproval?: unknown };
+
+  if (!isSurface(value.surface)) return null;
+  if (typeof value.userText !== 'string' || value.userText.trim().length === 0) return null;
+
+  return {
+    surface: value.surface,
+    userText: value.userText.trim(),
+    requiresApproval: value.requiresApproval === true,
+  };
+}`,
+      },
+      {
+        title: 'Agent Runtime Modeling',
+        content:
+          'Automation code should return typed receipts, blockers, proof, and recovery options. Chat should render useful choices from structured data instead of parsing raw exception text.',
+        bulletPoints: [
+          'Return typed success and failure results from bridge and desktop app adapters',
+          'Include stable error codes, retryability, user-action requirements, and proof paths',
+          'Switch on discriminants and use a `never` exhaustiveness check',
+          'Keep UI labels separate from runtime discriminants',
+          'Map database rows into app DTOs before handing them to UI or planners',
+        ],
+      },
+      {
+        title: 'Verification Checklist',
+        content:
+          'A TypeScript change is not done when the editor looks quiet. Agents should prove the change with the smallest useful command set and call out any skipped coverage.',
+        bulletPoints: [
+          'Run `npm run typecheck:app` for app code',
+          'Run the focused smoke test for changed planner, bridge, recovery, provider, approval, persistence, or route behavior',
+          'Run `npm run typecheck:functions` for Supabase functions or shared edge code',
+          'Run `git diff --check` before final handoff',
+          'Document any forced cast, skipped smoke, or unresolved type-risk explicitly',
+        ],
+      },
+      {
+        title: 'Sources To Recheck',
+        content:
+          'The canonical agent document at docs/TYPESCRIPT_AGENT_BEST_PRACTICES.md keeps the longer standard and source list. Recheck official TypeScript, TSConfig, typescript-eslint, Expo, and React TypeScript docs when changing the baseline.',
+        bulletPoints: [
+          'TypeScript Handbook: https://www.typescriptlang.org/docs/handbook/2/everyday-types.html',
+          'TypeScript narrowing: https://www.typescriptlang.org/docs/handbook/2/narrowing.html',
+          'TSConfig strictness: https://www.typescriptlang.org/tsconfig/strict.html',
+          'typescript-eslint type-checked configs: https://typescript-eslint.io/users/configs/',
+          'Expo TypeScript guide: https://docs.expo.dev/guides/typescript/',
+          'React TypeScript guide: https://react.dev/learn/typescript',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'agent-development-standards-index',
+    title: 'Agent Development Standards Index',
+    subtitle: 'Which coding, TypeScript, design, web-page, app automation, tool-contract, and UC style standards agents should read for each task.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#f59e0b',
+    tags: [
+      'agent standards',
+      'development standards',
+      'coding standards',
+      'typescript standards',
+      'design standards',
+      'web design standards',
+      'app automation standards',
+      'tool contract standards',
+      'agents',
+      'verification',
+    ],
+    content: [
+      {
+        title: 'Why The Index Exists',
+        content:
+          'The standards index gives agents a short routing layer before implementation. Instead of guessing which guide applies, agents can choose the coding, TypeScript, design, web-page, computer/app automation, tool-contract/eval, or local style standard that matches the task.',
+        bulletPoints: [
+          'Start with AGENTS.md and docs/AGENTS_ROADMAP.md',
+          'Use docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md to choose the right standard',
+          'Use the roadmap when ownership or guidance conflicts',
+          'Keep app wiki standards mirrored with the canonical docs',
+        ],
+      },
+      {
+        title: 'Standards Map',
+        content:
+          'Each task type has a required reading set and a usual verification shape. This keeps broad agent work consistent across code, TypeScript, design, wiki, web-page, computer/app automation, and tool/eval changes.',
+        tableData: {
+          headers: ['Task', 'Read', 'Verify'],
+          rows: [
+            ['General code change', 'CODING_AGENT_BEST_PRACTICES', 'Focused smoke, typecheck:app, git diff --check'],
+            ['TypeScript change', 'CODING + TYPESCRIPT_AGENT_BEST_PRACTICES', 'Focused smoke when behavior changes, typecheck:app'],
+            ['Product UI or automation card', 'DESIGN_AGENT_BEST_PRACTICES + UC_STYLE_GUIDE', 'Typecheck plus focused UI/runtime smoke when available'],
+            ['Web page or dashboard', 'MODERN_WEB_PAGE_DESIGN_AGENT_GUIDE + DESIGN + UC_STYLE_GUIDE', 'Mobile/desktop review, accessibility pass, typecheck'],
+            ['Browser, desktop, file, or app automation', 'AGENTIC_COMPUTER_APP_AUTOMATION_GUIDE + CODING + TYPESCRIPT + DESIGN', 'Computer/app route smoke, app-family smoke when relevant, typecheck'],
+            ['OpenSwan, bridge, MCP, or connected-agent tool contract', 'AGENT_TOOL_CONTRACTS_AND_EVALS_GUIDE + CODING + TYPESCRIPT + AUTOMATION', 'Tool-specific smoke, approval/recovery negative-path smoke, typecheck'],
+            ['Standards wiki content', 'This index plus the topic guide', 'smoke:agent-standards-wiki, typecheck:app, git diff --check'],
+          ],
+        },
+      },
+      {
+        title: 'Worktree Integration Checklist',
+        content:
+          'The standards registry also builds a hidden worktree-quality checklist for delegated agents. It uses git status --porcelain=v1 -uall path snapshots, starts from AGENTS.md plus the roadmap and stack reference, maps changed files to canonical owners, flags duplicate-path and verification risk, and recommends the narrowest smoke before typecheck and git diff --check.',
+        bulletPoints: [
+          'Use buildAgentWorktreeQualityChecklist when a bounded file list or git status output is available',
+          'Use buildAgentWorktreeQualityPromptBlock or pass changedPaths into applyAgentDevelopmentStandardsToPrompt when handing work to Codex, Claude Code, Cursor Composer, Gemini, or a custom connected agent',
+          'Prefer extending mapped owners such as genericAppNavigator, appAutomationControlSurfaces, chat planning/metadata, chat computer runtime, OpenSwan runtime, product UI, second brain/research, standards/wiki, package scripts, or agent-runtime SQL before creating another file',
+          'Escalate to a new roadmap owner only when no existing owner fits the concern',
+        ],
+      },
+      {
+        title: 'Canonical Standards',
+        content:
+          'The current canonical standards are docs/CODING_AGENT_BEST_PRACTICES.md, docs/TYPESCRIPT_AGENT_BEST_PRACTICES.md, docs/DESIGN_AGENT_BEST_PRACTICES.md, docs/MODERN_WEB_PAGE_DESIGN_AGENT_GUIDE.md, docs/AGENTIC_COMPUTER_APP_AUTOMATION_GUIDE.md, docs/AGENT_TOOL_CONTRACTS_AND_EVALS_GUIDE.md, and docs/UC_STYLE_GUIDE.md.',
+        bulletPoints: [
+          'Coding: change shape, architecture, security, testing, review, handoff',
+          'TypeScript: strict typing, boundary parsing, unions, React Native / Expo, verification',
+          'Design: product flow, UX writing, design-system discipline, automation UI',
+          'Modern web: page structure, responsive layout, accessibility, performance, forms, media',
+          'Computer/app automation: browser, desktop, files, native apps, Adobe/CAD, bridge recovery, evidence, and connected-agent adapter buildout',
+          'Tool contracts and evals: schemas, structured results, approval metadata, recovery, redaction, retryability, and negative-path coverage',
+          'UC style: local tokens for color, typography, radius, buttons, inputs, cards, and dark surfaces',
+        ],
+      },
+      {
+        title: 'Conflict Rules',
+        content:
+          'The standards should reinforce each other. When they conflict, the most specific document wins for its domain, and docs/AGENTS_ROADMAP.md wins over all standards docs.',
+        bulletPoints: [
+          'TypeScript-specific guidance wins over general coding guidance for TypeScript details',
+          'Modern web guidance owns page structure and browser behavior',
+          'Design guidance owns product flow, UX writing, and automation UI',
+          'UC_STYLE_GUIDE owns local visual tokens',
+          'AGENTS_ROADMAP wins when ownership or canonical architecture conflicts',
+        ],
+      },
+      {
+        title: 'Maintenance Contract',
+        content:
+          'When agents change these standards, they must keep the repo docs, app wiki, and verification smoke in sync so future agents see the same guidance everywhere.',
+        bulletPoints: [
+          'Update docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md',
+          'Update AGENTS.md and docs/AGENTS_ROADMAP.md when discoverability or ownership changes',
+          'Update the matching article in src/lib/wikiData.ts',
+          'Update scripts/agent-standards-wiki-smoketest.ts',
+          'Run npm run smoke:agent-standards-wiki, npm run typecheck:app, and git diff --check',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'agentic-computer-app-automation-for-agents',
+    title: 'Agentic Computer/App Automation For Agents',
+    subtitle: 'How agents should route, approve, execute, recover, and verify browser, desktop, local-file, and native-app tasks.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#f59e0b',
+    tags: [
+      'computer app automation',
+      'desktop automation',
+      'browser automation',
+      'computer use',
+      'photoshop',
+      'indesign',
+      'adobe',
+      'cad',
+      'bridge',
+      'approval',
+      'recovery',
+      'agents',
+    ],
+    content: [
+      {
+        title: 'The Automation Standard',
+        content:
+          'Use docs/AGENTIC_COMPUTER_APP_AUTOMATION_GUIDE.md when a chat request should operate another browser, desktop app, uploaded file, local file, Adobe project, CAD drawing, bridge, or unfamiliar app. The standard is a semantic, evidence-first automation ladder, not a blind click loop.',
+        bulletPoints: [
+          'Classify the surface and risk before action',
+          'Observe the browser, desktop, file, or app state before mutation',
+          'Prefer official APIs, scripts, plugins, file adapters, semantic locators, and accessibility trees before coordinates',
+          'Require approval for writes, exports, credentials, destructive actions, billing risk, private files, and low-confidence fallback',
+          'Return typed receipts, before/after proof, warnings, and recovery options',
+        ],
+      },
+      {
+        title: 'Surface Ladder',
+        content:
+          'Agents should choose the safest deterministic control surface available. For Photoshop and InDesign this usually means UXP or scripting APIs before accessibility automation. For websites it means semantic Playwright or Browserbase routes before visual fallback. For unfamiliar apps it means app API, file format, accessibility tree, then connected-agent buildout.',
+        tableData: {
+          headers: ['Surface', 'Use First When', 'Fallback'],
+          rows: [
+            ['Product API or file adapter', 'The app exposes a documented API, SDK, script runtime, or parseable file format', 'Native app script bridge'],
+            ['Native scripting or plugin API', 'Adobe, CAD, IDE, office, or design tools expose scripts/plugins/macros', 'Accessibility tree and menus'],
+            ['Browser automation', 'The task is on a website or web app', 'CDP inspection or guarded visual fallback'],
+            ['Desktop accessibility', 'The app lacks an API but exposes semantic UI controls', 'Coordinate fallback with approval'],
+            ['Connected-agent buildout', 'No safe route exists yet', 'Stop with recovery options until proof exists'],
+          ],
+        },
+      },
+      {
+        title: 'Typed Route Decision',
+        content:
+          'The helper buildAppAutomationRouteDecision(task, options) turns the research ladder into a compact execution gate. It returns ready_to_execute, needs_observation, needs_approval, needs_user_action, or needs_connected_agent_buildout before the chat mutates another app. formatAppAutomationRouteDecisionPromptBlock(decision) carries that decision into OpenSwan, SwanBot, Codex, Claude Code, Cursor Composer, or custom agents.',
+        bulletPoints: [
+          'Use the highest available deterministic surface and record stronger surfaces that were skipped',
+          'Block execution when install, version, active document, locator, permission, file grant, or app evidence is missing',
+          'Block writes, exports, uploads, generated scripts, destructive edits, and coordinates until approval exists',
+          'Delegate missing adapters through connected-agent buildout only with official source refs, smoke proof, and a bounded retry plan',
+        ],
+      },
+      {
+        title: 'Approval And Evidence',
+        content:
+          'The chat should stay quiet until the user needs to approve, unblock, choose, or inspect proof. Any write, export, credential, billing, private-file, destructive, or coordinate-fallback action needs an approval payload that explains scope, change, proof, and stop conditions.',
+        bulletPoints: [
+          'Before evidence proves the target was identified',
+          'Action receipts summarize commands, app operations, or browser steps',
+          'After evidence proves the requested change or records manual verification needed',
+          'Warnings list anything the agent could not verify',
+          'Local paths and private content stay hidden unless explicitly needed',
+        ],
+      },
+      {
+        title: 'Failure Recovery',
+        content:
+          'Failures should become selectable recovery options instead of raw error text. Good options include retry with fresh evidence, repair or start the bridge, ask the user to unblock permissions/MFA/file access, switch surface, hand off adapter buildout to a connected agent, or stop and show details.',
+        bulletPoints: [
+          'Each option needs an actor, safety mode, retry cap, and stop condition',
+          'Connected code agents build missing adapters only under a bounded scope',
+          'A retry is not ready until the buildout result includes source refs, verification, and a safe plan',
+          'Recovery context should include the failed message id, source surface, failure excerpt, and hidden guardrails',
+        ],
+      },
+      {
+        title: 'Research Basis',
+        content:
+          'The guide is grounded in current primary sources from Anthropic, MCP, NIST, OWASP, Playwright, Chrome DevTools Protocol, Apple UI scripting, Microsoft UI Automation, and Adobe UXP documentation.',
+        bulletPoints: [
+          'Anthropic agent and tool guidance: simple workflows first, clear tools, real evaluations, checkpoints, and stopping conditions',
+          'MCP tools: visible tool exposure, human denial path, structured outputs, validation, access control, and sanitized outputs',
+          'NIST AI RMF and OWASP: risk mapping, prompt injection, tool misuse, excessive agency, privilege abuse, data disclosure, and cascading failures',
+          'Playwright, Apple, Microsoft, and Chrome: semantic locators, actionability checks, accessibility/control trees, and structured state before low-level fallback',
+          'Adobe UXP: use documented Photoshop and InDesign scripting/plugin surfaces for layer, document, export, and text-frame work',
+        ],
+      },
+      {
+        title: 'Verification',
+        content:
+          'Agents should prove changes with the smallest command set that covers the risk. Standards/wiki edits need the standards smoke. Runtime app-automation changes need route, control-surface, evidence, and app-family smoke where relevant.',
+        bulletPoints: [
+          'Run npm run smoke:agent-standards-wiki for this article and the canonical guide',
+          'Run npm run smoke:chat-computer-request-router for routing changes',
+          'Run npm run smoke:app-automation-control-surfaces for control-surface metadata changes',
+          'Run npm run smoke:computer-task-evidence-contract for proof and receipt changes',
+          'Finish app-side changes with npm run typecheck:app and git diff --check',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'agent-tool-contracts-and-evals-for-agents',
+    title: 'Agent Tool Contracts And Evals For Agents',
+    subtitle: 'How agents should design, review, approve, recover, redact, and evaluate OpenSwan, bridge, MCP, and connected-agent tools.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#f59e0b',
+    tags: [
+      'tool contract',
+      'agent tool evals',
+      'mcp tool',
+      'openswan tool',
+      'bridge tool',
+      'structured result',
+      'approval metadata',
+      'recovery eval',
+      'redaction',
+      'negative path',
+      'agents',
+    ],
+    content: [
+      {
+        title: 'The Tool Standard',
+        content:
+          'Use docs/AGENT_TOOL_CONTRACTS_AND_EVALS_GUIDE.md when a change touches OpenSwan tools, desktop/browser bridge tools, MCP tools, connected-agent dispatch, recovery actions, approval metadata, redaction, or tool result contracts. The concrete helper is src/lib/agentToolContractStandards.ts. Tools should be agent-facing contracts with clear names, bounded schemas, typed results, recovery options, and proof coverage.',
+        bulletPoints: [
+          'One tool should expose one clear capability',
+          'Inputs should use strict schemas, enums, bounded strings, and required fields',
+          'Results should separate completed, blocked, unsafe, and failed states',
+          'Approval metadata should describe actor, target, risk, proof, retry limit, and stop condition',
+          'Negative-path evals should prove malformed input, missing permission, unsafe action, redaction, and recovery behavior',
+        ],
+      },
+      {
+        title: 'Contract Checklist',
+        content:
+          'A reliable tool contract names the domain and action, states purpose, validates untrusted inputs, annotates risk, defines idempotency, requires observation before side effects, returns structured evidence, and redacts private output before it reaches chat or prompts.',
+        tableData: {
+          headers: ['Contract Area', 'Requirement'],
+          rows: [
+            ['Name and purpose', 'Namespaced imperative action with one clear capability'],
+            ['Inputs', 'Strict schema, bounded fields, enums, and trust-boundary parsing'],
+            ['Risk and approval', 'Read/write/destructive/billing/credential/privacy annotation plus user-visible approval rule'],
+            ['Output shape', 'Stable completed, blocked, unsafe, and failed variants'],
+            ['Evidence', 'Before/after state, receipts, diffs, exports, hashes, or manual-verification marker'],
+            ['Eval coverage', 'Happy path plus malformed input, permission denial, unsafe target, redaction, retry, and prompt-injection cases'],
+          ],
+        },
+      },
+      {
+        title: 'Typed Self Review',
+        content:
+          'The helper reviewAgentToolContractDraft(description, draft, options) checks a proposed tool before agents mark it ready. It blocks missing schema fields, missing approval gates, missing recovery fields, missing evals, and missing redaction coverage. formatAgentToolContractReviewPromptBlock(review) turns those findings into a compact connected-agent handoff.',
+        bulletPoints: [
+          'Ready tools include purpose, inputs, trust boundary, risk tags, approval rule, idempotency, observation, output variants, evidence, redaction, eval ids, recovery fields, and smoke commands',
+          'Privileged tools are blocked unless approvalRequired is true',
+          'Missing evals and recovery fields are blockers because chat cannot recover safely from prose-only failures',
+          'Missing recommended smoke commands are warnings that need to be run or marked not applicable',
+        ],
+      },
+      {
+        title: 'Recovery Contract',
+        content:
+          'Recoverable failures need machine-readable fields so chat can show useful options without parsing prose. The recovery contract should include code, retryability, fresh-evidence requirement, approval requirement, actor, max attempts, recovery options, and stop condition.',
+        bulletPoints: [
+          'Retry only when idempotency or fresh evidence prevents duplicate side effects',
+          'Ask the user only for real blockers such as permissions, MFA, app install, file access, or approval',
+          'Use connected agents for bounded adapter or runtime repair with required proof',
+          'Stop instead of looping when the target stays ambiguous or the action becomes unsafe',
+        ],
+      },
+      {
+        title: 'Research Basis',
+        content:
+          'The standard is grounded in primary guidance from Anthropic, MCP, NIST, and OWASP. The shared direction is clear: tools should be narrow, visible, validated, permissioned, structured, evaluated, and resistant to untrusted content overriding policy.',
+        bulletPoints: [
+          'Anthropic: design tools for agents, use clear namespaces and descriptions, return useful context, and test with real tasks',
+          'MCP: tools are model-controlled capabilities that need visible exposure, user denial paths, structured outputs, input validation, access controls, rate limits, and sanitized output',
+          'NIST AI RMF: map context, measure risk, manage mitigations, and keep review visible',
+          'OWASP: defend against prompt injection, tool misuse, excessive agency, privilege abuse, data disclosure, supply-chain issues, and cascading failures',
+        ],
+      },
+      {
+        title: 'Verification',
+        content:
+          'Tool changes should prove both success and failure behavior. A passing happy path is not enough when the tool can touch files, browsers, apps, credentials, billing, connected agents, or recovery loops.',
+        bulletPoints: [
+          'Run npm run smoke:agent-tool-contract-standards for the reusable checklist and eval helper',
+          'Run npm run smoke:agent-standards-wiki for this article and the canonical guide',
+          'Run the tool-specific smoke for changed runtime behavior',
+          'Run approval and recovery negative-path smoke when the tool is privileged',
+          'Check redaction for secrets, private paths, screenshots, OCR, DOM, app state, and file snippets',
+          'Finish app-side changes with npm run typecheck:app and git diff --check',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'coding-best-practices-for-agents',
+    title: 'Coding Best Practices For Agents',
+    subtitle: 'A general engineering standard for agents writing, reviewing, testing, and handing off code.',
+    category: 'frameworks',
+    icon: '{}',
+    color: '#f59e0b',
+    tags: [
+      'coding best practices',
+      'code quality',
+      'secure coding',
+      'testing',
+      'review',
+      'agents',
+      'handoff',
+      'engineering standards',
+    ],
+    content: [
+      {
+        title: 'The General Code Standard',
+        content:
+          'Good code in this app should be clear, reviewable, tested at the right risk level, validated at trust boundaries, secure by default, observable enough to debug, and consistent with the canonical owner in the roadmap.',
+        bulletPoints: [
+          'Read the owning files and roadmap table before editing',
+          'Extend existing helpers, types, adapters, and tests before adding parallel paths',
+          'Keep changes small enough to review and roll back',
+          'Separate refactors from behavior changes when practical',
+          'Use docs/CODING_AGENT_BEST_PRACTICES.md as the full agent guide',
+        ],
+      },
+      {
+        title: 'Architecture And Boundaries',
+        content:
+          'Agents should keep side effects obvious and boundaries typed. UI can call runtime helpers, but generic logic should not import UI frameworks unless it is explicitly a UI helper.',
+        bulletPoints: [
+          'Keep adapters thin and translate boundary data into typed core logic',
+          'Use one source of truth for route ids, provider ids, tool names, approvals, and statuses',
+          'Do not hide file writes, network calls, bridge actions, database writes, or external app actions in formatters',
+          'Validate configuration and boundary inputs before downstream code uses them',
+        ],
+      },
+      {
+        title: 'Security And Error Handling',
+        content:
+          'Secure coding is part of the agent standard because this app controls providers, browsers, files, desktop apps, memory, approvals, and user content. Unknown errors should become typed failures with safe user-facing recovery.',
+        bulletPoints: [
+          'Treat user input, provider output, uploaded files, bridge responses, URL params, local storage, and database rows as untrusted',
+          'Use least privilege and allowlists for tools, routes, domains, app actions, and file operations',
+          'Never log API keys, OAuth tokens, secret headers, private paths, or private file contents',
+          'Fail closed for permissions, auth, destructive actions, billing risk, and unclear targets',
+          'Return stable error codes when the UI or recovery layer needs to act',
+        ],
+      },
+      {
+        title: 'Testing And Verification',
+        content:
+          'Verification should match blast radius. A documentation-only change needs diff hygiene; planner, bridge, recovery, provider, approval, persistence, or route behavior needs focused smoke coverage plus typecheck.',
+        tableData: {
+          headers: ['Change Type', 'Expected Verification'],
+          rows: [
+            ['Documentation only', 'git diff --check'],
+            ['App TypeScript or wiki data', 'npm run typecheck:app'],
+            ['Supabase functions', 'npm run typecheck:functions'],
+            ['Planner, route, recovery, bridge, provider, approval, persistence', 'Focused smoke plus npm run typecheck:app'],
+            ['Security-sensitive logic', 'Negative-path smoke plus auth, redaction, and least-privilege review'],
+          ],
+        },
+      },
+      {
+        title: 'Review And Handoff',
+        content:
+          'A useful agent handoff says what changed, where the canonical files are, what verification ran, what was skipped, and what risk remains. Review findings should lead with concrete bugs or regressions, not summaries.',
+        bulletPoints: [
+          'Check that the change solves the actual user request',
+          'Call out unrelated or oversized diffs',
+          'Check for validated inputs, typed recoverable errors, and approval-gated writes',
+          'Check that secrets are redacted from logs, metadata, receipts, and chat',
+          'Check that docs, wiki entries, or roadmap ownership are updated when behavior becomes canonical',
+        ],
+      },
+      {
+        title: 'Sources To Recheck',
+        content:
+          'The canonical coding guide keeps the full source list. Recheck engineering practice, secure coding, testing, and commit convention sources when changing the baseline.',
+        bulletPoints: [
+          'Google Engineering Practices: https://google.github.io/eng-practices/',
+          'Google small changes: https://google.github.io/eng-practices/review/developer/small-cls.html',
+          'OWASP secure coding: https://owasp.org/www-project-secure-coding-practices-quick-reference-guide/stable-en/',
+          'Testing Library principles: https://testing-library.com/docs/guiding-principles',
+          'Conventional Commits: https://www.conventionalcommits.org/en/v1.0.0/',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'modern-web-page-design-for-agents',
+    title: 'Modern Web Page Design For Agents',
+    subtitle: 'A practical standard for agents building useful, accessible, responsive, and performant developer-facing web pages.',
+    category: 'design',
+    icon: '[]',
+    color: '#ec4899',
+    tags: [
+      'modern web design',
+      'web page design',
+      'responsive design',
+      'accessibility',
+      'wcag',
+      'core web vitals',
+      'agents',
+      'developer ux',
+    ],
+    content: [
+      {
+        title: 'What Modern Means Here',
+        content:
+          'Modern web design is not trend-chasing. For this app, it means a page is useful, fast, readable, accessible, responsive, visually coherent, and honest about what the user can do.',
+        bulletPoints: [
+          'Start app/tool pages with the working interface, not a marketing hero',
+          'Make the page purpose, current state, and primary action obvious',
+          'Use the local UC style guide for color, typography, radius, buttons, cards, and inputs',
+          'Design empty, loading, error, permission, and success states as part of the page',
+        ],
+      },
+      {
+        title: 'Page Build Blueprint',
+        content:
+          'A strong developer-facing page has a clear order: page purpose and state, primary action, real work area, supporting details, and recovery paths. This keeps agents from building decorative pages that do not help the user finish the job.',
+        codeExample: `<main>
+  <header>
+    <h1>Page purpose</h1>
+    <p>Current state or short value summary.</p>
+    <div>{/* primary action, secondary action */}</div>
+  </header>
+
+  <section aria-labelledby="work-area-heading">
+    <h2 id="work-area-heading">Work Area</h2>
+    {/* tool, form, table, editor, preview, or task list */}
+  </section>
+
+  <aside aria-label="Supporting details">
+    {/* filters, history, proof, metadata, or debug details */}
+  </aside>
+</main>`,
+      },
+      {
+        title: 'Responsive And Accessible By Default',
+        content:
+          'Agents should build from semantic structure and content constraints. Components should reflow when content stops fitting, support keyboard and touch users, keep labels persistent, and respect browser zoom and reduced-motion preferences.',
+        bulletPoints: [
+          'Use one clear h1 and meaningful heading order',
+          'Prefer responsive grids, minmax, clamp, max-width, aspect-ratio, and container-aware components',
+          'Keep interactive elements keyboard reachable with visible focus states',
+          'Use persistent form labels and recoverable inline validation',
+          'Do not hide essential actions behind hover-only UI',
+        ],
+      },
+      {
+        title: 'Performance Is A Design Constraint',
+        content:
+          'Core Web Vitals are part of the design standard. Agents should prevent layout shift, avoid oversized assets, keep initial JavaScript small, and render useful loading or empty states instead of blank panels.',
+        bulletPoints: [
+          'Protect Largest Contentful Paint by prioritizing primary visible content',
+          'Prevent Cumulative Layout Shift with image dimensions, aspect ratios, and stable placeholders',
+          'Protect Interaction to Next Paint by avoiding unnecessary heavy client-side code',
+          'Use responsive images and compress assets',
+          'Do not add heavy animation, chart, editor, or 3D libraries unless the page truly needs them',
+        ],
+      },
+      {
+        title: 'Review Checklist',
+        content:
+          'A page is not ready just because it looks polished at one desktop width. Review it against real task completion, mobile layout, keyboard use, accessibility, performance, and local style consistency.',
+        bulletPoints: [
+          'The first screen shows the real workflow or a clear path to it',
+          'Text wraps cleanly on mobile and with long labels',
+          'Forms have labels, instructions, and recoverable errors',
+          'Images have useful alt text or are marked decorative',
+          'Cards are not nested inside cards and page sections are not fake floating cards',
+          'The palette follows the UC style guide and does not become one-note',
+          'Relevant typecheck or smoke tests and `git diff --check` pass',
+        ],
+      },
+      {
+        title: 'Sources To Recheck',
+        content:
+          'The canonical agent guide at docs/MODERN_WEB_PAGE_DESIGN_AGENT_GUIDE.md keeps the full standard. Recheck official web.dev, W3C WAI, MDN, NN/g, and Material accessibility references when changing the baseline.',
+        bulletPoints: [
+          'web.dev responsive design: https://web.dev/responsive-web-design-basics/',
+          'web.dev Core Web Vitals: https://web.dev/articles/vitals',
+          'W3C WCAG 2.2: https://www.w3.org/TR/WCAG22/',
+          'W3C WAI forms: https://www.w3.org/WAI/tutorials/forms/',
+          'MDN CSS layout: https://developer.mozilla.org/en-US/docs/Learn_web_development/Core/CSS_layout',
+          'NN/g usability heuristics: https://www.nngroup.com/articles/ten-usability-heuristics/',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'design-best-practices-for-agents',
+    title: 'Design Best Practices For Agents',
+    subtitle: 'A product design and design-system standard for agents building screens, flows, and automation UI.',
+    category: 'design',
+    icon: '[]',
+    color: '#ec4899',
+    tags: [
+      'design best practices',
+      'product design',
+      'design systems',
+      'ux writing',
+      'automation ui',
+      'accessibility',
+      'agents',
+      'developer ux',
+    ],
+    content: [
+      {
+        title: 'The Product Design Standard',
+        content:
+          'Good product design in this app helps the user understand their state, see the next useful action, recover from failure, and trust what an agent changed. Visual style should serve task clarity and repeated use.',
+        bulletPoints: [
+          'Show state, purpose, and primary action on the first useful screen',
+          'Reveal risk, approvals, blockers, and proof at the right time',
+          'Support repeated work instead of only first-time discovery',
+          'Use accessibility and responsive behavior as baseline requirements',
+          'Use docs/DESIGN_AGENT_BEST_PRACTICES.md as the full agent guide',
+        ],
+      },
+      {
+        title: 'Start With The User Job',
+        content:
+          'Before creating UI, agents should name the user job, actor, object, action, proof of completion, and failure path. That keeps design work grounded in what the user is trying to finish.',
+        bulletPoints: [
+          'Primary actor: user, agent, connected agent, bridge, browser, app, or provider',
+          'Primary object: message, file, app task, design asset, run, approval, wiki article, memory, provider, or automation',
+          'Primary action: create, review, approve, retry, inspect, edit, export, connect, recover, or compare',
+          'Proof: saved state, receipt, screenshot, file, export, run status, or visible UI change',
+          'Failure path: retry, recover, ask user, switch route, stop, or show details',
+        ],
+      },
+      {
+        title: 'Design System Discipline',
+        content:
+          'Agents should use semantic tokens, local components, complete interaction states, and component variants before adding one-off styles. The UC style guide owns visual tokens; this article owns product design decisions.',
+        bulletPoints: [
+          'Use existing spacing, radius, typography, color, button, input, card, and modal patterns',
+          'Cover default, hover, pressed, focused, selected, disabled, loading, empty, error, success, warning, and permission states',
+          'Prefer variants over duplicated components',
+          'Document why a new token or component is needed',
+          'Do not create a new visual language for one feature unless it is intentionally a distinct mode',
+        ],
+      },
+      {
+        title: 'Automation UX',
+        content:
+          'AI and automation UI needs enough structure for trust without flooding the user. Chat should stay quiet by default, but approvals, recovery choices, proof, and blockers must be clear and selectable.',
+        bulletPoints: [
+          'Show compact route, approval, blocker, and proof summaries',
+          'Hide raw prompts, local paths, run metadata, and stack traces behind details views',
+          'Make recovery options selectable so the user does not rewrite failure context',
+          'Make connected-agent handoffs explicit: actor, scope, retry limit, and stop condition',
+          'Use receipts and before/after evidence for file, app, browser, and design automation',
+        ],
+      },
+      {
+        title: 'Design Review Checklist',
+        content:
+          'Review design work against task completion, clarity, consistency, accessibility, and recovery. A screen can look polished and still fail if it hides the workflow or omits states.',
+        bulletPoints: [
+          'The workflow is visible and not buried behind explanation',
+          'Terminology is consistent for the same object or action',
+          'Empty, loading, error, disabled, permission, and success states exist',
+          'Controls do not jump when state changes',
+          'Developer/debug details are not the default user experience',
+          'The UI shows what the agent did and what proof exists',
+        ],
+      },
+      {
+        title: 'Sources To Recheck',
+        content:
+          'The canonical design guide keeps the full source list. Recheck product-design, design-system, accessibility, and token references when changing the baseline.',
+        bulletPoints: [
+          'NN/g usability heuristics: https://www.nngroup.com/articles/ten-usability-heuristics/',
+          'Figma components and shared libraries: https://www.figma.com/best-practices/components-styles-and-shared-libraries/',
+          'Figma variables: https://help.figma.com/hc/en-us/articles/15339657135383-Guide-to-variables-in-Figma',
+          'Figma design tokens: https://www.figma.com/resource-library/design-tokens/',
+          'Material accessibility: https://m3.material.io/foundations/accessible-design/overview',
+          'W3C WAI design tips: https://www.w3.org/WAI/tips/designing/',
         ],
       },
     ],
@@ -4653,7 +5849,7 @@ export function buildWikiKnowledgeBundle(query: string, limit = 6): string {
   const intro = `Wiki coverage map: ${categorySummary}. Impact domains: ${domainSummary}.`;
 
   if (relevant.length === 0) {
-    return `${intro}\n${domainGuidance ? `${domainGuidance}\n` : ''}No direct article match found for this query, but the AI wiki covers agents, models, frameworks, design, open-source AI, MCP, foundations, and landscape topics.`;
+    return `${intro}\n${domainGuidance ? `${domainGuidance}\n` : ''}No direct article match found for this query, but the Knowledge Wiki covers AI, agents, models, frameworks, design, open-source tooling, MCP, future cities, science, infrastructure, health, energy, materials, foundations, and landscape topics.`;
   }
 
   const articleLines = relevant.map(article => {
@@ -4768,7 +5964,7 @@ export function buildWikiSearchResponse(query: string, limit = 5): string {
   const relevant = getRelevantWikiArticles(query, limit);
 
   if (relevant.length === 0) {
-    return `**AI Wiki Search:** No strong match for "${query}".\n\nTry a more specific topic like:\n- MCP\n- Playwright\n- coding agents\n- model families\n- evals\n- retrieval\n- multimodal\n- support agents`;
+    return `**Knowledge Wiki Search:** No strong match for "${query}".\n\nTry a more specific topic like:\n- future cities\n- EPCOT\n- universe science\n- infrastructure\n- health and biotech\n- energy and materials\n- MCP\n- coding agents\n- model families`;
   }
 
   const lines = relevant.map((article, index) => {
@@ -4782,5 +5978,5 @@ export function buildWikiSearchResponse(query: string, limit = 5): string {
     ].filter(Boolean).join('\n');
   }).join('\n\n');
 
-  return `**AI Wiki Search: "${query}"**\n\n${lines}`;
+  return `**Knowledge Wiki Search: "${query}"**\n\n${lines}`;
 }

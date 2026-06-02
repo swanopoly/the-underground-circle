@@ -1,6 +1,6 @@
 # General Wiki Index
 
-Last updated: 2026-04-08
+Last updated: 2026-06-01
 
 ## Purpose
 
@@ -50,6 +50,13 @@ These are time-bound reports that capture what is current:
 - [agent-memory-ui-and-compaction-2026-04-08.md](/Users/cswanson/the-underground-circle/docs/wiki/agent-memory-ui-and-compaction-2026-04-08.md)
 - [semantic-memory-retrieval-and-privacy-2026-04-08.md](/Users/cswanson/the-underground-circle/docs/wiki/semantic-memory-retrieval-and-privacy-2026-04-08.md)
 - [agent-memory-review-notes-2026-04-08.md](/Users/cswanson/the-underground-circle/docs/wiki/agent-memory-review-notes-2026-04-08.md)
+- [agentic-computer-app-automation-2026-05-29.md](/Users/cswanson/the-underground-circle/docs/wiki/agentic-computer-app-automation-2026-05-29.md)
+- [agent-tool-contracts-and-evals-2026-05-29.md](/Users/cswanson/the-underground-circle/docs/wiki/agent-tool-contracts-and-evals-2026-05-29.md)
+- [nikola-tesla-projects-planetary-impact-2026-06-01.md](/Users/cswanson/the-underground-circle/docs/wiki/nikola-tesla-projects-planetary-impact-2026-06-01.md)
+- [nikola-tesla-systems-buildout-roadmap-2026-06-01.md](/Users/cswanson/the-underground-circle/docs/wiki/nikola-tesla-systems-buildout-roadmap-2026-06-01.md)
+- [nikola-tesla-motor-efficiency-audit-kit-2026-06-01.md](/Users/cswanson/the-underground-circle/docs/wiki/nikola-tesla-motor-efficiency-audit-kit-2026-06-01.md)
+- [nikola-tesla-claim-triage-and-source-checker-2026-06-01.md](/Users/cswanson/the-underground-circle/docs/wiki/nikola-tesla-claim-triage-and-source-checker-2026-06-01.md)
+- [nikola-tesla-systems-lab-school-path-2026-06-01.md](/Users/cswanson/the-underground-circle/docs/wiki/nikola-tesla-systems-lab-school-path-2026-06-01.md)
 - [open-model-deployment-economics-2026-04-07.md](/Users/cswanson/the-underground-circle/docs/wiki/open-model-deployment-economics-2026-04-07.md)
 - [ai-regulation-and-policy-tracker-2026-04-07.md](/Users/cswanson/the-underground-circle/docs/wiki/ai-regulation-and-policy-tracker-2026-04-07.md)
 

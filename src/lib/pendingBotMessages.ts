@@ -25,9 +25,13 @@ export type PendingBotMessageRecord = {
   browserPlans?: unknown[];
   browserPlanEvents?: unknown[];
   browserSessions?: unknown[];
+  recoveryOptions?: unknown[];
+  recoveryReliability?: unknown;
+  computerHandoff?: unknown;
   modeOutcomeSummary?: { headline: string; bulletPoints?: string[]; blockers?: string[] } | null;
   observedEval?: unknown;
   commandDecisions?: unknown[];
+  agentPlan?: unknown;
   taskPlan?: unknown;
   toolEvents?: unknown[];
   verificationResults?: unknown[];

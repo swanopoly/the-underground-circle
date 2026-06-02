@@ -20,7 +20,9 @@
  */
 import type { DesktopResult } from './desktopBridgeProtocol';
 import { getBridgeUrl } from './bridgeEnvironment';
+import { describeBrowserBridgeFailure, type BrowserBridgeFailure } from './browserBridgeFailure';
 import { ensureDesktopBridgePaired } from './desktopBridge';
+import type { AutomationVerificationGate } from './desktopAutomationSafety';
 
 const BRIDGE_PORT = 7778;
 const TOKEN_KEY = 'uc_desktop_bridge_token_v1';
@@ -32,6 +34,44 @@ function getBrowserBridgeBaseUrl(): string | null {
 function readToken(): string | null {
   if (typeof localStorage === 'undefined') return null;
   try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
+}
+
+function normalizeRequiredEvidence(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const evidence = value
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  return evidence.length > 0 ? evidence : undefined;
+}
+
+function parseBridgeErrorBody(text: string): { error?: string; errorCode?: string; recoveryHint?: string; requiredEvidence?: string[] } {
+  if (!text) return {};
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object') {
+      return {
+        error: typeof parsed.error === 'string' ? parsed.error : undefined,
+        errorCode: typeof parsed.errorCode === 'string' ? parsed.errorCode : undefined,
+        recoveryHint: typeof parsed.recoveryHint === 'string' ? parsed.recoveryHint : undefined,
+        requiredEvidence: normalizeRequiredEvidence((parsed as { requiredEvidence?: unknown }).requiredEvidence),
+      };
+    }
+  } catch {}
+  return { error: text };
+}
+
+function browserFailureResult<T>(
+  failure: BrowserBridgeFailure,
+  override?: { recoveryHint?: string; requiredEvidence?: string[] },
+): DesktopResult<T> {
+  return {
+    ok: false,
+    error: failure.message,
+    errorCode: failure.errorCode,
+    recoveryHint: override?.recoveryHint || failure.recoveryHint,
+    requiredEvidence: override?.requiredEvidence || failure.requiredEvidence,
+  };
 }
 
 // ─── Types ──────────────────────────────────────────────────────────────
@@ -73,23 +113,36 @@ export interface DomSnapshotResult {
   tree: BrowserA11yNode;
 }
 
+export interface BrowserVerificationState {
+  url: string;
+  title: string;
+  verificationDetected: boolean;
+  gate: AutomationVerificationGate | null;
+  selectorMatches: string[];
+  matchedTerms: string[];
+  pauseInstruction?: string;
+}
+
 // ─── Calls ──────────────────────────────────────────────────────────────
 
 async function callBrowser<T = unknown>(method: 'GET' | 'POST', pathname: string, body?: unknown): Promise<DesktopResult<T>> {
   const base = getBrowserBridgeBaseUrl();
   if (!base) {
-    return { ok: false, error: 'Browser bridge unavailable in this environment.', errorCode: 'bridge_offline' };
+    return browserFailureResult(describeBrowserBridgeFailure('Browser bridge unavailable in this environment.', 'bridge_offline'));
   }
   let token = readToken();
   if (!token) {
     const paired = await ensureDesktopBridgePaired();
     if (!paired.ok) {
-      return { ok: false, error: paired.error || 'Desktop bridge not paired. Pair first via `/desktop diag`.', errorCode: paired.errorCode || 'not_paired' };
+      return browserFailureResult(describeBrowserBridgeFailure(
+        paired.error || 'Desktop bridge not paired. Pair first via `/desktop diag`.',
+        paired.errorCode || 'not_paired',
+      ));
     }
     token = paired.data?.token || null;
   }
   if (!token) {
-    return { ok: false, error: 'Desktop bridge not paired. Pair first via `/desktop diag`.', errorCode: 'not_paired' };
+    return browserFailureResult(describeBrowserBridgeFailure('Desktop bridge not paired. Pair first via `/desktop diag`.', 'not_paired'));
   }
   try {
     const res = await fetch(`${base}${pathname}`, {
@@ -102,17 +155,30 @@ async function callBrowser<T = unknown>(method: 'GET' | 'POST', pathname: string
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      if (res.status === 401) return { ok: false, error: 'Token rejected.', errorCode: 'not_paired' };
-      if (res.status === 503) return { ok: false, error: text || 'Browser not started', errorCode: 'unknown' };
-      return { ok: false, error: text || `HTTP ${res.status}`, errorCode: 'unknown' };
+      const parsed = parseBridgeErrorBody(text);
+      if (res.status === 401) {
+        const failure = describeBrowserBridgeFailure(parsed.error || 'Token rejected.', parsed.errorCode || 'token_rejected');
+        return browserFailureResult(failure, parsed);
+      }
+      if (res.status === 503) {
+        const failure = describeBrowserBridgeFailure(parsed.error || 'Browser not started', parsed.errorCode || 'browser_bridge_offline');
+        return browserFailureResult(failure, parsed);
+      }
+      const failure = describeBrowserBridgeFailure(parsed.error || `HTTP ${res.status}`, parsed.errorCode);
+      return browserFailureResult(failure, parsed);
     }
     const json = await res.json();
     if (!json?.ok) {
-      return { ok: false, error: json?.error || 'bridge returned ok:false', errorCode: 'unknown' };
+      const failure = describeBrowserBridgeFailure(json?.error || 'bridge returned ok:false', json?.errorCode);
+      return browserFailureResult(failure, {
+        recoveryHint: typeof json?.recoveryHint === 'string' ? json.recoveryHint : undefined,
+        requiredEvidence: normalizeRequiredEvidence(json?.requiredEvidence),
+      });
     }
     return { ok: true, data: json as T };
   } catch (err: any) {
-    return { ok: false, error: err?.message || 'bridge unreachable', errorCode: 'bridge_offline' };
+    const failure = describeBrowserBridgeFailure(err?.message || 'bridge unreachable', 'bridge_offline');
+    return browserFailureResult(failure);
   }
 }
 
@@ -141,9 +207,9 @@ export async function getBrowserHealth(): Promise<BrowserHealth | null> {
  * Navigate the persistent browser context to `url`. Opens the context
  * on first call. Returns the final URL (after redirects) and title.
  */
-export async function openUrl(url: string, opts?: { timeoutMs?: number; waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' }): Promise<DesktopResult<{ url: string; title: string }>> {
+export async function openUrl(url: string, opts?: { timeoutMs?: number; waitUntil?: 'load' | 'domcontentloaded' | 'networkidle'; taskContext?: string }): Promise<DesktopResult<{ url: string; title: string }>> {
   if (!/^https?:\/\//i.test(url)) {
-    return { ok: false, error: 'url must start with http(s)://', errorCode: 'invalid_input' };
+    return browserFailureResult(describeBrowserBridgeFailure('url must start with http(s)://', 'invalid_input'));
   }
   return callBrowser('POST', '/browser/open_url', { url, ...opts });
 }
@@ -159,6 +225,16 @@ export async function domSnapshot(opts?: { maxNodes?: number; interestingOnly?: 
   if (opts?.interestingOnly === false) params.set('interesting', 'false');
   const qs = params.toString();
   return callBrowser('GET', `/browser/dom_snapshot${qs ? `?${qs}` : ''}`);
+}
+
+/**
+ * Checks the current browser page for CAPTCHA, anti-bot, Cloudflare,
+ * MFA, or other human verification gates. This is intentionally
+ * read-only: callers should pause and ask the user to complete the gate
+ * manually when `verificationDetected` is true.
+ */
+export async function verificationState(): Promise<DesktopResult<BrowserVerificationState>> {
+  return callBrowser('GET', '/browser/verification_state');
 }
 
 /**
@@ -179,9 +255,10 @@ export async function clickRole(args: {
   exact?: boolean;
   nth?: number;
   timeoutMs?: number;
+  taskContext?: string;
 }): Promise<DesktopResult<{ role: string; name?: string }>> {
   const role = String(args.role || '').trim();
-  if (!role) return { ok: false, error: 'role required', errorCode: 'invalid_input' };
+  if (!role) return browserFailureResult(describeBrowserBridgeFailure('role required', 'invalid_input'));
   return callBrowser('POST', '/browser/click_role', args);
 }
 
@@ -200,12 +277,13 @@ export async function fillField(args: {
   submit?: boolean;
   exact?: boolean;
   timeoutMs?: number;
+  taskContext?: string;
 }): Promise<DesktopResult<{ chars: number }>> {
   if (typeof args.text !== 'string') {
-    return { ok: false, error: 'text required', errorCode: 'invalid_input' };
+    return browserFailureResult(describeBrowserBridgeFailure('text required', 'invalid_input'));
   }
   if (args.text.length > 4000) {
-    return { ok: false, error: 'text too long (max 4000)', errorCode: 'invalid_input' };
+    return browserFailureResult(describeBrowserBridgeFailure('text too long (max 4000)', 'invalid_input'));
   }
   return callBrowser('POST', '/browser/fill', args);
 }
@@ -218,19 +296,40 @@ export async function selectOption(args: {
   value: string;
   exact?: boolean;
   timeoutMs?: number;
+  taskContext?: string;
 }): Promise<DesktopResult<{ value: string }>> {
   if (typeof args.value !== 'string' || !args.value.trim()) {
-    return { ok: false, error: 'value required', errorCode: 'invalid_input' };
+    return browserFailureResult(describeBrowserBridgeFailure('value required', 'invalid_input'));
   }
   return callBrowser('POST', '/browser/select', { role: args.role || 'combobox', ...args });
 }
 
-/** Press a single key or combo via Playwright's keyboard.press. */
-export async function pressKey(combo: string): Promise<DesktopResult<{ combo: string }>> {
-  if (typeof combo !== 'string' || !combo.trim()) {
-    return { ok: false, error: 'combo required', errorCode: 'invalid_input' };
+/** Upload a local file into a browser file input or file chooser. */
+export async function uploadFile(args: {
+  filePath: string;
+  name?: string;
+  selector?: string;
+  buttonRole?: string;
+  buttonName?: string;
+  buttonSelector?: string;
+  exact?: boolean;
+  timeoutMs?: number;
+  taskContext?: string;
+}): Promise<DesktopResult<{ filePath: string; fileName: string; sizeBytes: number; method: string }>> {
+  const filePath = String(args.filePath || '').trim();
+  if (!filePath) return browserFailureResult(describeBrowserBridgeFailure('filePath required', 'invalid_input'));
+  if (filePath.length > 1024 || /[\x00-\x1f]/.test(filePath)) {
+    return browserFailureResult(describeBrowserBridgeFailure('invalid filePath', 'invalid_input'));
   }
-  return callBrowser('POST', '/browser/press', { combo });
+  return callBrowser('POST', '/browser/upload_file', { ...args, filePath });
+}
+
+/** Press a single key or combo via Playwright's keyboard.press. */
+export async function pressKey(combo: string, opts?: { taskContext?: string }): Promise<DesktopResult<{ combo: string }>> {
+  if (typeof combo !== 'string' || !combo.trim()) {
+    return browserFailureResult(describeBrowserBridgeFailure('combo required', 'invalid_input'));
+  }
+  return callBrowser('POST', '/browser/press', { combo, taskContext: opts?.taskContext });
 }
 
 /** Full-page screenshot as base64 PNG. */

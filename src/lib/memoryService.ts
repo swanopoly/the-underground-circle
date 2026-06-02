@@ -749,6 +749,11 @@ const TURN_RETRIEVAL_DEFAULTS = {
   importanceBonus: 0.15,      // multiplier × importance (0..1)
 };
 
+// Synthetic similarity assigned to keyword-fallback candidates (semantic
+// search unavailable). Modest baseline so the existing recency/importance/soul
+// ranking — not cosine distance — differentiates the ILIKE hits.
+const KEYWORD_FALLBACK_SIMILARITY = 0.5;
+
 const ARCHIVE_PASSIVE_RETRIEVAL_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const ARCHIVE_PASSIVE_RETRIEVAL_BIAS = 0.18;
 
@@ -827,12 +832,50 @@ export async function retrieveForTurn(opts: {
 
   // Step 1 — embed + candidate search via the Phase 1 semantic RPC
   const { semanticSearchMemories } = await import('./memoryEmbeddings');
-  const candidates = await semanticSearchMemories({
+  let candidates: Array<{
+    id: string; title: string; content: string; memory_kind: string;
+    scope: string; importance: number; similarity: number;
+    metadata: Record<string, unknown>;
+  }> = await semanticSearchMemories({
     queryText: opts.queryText,
     circleId: opts.circleId,
     limit: cfg.candidatePoolSize,
     matchThreshold: 0, // let every match through; we rank ourselves
   });
+
+  // Step 1b — keyword fallback. semanticSearchMemories returns [] whenever the
+  // embedding proxy/key is unavailable (embedText → null) or the match_memories
+  // RPC is missing. Rather than silently recalling nothing, fall back to an
+  // ILIKE search over the salient query terms so memory still surfaces without
+  // embeddings. Synthetic similarity lets the recency/importance/soul ranking
+  // below differentiate the keyword hits.
+  if (candidates.length === 0) {
+    const terms = extractSearchTerms(opts.queryText.toLowerCase())
+      .map(term => term.replace(/[(),]/g, ' ').trim())  // strip PostgREST or() metachars
+      .filter(Boolean)
+      .slice(0, 6);
+    if (terms.length > 0) {
+      const orFilter = terms
+        .map(term => `title.ilike.%${term}%,content.ilike.%${term}%`)
+        .join(',');
+      try {
+        const { data: keywordRows } = await supabase
+          .from('memory_entries')
+          .select('*')
+          .eq('circle_id', opts.circleId)
+          .eq('is_active', true)
+          .or(orFilter)
+          .order('updated_at', { ascending: false })
+          .limit(cfg.candidatePoolSize);
+        candidates = (keywordRows || []).map(d => ({
+          ...mapMemoryEntry(d),
+          similarity: KEYWORD_FALLBACK_SIMILARITY,
+        })) as typeof candidates;
+      } catch (err) {
+        console.warn('[memoryService] keyword fallback failed:', err);
+      }
+    }
+  }
   if (candidates.length === 0) return { memories: [], formatted: '' };
 
   // Step 2 — load soul-link rows for the candidate set in one round-trip.
@@ -1010,7 +1053,11 @@ export async function retrieveForTurn(opts: {
     const reason = m.reason ? ` (${m.reason})` : '';
     return `- [${m.memory_kind}] ${m.title}: ${m.content}${reason}`;
   }).join('\n');
-  const formatted = `${header}\n${body}`;
+  // Retrieved memory is untrusted (rule 5): a circle member or an external
+  // source may have written content into it. Fence it so the model treats the
+  // recalled text as data, not instructions. The header stays outside the
+  // fence so the section label remains readable.
+  const formatted = `${header}\n<untrusted_quoted>\n${body}\n</untrusted_quoted>`;
 
   return { memories: kept, formatted };
 }

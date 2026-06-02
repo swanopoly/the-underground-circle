@@ -172,6 +172,161 @@ export default function ComputerUseConsole({
             {taskState.currentStep ? (
               <Text style={styles.statusMeta}>Current step: {taskState.currentStep}</Text>
             ) : null}
+            {taskState.grounding ? (
+              <View style={styles.groundingBox}>
+                <View style={styles.statusRow}>
+                  <Text style={styles.groundingTitle}>
+                    {taskState.grounding.strategyLabel || 'Grounding'}
+                  </Text>
+                  <Text style={[styles.groundingPill, { borderColor: accentBorder, color: accentColor }]}>
+                    {taskState.grounding.status.replace(/_/g, ' ').toUpperCase()}
+                  </Text>
+                </View>
+                {taskState.grounding.primarySurface ? (
+                  <Text style={styles.statusMeta}>
+                    Surface: {taskState.grounding.primarySurface}
+                  </Text>
+                ) : null}
+                {taskState.grounding.nextAction ? (
+                  <Text style={styles.statusMeta}>
+                    Next safe action: {taskState.grounding.nextAction}
+                  </Text>
+                ) : null}
+                {taskState.grounding.badges.length > 0 ? (
+                  <Text style={styles.groundingBadges}>
+                    {taskState.grounding.badges.slice(0, 4).join(' · ')}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
+            {taskState.complexity ? (
+              <View style={styles.groundingBox}>
+                <View style={styles.statusRow}>
+                  <Text style={styles.groundingTitle}>Checkpoint plan</Text>
+                  <Text style={[styles.groundingPill, { borderColor: accentBorder, color: accentColor }]}>
+                    {taskState.complexity.level.toUpperCase()}
+                  </Text>
+                </View>
+                {taskState.complexity.reasons.length > 0 ? (
+                  <Text style={styles.groundingBadges}>
+                    {taskState.complexity.reasons.slice(0, 3).join(' · ')}
+                  </Text>
+                ) : null}
+                {taskState.complexity.checkpoints.slice(0, 5).map((checkpoint) => (
+                  <Text key={checkpoint.id} style={styles.statusMeta}>
+                    {checkpoint.label}{checkpoint.requiresApproval ? ' · approval' : ''}
+                  </Text>
+                ))}
+              </View>
+            ) : null}
+            {taskState.checkpointRecovery ? (
+              <View style={styles.groundingBox}>
+                <View style={styles.statusRow}>
+                  <Text style={styles.groundingTitle}>Recovery checkpoint</Text>
+                  <Text style={[styles.groundingPill, { borderColor: accentBorder, color: accentColor }]}>
+                    {taskState.checkpointRecovery.confidence.toUpperCase()}
+                  </Text>
+                </View>
+                <Text style={styles.statusBlockers}>
+                  {taskState.checkpointRecovery.failedCheckpointLabel}
+                </Text>
+                {taskState.checkpointRecovery.reason ? (
+                  <Text style={styles.statusMeta}>
+                    {taskState.checkpointRecovery.reason}
+                  </Text>
+                ) : null}
+                {taskState.checkpointRecovery.safeNextStep ? (
+                  <Text style={styles.statusMeta}>
+                    Next: {taskState.checkpointRecovery.safeNextStep}
+                  </Text>
+                ) : null}
+                {taskState.checkpointRecovery.retryPolicy ? (
+                  <Text style={taskState.checkpointRecovery.retryPolicy.canRetry ? styles.statusMeta : styles.statusBlockers}>
+                    Guard: {taskState.checkpointRecovery.retryPolicy.canRetry ? 'retry once with fresh evidence' : taskState.checkpointRecovery.retryPolicy.stopReason || 'stop before retry'}
+                    {` (${taskState.checkpointRecovery.retryPolicy.repeatCount}/${taskState.checkpointRecovery.retryPolicy.retryLimit})`}
+                  </Text>
+                ) : null}
+                {taskState.checkpointRecovery.retryPolicy?.evidenceReadiness ? (
+                  <Text style={taskState.checkpointRecovery.retryPolicy.evidenceReadiness.ready ? styles.statusMeta : styles.statusBlockers}>
+                    Evidence status: {taskState.checkpointRecovery.retryPolicy.evidenceReadiness.status}
+                    {taskState.checkpointRecovery.retryPolicy.evidenceReadiness.nextEvidenceTools.length
+                      ? ` · ${taskState.checkpointRecovery.retryPolicy.evidenceReadiness.nextEvidenceTools.slice(0, 3).join(' · ')}`
+                      : ''}
+                  </Text>
+                ) : null}
+                {taskState.checkpointRecovery.retryPolicy?.requiredEvidence?.length ? (
+                  <Text style={styles.statusMeta}>
+                    Evidence: {taskState.checkpointRecovery.retryPolicy.requiredEvidence
+                      .filter((item) => item.required)
+                      .slice(0, 3)
+                      .map((item) => item.tool)
+                      .join(' · ')}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
+            {taskState.capabilityBuildout ? (
+              <View style={styles.groundingBox}>
+                <View style={styles.statusRow}>
+                  <Text style={styles.groundingTitle}>
+                    {taskState.capabilityBuildout.appName
+                      ? `${taskState.capabilityBuildout.appName} capability`
+                      : 'App capability buildout'}
+                  </Text>
+                  <Text style={[styles.groundingPill, { borderColor: accentBorder, color: accentColor }]}>
+                    {taskState.capabilityBuildout.status.replace(/_/g, ' ').toUpperCase()}
+                  </Text>
+                </View>
+                {taskState.capabilityBuildout.buildoutKind || taskState.capabilityBuildout.risk ? (
+                  <Text style={styles.statusMeta}>
+                    {[taskState.capabilityBuildout.buildoutKind, taskState.capabilityBuildout.risk ? `${taskState.capabilityBuildout.risk} risk` : '']
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </Text>
+                ) : null}
+                {taskState.capabilityBuildout.sessionId ? (
+                  <Text style={styles.statusMeta}>
+                    Session: {taskState.capabilityBuildout.sessionId}
+                  </Text>
+                ) : null}
+                {taskState.capabilityBuildout.summary ? (
+                  <Text style={styles.statusMeta}>
+                    Summary: {taskState.capabilityBuildout.summary}
+                  </Text>
+                ) : null}
+                {taskState.capabilityBuildout.controlSurface ? (
+                  <Text style={styles.statusMeta}>
+                    Control: {taskState.capabilityBuildout.controlSurface}
+                  </Text>
+                ) : null}
+                {taskState.capabilityBuildout.sourceRefs && taskState.capabilityBuildout.sourceRefs.length > 0 ? (
+                  <Text style={styles.statusMeta}>
+                    Sources: {taskState.capabilityBuildout.sourceRefs.slice(0, 2).join(' · ')}
+                  </Text>
+                ) : null}
+                {taskState.capabilityBuildout.filesChanged && taskState.capabilityBuildout.filesChanged.length > 0 ? (
+                  <Text style={styles.statusMeta}>
+                    Files: {taskState.capabilityBuildout.filesChanged.slice(0, 3).join(' · ')}
+                  </Text>
+                ) : null}
+                {taskState.capabilityBuildout.userActionNeeded ? (
+                  <Text style={styles.statusBlockers}>
+                    Action needed: {taskState.capabilityBuildout.userActionNeeded}
+                  </Text>
+                ) : null}
+                {taskState.capabilityBuildout.autoRetryStatus ? (
+                  <Text style={styles.statusMeta}>
+                    Retry: {taskState.capabilityBuildout.autoRetryStatus.replace(/_/g, ' ')}
+                    {taskState.capabilityBuildout.autoRetryRunId ? ` (${taskState.capabilityBuildout.autoRetryRunId.slice(0, 8)})` : ''}
+                  </Text>
+                ) : null}
+                {taskState.capabilityBuildout.retryPlan ? (
+                  <Text style={styles.statusMeta}>
+                    Next: {taskState.capabilityBuildout.retryPlan}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
             {taskState.blockers.length > 0 ? (
               <Text style={styles.statusBlockers}>
                 Blockers: {taskState.blockers.slice(0, 2).join(' · ')}
@@ -463,6 +618,36 @@ const styles = StyleSheet.create({
     color: TEXT_DIM,
     fontSize: 12,
     lineHeight: 18,
+  },
+  groundingBox: {
+    backgroundColor: '#020817',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    borderRadius: 10,
+    padding: 10,
+    gap: 4,
+    marginTop: 4,
+  },
+  groundingTitle: {
+    color: TEXT,
+    fontSize: 12,
+    fontWeight: '700',
+    flex: 1,
+  },
+  groundingPill: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    fontFamily: 'monospace',
+    fontSize: 9,
+    letterSpacing: 0.7,
+    fontWeight: '700',
+  },
+  groundingBadges: {
+    color: '#bae6fd',
+    fontSize: 11,
+    lineHeight: 16,
   },
   statusBlockers: {
     color: '#fda4af',

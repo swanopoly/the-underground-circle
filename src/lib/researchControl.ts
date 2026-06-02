@@ -63,6 +63,28 @@ export interface ResearchAgentRun {
   created_at?: string | null;
 }
 
+export interface KnowledgeProfileOption {
+  key: string;
+  label: string;
+  description: string;
+  cadence: 'daily' | 'weekly';
+  color: string;
+}
+
+export const RESEARCH_PROFILE_OPTIONS: KnowledgeProfileOption[] = [
+  { key: 'deep_learning_frontier', label: 'Deep Learning', description: 'Foundation models, representation learning, and ML progress.', cadence: 'daily', color: '#6366f1' },
+  { key: 'agent_systems_and_evals', label: 'Agents + Evals', description: 'Tool use, coding agents, evals, and interpretability.', cadence: 'daily', color: '#22c55e' },
+  { key: 'physical_ai_and_robotics', label: 'Robotics', description: 'Embodied AI, robotics, and multimodal physical systems.', cadence: 'daily', color: '#f59e0b' },
+  { key: 'biotech_and_medical_ai', label: 'Biotech + Medical', description: 'Clinical AI, biomedical ML, imaging, and drug discovery.', cadence: 'daily', color: '#ef4444' },
+  { key: 'open_model_serving_and_infra', label: 'Open Model Infra', description: 'Model serving, inference systems, and deployment infrastructure.', cadence: 'daily', color: '#06b6d4' },
+];
+
+export const SECOND_BRAIN_KNOWLEDGE_PROFILE_OPTIONS: KnowledgeProfileOption[] = [
+  { key: 'ai_technology_watch', label: 'AI + Technology', description: 'Daily AI, agent, robotics, HCI, and technology intake for Wiki and .web.', cadence: 'daily', color: '#22c55e' },
+  { key: 'universe_science_watch', label: 'Universe Science', description: 'Daily cosmology, astronomy, space, and planetary science signals.', cadence: 'daily', color: '#a855f7' },
+  { key: 'future_city_design', label: 'Future Cities', description: 'Weekly Disney EPCOT, city systems, transit, and public technology design notes.', cadence: 'weekly', color: '#f59e0b' },
+];
+
 export function getResearchDocumentRelevantSpirits(doc: ResearchDocument): string[] {
   const metadata = (doc.metadata || {}) as { relevant_spirits?: unknown };
   return Array.isArray(metadata.relevant_spirits)
@@ -122,8 +144,7 @@ export async function getGeneratedResearchBriefs(limit = 20): Promise<ResearchDo
       .from('research_documents')
       .select('*')
       .eq('is_active', true)
-      .eq('source_type', 'paper')
-      .eq('source_title', 'arXiv')
+      .in('source_type', ['paper', 'website', 'dataset', 'guideline', 'note'])
       .order('publication_date', { ascending: false })
       .order('updated_at', { ascending: false })
       .limit(limit);
@@ -241,6 +262,31 @@ export async function runResearchProfile(profileKey: string): Promise<{ ok: bool
     if (error) return { ok: false, error: error.message };
     if (data?.ok === false) return { ok: false, error: data?.error || 'Run failed' };
     return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export async function runSecondBrainKnowledgeProfile(opts: {
+  profileKeys?: string[];
+  circleId?: string;
+  userId?: string;
+  visibility?: 'private' | 'circle_shared';
+} = {}): Promise<{ ok: boolean; error?: string | null; profiles?: unknown[] }> {
+  try {
+    const { data, error } = await supabase.functions.invoke('research-daily-runner', {
+      body: {
+        action: 'seed_second_brain',
+        source: 'manual_second_brain_ui',
+        profiles: opts.profileKeys && opts.profileKeys.length > 0 ? opts.profileKeys : undefined,
+        circleId: opts.circleId,
+        userId: opts.userId,
+        visibility: opts.visibility || 'private',
+      },
+    });
+    if (error) return { ok: false, error: error.message };
+    if (data?.ok === false) return { ok: false, error: data?.error || 'Second Brain knowledge intake failed' };
+    return { ok: true, profiles: data?.profiles };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }

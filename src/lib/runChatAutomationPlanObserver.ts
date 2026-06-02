@@ -9,10 +9,11 @@
  */
 
 import { supabase } from './supabase';
+import { persistAgentRunLedgerPreview } from './agentRunLedgerPersistence';
 import { summarisePlanForTelemetry } from './chatAutomationPlanner';
 import type { ChatAutomationObserver } from './runChatAutomationPlan';
 
-export const attachPlanDecisionToRun: ChatAutomationObserver = async (plan, outcome) => {
+export const attachPlanDecisionToRun: ChatAutomationObserver = async (plan, outcome, ctx) => {
   const runId = outcome.runId;
   if (!runId) return;
   try {
@@ -36,6 +37,14 @@ export const attachPlanDecisionToRun: ChatAutomationObserver = async (plan, outc
         },
       })
       .eq('id', runId);
+    await persistAgentRunLedgerPreview({
+      preview: plan.ledgerPreview,
+      actualRunId: runId,
+      circleId: ctx.circleId,
+      userId: ctx.userId,
+      outcomeStatus: outcome.status,
+      source: 'chat_automation_observer',
+    });
   } catch {
     // telemetry only — never block the dispatcher
   }

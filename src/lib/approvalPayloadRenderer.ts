@@ -59,8 +59,16 @@ function toolAction(tool: string): { verb: string; target: 'app' | 'browser' | '
     case 'desktop.focus_app':  return { verb: 'Focus', target: 'app' };
     case 'desktop.click_element':
     case 'desktop.click_at':   return { verb: 'Click', target: 'app' };
+    case 'desktop.set_element_value': return { verb: 'Set field in', target: 'app' };
+    case 'desktop.mouse_click': return { verb: 'Mouse click in', target: 'app' };
+    case 'desktop.mouse_down': return { verb: 'Hold mouse in', target: 'app' };
+    case 'desktop.mouse_up': return { verb: 'Release mouse in', target: 'app' };
+    case 'desktop.mouse_drag': return { verb: 'Drag in', target: 'app' };
+    case 'desktop.mouse_scroll': return { verb: 'Scroll in', target: 'app' };
     case 'desktop.type_text':  return { verb: 'Type into', target: 'app' };
+    case 'desktop.paste_text': return { verb: 'Paste into', target: 'app' };
     case 'desktop.press_keys': return { verb: 'Press keys in', target: 'app' };
+    case 'desktop.menu_click': return { verb: 'Click menu in', target: 'app' };
     case 'desktop.open_url':   return { verb: 'Open', target: 'browser' };
     case 'desktop.open_path':  return { verb: 'Open', target: 'file' };
     case 'browser.open_url':   return { verb: 'Navigate to', target: 'browser' };

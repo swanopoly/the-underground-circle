@@ -1,4 +1,4 @@
-export type TerminalAgentProvider = 'claude-code' | 'codex' | 'gemini';
+export type TerminalAgentProvider = 'claude-code' | 'codex' | 'gemini' | 'cursor';
 
 export type TerminalAgentLaunchResult = {
   ok: boolean;
@@ -51,6 +51,11 @@ const PROVIDER_META: Record<TerminalAgentProvider, { label: string; namePrefix: 
     namePrefix: 'Gemini CLI',
     aliases: [/\bgemini\s+cli\b/i, /\bgemini\b/i],
   },
+  cursor: {
+    label: 'Cursor Composer',
+    namePrefix: 'Cursor Composer',
+    aliases: [/\bcursor\s+composer\b/i, /\bcursor\s+agent\b/i, /\bcursor\b/i],
+  },
 };
 
 export interface TerminalAgentLaunchPlan {
@@ -86,7 +91,7 @@ function detectProvider(message: string): TerminalAgentProvider | null {
 
 function extractCount(message: string): number {
   const numericPatterns = [
-    /\b(\d{1,2})\s+(?:separate|seperate|different|individual)?\s*(?:claude\s+code|codex|gemini\s+cli|gemini)?\s*(?:sessions?|agents?|terminals?|windows?)\b/i,
+    /\b(\d{1,2})\s+(?:separate|seperate|different|individual)?\s*(?:claude\s+code|codex|gemini\s+cli|gemini|cursor\s+composer|cursor)?\s*(?:sessions?|agents?|terminals?|windows?)\b/i,
     /\b(?:sessions?|agents?|terminals?|windows?)\s*[x*]?\s*(\d{1,2})\b/i,
   ];
   for (const pattern of numericPatterns) {
@@ -95,7 +100,7 @@ function extractCount(message: string): number {
   }
 
   const words = Object.keys(NUMBER_WORDS).join('|');
-  const wordPattern = new RegExp(`\\b(${words})\\s+(?:separate|seperate|different|individual)?\\s*(?:claude\\s+code|codex|gemini\\s+cli|gemini)?\\s*(?:sessions?|agents?|terminals?|windows?)\\b`, 'i');
+  const wordPattern = new RegExp(`\\b(${words})\\s+(?:separate|seperate|different|individual)?\\s*(?:claude\\s+code|codex|gemini\\s+cli|gemini|cursor\\s+composer|cursor)?\\s*(?:sessions?|agents?|terminals?|windows?)\\b`, 'i');
   const wordMatch = message.match(wordPattern);
   if (wordMatch) return clampCount(NUMBER_WORDS[wordMatch[1].toLowerCase()]);
 
@@ -201,7 +206,13 @@ export function formatTerminalAgentLaunchResponse(plan: TerminalAgentLaunchPlan,
       `I could not start the ${plan.providerLabel} terminal sessions: ${detail}`,
       '',
       'Make sure the matching local bridge is running:',
-      plan.provider === 'claude-code' ? '`npm run bridge`' : plan.provider === 'codex' ? '`npm run bridge:codex`' : '`node scripts/gemini-bridge.js`',
+      plan.provider === 'claude-code'
+        ? '`npm run bridge`'
+        : plan.provider === 'codex'
+          ? '`npm run bridge:codex`'
+          : plan.provider === 'cursor'
+            ? '`npm run bridge:cursor`'
+            : '`npm run bridge:gemini`',
     ].join('\n');
   }
 

@@ -22,6 +22,10 @@ const {
   saveManagedTerminalSession,
   sendToTerminalByTitle,
 } = require('./terminal-launch-utils');
+const {
+  buildCodexSessionRecentActions,
+  summarizeCodexJsonl,
+} = require('./codex-session-summary');
 
 const PORT = 7779;
 const SCAN_INTERVAL = 5000;
@@ -31,7 +35,7 @@ const IDLE_THRESHOLD = 1800_000;    // 30min → idle (Codex writes less frequen
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token',
+  'Access-Control-Allow-Headers': 'Content-Type, X-UC-Desktop-Token, X-UC-File-Session-Token',
   // Private Network Access (Chrome 116+) — required for the live HTTPS
   // app at app.chrisswanson.xyz to talk to localhost without silent
   // browser blocking.
@@ -133,6 +137,25 @@ function normalizeCliPrompt(value) {
 function promptPreview(value, max = 180) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function readFileTail(filePath, maxBytes = 512 * 1024) {
+  try {
+    const stat = fs.statSync(filePath);
+    const start = Math.max(0, stat.size - maxBytes);
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const buffer = Buffer.alloc(stat.size - start);
+      fs.readSync(fd, buffer, 0, buffer.length, start);
+      const text = buffer.toString('utf8');
+      const firstNewline = text.indexOf('\n');
+      return start > 0 && firstNewline >= 0 ? text.slice(firstNewline + 1) : text;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return '';
+  }
 }
 
 function safeProjectDir(input) {
@@ -447,33 +470,28 @@ function scanCodexFiles() {
         // Only include recently active files
         if (age > IDLE_THRESHOLD) continue;
 
-        // Try to extract model from last line of jsonl
-        let detectedModel = 'codex';
-        try {
-          const content = fs.readFileSync(filePath, 'utf8');
-          const lastLines = content.trim().split('\n').slice(-5);
-          for (const line of lastLines.reverse()) {
-            try {
-              const parsed = JSON.parse(line);
-              if (parsed.model) { detectedModel = parsed.model; break; }
-              if (parsed.payload?.model) { detectedModel = parsed.payload.model; break; }
-            } catch {}
-          }
-        } catch {}
+        const sessionSummary = summarizeCodexJsonl(readFileTail(filePath));
         const baseName = path.basename(file).replace(/\.\w+$/, '');
+        const sessionId = sessionSummary.sessionMarker || `codex-${baseName}`;
+        const task = sessionSummary.lastUserMessage
+          ? promptPreview(sessionSummary.lastUserMessage, 240)
+          : `Session: ${baseName}`;
         sessions.push({
-          sessionId: `codex-${baseName}`,
+          sessionId,
           projectDir: dir,
-          model: detectedModel,
+          model: sessionSummary.model || 'codex',
           status: age < ACTIVE_THRESHOLD ? 'active' : 'idle',
-          task: `Session: ${baseName}`,
+          task,
           lastActivity: stat.mtime.toISOString(),
           totalInputTokens: 0,
           totalOutputTokens: 0,
-          messageCount: 0,
-          recentActions: [],
+          messageCount: sessionSummary.messageCount || 0,
+          recentActions: buildCodexSessionRecentActions(sessionSummary),
           filesRead: 0,
           filesWritten: 0,
+          lastAssistantMessage: sessionSummary.lastAssistantMessage || undefined,
+          appCapabilityResultText: sessionSummary.appCapabilityResultText || undefined,
+          appCapabilityResultStatus: sessionSummary.appCapabilityResultStatus || undefined,
         });
       }
     } catch {}
@@ -510,6 +528,9 @@ function registerSession(data) {
     launchError: data.launchError,
     terminalTitle: data.terminalTitle,
     manageable: Boolean(data.terminalTitle),
+    lastAssistantMessage: data.lastAssistantMessage,
+    appCapabilityResultText: data.appCapabilityResultText,
+    appCapabilityResultStatus: data.appCapabilityResultStatus,
   };
 
   // Update existing or add new
@@ -541,14 +562,38 @@ async function scan() {
     return { ...s, status: age < ACTIVE_THRESHOLD ? s.status : 'idle' };
   });
 
-  // Merge all sources, dedup by sessionId
+  // Merge all sources, dedup by sessionId. File-backed Codex JSONL records may
+  // arrive after a managed terminal registration; keep the terminal controls
+  // from the managed record while adding transcript/result metadata from files.
   const allSessions = [...manualSessions, ...processSessions, ...fileSessions];
-  const seen = new Set();
-  cachedSessions = allSessions.filter(s => {
-    if (seen.has(s.sessionId)) return false;
-    seen.add(s.sessionId);
-    return true;
-  });
+  const byId = new Map();
+  for (const session of allSessions) {
+    if (!session?.sessionId) continue;
+    const existing = byId.get(session.sessionId);
+    if (!existing) {
+      byId.set(session.sessionId, session);
+      continue;
+    }
+    byId.set(session.sessionId, {
+      ...existing,
+      ...session,
+      terminalTitle: existing.terminalTitle || session.terminalTitle,
+      terminal: existing.terminal || session.terminal,
+      terminalPid: existing.terminalPid || session.terminalPid,
+      launchId: existing.launchId || session.launchId,
+      launchedAt: existing.launchedAt || session.launchedAt,
+      manageable: Boolean(existing.manageable || session.manageable),
+      recentActions: [
+        ...(existing.recentActions || []),
+        ...(session.recentActions || []),
+      ].filter(Boolean).slice(-8),
+      status: existing.status === 'active' || session.status === 'active' ? 'active' : session.status || existing.status,
+      lastActivity: new Date(existing.lastActivity || 0).getTime() > new Date(session.lastActivity || 0).getTime()
+        ? existing.lastActivity
+        : session.lastActivity,
+    });
+  }
+  cachedSessions = Array.from(byId.values());
 
   lastScanTime = new Date().toISOString();
 }

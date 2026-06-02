@@ -15,6 +15,8 @@
  * Replay strategy per step:
  * - `browser.click_role` / `browser.fill_field` — re-fire verbatim;
  *   role + name is already semantic.
+ * - `desktop.set_element_value` — re-fire by semantic target when
+ *   recorded from an AX field; fall back to the captured path.
  * - `desktop.click_element` — re-fetch the a11y tree for the
  *   captured app, locate the element by role + label (not path,
  *   because paths shift when the app's tree changes), click it.
@@ -239,9 +241,17 @@ const RECORDABLE_TOOLS = new Set([
   'desktop.launch_app',
   'desktop.focus_app',
   'desktop.type_text',
+  'desktop.paste_text',
   'desktop.press_keys',
+  'desktop.menu_click',
+  'desktop.mouse_click',
+  'desktop.mouse_down',
+  'desktop.mouse_up',
+  'desktop.mouse_drag',
+  'desktop.mouse_scroll',
   'desktop.click_at',
   'desktop.click_element',
+  'desktop.set_element_value',
   'desktop.open_url',
   'desktop.open_path',
   'desktop.wait_for_app',
@@ -278,6 +288,9 @@ export function buildStep(args: {
     case 'desktop.type_text':
       summary = `Typed ${String(args.input.text || '').length} chars`;
       break;
+    case 'desktop.paste_text':
+      summary = `Pasted ${String(args.input.text || '').length} chars`;
+      break;
     case 'desktop.press_keys':
       summary = `Pressed ${String(args.input.combo || '')}`;
       break;
@@ -286,8 +299,30 @@ export function buildStep(args: {
         ? `Clicked "${args.a11yTarget.label}"`
         : `Clicked element at ${String(args.input.path || '')}`;
       break;
+    case 'desktop.set_element_value':
+      summary = args.a11yTarget?.label
+        ? `Set "${args.a11yTarget.label}" to ${String(args.input.text || '').length} chars`
+        : `Set element at ${String(args.input.path || '')} to ${String(args.input.text || '').length} chars`;
+      break;
     case 'desktop.click_at':
       summary = `Clicked at (${args.input.x}, ${args.input.y})`;
+      break;
+    case 'desktop.mouse_click':
+      summary = `Mouse clicked at (${args.input.x}, ${args.input.y})`;
+      break;
+    case 'desktop.mouse_down':
+      summary = `Mouse down at (${args.input.x}, ${args.input.y})`;
+      break;
+    case 'desktop.mouse_up':
+      summary = typeof args.input.x === 'number' && typeof args.input.y === 'number'
+        ? `Mouse up at (${args.input.x}, ${args.input.y})`
+        : 'Mouse up';
+      break;
+    case 'desktop.mouse_drag':
+      summary = `Dragged from (${args.input.fromX}, ${args.input.fromY}) to (${args.input.toX}, ${args.input.toY})`;
+      break;
+    case 'desktop.mouse_scroll':
+      summary = `Scrolled mouse deltaY=${String(args.input.deltaY ?? '')}`;
       break;
     case 'browser.open_url':
       summary = `Opened ${String(args.input.url || '')}`;
@@ -330,16 +365,14 @@ export type ReplayInvocation = {
 
 /**
  * Translates a recorded step into the tool call to fire at replay time.
- * For `desktop.click_element` we discard the original `path` because
- * paths are unstable across app restarts; the dispatcher must re-fetch
- * the a11y tree and rediscover by role+label. We signal that by
- * annotating the invocation's note — the dispatcher implementation
- * (added in UC-4b) will do the actual re-discovery.
+ * For semantic AX steps we carry both the original path and `_target`.
+ * The replay dispatcher should prefer target lookup because paths are
+ * unstable across app restarts; path remains a last-resort fallback.
  */
 export function planReplayStep(step: RecordedStep): ReplayInvocation {
-  if (step.tool === 'desktop.click_element') {
+  if (step.tool === 'desktop.click_element' || step.tool === 'desktop.set_element_value') {
     return {
-      tool: 'desktop.click_element',
+      tool: step.tool,
       input: {
         // Path is carried through but the replay dispatcher should
         // prefer target lookup. Keeping both lets the dispatcher use

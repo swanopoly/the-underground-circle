@@ -4,6 +4,7 @@
 //   uc-ax-helper tree --app "zoom.us" [--max-depth 6] [--max-nodes 150]
 //   uc-ax-helper tree --frontmost [--max-depth 6] [--max-nodes 150]
 //   uc-ax-helper click --pid <pid> --path "0.2.1" [--button left|right]
+//   uc-ax-helper set-value --pid <pid> --path "0.2.1" --text "value"
 //
 // Output is NDJSON: exactly one `{"ok":true,...}` or `{"ok":false,"error":"..."}`
 // line on stdout. Never prints to stderr on the happy path (the bridge
@@ -258,6 +259,14 @@ func performClick(on element: AXUIElement) -> (ok: Bool, method: String, error: 
     return (true, "cg_event", nil)
 }
 
+func performSetValue(on element: AXUIElement, text: String) -> (ok: Bool, method: String, error: String?) {
+    let err = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef)
+    if err == .success {
+        return (true, "ax_set_value", nil)
+    }
+    return (false, "none", "AXValue could not be set (\(err.rawValue))")
+}
+
 // MARK: - CLI parsing
 
 func arg(_ flag: String, default def: String? = nil) -> String? {
@@ -282,7 +291,7 @@ func emitError(_ msg: String) {
 // MARK: - Main
 
 guard CommandLine.arguments.count >= 2 else {
-    emitError("usage: uc-ax-helper <tree|click> ...")
+    emitError("usage: uc-ax-helper <tree|click|set-value> ...")
     exit(1)
 }
 
@@ -347,6 +356,37 @@ if sub == "click" {
         exit(0)
     } else {
         emitError(result.error ?? "click failed")
+        exit(1)
+    }
+}
+
+if sub == "set-value" {
+    if !AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt" as CFString: false] as CFDictionary) {
+        emitError("Accessibility permission not granted.")
+    }
+    guard let pidStr = arg("--pid"), let pid = pid_t(pidStr) else {
+        emitError("--pid required")
+        exit(1)
+    }
+    guard let path = arg("--path") else {
+        emitError("--path required")
+        exit(1)
+    }
+    guard let text = arg("--text") else {
+        emitError("--text required")
+        exit(1)
+    }
+    let axApp = AXUIElementCreateApplication(pid)
+    guard let element = elementAtPath(axApp, path: path) else {
+        emitError("path not found: \(path)")
+        exit(1)
+    }
+    let result = performSetValue(on: element, text: text)
+    if result.ok {
+        print("{\"ok\":true,\"method\":\(jsonEscape(result.method)),\"chars\":\(text.count)}")
+        exit(0)
+    } else {
+        emitError(result.error ?? "set value failed")
         exit(1)
     }
 }

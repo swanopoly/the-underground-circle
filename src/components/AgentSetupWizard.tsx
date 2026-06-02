@@ -13,7 +13,7 @@ import {
   ScrollView, ActivityIndicator, Platform, KeyboardAvoidingView,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { AgentConnection, PROVIDER_META, ProviderType, generateId } from '../lib/connectionManager';
+import { AgentConnection, ProviderType, generateId } from '../lib/connectionManager';
 import { DiagnosticResult, getTokenHint } from '../lib/connectionDiagnostics';
 import { supportsOpenSwanRpc, testAgentBridgeConnection } from '../lib/agentBridgeSupport';
 
@@ -38,8 +38,16 @@ interface ProviderCard {
 
 const PROVIDERS: ProviderCard[] = [
   { type: 'openswan',      icon: '🐾', label: 'OpenSwan',    tagline: 'Recommended — full control',   color: '#6366f1', defaultEndpoint: 'http://localhost:18789' },
-  { type: 'claude-code',   icon: '🤖', label: 'Claude Code', tagline: 'Anthropic\'s coding agent',     color: '#f97316', defaultEndpoint: 'http://localhost:8080'  },
-  { type: 'codex',         icon: '🧠', label: 'Codex',       tagline: 'OpenAI\'s agent',               color: '#22c55e', defaultEndpoint: 'https://api.openai.com/v1' },
+  { type: 'claude-code',   icon: '🤖', label: 'Claude Code', tagline: 'Anthropic\'s coding agent',     color: '#f97316', defaultEndpoint: 'http://localhost:7778'  },
+  { type: 'codex',         icon: '🧠', label: 'Codex',       tagline: 'OpenAI\'s agent',               color: '#22c55e', defaultEndpoint: 'http://localhost:7779' },
+  { type: 'cursor',        icon: '🎯', label: 'Cursor',      tagline: 'Composer/editor agent bridge',  color: '#8b5cf6', defaultEndpoint: 'http://localhost:2087' },
+  { type: 'gemini',        icon: '♊', label: 'Gemini CLI',   tagline: 'Google CLI or local bridge',     color: '#4285f4', defaultEndpoint: 'http://localhost:7780' },
+  { type: 'opencode',      icon: 'OC', label: 'OpenCode',    tagline: 'Custom coding-agent bridge',     color: '#38bdf8', defaultEndpoint: 'https://' },
+  { type: 'aider',         icon: 'AI', label: 'Aider',       tagline: 'Pair-programming bridge',        color: '#f97316', defaultEndpoint: 'https://' },
+  { type: 'cline',         icon: 'CL', label: 'Cline',       tagline: 'VS Code agent bridge',           color: '#ec4899', defaultEndpoint: 'https://' },
+  { type: 'windsurf',      icon: 'WS', label: 'Windsurf',    tagline: 'Editor agent bridge',            color: '#06b6d4', defaultEndpoint: 'https://' },
+  { type: 'continue',      icon: 'CN', label: 'Continue',    tagline: 'IDE assistant bridge',           color: '#22c55e', defaultEndpoint: 'https://' },
+  { type: 'amp',           icon: 'AM', label: 'Amp',         tagline: 'Coding-agent bridge',            color: '#a78bfa', defaultEndpoint: 'https://' },
   { type: 'generic-agent', icon: '⚡', label: 'Other',       tagline: 'Any custom bridge, Pi, or remote agent', color: '#a855f7', defaultEndpoint: 'https://' },
 ];
 
@@ -114,7 +122,7 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
       id: generateId(),
       name: agentName || provider.label,
       provider: provider.type,
-      endpoint,
+      endpoint: gatewayUrl,
       token,
       enabled: true,
       status: 'disconnected',
@@ -203,7 +211,7 @@ export default function AgentSetupWizard({ visible, onClose, onComplete }: Props
                   <Text style={s.hintTitle}>🧩 Custom bridge contract</Text>
                   <Text style={s.hintText}>
                     Any agent can connect here if it exposes a reachable <Text style={s.inlineMono}>GET /health</Text> endpoint.
-                    If you also expose richer RPCs later, the Office can layer on more features.
+                    To accept chat tasks, expose one of <Text style={s.inlineMono}>POST /task</Text>, <Text style={s.inlineMono}>/tasks</Text>, <Text style={s.inlineMono}>/message</Text>, <Text style={s.inlineMono}>/chat</Text>, or <Text style={s.inlineMono}>/run</Text>.
                   </Text>
                 </View>
               )}

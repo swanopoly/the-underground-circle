@@ -7,6 +7,19 @@
  * Run: npm run smoke:desktop-diag
  */
 
+import { readFileSync } from 'node:fs';
+import {
+  buildDesktopBridgeRecoveryPayload,
+  buildDesktopBridgeRecoveryOptions,
+  renderDesktopBridgeRecoveryMessage,
+} from '../src/lib/desktopBridgeRecovery';
+import {
+  buildDesktopBrowserReadiness,
+  buildDesktopBridgeBackgroundStartCommand,
+  isDesktopBridgeRecoverySelection,
+  renderDesktopBridgeConnectedMessage,
+} from '../src/lib/desktopBridgeAutoConnect';
+
 type DiagStep = {
   name: string;
   status: 'pass' | 'fail' | 'skip';
@@ -92,6 +105,34 @@ function main() {
     assert(r.includes('Access-Control-Allow-Headers'), 'degraded: CORS hint surfaced');
   }
 
+  // ─── Bridge pairing security — keep hostile origins out of token pairing ───
+  {
+    const bridgeSource = readFileSync('scripts/claude-bridge.js', 'utf8');
+    const dynamicCorsIndex = bridgeSource.indexOf('const CORS = buildCorsHeaders(req)');
+    const originBlockIndex = bridgeSource.indexOf('if (!isBridgeOriginAllowed(req))');
+    const desktopPairIndex = bridgeSource.indexOf("url === '/desktop/pair'");
+    assert(dynamicCorsIndex >= 0, 'security: Claude bridge uses request-scoped CORS headers');
+    assert(originBlockIndex >= 0 && desktopPairIndex >= 0 && originBlockIndex < desktopPairIndex, 'security: origin allowlist runs before /desktop/pair token response');
+    assert(bridgeSource.includes("'Access-Control-Allow-Origin': origin"), 'security: CORS response mirrors only allowed origins');
+    assert(bridgeSource.includes("Origin blocked by bridge allowlist"), 'security: hostile origins get explicit 403');
+  }
+
+  // ─── Local bridge CORS header contract ─────────────────────────
+  {
+    const bridgeFiles = [
+      'scripts/claude-bridge.js',
+      'scripts/codex-bridge.js',
+      'scripts/cursor-bridge.js',
+      'scripts/gemini-bridge.js',
+    ];
+    for (const file of bridgeFiles) {
+      const source = readFileSync(file, 'utf8');
+      assert(source.includes('X-UC-Desktop-Token'), `cors: ${file} allows desktop token header`);
+      assert(source.includes('X-UC-File-Session-Token'), `cors: ${file} allows local file session token header`);
+      assert(source.includes('Access-Control-Allow-Private-Network'), `cors: ${file} allows private-network preflight`);
+    }
+  }
+
   // ─── Skip row — unknown app alias ─────────────────────────────
   {
     const r = renderDesktopBridgeDiag({
@@ -102,6 +143,66 @@ function main() {
       ],
     });
     assert(r.includes('[SKIP] Alias match'), 'skip: SKIP icon rendered');
+  }
+
+  // ─── Recovery payloads — used by the DESKTOP chip and Pair action ───────
+  {
+    const msg = renderDesktopBridgeRecoveryMessage('unreachable');
+    const options = buildDesktopBridgeRecoveryOptions('unreachable');
+    const payload = buildDesktopBridgeRecoveryPayload('pair_failed', 'token missing');
+    assert(msg.includes('npm run bridge'), 'recovery: offline message includes npm run bridge');
+    assert(options.some((option) => option.id === 'repair_or_restart_bridge' && option.recommended), 'recovery: offline options recommend bridge repair');
+    assert(options.some((option) => option.id === 'let_connected_agent_repair'), 'recovery: offline options include connected-agent diagnosis');
+    assert(payload.content.includes('pairing failed'), 'recovery: pair failure message is explicit');
+    assert(payload.recoveryOptions.some((option) => option.id === 'repair_or_restart_bridge'), 'recovery: pair failure carries repair option');
+    assert(payload.touched.includes('desktop_bridge:pair_failed'), 'recovery: pair failure touched metadata is tagged');
+    const startCommand = buildDesktopBridgeBackgroundStartCommand();
+    assert(startCommand.includes('npm run bridge'), 'auto-connect: background starter uses npm run bridge');
+    assert(!/\bclaude\b/i.test(startCommand), 'auto-connect: background starter does not invoke Claude billing paths');
+    assert(isDesktopBridgeRecoverySelection({
+      optionId: 'repair_or_restart_bridge',
+      label: 'Start or repair the bridge',
+      detail: 'retry',
+      actor: 'user',
+      recommended: true,
+      source: 'recovery_policy',
+      context: { sourceSurface: 'desktop_bridge_status_chip' },
+    }), 'auto-connect: desktop chip repair selections are handled locally');
+    assert(isDesktopBridgeRecoverySelection({
+      optionId: 'repair_or_restart_bridge',
+      label: 'Start or repair the bridge',
+      detail: 'retry',
+      actor: 'user',
+      recommended: true,
+      source: 'recovery_policy',
+      context: { sourceSurface: 'desktop_bridge_recovery_card' },
+    }), 'auto-connect: desktop bridge recovery cards are handled locally');
+    assert(!isDesktopBridgeRecoverySelection({
+      optionId: 'repair_or_restart_bridge',
+      label: 'Start or repair the bridge',
+      detail: 'retry',
+      actor: 'user',
+      recommended: true,
+      source: 'recovery_policy',
+      context: { sourceSurface: 'browser_task' },
+    }), 'auto-connect: unrelated bridge repair selections still use general recovery');
+    const readiness = buildDesktopBrowserReadiness(
+      { ok: true, platform: 'darwin', supported: true, tools: ['launch', 'browser_tabs', 'a11y_tree'] },
+      {
+        ok: true,
+        playwright: '1.59.0',
+        chromeChannel: 'not_started',
+        profileDir: '/tmp/uc-browser-profile',
+        contextOpen: false,
+        currentUrl: null,
+        currentTitle: null,
+      },
+    );
+    const connected = renderDesktopBridgeConnectedMessage('paired', false, readiness);
+    assert(readiness.desktop.toolCount === 3, 'readiness: desktop tool count is compact');
+    assert(readiness.browser.ready && !readiness.browser.contextOpen, 'readiness: browser available before first page opens');
+    assert(connected.includes('Desktop: ready (3 tools).'), 'readiness: connected message shows desktop readiness');
+    assert(connected.includes('Browser: ready; opens on first browser task.'), 'readiness: connected message shows browser readiness');
   }
 
   if (failures > 0) {

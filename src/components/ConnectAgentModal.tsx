@@ -35,10 +35,13 @@ const AGENT_OPTIONS: { type: AgentType; label: string; icon: string; color: stri
   { type: 'codex',       label: 'Codex CLI',   icon: '🧠', color: '#10a37f', desc: 'OpenAI\'s CLI agent' },
   { type: 'gemini-cli',  label: 'Gemini CLI',  icon: '♊', color: '#4285f4', desc: 'Google\'s CLI agent' },
   { type: 'cursor',      label: 'Cursor',      icon: '🎯', color: '#8b5cf6', desc: 'AI code editor' },
+  { type: 'opencode',    label: 'OpenCode',    icon: 'OC', color: '#38bdf8', desc: 'Coding agent CLI' },
   { type: 'windsurf',    label: 'Windsurf',    icon: '🏄', color: '#06b6d4', desc: 'Codeium\'s editor' },
   { type: 'copilot',     label: 'Copilot',     icon: '🤖', color: '#1f6feb', desc: 'GitHub\'s AI agent' },
   { type: 'aider',       label: 'Aider',       icon: '🛠️', color: '#f59e0b', desc: 'AI pair programming' },
   { type: 'cline',       label: 'Cline',       icon: '⚡', color: '#ec4899', desc: 'VS Code AI agent' },
+  { type: 'continue',    label: 'Continue',    icon: 'CN', color: '#22c55e', desc: 'IDE assistant' },
+  { type: 'amp',         label: 'Amp',         icon: 'AM', color: '#a78bfa', desc: 'Coding agent CLI' },
 ];
 
 // ── Component ────────────────────────────────────────────────────────────────

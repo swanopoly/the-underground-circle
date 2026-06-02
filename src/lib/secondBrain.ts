@@ -2,19 +2,30 @@ import { supabase } from './supabase';
 import { saveMemory, type MemoryEntry, type MemoryScope } from './agentRunSystem';
 import { EMBEDDING_MODEL, embedText, semanticSearchMemories } from './memoryEmbeddings';
 import {
+  buildNextSecondBrainReviewMetadata,
+  buildSecondBrainAgentBrief,
+  buildSecondBrainBaseViews,
   buildSecondBrainTitle,
   extractSecondBrainTags,
+  getSecondBrainReviewState,
   scoreSecondBrainConnection,
   summarizeSecondBrainContent,
   uniqueSecondBrainStrings,
 } from './secondBrainCore';
 
 export {
+  buildNextSecondBrainReviewMetadata,
+  buildSecondBrainAgentBrief,
+  buildSecondBrainBaseViews,
   buildSecondBrainPromptContext,
   buildSecondBrainTitle,
   extractSecondBrainTags,
+  getSecondBrainReviewState,
   scoreSecondBrainConnection,
   summarizeSecondBrainContent,
+  type SecondBrainBaseView,
+  type SecondBrainReviewState,
+  type SecondBrainReviewUrgency,
 } from './secondBrainCore';
 
 export type SecondBrainNoteStatus = 'inbox' | 'processed' | 'evergreen' | 'archived';
@@ -139,7 +150,12 @@ function normalizeLink(row: any): SecondBrainLink {
 
 export async function loadSecondBrainNotes(
   circleId: string,
-  opts: { status?: SecondBrainNoteStatus | 'active'; limit?: number } = {},
+  opts: {
+    status?: SecondBrainNoteStatus | 'active';
+    limit?: number;
+    createdBy?: string;
+    visibilityFilter?: SecondBrainVisibility;
+  } = {},
 ): Promise<{ notes: SecondBrainNote[]; error?: string; missing?: boolean }> {
   try {
     let query = supabase
@@ -152,6 +168,12 @@ export async function loadSecondBrainNotes(
       query = query.neq('status', 'archived');
     } else if (opts.status) {
       query = query.eq('status', opts.status);
+    }
+    if (opts.createdBy) {
+      query = query.eq('created_by', opts.createdBy);
+    }
+    if (opts.visibilityFilter) {
+      query = query.eq('visibility', opts.visibilityFilter);
     }
     const { data, error } = await query;
     if (error) {
@@ -226,7 +248,7 @@ export async function createSecondBrainNote(
       parent_note_id: input.parentNoteId || null,
       status: input.status || 'inbox',
       note_kind: noteKind,
-      visibility: input.visibility || 'circle_shared',
+      visibility: input.visibility || 'private',
       title: title.slice(0, 140),
       content,
       summary: summarizeSecondBrainContent(content),
@@ -312,10 +334,13 @@ export async function createSecondBrainLink(input: {
 export async function createSecondBrainNoteFromMemory(
   memory: MemoryEntry,
   userId: string,
+  fallbackCircleId?: string,
+  visibilityOverride?: SecondBrainVisibility,
 ): Promise<{ note: SecondBrainNote | null; error?: string; missing?: boolean }> {
-  if (!memory.circle_id) return { note: null, error: 'Memory is not attached to a circle.' };
+  const circleId = memory.circle_id || fallbackCircleId;
+  if (!circleId) return { note: null, error: 'Memory is not attached to a circle.' };
   return createSecondBrainNote({
-    circleId: memory.circle_id,
+    circleId,
     userId,
     sourceMemoryId: memory.id,
     title: memory.title,
@@ -327,6 +352,7 @@ export async function createSecondBrainNoteFromMemory(
     ].filter(Boolean).join('\n'),
     noteKind: 'memory_digest',
     status: 'processed',
+    visibility: visibilityOverride || (memory.scope === 'user' || memory.visibility === 'private' ? 'private' : 'circle_shared'),
     tags: extractSecondBrainTags(`${memory.title}\n${memory.content}\n${memory.memory_kind}\n${memory.scope}`),
     importance: Math.max(0.55, Math.min(1, memory.importance || 0.65)),
     metadata: {
@@ -379,6 +405,26 @@ export async function promoteSecondBrainNoteToMemory(
     reason: 'Promoted from digital brain note to agent memory.',
   });
   return { memory };
+}
+
+export async function shareSecondBrainNote(
+  noteId: string,
+  visibility: SecondBrainVisibility,
+): Promise<{ note: SecondBrainNote | null; error?: string }> {
+  return updateSecondBrainNote(noteId, { visibility });
+}
+
+export async function reviewSecondBrainNote(
+  note: SecondBrainNote,
+  action: 'reviewed' | 'snoozed' | 'evergreen' = 'reviewed',
+): Promise<{ note: SecondBrainNote | null; error?: string }> {
+  const metadata = buildNextSecondBrainReviewMetadata(note, action);
+  const status = action === 'evergreen'
+    ? 'evergreen'
+    : note.status === 'inbox'
+      ? 'processed'
+      : note.status;
+  return updateSecondBrainNote(note.id, { status, metadata });
 }
 
 async function keywordSearchNotes(circleId: string, queryText: string, limit: number): Promise<SecondBrainNote[]> {
@@ -478,9 +524,18 @@ export async function searchSecondBrain(
   };
 }
 
-export async function buildSecondBrainGraph(circleId: string): Promise<{ graph: SecondBrainGraph; error?: string; missing?: boolean }> {
+export async function buildSecondBrainGraph(
+  circleId: string,
+  opts?: { userId?: string; mode?: 'mine' | 'circle' },
+): Promise<{ graph: SecondBrainGraph; error?: string; missing?: boolean }> {
+  const notesFilter: Parameters<typeof loadSecondBrainNotes>[1] = { status: 'active', limit: 120 };
+  if (opts?.mode === 'mine' && opts.userId) {
+    notesFilter.createdBy = opts.userId;
+  } else if (opts?.mode === 'circle') {
+    notesFilter.visibilityFilter = 'circle_shared';
+  }
   const [notesResult, linksResult] = await Promise.all([
-    loadSecondBrainNotes(circleId, { status: 'active', limit: 120 }),
+    loadSecondBrainNotes(circleId, notesFilter),
     loadSecondBrainLinks(circleId),
   ]);
   const notes = notesResult.notes;

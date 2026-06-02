@@ -5,8 +5,8 @@
  *
  * Why persistent: `launchPersistentContext` reuses a real Chrome
  * profile across calls, so sites stay logged in, cookies persist,
- * passkeys work, and we sidestep 80%+ of CAPTCHA/2FA pain without
- * residential proxies.
+ * passkeys work, and routine login friction drops. CAPTCHA/2FA/bot
+ * verification still pauses for a human to complete manually.
  *
  * Profile location: ~/Library/Application Support/UC/ChromeProfile
  *   — intentionally OUR profile, not the user's real Chrome profile.
@@ -39,6 +39,117 @@ let context = null;   // BrowserContext
 let page = null;      // Page (re-used)
 let launchError = null;
 let launchPromise = null;
+
+function classifyBrowserFailure(error, explicitCode) {
+  const code = String(explicitCode || '').trim().toLowerCase();
+  if (code && code !== 'unknown') return code;
+  const text = String((error && error.message) || error || '').toLowerCase();
+  if (!text) return code || 'unknown';
+  if (/\b(captcha|recaptcha|hcaptcha|turnstile|not a robot|human verification|bot verification|cloudflare security check)\b/.test(text)) return 'human_verification_required';
+  if (/\b(browser dialog|browser popup|native dialog|javascript dialog|beforeunload|alert|confirm|prompt)\b.*\b(blocked|needs a decision|manual|unsafe|not accepted|dismissed)\b/.test(text)) return 'browser_dialog_blocked';
+  if (/\b(token rejected|unauthorized|401)\b/.test(text)) return 'token_rejected';
+  if (/\b(not paired|pair first|desktop bridge not paired)\b/.test(text)) return 'not_paired';
+  if (/\b(browser bridge|browser session|chrome launch|chromium fallback|playwright|context)\b.*\b(unavailable|offline|not running|failed|missing|closed|disconnected)\b/.test(text)) return 'browser_bridge_offline';
+  if (/\b(waiting for selector|waiting for locator)\b/.test(text)) return 'selector_not_found';
+  if (/\b(timeout|timed out|timeouterror)\b/.test(text)) {
+    return /\b(locator|selector|getbyrole|element)\b/.test(text) ? 'selector_not_found' : 'timeout';
+  }
+  if (/\bstrict mode violation|resolved to \d+ elements|more than one element|ambiguous|not visible|not enabled|not editable|intercepts pointer events|outside|detached from dom|hidden\b/.test(text)) return 'uncertain_ui_target';
+  if (/\b(login required|sign in required|authentication required|auth required|session expired)\b/.test(text)) return 'auth_required';
+  if (/\b(file not found|no such file|enoent)\b/.test(text)) return 'file_not_found';
+  if (/\b(path must stay under|not allowed|outside allowed)\b/.test(text)) return 'path_not_allowed';
+  if (/\b(permission denied|eacces|operation not permitted|accessibility permission|screen recording)\b/.test(text)) return 'permission_denied';
+  if (/\b(net::|network error|failed to fetch|econnreset|etimedout|connection refused)\b/.test(text)) return 'network_error';
+  if (/\b(500|internal server error)\b/.test(text)) return 'server_error';
+  return code || 'unknown';
+}
+
+function browserRecoveryHint(errorCode) {
+  switch (errorCode) {
+    case 'human_verification_required':
+      return 'Pause automation and ask the user to complete the verification challenge in the UC browser profile.';
+    case 'not_paired':
+    case 'token_rejected':
+      return 'Re-pair the local desktop bridge, then retry the browser action with a fresh page check.';
+    case 'bridge_offline':
+    case 'browser_bridge_offline':
+      return 'Reconnect the local bridge/browser session, then collect fresh browser health before retrying.';
+    case 'browser_dialog_blocked':
+      return 'Read the browser popup text/buttons, use the guarded modal advisor, and retry only if it selects a safe acknowledgement or requested-output overwrite.';
+    case 'selector_not_found':
+      return 'Collect a fresh DOM snapshot, prefer role/name locators, and retry the failed action once.';
+    case 'uncertain_ui_target':
+      return 'Refresh DOM/screenshot evidence and ask for confirmation if more than one target still matches.';
+    case 'auth_required':
+      return 'Ask the user to sign in inside the UC browser profile before retrying.';
+    case 'file_not_found':
+      return 'Ask for or search the exact local file path before retrying the upload.';
+    case 'path_not_allowed':
+      return 'Use a file under the user home folder or request a scoped file grant.';
+    case 'missing_permission':
+    case 'permission_denied':
+      return 'Ask the user to grant the missing local browser/desktop permission, then retry readiness.';
+    case 'network_error':
+    case 'server_error':
+    case 'timeout':
+      return errorCode === 'timeout'
+        ? 'Collect current URL, title, screenshot or DOM state, then retry the timed browser step once with a bounded wait.'
+        : 'Retry once after fresh page state and stop if the same failure repeats.';
+    case 'invalid_input':
+      return 'Fix the browser action arguments before sending another request.';
+    default:
+      return 'Capture fresh browser health, DOM state, and the raw error before retrying.';
+  }
+}
+
+function browserRequiredEvidence(errorCode) {
+  switch (errorCode) {
+    case 'human_verification_required':
+      return ['browser.verification_state', 'user.complete_browser_verification'];
+    case 'not_paired':
+    case 'token_rejected':
+      return ['desktop.bridge_pairing', 'browser.health'];
+    case 'bridge_offline':
+    case 'browser_bridge_offline':
+      return ['desktop.bridge_health', 'browser.health'];
+    case 'browser_dialog_blocked':
+      return ['browser.dialog_observation', 'browser.dom_snapshot', 'browser.screenshot'];
+    case 'selector_not_found':
+      return ['browser.dom_snapshot', 'browser.screenshot'];
+    case 'uncertain_ui_target':
+      return ['browser.dom_snapshot', 'browser.screenshot', 'user.confirm_target'];
+    case 'auth_required':
+      return ['browser.screenshot', 'user.sign_in_browser_profile'];
+    case 'file_not_found':
+      return ['desktop.file_search', 'desktop.file_stat'];
+    case 'path_not_allowed':
+      return ['desktop.file_grant', 'desktop.file_stat'];
+    case 'missing_permission':
+    case 'permission_denied':
+      return ['desktop.permission_check', 'browser.health'];
+    case 'timeout':
+      return ['browser.health', 'browser.dom_snapshot', 'browser.screenshot'];
+    case 'network_error':
+    case 'server_error':
+      return ['browser.health', 'browser.screenshot'];
+    default:
+      return ['browser.health', 'browser.dom_snapshot'];
+  }
+}
+
+function writeBrowserFailure(res, CORS, error, fallback, explicitCode, statusCode = 200) {
+  const raw = String((error && error.message) || error || fallback || 'browser action failed').trim();
+  const errorCode = classifyBrowserFailure(raw, explicitCode);
+  const requiredEvidence = browserRequiredEvidence(errorCode);
+  res.writeHead(statusCode, CORS);
+  res.end(JSON.stringify({
+    ok: false,
+    error: raw,
+    errorCode,
+    recoveryHint: browserRecoveryHint(errorCode),
+    requiredEvidence,
+  }));
+}
 
 function ensureProfileDir() {
   try { fs.mkdirSync(PROFILE_DIR, { recursive: true }); } catch {}
@@ -200,21 +311,23 @@ async function handleOpenUrl(req, res, CORS) {
   if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
   const url = String(body.url || '').trim();
   if (!/^https?:\/\//i.test(url)) {
-    res.writeHead(400, CORS);
-    res.end(JSON.stringify({ ok: false, error: 'url must start with http(s)://' }));
+    writeBrowserFailure(res, CORS, 'url must start with http(s)://', undefined, 'invalid_input', 400);
     return;
   }
   const launched = await ensureContext();
-  if (!launched.ok) { res.writeHead(503, CORS); res.end(JSON.stringify({ ok: false, error: launched.error })); return; }
+  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
   try {
     const waitUntil = ['load', 'domcontentloaded', 'networkidle'].includes(body.waitUntil) ? body.waitUntil : 'load';
     const timeout = Math.max(1000, Math.min(60000, Number(body.timeoutMs) || 30000));
-    await launched.page.goto(url, { waitUntil, timeout });
+    const dialogRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+      await launched.page.goto(url, { waitUntil, timeout });
+      return { url: launched.page.url(), title: await launched.page.title() };
+    });
+    if (!dialogRun.ok) { writeBrowserDialogBlocked(res, CORS, dialogRun.blockedDecision); return; }
     res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: true, url: launched.page.url(), title: await launched.page.title() }));
+    res.end(JSON.stringify({ ok: true, ...dialogRun.result, handledDialogs: dialogRun.handledDialogs }));
   } catch (e) {
-    res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: false, error: (e && e.message) || 'navigation failed' }));
+    writeBrowserFailure(res, CORS, e, 'navigation failed');
   }
 }
 
@@ -342,6 +455,351 @@ const PAGE_WALKER = `(function walk(opts) {
   return { tree: root || { id: '0', role: 'document' }, nodeCount: counter.n };
 })`;
 
+const HUMAN_VERIFICATION_PAUSE_MESSAGE =
+  'Human verification detected. Pause automation and ask the user to complete the verification manually, then continue only after the user confirms it is done.';
+
+const VERIFICATION_DETECTORS = [
+  {
+    kind: 'captcha',
+    label: 'CAPTCHA / human verification',
+    reason: 'The page or target appears to contain CAPTCHA or "not a robot" verification.',
+    patterns: [
+      /\bcaptcha\b/i,
+      /\brecaptcha\b/i,
+      /\bhcaptcha\b/i,
+      /\bturnstile\b/i,
+      /\bi\s*(?:am|'m|m)\s+not\s+a\s+robot\b/i,
+      /\bnot\s+a\s+robot\b/i,
+      /\bverify\s+(?:you(?:'re| are)|that\s+you\s+are)\s+(?:human|not\s+a\s+robot)\b/i,
+      /\bhuman\s+verification\b/i,
+    ],
+  },
+  {
+    kind: 'bot_check',
+    label: 'Bot verification / security check',
+    reason: 'The page or target appears to be an anti-bot or security challenge.',
+    patterns: [
+      /\bbot\s+(?:check|verification|challenge|protection)\b/i,
+      /\banti[-\s]?bot\b/i,
+      /\bcloudflare\b[\s\S]{0,80}\b(?:challenge|security|verify|checking)\b/i,
+      /\bchecking\s+(?:your\s+)?browser\b/i,
+      /\bsecurity\s+check\b/i,
+      /\bverify\s+(?:you(?:'re| are)|that\s+you\s+are)\s+human\b/i,
+      /\bprove\s+(?:you(?:'re| are)|that\s+you\s+are)\s+human\b/i,
+    ],
+  },
+  {
+    kind: 'mfa',
+    label: 'MFA / one-time verification code',
+    reason: 'The page or target appears to require a human-controlled security code or authenticator step.',
+    patterns: [
+      /\b(?:two[-\s]?factor|2fa|mfa|multi[-\s]?factor)\b/i,
+      /\b(?:one[-\s]?time|single[-\s]?use)\s+(?:password|passcode|code)\b/i,
+      /\b(?:otp|totp)\b/i,
+      /\bauthenticator\s+(?:app|code)\b/i,
+      /\bverification\s+code\b/i,
+      /\bsecurity\s+code\b/i,
+    ],
+  },
+  {
+    kind: 'login_challenge',
+    label: 'Login challenge',
+    reason: 'The page or target appears to need a human login challenge or identity confirmation.',
+    patterns: [
+      /\bconfirm\s+(?:your\s+)?identity\b/i,
+      /\bidentity\s+verification\b/i,
+      /\btrusted\s+device\b/i,
+      /\bapprove\s+(?:this\s+)?(?:login|sign[-\s]?in)\b/i,
+      /\bdevice\s+verification\b/i,
+    ],
+  },
+];
+
+function detectVerificationGate(signals) {
+  const text = (Array.isArray(signals) ? signals : [signals])
+    .map((value) => String(value || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n')
+    .slice(0, 50000);
+  if (!text) return null;
+  for (const detector of VERIFICATION_DETECTORS) {
+    const matchedTerms = detector.patterns
+      .map((pattern) => {
+        const match = text.match(pattern);
+        return match ? match[0] : null;
+      })
+      .filter(Boolean);
+    if (matchedTerms.length === 0) continue;
+    return {
+      detected: true,
+      kind: detector.kind,
+      label: detector.label,
+      reason: detector.reason,
+      matchedTerms: Array.from(new Set(matchedTerms.map((term) => String(term).slice(0, 120)))),
+      requiresHumanPause: true,
+      canAutomate: false,
+      pauseInstruction: HUMAN_VERIFICATION_PAUSE_MESSAGE,
+    };
+  }
+  return null;
+}
+
+async function inspectPageVerification(pageRef) {
+  const snapshot = await pageRef.evaluate(() => {
+    const selectors = [
+      'iframe[src*="recaptcha"]',
+      'iframe[src*="hcaptcha"]',
+      'iframe[src*="turnstile"]',
+      'iframe[title*="captcha" i]',
+      'iframe[title*="verification" i]',
+      '[class*="captcha" i]',
+      '[id*="captcha" i]',
+      '[data-sitekey]',
+      '[data-cf-turnstile-response]',
+      '.cf-turnstile',
+      '.g-recaptcha',
+      '.h-captcha',
+    ];
+    const selectorMatches = [];
+    for (const selector of selectors) {
+      try {
+        if (document.querySelector(selector)) selectorMatches.push(selector);
+      } catch {}
+    }
+    const controlTexts = Array.from(document.querySelectorAll('iframe, button, input, label, [role="button"], [role="checkbox"], [aria-label], [title]'))
+      .slice(0, 300)
+      .map((el) => [
+        el.getAttribute('aria-label'),
+        el.getAttribute('title'),
+        el.getAttribute('name'),
+        el.getAttribute('id'),
+        el.getAttribute('class'),
+        el.getAttribute('src'),
+        el.textContent,
+      ].filter(Boolean).join(' '))
+      .filter(Boolean);
+    const text = ((document.body && document.body.innerText) || document.documentElement.innerText || '').slice(0, 20000);
+    return { text, selectorMatches, controlTexts };
+  });
+  const gate = detectVerificationGate([
+    snapshot.text,
+    ...(snapshot.selectorMatches || []),
+    ...(snapshot.controlTexts || []),
+  ]);
+  return {
+    url: pageRef.url(),
+    title: await pageRef.title().catch(() => ''),
+    verificationDetected: !!gate,
+    gate,
+    selectorMatches: snapshot.selectorMatches || [],
+    matchedTerms: gate ? gate.matchedTerms : [],
+    pauseInstruction: gate ? gate.pauseInstruction : undefined,
+  };
+}
+
+async function guardHumanVerification(pageRef, targetSignals) {
+  const targetGate = detectVerificationGate(targetSignals);
+  if (targetGate) return targetGate;
+  const state = await inspectPageVerification(pageRef);
+  return state.gate || null;
+}
+
+function writeHumanVerificationPause(res, CORS, gate) {
+  res.writeHead(200, CORS);
+  res.end(JSON.stringify({
+    ok: false,
+    error: `${gate.label}: ${gate.pauseInstruction}`,
+    errorCode: 'human_verification_required',
+    requiresHumanVerification: true,
+    gate,
+  }));
+}
+
+function cleanDialogText(value, max = 1200) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function browserDialogButtons(type) {
+  switch (type) {
+    case 'alert':
+      return [{ id: 'accept', label: 'OK' }];
+    case 'beforeunload':
+      return [
+        { id: 'dismiss', label: 'Stay on page' },
+        { id: 'accept', label: 'Leave page' },
+      ];
+    case 'confirm':
+    case 'prompt':
+    default:
+      return [
+        { id: 'accept', label: 'OK' },
+        { id: 'dismiss', label: 'Cancel' },
+      ];
+  }
+}
+
+function browserDialogFilename(text) {
+  const quoted = text.match(/[“"]([^“”"]+\.[A-Za-z0-9]{2,8})[”"]/);
+  if (quoted && quoted[1]) return cleanDialogText(quoted[1], 200);
+  const bare = text.match(/\b([A-Za-z0-9][^\\/:*?"<>|\n\r]{0,120}\.(?:png|jpe?g|pdf|psd|indd|ai|svg|webp|tiff?|zip|csv|xlsx?|docx?))\b/i);
+  return bare && bare[1] ? cleanDialogText(bare[1], 200) : null;
+}
+
+function browserDialogTaskMentionsFilename(task, filename) {
+  if (!filename) return false;
+  const lowerTask = cleanDialogText(task, 2000).toLowerCase();
+  const lowerFilename = cleanDialogText(filename, 200).toLowerCase();
+  if (lowerTask.includes(lowerFilename)) return true;
+  const extMatch = lowerFilename.match(/\.([a-z0-9]{2,8})$/);
+  const extension = extMatch ? extMatch[1] : '';
+  const basename = lowerFilename.replace(/\.[a-z0-9]{2,8}$/i, '').trim();
+  if (!basename || !extension) return false;
+  const formatMentioned = extension === 'jpg' || extension === 'jpeg'
+    ? /\b(?:jpg|jpeg)\b/.test(lowerTask)
+    : new RegExp(`\\b${extension.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(lowerTask);
+  return lowerTask.includes(basename) && formatMentioned;
+}
+
+function classifyBrowserDialogRisk(observation) {
+  const text = cleanDialogText(`${observation.dialogType} ${observation.message} ${observation.defaultValue || ''}`, 2000).toLowerCase();
+  if (/\b(password|passcode|sign in|login|log in|mfa|2fa|two-factor|verification code|captcha|recovery phrase|seed phrase|authenticator|confirm identity)\b/.test(text)) return 'credential_or_identity';
+  if (/\b(payment|purchase|buy|subscribe|billing|credit card|charge|checkout|place order)\b/.test(text)) return 'payment_or_purchase';
+  if (/\b(send|publish|post|share publicly|email now|submit order)\b/.test(text)) return 'external_send_or_publish';
+  if (/\b(delete|erase|trash|remove permanently|discard changes|close without saving|leave page|unsaved changes|not be saved|revert|reset)\b/.test(text)) return 'destructive';
+  if (/\balready exists\b/.test(text) && /\b(replace|overwrite)\b/.test(text)) return 'replace_requested_output';
+  if (observation.dialogType === 'prompt') return 'prompt_input';
+  if (observation.dialogType === 'alert' && /\b(ok|continue|close|done|warning|alert|profile|missing|modified|unavailable|cannot|could not|complete|saved)\b/.test(text)) return 'safe_acknowledgement';
+  return 'unknown';
+}
+
+function buildBrowserDialogObservation(dialog, pageRef) {
+  let url = null;
+  try { url = pageRef.url(); } catch {}
+  return {
+    dialogType: typeof dialog.type === 'function' ? dialog.type() : 'unknown',
+    message: cleanDialogText(typeof dialog.message === 'function' ? dialog.message() : ''),
+    defaultValue: cleanDialogText(typeof dialog.defaultValue === 'function' ? dialog.defaultValue() : '', 300),
+    url,
+    title: null,
+    buttons: browserDialogButtons(typeof dialog.type === 'function' ? dialog.type() : 'unknown'),
+  };
+}
+
+function decideBrowserDialogAction(observation, taskContext) {
+  const risk = classifyBrowserDialogRisk(observation);
+  if (
+    risk === 'credential_or_identity'
+    || risk === 'payment_or_purchase'
+    || risk === 'external_send_or_publish'
+    || risk === 'destructive'
+    || risk === 'prompt_input'
+  ) {
+    return {
+      action: 'dismiss_dialog',
+      risk,
+      confidence: 0.96,
+      reason: `Blocked ${risk.replace(/_/g, ' ')} browser popup from automatic acceptance.`,
+      blocking: true,
+    };
+  }
+  if (risk === 'replace_requested_output') {
+    const filename = browserDialogFilename(observation.message);
+    if (browserDialogTaskMentionsFilename(taskContext, filename)) {
+      return {
+        action: 'accept_dialog',
+        risk,
+        confidence: 0.94,
+        reason: `The browser popup is asking to replace requested output file ${filename}.`,
+        blocking: false,
+      };
+    }
+    return {
+      action: 'dismiss_dialog',
+      risk,
+      confidence: 0.85,
+      reason: 'The popup is an overwrite request, but the requested output filename was not confirmed in the task.',
+      blocking: true,
+    };
+  }
+  if (risk === 'safe_acknowledgement' && observation.dialogType === 'alert') {
+    return {
+      action: 'accept_dialog',
+      risk,
+      confidence: 0.84,
+      reason: 'The browser popup is a non-destructive acknowledgement.',
+      blocking: false,
+    };
+  }
+  return {
+    action: 'dismiss_dialog',
+    risk,
+    confidence: 0.5,
+    reason: 'No safe automatic browser popup action matched the task, so the bridge dismissed it and stopped.',
+    blocking: true,
+  };
+}
+
+async function runWithBrowserDialogHandling(pageRef, body, actionFn) {
+  const taskContext = cleanDialogText([body.taskContext, body.task, body.description].filter(Boolean).join('\n'), 3000);
+  const handledDialogs = [];
+  let blockedDecision = null;
+  const handler = async (dialog) => {
+    const observation = buildBrowserDialogObservation(dialog, pageRef);
+    const decision = decideBrowserDialogAction(observation, taskContext);
+    const record = { observation, decision };
+    handledDialogs.push(record);
+    try {
+      if (decision.action === 'accept_dialog') {
+        await dialog.accept();
+      } else {
+        await dialog.dismiss();
+      }
+    } catch (err) {
+      blockedDecision = blockedDecision || {
+        observation,
+        decision: {
+          ...decision,
+          blocking: true,
+          reason: `${decision.reason} Dialog handling failed: ${(err && err.message) || String(err)}`,
+        },
+      };
+      return;
+    }
+    if (decision.blocking) blockedDecision = blockedDecision || record;
+  };
+  pageRef.on('dialog', handler);
+  try {
+    let result = null;
+    try {
+      result = await actionFn();
+    } catch (err) {
+      if (blockedDecision) {
+        return { ok: false, blockedDecision, handledDialogs };
+      }
+      throw err;
+    }
+    if (blockedDecision) {
+      return { ok: false, blockedDecision, handledDialogs };
+    }
+    return { ok: true, result, handledDialogs };
+  } finally {
+    pageRef.off('dialog', handler);
+  }
+}
+
+function writeBrowserDialogBlocked(res, CORS, blockedDecision) {
+  const observation = blockedDecision && blockedDecision.observation ? blockedDecision.observation : {};
+  const decision = blockedDecision && blockedDecision.decision ? blockedDecision.decision : {};
+  const message = cleanDialogText(observation.message || 'Browser popup needs a decision.', 500);
+  writeBrowserFailure(
+    res,
+    CORS,
+    `Browser dialog blocked: ${message}. Decision: ${decision.reason || 'No safe automatic action.'}`,
+    undefined,
+    'browser_dialog_blocked',
+  );
+}
+
 async function handleDomSnapshot(req, res, CORS, parsedUrl) {
   const launched = await ensureContext();
   if (!launched.ok) { res.writeHead(503, CORS); res.end(JSON.stringify({ ok: false, error: launched.error })); return; }
@@ -360,6 +818,19 @@ async function handleDomSnapshot(req, res, CORS, parsedUrl) {
   } catch (e) {
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ ok: false, error: (e && e.message) || 'snapshot failed' }));
+  }
+}
+
+async function handleVerificationState(_req, res, CORS) {
+  const launched = await ensureContext();
+  if (!launched.ok) { res.writeHead(503, CORS); res.end(JSON.stringify({ ok: false, error: launched.error })); return; }
+  try {
+    const state = await inspectPageVerification(launched.page);
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: true, ...state }));
+  } catch (e) {
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: false, error: (e && e.message) || 'verification state failed' }));
   }
 }
 
@@ -428,15 +899,21 @@ async function handleClickRole(req, res, CORS) {
   const { body, err } = await readJsonBody(req);
   if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
   const role = String(body.role || '').trim();
-  if (!role) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'role required' })); return; }
+  if (!role) { writeBrowserFailure(res, CORS, 'role required', undefined, 'invalid_input', 400); return; }
   const launched = await ensureContext();
-  if (!launched.ok) { res.writeHead(503, CORS); res.end(JSON.stringify({ ok: false, error: launched.error })); return; }
+  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
   try {
+    const gate = await guardHumanVerification(launched.page, [role, body.name, body.selector]);
+    if (gate) { writeHumanVerificationPause(res, CORS, gate); return; }
     const timeout = Math.max(500, Math.min(30000, Number(body.timeoutMs) || 5000));
     let locator = resolveLocator(launched.page, role, body);
     if (typeof body.nth === 'number') locator = locator.nth(body.nth);
     try {
-      await locator.click({ timeout });
+      const dialogRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+        await locator.click({ timeout });
+        return null;
+      });
+      if (!dialogRun.ok) { writeBrowserDialogBlocked(res, CORS, dialogRun.blockedDecision); return; }
     } catch (firstErr) {
       // Fallback: if `name` looked like a selector and direct locator
       // failed, try extracting a semantic name and going through
@@ -450,13 +927,16 @@ async function handleClickRole(req, res, CORS) {
       if (body.exact === true) opts.exact = true;
       const fallback = launched.page.getByRole(role, opts);
       const fb = typeof body.nth === 'number' ? fallback.nth(body.nth) : fallback;
-      await fb.click({ timeout });
+      const dialogRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+        await fb.click({ timeout });
+        return null;
+      });
+      if (!dialogRun.ok) { writeBrowserDialogBlocked(res, CORS, dialogRun.blockedDecision); return; }
     }
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ ok: true, role, name: body.name || null }));
   } catch (e) {
-    res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: false, error: (e && e.message) || 'click failed' }));
+    writeBrowserFailure(res, CORS, e, 'click failed');
   }
 }
 
@@ -465,14 +945,20 @@ async function handleFill(req, res, CORS) {
   if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
   const role = String(body.role || 'textbox').trim();
   const text = typeof body.text === 'string' ? body.text : '';
-  if (text.length > 4000) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'text too long (max 4000)' })); return; }
+  if (text.length > 4000) { writeBrowserFailure(res, CORS, 'text too long (max 4000)', undefined, 'invalid_input', 400); return; }
   const launched = await ensureContext();
-  if (!launched.ok) { res.writeHead(503, CORS); res.end(JSON.stringify({ ok: false, error: launched.error })); return; }
+  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
   try {
+    const gate = await guardHumanVerification(launched.page, [role, body.name, body.selector, body.text]);
+    if (gate) { writeHumanVerificationPause(res, CORS, gate); return; }
     const timeout = Math.max(500, Math.min(30000, Number(body.timeoutMs) || 5000));
     const locator = resolveLocator(launched.page, role, body);
     try {
-      await locator.fill(text, { timeout });
+      const dialogRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+        await locator.fill(text, { timeout });
+        return null;
+      });
+      if (!dialogRun.ok) { writeBrowserDialogBlocked(res, CORS, dialogRun.blockedDecision); return; }
     } catch (firstErr) {
       // Same semantic-name fallback as click — when planner stuffed a
       // CSS selector into `name`, direct selector lookup might still
@@ -484,16 +970,23 @@ async function handleFill(req, res, CORS) {
       if (!semantic) throw firstErr;
       const opts = { name: semantic };
       if (body.exact === true) opts.exact = true;
-      await launched.page.getByRole(role, opts).fill(text, { timeout });
+      const dialogRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+        await launched.page.getByRole(role, opts).fill(text, { timeout });
+        return null;
+      });
+      if (!dialogRun.ok) { writeBrowserDialogBlocked(res, CORS, dialogRun.blockedDecision); return; }
     }
     if (body.submit) {
-      await launched.page.keyboard.press('Enter');
+      const submitRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+        await launched.page.keyboard.press('Enter');
+        return null;
+      });
+      if (!submitRun.ok) { writeBrowserDialogBlocked(res, CORS, submitRun.blockedDecision); return; }
     }
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ ok: true, chars: text.length, submitted: !!body.submit }));
   } catch (e) {
-    res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: false, error: (e && e.message) || 'fill failed' }));
+    writeBrowserFailure(res, CORS, e, 'fill failed');
   }
 }
 
@@ -502,27 +995,142 @@ async function handleSelect(req, res, CORS) {
   if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
   const role = String(body.role || 'combobox').trim();
   const value = typeof body.value === 'string' ? body.value.trim() : '';
-  if (!value) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'value required' })); return; }
+  if (!value) { writeBrowserFailure(res, CORS, 'value required', undefined, 'invalid_input', 400); return; }
   const launched = await ensureContext();
-  if (!launched.ok) { res.writeHead(503, CORS); res.end(JSON.stringify({ ok: false, error: launched.error })); return; }
+  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
   try {
+    const gate = await guardHumanVerification(launched.page, [role, body.name, body.selector, body.value]);
+    if (gate) { writeHumanVerificationPause(res, CORS, gate); return; }
     const timeout = Math.max(500, Math.min(30000, Number(body.timeoutMs) || 5000));
     const locator = resolveLocator(launched.page, role, body);
     try {
-      await locator.selectOption(value, { timeout });
+      const valueRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+        await locator.selectOption(value, { timeout });
+        return null;
+      });
+      if (!valueRun.ok) { writeBrowserDialogBlocked(res, CORS, valueRun.blockedDecision); return; }
     } catch (valueErr) {
       try {
-        await locator.selectOption({ label: value }, { timeout });
+        const labelRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+          await locator.selectOption({ label: value }, { timeout });
+          return null;
+        });
+        if (!labelRun.ok) { writeBrowserDialogBlocked(res, CORS, labelRun.blockedDecision); return; }
       } catch (labelErr) {
-        await locator.click({ timeout });
-        await launched.page.getByRole('option', { name: value }).click({ timeout });
+        const openRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+          await locator.click({ timeout });
+          return null;
+        });
+        if (!openRun.ok) { writeBrowserDialogBlocked(res, CORS, openRun.blockedDecision); return; }
+        const optionRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+          await launched.page.getByRole('option', { name: value }).click({ timeout });
+          return null;
+        });
+        if (!optionRun.ok) { writeBrowserDialogBlocked(res, CORS, optionRun.blockedDecision); return; }
       }
     }
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ ok: true, value }));
   } catch (e) {
+    writeBrowserFailure(res, CORS, e, 'select failed');
+  }
+}
+
+function expandUploadPath(rawPath) {
+  const raw = String(rawPath || '').trim();
+  if (!raw) return '';
+  if (raw === '~') return os.homedir();
+  if (raw.startsWith('~/')) return path.join(os.homedir(), raw.slice(2));
+  return path.resolve(raw);
+}
+
+function isPathInside(child, parent) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!!relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function validateBrowserUploadFile(rawPath) {
+  if (typeof rawPath !== 'string' || !rawPath.trim()) return { ok: false, error: 'filePath required' };
+  if (rawPath.length > 1024 || /[\x00-\x1f]/.test(rawPath)) return { ok: false, error: 'invalid filePath' };
+  const filePath = expandUploadPath(rawPath);
+  if (!isPathInside(filePath, os.homedir())) return { ok: false, error: 'filePath must stay under the user home folder' };
+  let stat = null;
+  try { stat = fs.statSync(filePath); } catch {
+    return { ok: false, error: `file not found: ${filePath}` };
+  }
+  if (!stat.isFile()) return { ok: false, error: `filePath is not a file: ${filePath}` };
+  if (stat.size > 250 * 1024 * 1024) return { ok: false, error: 'file too large for browser upload endpoint (max 250MB)' };
+  return { ok: true, filePath, size: stat.size };
+}
+
+async function handleUploadFile(req, res, CORS) {
+  const { body, err } = await readJsonBody(req, 16 * 1024);
+  if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
+  const validated = validateBrowserUploadFile(body.filePath);
+  if (!validated.ok) { writeBrowserFailure(res, CORS, validated.error, undefined, classifyBrowserFailure(validated.error), 400); return; }
+  const launched = await ensureContext();
+  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
+  try {
+    const gate = await guardHumanVerification(launched.page, [body.name, body.selector, body.buttonName, body.buttonSelector]);
+    if (gate) { writeHumanVerificationPause(res, CORS, gate); return; }
+    const timeout = Math.max(500, Math.min(30000, Number(body.timeoutMs) || 10000));
+    let method = '';
+
+    if (body.buttonSelector || body.buttonName || body.buttonRole) {
+      const buttonRole = String(body.buttonRole || 'button').trim() || 'button';
+      const buttonLocator = resolveLocator(launched.page, buttonRole, {
+        selector: body.buttonSelector,
+        name: body.buttonName,
+        exact: body.exact,
+      });
+      const chooserPromise = launched.page.waitForEvent('filechooser', { timeout });
+      const dialogRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+        await buttonLocator.click({ timeout });
+        return null;
+      });
+      if (!dialogRun.ok) { writeBrowserDialogBlocked(res, CORS, dialogRun.blockedDecision); return; }
+      const chooser = await chooserPromise;
+      await chooser.setFiles(validated.filePath);
+      method = 'filechooser';
+    } else {
+      const candidates = [];
+      if (body.selector || (body.name && looksLikeCssSelector(body.name))) {
+        candidates.push(resolveLocator(launched.page, 'textbox', body));
+      }
+      if (body.name && !looksLikeCssSelector(body.name)) {
+        candidates.push(launched.page.getByLabel(String(body.name), { exact: body.exact === true }));
+        candidates.push(launched.page.locator(`input[type="file"][name="${String(body.name).replace(/"/g, '\\"')}"]`));
+        candidates.push(launched.page.locator(`input[type="file"][aria-label="${String(body.name).replace(/"/g, '\\"')}"]`));
+      }
+      candidates.push(launched.page.locator('input[type="file"]').first());
+      let lastErr = null;
+      for (const locator of candidates) {
+        try {
+          const inputRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+            await locator.setInputFiles(validated.filePath, { timeout });
+            return null;
+          });
+          if (!inputRun.ok) { writeBrowserDialogBlocked(res, CORS, inputRun.blockedDecision); return; }
+          method = 'input';
+          lastErr = null;
+          break;
+        } catch (candidateErr) {
+          lastErr = candidateErr;
+        }
+      }
+      if (lastErr) throw lastErr;
+    }
+
     res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: false, error: (e && e.message) || 'select failed' }));
+    res.end(JSON.stringify({
+      ok: true,
+      filePath: validated.filePath,
+      fileName: path.basename(validated.filePath),
+      sizeBytes: validated.size,
+      method,
+    }));
+  } catch (e) {
+    writeBrowserFailure(res, CORS, e, 'upload failed');
   }
 }
 
@@ -530,32 +1138,36 @@ async function handlePress(req, res, CORS) {
   const { body, err } = await readJsonBody(req);
   if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
   const combo = String(body.combo || '').trim();
-  if (!combo) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'combo required' })); return; }
+  if (!combo) { writeBrowserFailure(res, CORS, 'combo required', undefined, 'invalid_input', 400); return; }
   const launched = await ensureContext();
-  if (!launched.ok) { res.writeHead(503, CORS); res.end(JSON.stringify({ ok: false, error: launched.error })); return; }
+  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
   try {
+    const gate = await guardHumanVerification(launched.page, [body.combo]);
+    if (gate) { writeHumanVerificationPause(res, CORS, gate); return; }
     // Playwright accepts combos like "Control+A", "Shift+Tab", "Enter".
-    await launched.page.keyboard.press(combo);
+    const dialogRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+      await launched.page.keyboard.press(combo);
+      return null;
+    });
+    if (!dialogRun.ok) { writeBrowserDialogBlocked(res, CORS, dialogRun.blockedDecision); return; }
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ ok: true, combo }));
   } catch (e) {
-    res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: false, error: (e && e.message) || 'press failed' }));
+    writeBrowserFailure(res, CORS, e, 'press failed');
   }
 }
 
 async function handleScreenshot(req, res, CORS) {
   const { body } = await readJsonBody(req);
   const launched = await ensureContext();
-  if (!launched.ok) { res.writeHead(503, CORS); res.end(JSON.stringify({ ok: false, error: launched.error })); return; }
+  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
   try {
     const buf = await launched.page.screenshot({ fullPage: !!body.fullPage, type: 'png' });
     const base64 = buf.toString('base64');
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ ok: true, mimeType: 'image/png', sizeBytes: buf.length, base64 }));
   } catch (e) {
-    res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: false, error: (e && e.message) || 'screenshot failed' }));
+    writeBrowserFailure(res, CORS, e, 'screenshot failed');
   }
 }
 
@@ -583,9 +1195,11 @@ module.exports = {
   handleHealth,
   handleOpenUrl,
   handleDomSnapshot,
+  handleVerificationState,
   handleClickRole,
   handleFill,
   handleSelect,
+  handleUploadFile,
   handlePress,
   handleScreenshot,
   handleClose,

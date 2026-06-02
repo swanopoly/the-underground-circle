@@ -67,6 +67,9 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | Concern | Owner |
 |---|---|
 | Chat planning | `src/lib/chatAutomationPlanner.ts` |
+| Chat computer/app request routing | `src/lib/chatComputerRequestRouter.ts` |
+| Chat computer/app user notices | `src/lib/chatComputerRequestUx.ts` |
+| Computer task evidence contract | `src/lib/computerTaskEvidenceContract.ts`, `src/lib/computerTaskEvidenceRecovery.ts` |
 | Chat execution | `src/lib/runChatAutomationPlan.ts` |
 | BlackSwan response path | `src/lib/swanbot.ts`, `supabase/functions/swanbot-ai/index.ts` |
 | v2 SwanBot tool loop | `supabase/functions/swanbot-v2-ai/index.ts` |
@@ -80,6 +83,8 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | Computer task runtime | `src/lib/computerTaskRuntime.ts` |
 | Browser computer use | `src/lib/computerUse.ts`, `supabase/functions/computer-use-agent/index.ts` |
 | Local desktop intent | `src/lib/localComputerAwarenessIntent.ts` |
+| Design creative AI | `src/lib/designAppCreativeAi.ts` |
+| Design execution pipeline | `src/lib/designAppExecutionPipeline.ts` |
 | Marketplace prompt context | `src/lib/marketplaceIntegrationContext.ts` |
 
 Rule: new routing behavior goes into the relevant owner above. Do not extend
@@ -145,6 +150,49 @@ screen state, file list/read/search, and accessibility tree are lower risk.
 Actions such as launch/focus app, open URL/path, clipboard write/clear,
 shortcut run, and window management need the risk/approval path described in
 the runtime docs.
+
+Before executing a chat request that asks to operate another app, browser,
+local file, CAD tool, Adobe design file, or unfamiliar desktop program,
+`src/lib/chatComputerRequestRouter.ts` builds the hidden best path: computer
+preview, selected pipeline, app/browser strategy, surface order, approvals,
+fallback pipelines, recommended tools, and proof requirements. Keep this route
+quiet in chat; show the user only approval, proof, or actionable blockers.
+The route also carries the typed app automation decision from
+`src/lib/appAutomationControlSurfaces.ts`, so app/browser tasks can stop for
+fresh observation, approval, user action, or connected-agent buildout before
+mutating another surface.
+Use `src/lib/chatComputerRequestUx.ts` for that visible/hidden notice decision
+so app/browser/desktop routes share the same user-friendly wording and actions.
+Live computer handoff metadata and persisted chat rows should carry that notice
+and the compact route-decision summary through
+`src/lib/chatComputerHandoffContext.ts` instead of inventing new copy.
+`src/lib/computerTaskEvidenceContract.ts` owns observe-before, actionability,
+approval, proof-after, fail-closed, retry-evidence, and source-reference
+requirements for those routes. `src/lib/computerTaskEvidenceRecovery.ts` owns
+failure-time contract diagnosis so chat recovery can choose fresh-evidence
+retry, user unblock, connected-agent adapter repair, or stop/report. It also
+emits required evidence tools plus readiness state so retries can fail closed
+when observations are missing or stale. Pass the compact app route decision into
+that recovery path so route-level missing confirmations, approvals,
+user-action blockers, and connected-agent buildout decisions shape the recovery
+options instead of being lost after preflight.
+
+Photoshop/InDesign creative-AI work uses `src/lib/designAppCreativeAi.ts` for
+text-to-image, generative fill/remove, generative expand, creative variants, and
+InDesign data-merge variant planning. It also turns those capabilities into
+reusable recipes such as Photoshop generated background packs, variant contact
+sheets, localized cleanup, canvas expansion, InDesign frame placement, placed
+image expansion, and data-merge campaign variants. It requires prompt/data
+approval, target-layer/frame/selection evidence, generated-output receipts,
+proof verification, and connected-agent adapter buildout when the exact Firefly
+or app bridge tool is missing.
+
+Photoshop/InDesign task execution order lives in
+`src/lib/designAppExecutionPipeline.ts`. That file combines automation plans,
+operation runbooks, creative-AI recipes, and adapter-gap contracts into the
+shared resolve -> observe -> approve -> mutate -> export/package -> verify ->
+recover pipeline used by SwanBot/OpenSwan prompts, chat handoff metadata,
+persisted chat rows, and connected-agent buildout prompts.
 
 ## Memory, Skills, And Approvals
 

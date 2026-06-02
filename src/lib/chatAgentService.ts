@@ -1,5 +1,7 @@
 import { formatPersistedChatBotMessage } from './chatAgentIdentity';
+import type { AgentPlanDraft } from './agentPlanMode';
 import type { ChatCommandDecision } from './chatCommandRegistry';
+import type { ChatComputerHandoffMetadata } from './chatComputerHandoffContext';
 import type { BrowserPlanCardData, BrowserPlanEvent, BrowserSessionRecord } from './computerUse';
 import type { OpenSwanMemoryRecommendation, PromptMemoryReference } from './memoryService';
 import type { OpenSwanExecutionContract } from './openswanExecution';
@@ -11,6 +13,7 @@ import { persistChatMessage, updateChatMessageContent } from './chatService';
 import type { ResearchDocumentReference } from './researchControl';
 import { getResearchDocumentReferences } from './researchControl';
 import type { SwanBotStructuredArtifact, SwanBotStructuredResponse } from './swanbot';
+import type { PersistedChatRecoveryOption, PersistedChatRecoveryReliabilitySummary } from './persistedChatMetadata';
 import { getWikiArticleReferences, type WikiArticleReference } from './wikiData';
 
 export async function buildChatInfluenceReferences(params: {
@@ -63,12 +66,16 @@ export function persistMainChatBotMessageWithRetry(params: {
   memoryRefs?: PromptMemoryReference[];
   memoryRecommendations?: OpenSwanMemoryRecommendation[];
   executionStream?: OpenSwanExecutionContract[];
+  agentPlan?: AgentPlanDraft | Record<string, unknown>;
   taskPlan?: OpenSwanTaskPlan;
   toolEvents?: OpenSwanToolEvent[];
   verificationResults?: OpenSwanVerificationResult[];
   browserPlans?: BrowserPlanCardData[];
   browserPlanEvents?: BrowserPlanEvent[];
   browserSessions?: BrowserSessionRecord[];
+  recoveryOptions?: PersistedChatRecoveryOption[];
+  recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
+  computerHandoff?: ChatComputerHandoffMetadata | null;
   modeOutcomeSummary?: {
     headline: string;
     bulletPoints?: string[];
@@ -97,12 +104,16 @@ export function persistMainChatBotMessageWithRetry(params: {
     memoryRefs,
     memoryRecommendations,
     executionStream,
+    agentPlan,
     taskPlan,
     toolEvents,
     verificationResults,
     browserPlans,
     browserPlanEvents,
     browserSessions,
+    recoveryOptions,
+    recoveryReliability,
+    computerHandoff,
     modeOutcomeSummary,
     observedEval,
     routing,
@@ -128,12 +139,16 @@ export function persistMainChatBotMessageWithRetry(params: {
           memoryRefs,
           memoryRecommendations,
           executionStream,
+          agentPlan,
           taskPlan,
           toolEvents,
           verificationResults,
           browserPlans,
           browserPlanEvents,
           browserSessions,
+          recoveryOptions,
+          recoveryReliability,
+          computerHandoff,
           modeOutcomeSummary,
           observedEval,
           routing,
@@ -177,12 +192,16 @@ export function updateMainChatBotMessageWithRetry(params: {
   memoryRefs?: PromptMemoryReference[];
   memoryRecommendations?: OpenSwanMemoryRecommendation[];
   executionStream?: OpenSwanExecutionContract[];
+  agentPlan?: AgentPlanDraft | Record<string, unknown>;
   taskPlan?: OpenSwanTaskPlan;
   toolEvents?: OpenSwanToolEvent[];
   verificationResults?: OpenSwanVerificationResult[];
   browserPlans?: BrowserPlanCardData[];
   browserPlanEvents?: BrowserPlanEvent[];
   browserSessions?: BrowserSessionRecord[];
+  recoveryOptions?: PersistedChatRecoveryOption[];
+  recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
+  computerHandoff?: ChatComputerHandoffMetadata | null;
   modeOutcomeSummary?: {
     headline: string;
     bulletPoints?: string[];
@@ -208,12 +227,16 @@ export function updateMainChatBotMessageWithRetry(params: {
     memoryRefs,
     memoryRecommendations,
     executionStream,
+    agentPlan,
     taskPlan,
     toolEvents,
     verificationResults,
     browserPlans,
     browserPlanEvents,
     browserSessions,
+    recoveryOptions,
+    recoveryReliability,
+    computerHandoff,
     modeOutcomeSummary,
     observedEval,
     routing,
@@ -235,12 +258,16 @@ export function updateMainChatBotMessageWithRetry(params: {
         memoryRefs,
         memoryRecommendations,
         executionStream,
+        agentPlan,
         taskPlan,
         toolEvents,
         verificationResults,
         browserPlans,
         browserPlanEvents,
         browserSessions,
+        recoveryOptions,
+        recoveryReliability,
+        computerHandoff,
         modeOutcomeSummary,
         observedEval,
         routing,

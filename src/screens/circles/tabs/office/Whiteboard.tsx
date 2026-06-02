@@ -26,6 +26,12 @@ import {
   type SiteAgentReadinessSnapshot,
   type SiteAgentReadinessPriority,
 } from '../../../../lib/siteAgentReadiness';
+import { getBridgeEnvironment, getBridgeUrl } from '../../../../lib/bridgeEnvironment';
+import { probeBridges } from '../../../../lib/bridgeHealthDiag';
+import {
+  buildOfficeBridgeReadinessSnapshot,
+  type OfficeBridgeReadinessSnapshot,
+} from '../../../../lib/officeBridgeReadiness';
 
 interface Props {
   editable?: boolean;
@@ -184,6 +190,7 @@ interface CommandCenterVm {
     error: number;
     disconnected: number;
   };
+  bridgeReadiness: OfficeBridgeReadinessSnapshot | null;
   readiness: SiteAgentReadinessSnapshot | null;
 }
 
@@ -206,6 +213,9 @@ export default function Whiteboard({
   const [readinessSnapshot, setReadinessSnapshot] = useState<SiteAgentReadinessSnapshot | null>(null);
   const [readinessLoading, setReadinessLoading] = useState(false);
   const [readinessError, setReadinessError] = useState<string | null>(null);
+  const [bridgeReadiness, setBridgeReadiness] = useState<OfficeBridgeReadinessSnapshot | null>(null);
+  const [bridgeLoading, setBridgeLoading] = useState(false);
+  const [bridgeError, setBridgeError] = useState<string | null>(null);
 
   // ── BlackSwan status ──
   const [bsStatus, setBsStatus] = useState<'local' | 'offline' | 'checking'>('checking');
@@ -302,6 +312,49 @@ export default function Whiteboard({
     };
   }, [circleId, expanded, refreshReadiness]);
 
+  const refreshBridgeReadiness = useCallback(async () => {
+    const env = getBridgeEnvironment();
+    setBridgeLoading(true);
+    setBridgeError(null);
+    try {
+      if (!env.available) {
+        setBridgeReadiness(buildOfficeBridgeReadinessSnapshot([], {
+          available: false,
+          unavailableReason: env.reason,
+        }));
+        return;
+      }
+      const results = await probeBridges({
+        timeoutMs: 1500,
+        urlForPort: (port) => getBridgeUrl(port),
+      });
+      setBridgeReadiness(buildOfficeBridgeReadinessSnapshot(results, { available: true }));
+    } catch (error: any) {
+      const message = error?.message || 'Bridge health audit failed.';
+      setBridgeError(message);
+      setBridgeReadiness(buildOfficeBridgeReadinessSnapshot([], {
+        available: true,
+        error: message,
+      }));
+    } finally {
+      setBridgeLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    const run = async () => {
+      if (!alive) return;
+      await refreshBridgeReadiness();
+    };
+    run();
+    const timer = setInterval(run, expanded ? 45_000 : 120_000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [expanded, refreshBridgeReadiness]);
+
   // Running tasks
   const runningTasks = useMemo(() => {
     const map = new Map<string, AgentActivity>();
@@ -377,7 +430,9 @@ export default function Whiteboard({
     score -= warningHealth * 5;
     score -= connectedRatio < 1 && totalConnections > 0 ? Math.round((1 - connectedRatio) * 20) : 0;
     if (readinessSnapshot) score = Math.round((score * 0.65) + (readinessSnapshot.score * 0.35));
+    if (bridgeReadiness) score = Math.round((score * 0.8) + (bridgeReadiness.score * 0.2));
     if (readinessError) score -= 8;
+    if (bridgeError) score -= 8;
     score = Math.max(0, Math.min(100, Math.round(score)));
 
     const issues: CommandIssueVm[] = [];
@@ -435,10 +490,30 @@ export default function Whiteboard({
         });
       }
     }
+    if (bridgeError) {
+      issues.push({
+        title: 'Bridge audit failed',
+        detail: bridgeError,
+        tone: 'warn',
+      });
+    } else if (bridgeReadiness && (bridgeReadiness.offline > 0 || bridgeReadiness.degraded > 0 || !bridgeReadiness.available)) {
+      issues.push({
+        title: bridgeReadiness.statusLabel,
+        detail: bridgeReadiness.primaryIssue || bridgeReadiness.summary,
+        tone: bridgeReadiness.tone === 'danger' ? 'danger' : 'warn',
+      });
+    }
 
     const actionCues: ActionCueVm[] = [];
     if (pendingApprovals.length > 0) actionCues.push({ label: 'Review approvals', detail: 'Unblock waiting agents from the HITL queue.', tone: 'warn' });
     if (errorConnections.length > 0) actionCues.push({ label: 'Reconnect bridges', detail: errorConnections[0]?.error || 'Run bridge diagnostics and retry failed links.', tone: 'danger' });
+    if (bridgeReadiness && (bridgeReadiness.offline > 0 || bridgeReadiness.degraded > 0 || !bridgeReadiness.available)) {
+      actionCues.push({
+        label: bridgeReadiness.actionLabel,
+        detail: bridgeReadiness.actionDetail,
+        tone: bridgeReadiness.tone === 'danger' ? 'danger' : 'warn',
+      });
+    }
     if (activeBrowserAgents.length > 0) actionCues.push({ label: 'Watch browser session', detail: `${activeBrowserAgents[0].name} is using browser/computer tools.`, tone: 'live' });
     if (dangerBudgetAlerts.length > 0) actionCues.push({ label: 'Check spend controls', detail: dangerBudgetAlerts[0].message, tone: 'danger' });
     if (readinessSnapshot?.recommendations.length) {
@@ -497,10 +572,14 @@ export default function Whiteboard({
       },
       {
         title: 'Bridges',
-        value: `${connected}/${totalConnections || enabledConnections.length || 0}`,
-        detail: errorConnections[0]?.error || (connecting > 0 ? `${connecting} connecting` : 'Bridge links available'),
-        tone: errorConnections.length > 0 ? 'danger' : connected > 0 ? 'good' : totalConnections > 0 ? 'warn' : 'muted',
-        foot: errorConnections.length > 0 ? errorConnections[0]?.name : `${enabledConnections.length} enabled`,
+        value: bridgeReadiness
+          ? `${bridgeReadiness.healthy}/${bridgeReadiness.total}`
+          : bridgeLoading ? '...' : `${connected}/${totalConnections || enabledConnections.length || 0}`,
+        detail: bridgeReadiness?.primaryIssue || bridgeReadiness?.summary || errorConnections[0]?.error || (connecting > 0 ? `${connecting} connecting` : 'Bridge links available'),
+        tone: bridgeReadiness ? bridgeReadiness.tone : errorConnections.length > 0 ? 'danger' : connected > 0 ? 'good' : totalConnections > 0 ? 'warn' : 'muted',
+        foot: bridgeReadiness
+          ? `${bridgeReadiness.activeSessions} active session${bridgeReadiness.activeSessions === 1 ? '' : 's'}`
+          : errorConnections.length > 0 ? errorConnections[0]?.name : `${enabledConnections.length} enabled`,
       },
       {
         title: 'Schedules',
@@ -529,6 +608,7 @@ export default function Whiteboard({
         error: errorConnections.length,
         disconnected,
       },
+      bridgeReadiness,
       readiness: readinessSnapshot,
     };
   }, [
@@ -542,6 +622,9 @@ export default function Whiteboard({
     healthCheck,
     pendingApprovals,
     periodCosts,
+    bridgeError,
+    bridgeLoading,
+    bridgeReadiness,
     readinessError,
     readinessLoading,
     readinessSnapshot,
@@ -727,6 +810,7 @@ export default function Whiteboard({
               workloads={workloads} costOpts={costOpts} todayStats={todayStats}
               reward={reward} badgeColor={badgeColor} commandCenter={commandCenter}
               readinessLoading={readinessLoading} readinessError={readinessError} onRefreshReadiness={refreshReadiness}
+              bridgeLoading={bridgeLoading} bridgeError={bridgeError} onRefreshBridgeReadiness={refreshBridgeReadiness}
             />
           )}
           {activeTab === 'agents' && (
@@ -746,6 +830,9 @@ export default function Whiteboard({
               readinessLoading={readinessLoading}
               readinessError={readinessError}
               onRefreshReadiness={refreshReadiness}
+              bridgeLoading={bridgeLoading}
+              bridgeError={bridgeError}
+              onRefreshBridgeReadiness={refreshBridgeReadiness}
             />
           )}
         </ScrollView>
@@ -819,6 +906,7 @@ function gradeTone(grade: SiteAgentReadinessSnapshot['grade']): Tone {
 
 function CommandCenterPanel({ commandCenter }: { commandCenter: CommandCenterVm }) {
   const stateColor = toneColor(commandCenter.stateTone);
+  const bridgeStats = commandCenter.bridgeReadiness;
   return (
     <View style={s.commandPanel}>
       <View style={s.commandTopRow}>
@@ -838,7 +926,11 @@ function CommandCenterPanel({ commandCenter }: { commandCenter: CommandCenterVm 
         <CommandKpi label="LINKS" value={`${commandCenter.connectionStats.connected}/${commandCenter.connectionStats.enabled || 0}`} tone={commandCenter.connectionStats.error > 0 ? 'danger' : 'good'} />
         <CommandKpi label="TOOLS" value={String(commandCenter.activeToolAgents.length)} tone={commandCenter.activeToolAgents.length > 0 ? 'live' : 'muted'} />
         <CommandKpi label="BROWSER" value={String(commandCenter.activeBrowserAgents.length)} tone={commandCenter.activeBrowserAgents.length > 0 ? 'live' : 'muted'} />
-        <CommandKpi label="FIX" value={String(commandCenter.issues.length)} tone={commandCenter.issues.length > 0 ? 'warn' : 'good'} />
+        <CommandKpi
+          label="BRIDGE"
+          value={bridgeStats ? `${bridgeStats.healthy}/${bridgeStats.total}` : '—'}
+          tone={bridgeStats ? bridgeStats.tone : commandCenter.issues.length > 0 ? 'warn' : 'muted'}
+        />
       </View>
     </View>
   );
@@ -994,6 +1086,100 @@ function AutomationReadinessPanel({
         style={[s.refreshAuditBtn, loading && { opacity: 0.6 }, Platform.OS === 'web' && { cursor: loading ? 'default' : 'pointer' } as any]}
       >
         <Text style={[s.refreshAuditText, { color }]}>{loading ? 'AUDITING...' : 'REFRESH READINESS'}</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function AgentBridgeReadinessPanel({
+  snapshot,
+  loading,
+  error,
+  onRefresh,
+  compact = false,
+}: {
+  snapshot: OfficeBridgeReadinessSnapshot | null;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+  compact?: boolean;
+}) {
+  const tone = snapshot ? snapshot.tone : error ? 'warn' : 'muted';
+  const color = toneColor(tone);
+  return (
+    <View style={[s.bridgePanel, { borderColor: color + '35' }]}>
+      <View style={s.readinessHead}>
+        <View style={s.readinessTitleBlock}>
+          <Text style={s.readinessEyebrow}>AGENT BRIDGES</Text>
+          <Text style={s.readinessTitle}>
+            {snapshot?.statusLabel || (loading ? 'Checking bridges...' : error ? 'Bridge audit needs review' : 'Bridge audit pending')}
+          </Text>
+          <Text style={s.readinessSummary} numberOfLines={2}>
+            {snapshot?.summary || error || 'Checks Claude Code, Codex, Gemini CLI, Cursor, and OpenSwan local bridge health.'}
+          </Text>
+        </View>
+        <View style={[s.readinessScoreBox, { backgroundColor: color + '12', borderColor: color + '45' }]}>
+          <Text style={[s.readinessScore, { color }]}>{snapshot ? snapshot.score : loading ? '...' : '—'}</Text>
+          <Text style={[s.readinessGrade, { color }]}>{snapshot?.tone?.toUpperCase() || 'AUDIT'}</Text>
+        </View>
+      </View>
+
+      {snapshot ? (
+        <>
+          <View style={s.readinessStatsGrid}>
+            <ReadinessStat label="READY" value={`${snapshot.healthy}/${snapshot.total}`} tone={snapshot.offline > 0 ? 'danger' : snapshot.degraded > 0 ? 'warn' : 'good'} />
+            <ReadinessStat label="DEGRADED" value={String(snapshot.degraded)} tone={snapshot.degraded > 0 ? 'warn' : 'good'} />
+            <ReadinessStat label="OFFLINE" value={String(snapshot.offline)} tone={snapshot.offline > 0 ? 'danger' : 'good'} />
+            <ReadinessStat label="SESSIONS" value={String(snapshot.activeSessions)} tone={snapshot.activeSessions > 0 ? 'live' : 'muted'} />
+            <ReadinessStat label="ACCESS" value={snapshot.available ? 'ON' : 'OFF'} tone={snapshot.available ? 'good' : 'warn'} />
+          </View>
+
+          {!compact ? (
+            <View style={s.secTight}>
+              <Text style={s.secTitle}>BRIDGE FLEET</Text>
+              <View style={s.bridgeFleetGrid}>
+                {snapshot.results.map(result => {
+                  const resultTone: Tone = result.status === 'healthy' ? 'good' : result.status === 'degraded' ? 'warn' : 'danger';
+                  const resultColor = toneColor(resultTone);
+                  return (
+                    <View key={result.name} style={[s.bridgeFleetCard, { borderColor: resultColor + '25', backgroundColor: resultColor + '08' }]}>
+                      <View style={s.bridgeFleetHead}>
+                        <Text style={s.bridgeFleetName} numberOfLines={1}>{result.label}</Text>
+                        <Text style={[s.bridgeFleetStatus, { color: resultColor }]}>{result.status.toUpperCase()}</Text>
+                      </View>
+                      <Text style={s.bridgeFleetDetail} numberOfLines={2}>{result.detail}</Text>
+                      <Text style={s.bridgeFleetFoot} numberOfLines={1}>
+                        :{result.port}{result.sessionCount !== undefined ? ` · ${result.sessionCount} session${result.sessionCount === 1 ? '' : 's'}` : ''}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </View>
+            </View>
+          ) : null}
+
+          {snapshot.primaryIssue ? (
+            <View style={[s.recommendationRow, { borderLeftColor: color }]}>
+              <View style={s.recommendationTop}>
+                <Text style={[s.recommendationPriority, { color }]}>{snapshot.actionLabel.toUpperCase()}</Text>
+              </View>
+              <Text style={s.recommendationTitle}>{snapshot.primaryIssue}</Text>
+              <Text style={s.recommendationDetail} numberOfLines={2}>{snapshot.actionDetail}</Text>
+            </View>
+          ) : null}
+        </>
+      ) : (
+        <View style={s.readinessEmpty}>
+          <Text style={s.readinessEmptyText}>{loading ? 'Checking local bridge fleet...' : 'No bridge health snapshot yet.'}</Text>
+        </View>
+      )}
+
+      <Pressable
+        onPress={onRefresh}
+        disabled={loading}
+        style={[s.refreshAuditBtn, loading && { opacity: 0.6 }, Platform.OS === 'web' && { cursor: loading ? 'default' : 'pointer' } as any]}
+      >
+        <Text style={[s.refreshAuditText, { color }]}>{loading ? 'CHECKING...' : 'REFRESH BRIDGES'}</Text>
       </Pressable>
     </View>
   );
@@ -1174,6 +1360,9 @@ function OverviewTab({
   readinessLoading,
   readinessError,
   onRefreshReadiness,
+  bridgeLoading,
+  bridgeError,
+  onRefreshBridgeReadiness,
 }: any) {
   const now = Date.now();
   const buckets = [0, 0, 0, 0, 0, 0];
@@ -1195,6 +1384,16 @@ function OverviewTab({
   return (
     <View>
       <CommandCenterPanel commandCenter={commandCenter} />
+
+      <View style={s.sec}>
+        <AgentBridgeReadinessPanel
+          snapshot={commandCenter.bridgeReadiness}
+          loading={bridgeLoading}
+          error={bridgeError}
+          onRefresh={onRefreshBridgeReadiness}
+          compact
+        />
+      </View>
 
       <View style={s.sec}>
         <AutomationReadinessPanel
@@ -1621,7 +1820,7 @@ function ActivityTab({ agents, activities, statusHistory, runningTasks, commandC
 }
 
 // ── OPS TAB ────────────────────────────────────────────────────────────────
-function OpsTab({ cronJobs, activities, costOpts, commandCenter, budgetAlerts, periodCosts, readinessLoading, readinessError, onRefreshReadiness }: {
+function OpsTab({ cronJobs, activities, costOpts, commandCenter, budgetAlerts, periodCosts, readinessLoading, readinessError, onRefreshReadiness, bridgeLoading, bridgeError, onRefreshBridgeReadiness }: {
   cronJobs: CronJob[];
   activities: AgentActivity[];
   costOpts: any[];
@@ -1631,6 +1830,9 @@ function OpsTab({ cronJobs, activities, costOpts, commandCenter, budgetAlerts, p
   readinessLoading: boolean;
   readinessError: string | null;
   onRefreshReadiness: () => void;
+  bridgeLoading: boolean;
+  bridgeError: string | null;
+  onRefreshBridgeReadiness: () => void;
 }) {
   const completed = activities.filter(a => a.activity_type === 'task_completed').length;
   const failed = activities.filter(a => a.activity_type === 'task_failed').length;
@@ -1674,6 +1876,15 @@ function OpsTab({ cronJobs, activities, costOpts, commandCenter, budgetAlerts, p
           <IssueStack issues={commandCenter.issues} />
           <ActionCueList cues={commandCenter.actionCues} />
         </View>
+      </View>
+
+      <View style={s.sec}>
+        <AgentBridgeReadinessPanel
+          snapshot={commandCenter.bridgeReadiness}
+          loading={bridgeLoading}
+          error={bridgeError}
+          onRefresh={onRefreshBridgeReadiness}
+        />
       </View>
 
       <View style={s.sec}>
@@ -2116,6 +2327,7 @@ const s = StyleSheet.create({
   cueLabel: { fontSize: 6.5, fontWeight: '900', fontFamily: 'monospace', letterSpacing: 0.3 },
   cueDetail: { fontSize: 6, fontFamily: 'monospace', color: C.textSec, marginTop: 2 },
   readinessPanel: { backgroundColor: '#050505', borderRadius: 8, borderWidth: 1, padding: 8 },
+  bridgePanel: { backgroundColor: '#050505', borderRadius: 8, borderWidth: 1, padding: 8 },
   readinessHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   readinessTitleBlock: { flex: 1 },
   readinessEyebrow: { fontSize: 5, fontWeight: '900', fontFamily: 'monospace', color: C.textTert, letterSpacing: 1.2 },
@@ -2146,6 +2358,13 @@ const s = StyleSheet.create({
   recommendationAction: { marginLeft: 'auto' as any, fontSize: 5, fontWeight: '800', fontFamily: 'monospace', color: C.accent },
   recommendationTitle: { fontSize: 6.8, fontWeight: '900', fontFamily: 'monospace', color: C.text },
   recommendationDetail: { fontSize: 6, fontFamily: 'monospace', color: C.textSec, marginTop: 2 },
+  bridgeFleetGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
+  bridgeFleetCard: { width: '49%' as any, minHeight: 56, borderRadius: 6, borderWidth: 1, padding: 6 },
+  bridgeFleetHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 4, marginBottom: 3 },
+  bridgeFleetName: { flex: 1, fontSize: 6.4, fontWeight: '900', fontFamily: 'monospace', color: C.text },
+  bridgeFleetStatus: { fontSize: 5.2, fontWeight: '900', fontFamily: 'monospace' },
+  bridgeFleetDetail: { fontSize: 5.8, fontFamily: 'monospace', color: C.textSec, lineHeight: 8 },
+  bridgeFleetFoot: { fontSize: 5.2, fontWeight: '800', fontFamily: 'monospace', color: C.textTert, marginTop: 'auto' as any },
   playbookGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4 },
   playbookCard: { width: '49%' as any, minHeight: 70, borderRadius: 7, borderWidth: 1, padding: 7 },
   playbookHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 4, marginBottom: 4 },

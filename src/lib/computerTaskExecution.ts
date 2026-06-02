@@ -1,13 +1,31 @@
 import type { TaskCapabilityProfileKey } from './taskCapabilityProfiles';
 import type { ComputerCapabilityAudit } from './computerCapabilityRegistry';
+import {
+  buildComputerAppPreflight,
+  type ComputerAppPreflight,
+} from './computerAppPreflight';
+import {
+  buildComputerAppGroundingPlan,
+  buildComputerAppGroundingRunbook,
+  buildComputerAppGroundingTrace,
+  recommendComputerAppGroundingNextStep,
+  type ComputerAppGroundingNextStep,
+  type ComputerAppGroundingPlan,
+  type ComputerAppGroundingRunbook,
+  type ComputerAppGroundingTrace,
+} from './computerAppGrounding';
 import { buildComputerTaskDispatchPrefix } from './computerTaskDispatch';
+import {
+  buildComputerTaskComplexityPlan,
+  type ComputerTaskComplexityPlan,
+} from './computerTaskComplexityPlan';
 import { buildComputerTaskGrantPlan, type ComputerTaskGrantPlan } from './computerTaskGrants';
 import {
   planComputerTaskPreview,
   summarizeComputerTaskCapabilityReadiness,
   type ComputerTaskPlanPreview,
 } from './computerTaskPlanner';
-import type { BusinessModelTaskPlan } from './businessModelProfiles';
+import type { BusinessModelTaskPlan } from './businessModelProfileCore';
 
 export interface ComputerTaskExecutionEnvelope {
   preview: ComputerTaskPlanPreview;
@@ -21,6 +39,12 @@ export interface ComputerTaskExecutionEnvelope {
   capabilityProfile: TaskCapabilityProfileKey;
   entrypoint: 'browser_runtime' | 'agent_runtime';
   grants: ComputerTaskGrantPlan;
+  preflight: ComputerAppPreflight;
+  computerAppGrounding: ComputerAppGroundingPlan | null;
+  computerAppGroundingRunbook: ComputerAppGroundingRunbook | null;
+  computerAppGroundingNextStep: ComputerAppGroundingNextStep | null;
+  computerAppGroundingTrace: ComputerAppGroundingTrace | null;
+  complexityPlan: ComputerTaskComplexityPlan;
   businessModelPlan?: BusinessModelTaskPlan | null;
 }
 
@@ -62,6 +86,22 @@ export function prepareComputerTaskExecution(args: {
 }): ComputerTaskExecutionEnvelope {
   const preview = planComputerTaskPreview(args.task);
   const readiness = summarizeComputerTaskCapabilityReadiness(preview, args.audit);
+  const preflight = buildComputerAppPreflight({ task: args.task, audit: args.audit });
+  const computerAppGrounding = buildComputerAppGroundingPlan(args.task);
+  const computerAppGroundingRunbook = buildComputerAppGroundingRunbook(args.task);
+  const computerAppGroundingNextStep = recommendComputerAppGroundingNextStep({
+    plan: computerAppGrounding,
+    observations: [],
+  });
+  const computerAppGroundingTrace = buildComputerAppGroundingTrace({
+    plan: computerAppGrounding,
+    observations: [],
+    actions: [],
+  });
+  const complexityPlan = buildComputerTaskComplexityPlan({
+    task: args.task,
+    preview,
+  });
   const grants = buildComputerTaskGrantPlan({
     task: args.task,
     preview,
@@ -78,12 +118,24 @@ export function prepareComputerTaskExecution(args: {
       readiness,
       audit: args.audit,
       grants,
+      preflight,
+      computerAppGrounding,
+      computerAppGroundingRunbook,
+      computerAppGroundingNextStep,
+      computerAppGroundingTrace,
+      complexityPlan,
       businessModelPlan: args.businessModelPlan,
     }),
     recommendedMode: resolveMode(preview.kind),
     capabilityProfile: resolveCapabilityProfile(preview.kind),
     entrypoint: preview.kind === 'browser_task' ? 'browser_runtime' : 'agent_runtime',
     grants,
+    preflight,
+    computerAppGrounding,
+    computerAppGroundingRunbook,
+    computerAppGroundingNextStep,
+    computerAppGroundingTrace,
+    complexityPlan,
     businessModelPlan: args.businessModelPlan,
   };
 }

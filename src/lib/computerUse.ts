@@ -15,6 +15,13 @@ import { buildFallbackBrowserActions as buildPureFallbackBrowserActions } from '
 import { chooseBrowserAutomationBackendPreference, type BrowserAutomationBackendPreference } from './browserAutomationBackend';
 import { getBridgeUrl } from './bridgeEnvironment';
 import { ensureDesktopBridgePaired } from './desktopBridge';
+import { detectAutomationVerificationGate } from './desktopAutomationSafety';
+import type { ComputerAppPreflight } from './computerAppPreflight';
+import {
+  buildComputerAppGroundingPlan,
+  buildComputerAppGroundingTrace,
+  type ComputerAppGroundingTrace,
+} from './computerAppGrounding';
 import {
   clickRole as localBrowserClickRole,
   domSnapshot as localBrowserDomSnapshot,
@@ -92,6 +99,8 @@ export interface ComputerUsePlanSummary {
   requiresApproval: boolean;
   summaryText: string;
   recommendedPermission: ComputerUsePermission;
+  computerAppPreflight?: ComputerAppPreflight | null;
+  computerAppGroundingTrace?: ComputerAppGroundingTrace | null;
 }
 
 export interface BrowserPlanCardData {
@@ -110,6 +119,8 @@ export interface BrowserPlanCardData {
   backendSessionId?: string;
   backendLiveUrl?: string;
   actions: Array<Pick<BrowserAction, 'id' | 'type' | 'target' | 'value' | 'description' | 'requiresApproval' | 'approvalReason' | 'blockedReason'>>;
+  computerAppPreflight?: ComputerAppPreflight | null;
+  computerAppGroundingTrace?: ComputerAppGroundingTrace | null;
 }
 
 export type BrowserPlanEventKind =
@@ -213,6 +224,18 @@ function assessBrowserActionSafety(
   intent: BrowserTaskIntent | undefined,
   action: Pick<BrowserAction, 'type' | 'description' | 'target' | 'value'>,
 ): BrowserActionSafetyAssessment {
+  const verificationGate = detectAutomationVerificationGate([
+    action.description,
+    action.target,
+    action.value,
+  ]);
+  if (verificationGate) {
+    return {
+      requiresApproval: false,
+      blockedReason: `${verificationGate.label}: ${verificationGate.pauseInstruction}`,
+    };
+  }
+
   const targetDomain = action.target && /^https?:\/\//i.test(action.target) ? extractDomain(action.target) : null;
   if (intent?.allowedDomains?.length && targetDomain && !intent.allowedDomains.includes(targetDomain)) {
     return {
@@ -468,6 +491,9 @@ Each action has: type, target, value (optional), description.
 Valid types: navigate, observe, extract, click, fill, screenshot, select, press_key, wait, scroll
 
 Rules:
+- Follow any Computer/App Grounding section in CONTEXT before choosing click/fill/submit actions.
+- If CONTEXT says the next safe action is an observation, start with observe/extract/screenshot instead of mutation.
+- Never plan to solve CAPTCHA, MFA, OTP, Cloudflare, Turnstile, or "I am not a robot"; plan a pause/blocked step instead.
 - Prefer the explicit start URL when one is present.
 - Keep actions inside the allowed domains unless the task clearly requires otherwise.
 - For web data retrieval, keep the action plan narrow: navigate, wait for rendered content when needed, extract the requested fields, and add a screenshot only when visual proof matters.
@@ -803,6 +829,11 @@ export async function executeAction(
   session?: ComputerUseSession,
 ): Promise<BrowserAction> {
   const updated: BrowserAction = { ...action, status: 'executing', executedAt: new Date().toISOString() };
+  const browserTaskContext = [
+    session?.task,
+    action.description,
+    action.target,
+  ].filter(Boolean).join('\n');
 
   try {
     const beforeShot = await takeScreenshot(session);
@@ -844,7 +875,7 @@ export async function executeAction(
     } else {
       switch (action.type) {
         case 'navigate': {
-          const result = await localBrowserOpenUrl(action.target || '', { waitUntil: 'domcontentloaded' });
+          const result = await localBrowserOpenUrl(action.target || '', { waitUntil: 'domcontentloaded', taskContext: browserTaskContext });
           if (!result.ok) throw new Error(result.error || 'Local browser navigation failed.');
           if (session) session.currentUrl = result.data?.url || action.target;
           break;
@@ -860,7 +891,7 @@ export async function executeAction(
           return updated;
         }
         case 'click': {
-          const result = await localBrowserClickRole(buildLocalBrowserLocatorArgs(action, 'button'));
+          const result = await localBrowserClickRole({ ...buildLocalBrowserLocatorArgs(action, 'button'), taskContext: browserTaskContext });
           if (!result.ok) throw new Error(result.error || 'Local browser click failed.');
           break;
         }
@@ -868,6 +899,7 @@ export async function executeAction(
           const result = await localBrowserFillField({
             ...buildLocalBrowserLocatorArgs(action, 'textbox'),
             text: action.value || '',
+            taskContext: browserTaskContext,
           });
           if (!result.ok) throw new Error(result.error || 'Local browser fill failed.');
           break;
@@ -889,12 +921,13 @@ export async function executeAction(
           const result = await localBrowserSelectOption({
             ...buildLocalBrowserLocatorArgs(action, 'combobox'),
             value: action.value || '',
+            taskContext: browserTaskContext,
           });
           if (!result.ok) throw new Error(result.error || 'Local browser select failed.');
           break;
         }
         case 'press_key': {
-          const result = await localBrowserPressKey(action.value || action.target || '');
+          const result = await localBrowserPressKey(action.value || action.target || '', { taskContext: browserTaskContext });
           if (!result.ok) throw new Error(result.error || 'Local browser key press failed.');
           break;
         }
@@ -1034,16 +1067,38 @@ export async function describeComputerUsePlan(opts: {
   agentName?: string;
   userId?: string;
   model?: string | null;
+  planningContext?: string | null;
+  computerAppPreflight?: ComputerAppPreflight | null;
+  computerAppGroundingTrace?: ComputerAppGroundingTrace | null;
 }): Promise<ComputerUsePlanSummary> {
   const task = opts.task.trim();
   const intent = analyzeBrowserTask(task);
+  const computerAppGroundingTrace = opts.computerAppGroundingTrace || buildComputerAppGroundingTrace({
+    plan: buildComputerAppGroundingPlan(task),
+    observations: [],
+    actions: [],
+  });
   const session = await createSession(
     opts.agentName || 'OpenSwan',
     task,
     intent.suggestedPermission,
     { circleId: opts.circleId, intent, recommendedPermission: intent.suggestedPermission },
   );
-  const actions = await planActions(task, undefined, intent, {
+  const effectivePlanningContext = [
+    opts.planningContext || '',
+    computerAppGroundingTrace
+      ? [
+          'Browser plan grounding trace:',
+          `status=${computerAppGroundingTrace.status}`,
+          `nextAction=${computerAppGroundingTrace.display.nextAction}`,
+          `summary=${computerAppGroundingTrace.display.summary}`,
+          computerAppGroundingTrace.display.blockers.length
+            ? `blockers=${computerAppGroundingTrace.display.blockers.join(' | ')}`
+            : '',
+        ].filter(Boolean).join('\n')
+      : '',
+  ].filter(Boolean).join('\n\n');
+  const actions = await planActions(task, effectivePlanningContext || undefined, intent, {
     circleId: opts.circleId,
     userId: opts.userId,
     model: opts.model,
@@ -1061,6 +1116,12 @@ export async function describeComputerUsePlan(opts: {
     `Browserbase workflow: ${intent.browserbaseWorkflow.label} — ${intent.browserbaseWorkflow.summary}`,
     intent.browserbaseWorkflow.expectsStructuredOutput ? 'Structured output expected from the final browser result' : '',
     intent.browserbaseWorkflow.requiresSubmissionVerification ? 'Final submission must be verified with visible proof or validation errors' : '',
+    intent.verificationGate ? `${intent.verificationGate.label}: human must complete this step manually before automation continues` : '',
+    opts.computerAppPreflight ? `Computer/app preflight: ${opts.computerAppPreflight.status} — ${opts.computerAppPreflight.summary}` : '',
+    computerAppGroundingTrace ? `Grounding trace: ${computerAppGroundingTrace.status} — ${computerAppGroundingTrace.display.nextAction}` : '',
+    computerAppGroundingTrace?.display.blockers.length
+      ? `Grounding blockers: ${computerAppGroundingTrace.display.blockers.join(' | ')}`
+      : '',
     `Planned actions: ${actions.length}`,
     ...actions.slice(0, 8).map((action, index) =>
       `${index + 1}. ${action.type.toUpperCase()}${action.target ? ` ${action.target}` : ''} — ${action.description}`),
@@ -1081,6 +1142,8 @@ export async function describeComputerUsePlan(opts: {
     requiresApproval: true,
     summaryText,
     recommendedPermission: intent.suggestedPermission,
+    computerAppPreflight: opts.computerAppPreflight || null,
+    computerAppGroundingTrace,
   };
 }
 
@@ -1123,6 +1186,8 @@ export function toBrowserPlanCardData(plan: ComputerUsePlanSummary): BrowserPlan
     requiresApproval: plan.requiresApproval,
     recommendedPermission: plan.recommendedPermission,
     status: 'planned',
+    computerAppPreflight: plan.computerAppPreflight || null,
+    computerAppGroundingTrace: plan.computerAppGroundingTrace || null,
     actions: plan.actions.map((action) => ({
       id: action.id,
       type: action.type,

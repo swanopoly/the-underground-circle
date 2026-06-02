@@ -25,6 +25,20 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+function envFlag(name: string, fallback = false): boolean {
+  const raw = (Deno.env.get(name) || "").trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
+function heartbeatAgentEnabled(): boolean {
+  if (envFlag("AUTONOMOUS_AI_PAUSED")) return false;
+  if (envFlag("HEARTBEAT_AGENT_PAUSED")) return false;
+  // Cost guard: after the Anthropic spend investigation, heartbeat is
+  // opt-in only. Set HEARTBEAT_AGENT_ENABLED=true to re-enable this cron.
+  return envFlag("HEARTBEAT_AGENT_ENABLED", false);
+}
+
 // ─── Tool Definitions (same as swanbot-ai) ──────────────────────────────────
 
 const HEARTBEAT_TOOLS = [
@@ -486,6 +500,30 @@ What needs attention? Take action if needed, or say "All clear." if everything i
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
+  }
+
+  if (req.method === "GET") {
+    return new Response(
+      JSON.stringify({
+        service: "heartbeat-agent",
+        status: heartbeatAgentEnabled() ? "enabled" : "paused",
+        enabled: heartbeatAgentEnabled(),
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
+  if (!heartbeatAgentEnabled()) {
+    return new Response(
+      JSON.stringify({
+        skipped: true,
+        service: "heartbeat-agent",
+        reason: "heartbeat_agent_paused",
+        enabled: false,
+        message: "Heartbeat agent is paused. Set HEARTBEAT_AGENT_ENABLED=true to re-enable scheduled Anthropic usage.",
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
   }
 
   try {

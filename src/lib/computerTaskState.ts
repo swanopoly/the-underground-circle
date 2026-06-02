@@ -1,41 +1,44 @@
 import { storage } from './storage';
+import {
+  buildComputerTaskStateSteps,
+  compactComputerTaskCheckpointRecovery,
+  compactComputerTaskCheckpointEvidenceReadiness,
+  compactComputerTaskComplexityPlan,
+  evaluateComputerTaskCheckpointEvidenceReadiness,
+  markComputerTaskCheckpointRecoveryObserved,
+  type ComputerTaskCapabilityBuildout,
+  type ComputerTaskCapabilityBuildoutStatus,
+  type ComputerTaskPhase,
+  type ComputerTaskStateCheckpoint,
+  type ComputerTaskStateCheckpointRecovery,
+  type ComputerTaskStateRecord,
+  type ComputerTaskStateStep,
+  type ComputerTaskStepStatus,
+} from './computerTaskStateModel';
 
-export type ComputerTaskPhase =
-  | 'planning'
-  | 'awaiting_approval'
-  | 'executing'
-  | 'completed'
-  | 'failed'
-  | 'blocked';
+export {
+  buildComputerTaskStateSteps,
+  compactComputerTaskCheckpointRecovery,
+  compactComputerTaskCheckpointEvidenceReadiness,
+  compactComputerTaskComplexityPlan,
+  evaluateComputerTaskCheckpointEvidenceReadiness,
+  markComputerTaskCheckpointRecoveryObserved,
+};
 
-export type ComputerTaskStepStatus = 'pending' | 'active' | 'completed' | 'blocked';
-
-export interface ComputerTaskStateStep {
-  id: string;
-  label: string;
-  status: ComputerTaskStepStatus;
-}
-
-export interface ComputerTaskStateRecord {
-  id: string;
-  circleId: string;
-  threadId: string | null;
-  task: string;
-  taskKind: string;
-  taskLabel: string;
-  adapterId?: string | null;
-  phase: ComputerTaskPhase;
-  currentStep: string | null;
-  steps: ComputerTaskStateStep[];
-  blockers: string[];
-  nextSteps: string[];
-  grantedAccess: string[];
-  accessPlan: string | null;
-  runId?: string | null;
-  sessionId?: string | null;
-  liveUrl?: string | null;
-  updatedAt: string;
-}
+export type {
+  ComputerTaskCapabilityBuildout,
+  ComputerTaskCapabilityBuildoutStatus,
+  ComputerTaskCheckpointEvidenceObservation,
+  ComputerTaskCheckpointEvidenceReadiness,
+  ComputerTaskPhase,
+  ComputerTaskStateCheckpoint,
+  ComputerTaskStateCheckpointRecovery,
+  ComputerTaskStateComplexity,
+  ComputerTaskStateGrounding,
+  ComputerTaskStateRecord,
+  ComputerTaskStateStep,
+  ComputerTaskStepStatus,
+} from './computerTaskStateModel';
 
 const STORAGE_PREFIX = 'computer_task_state_v1';
 
@@ -76,6 +79,119 @@ function normalizeRecord(raw: string | null): ComputerTaskStateRecord | null {
       runId: parsed.runId ? String(parsed.runId) : null,
       sessionId: parsed.sessionId ? String(parsed.sessionId) : null,
       liveUrl: parsed.liveUrl ? String(parsed.liveUrl) : null,
+      grounding: parsed.grounding && typeof parsed.grounding === 'object'
+        ? {
+            status: String(parsed.grounding.status || ''),
+            strategyId: parsed.grounding.strategyId ? String(parsed.grounding.strategyId) : null,
+            strategyLabel: parsed.grounding.strategyLabel ? String(parsed.grounding.strategyLabel) : null,
+            primarySurface: parsed.grounding.primarySurface ? String(parsed.grounding.primarySurface) : null,
+            summary: parsed.grounding.summary ? String(parsed.grounding.summary) : null,
+            nextAction: parsed.grounding.nextAction ? String(parsed.grounding.nextAction) : null,
+            badges: Array.isArray(parsed.grounding.badges) ? parsed.grounding.badges.map(String).filter(Boolean).slice(0, 8) : [],
+            blockers: Array.isArray(parsed.grounding.blockers) ? parsed.grounding.blockers.map(String).filter(Boolean).slice(0, 8) : [],
+          }
+        : null,
+      capabilityBuildout: parsed.capabilityBuildout && typeof parsed.capabilityBuildout === 'object'
+        ? {
+            status: (parsed.capabilityBuildout.status || 'requested') as ComputerTaskCapabilityBuildoutStatus,
+            message: String(parsed.capabilityBuildout.message || ''),
+            appName: parsed.capabilityBuildout.appName ? String(parsed.capabilityBuildout.appName) : null,
+            buildoutKind: parsed.capabilityBuildout.buildoutKind ? String(parsed.capabilityBuildout.buildoutKind) : null,
+            risk: parsed.capabilityBuildout.risk ? String(parsed.capabilityBuildout.risk) : null,
+            sessionId: parsed.capabilityBuildout.sessionId ? String(parsed.capabilityBuildout.sessionId) : null,
+            launched: typeof parsed.capabilityBuildout.launched === 'boolean' ? parsed.capabilityBuildout.launched : null,
+            approvalId: parsed.capabilityBuildout.approvalId ? String(parsed.capabilityBuildout.approvalId) : null,
+            retryPlan: parsed.capabilityBuildout.retryPlan ? String(parsed.capabilityBuildout.retryPlan) : null,
+            summary: parsed.capabilityBuildout.summary ? String(parsed.capabilityBuildout.summary) : null,
+            controlSurface: parsed.capabilityBuildout.controlSurface ? String(parsed.capabilityBuildout.controlSurface) : null,
+            sourceRefs: Array.isArray(parsed.capabilityBuildout.sourceRefs) ? parsed.capabilityBuildout.sourceRefs.map(String).filter(Boolean).slice(0, 12) : [],
+            filesChanged: Array.isArray(parsed.capabilityBuildout.filesChanged) ? parsed.capabilityBuildout.filesChanged.map(String).filter(Boolean).slice(0, 40) : [],
+            verification: parsed.capabilityBuildout.verification ? String(parsed.capabilityBuildout.verification) : null,
+            userActionNeeded: parsed.capabilityBuildout.userActionNeeded ? String(parsed.capabilityBuildout.userActionNeeded) : null,
+            missingEvidence: Array.isArray(parsed.capabilityBuildout.missingEvidence) ? parsed.capabilityBuildout.missingEvidence.map(String).filter(Boolean).slice(0, 8) : [],
+            autoRetryStatus: parsed.capabilityBuildout.autoRetryStatus ? String(parsed.capabilityBuildout.autoRetryStatus) as ComputerTaskCapabilityBuildout['autoRetryStatus'] : null,
+            autoRetryAttemptedAt: parsed.capabilityBuildout.autoRetryAttemptedAt ? String(parsed.capabilityBuildout.autoRetryAttemptedAt) : null,
+            autoRetryCompletedAt: parsed.capabilityBuildout.autoRetryCompletedAt ? String(parsed.capabilityBuildout.autoRetryCompletedAt) : null,
+            autoRetryRunId: parsed.capabilityBuildout.autoRetryRunId ? String(parsed.capabilityBuildout.autoRetryRunId) : null,
+            updatedAt: String(parsed.capabilityBuildout.updatedAt || nowIso()),
+          }
+        : null,
+      complexity: parsed.complexity && typeof parsed.complexity === 'object'
+        ? {
+            level: String(parsed.complexity.level || ''),
+            score: Number(parsed.complexity.score || 0),
+            reasons: Array.isArray(parsed.complexity.reasons) ? parsed.complexity.reasons.map(String).filter(Boolean).slice(0, 6) : [],
+            checkpoints: Array.isArray(parsed.complexity.checkpoints)
+              ? parsed.complexity.checkpoints.map((checkpoint: any) => ({
+                  id: String(checkpoint?.id || ''),
+                  label: String(checkpoint?.label || ''),
+                  surface: String(checkpoint?.surface || 'verification'),
+                  requiresApproval: Boolean(checkpoint?.requiresApproval),
+                })).filter((checkpoint: ComputerTaskStateCheckpoint) => checkpoint.id && checkpoint.label).slice(0, 8)
+              : [],
+          }
+        : null,
+      checkpointRecovery: compactComputerTaskCheckpointRecovery(
+        parsed.checkpointRecovery && typeof parsed.checkpointRecovery === 'object'
+          ? {
+              level: String(parsed.checkpointRecovery.level || ''),
+              complexityScore: Number(parsed.checkpointRecovery.complexityScore || 0),
+              failedCheckpointId: String(parsed.checkpointRecovery.failedCheckpointId || ''),
+              failedCheckpointLabel: String(parsed.checkpointRecovery.failedCheckpointLabel || ''),
+              surface: String(parsed.checkpointRecovery.surface || 'unknown'),
+              requiresApproval: Boolean(parsed.checkpointRecovery.requiresApproval),
+              confidence: String(parsed.checkpointRecovery.confidence || 'low'),
+              reason: String(parsed.checkpointRecovery.reason || ''),
+              safeNextStep: String(parsed.checkpointRecovery.safeNextStep || ''),
+              remainingCheckpointIds: Array.isArray(parsed.checkpointRecovery.remainingCheckpointIds)
+                ? parsed.checkpointRecovery.remainingCheckpointIds.map(String).filter(Boolean)
+                : [],
+              retryPolicy: parsed.checkpointRecovery.retryPolicy && typeof parsed.checkpointRecovery.retryPolicy === 'object'
+                ? {
+                    failureFingerprint: String(parsed.checkpointRecovery.retryPolicy.failureFingerprint || ''),
+                    repeatCount: Number(parsed.checkpointRecovery.retryPolicy.repeatCount || 1),
+                    retryLimit: Number(parsed.checkpointRecovery.retryPolicy.retryLimit || 0),
+                    canRetry: Boolean(parsed.checkpointRecovery.retryPolicy.canRetry),
+                    nextAction: String(parsed.checkpointRecovery.retryPolicy.nextAction || ''),
+                    stopReason: parsed.checkpointRecovery.retryPolicy.stopReason ? String(parsed.checkpointRecovery.retryPolicy.stopReason) : null,
+                    requiredEvidence: Array.isArray(parsed.checkpointRecovery.retryPolicy.requiredEvidence)
+                      ? parsed.checkpointRecovery.retryPolicy.requiredEvidence.map((item: any) => ({
+                          id: String(item?.id || ''),
+                          tool: String(item?.tool || ''),
+                          summary: String(item?.summary || ''),
+                          freshnessMs: Number(item?.freshnessMs || 15_000),
+                          required: item?.required !== false,
+                        }))
+                      : [],
+                    forbiddenActions: Array.isArray(parsed.checkpointRecovery.retryPolicy.forbiddenActions)
+                      ? parsed.checkpointRecovery.retryPolicy.forbiddenActions.map(String).filter(Boolean)
+                      : [],
+                    resumeInstruction: String(parsed.checkpointRecovery.retryPolicy.resumeInstruction || ''),
+                    evidenceReadiness: parsed.checkpointRecovery.retryPolicy.evidenceReadiness && typeof parsed.checkpointRecovery.retryPolicy.evidenceReadiness === 'object'
+                      ? {
+                          ready: Boolean(parsed.checkpointRecovery.retryPolicy.evidenceReadiness.ready),
+                          status: String(parsed.checkpointRecovery.retryPolicy.evidenceReadiness.status || 'missing') as any,
+                          checkedAt: String(parsed.checkpointRecovery.retryPolicy.evidenceReadiness.checkedAt || nowIso()),
+                          satisfiedEvidenceIds: Array.isArray(parsed.checkpointRecovery.retryPolicy.evidenceReadiness.satisfiedEvidenceIds)
+                            ? parsed.checkpointRecovery.retryPolicy.evidenceReadiness.satisfiedEvidenceIds.map(String).filter(Boolean)
+                            : [],
+                          missingEvidenceIds: Array.isArray(parsed.checkpointRecovery.retryPolicy.evidenceReadiness.missingEvidenceIds)
+                            ? parsed.checkpointRecovery.retryPolicy.evidenceReadiness.missingEvidenceIds.map(String).filter(Boolean)
+                            : [],
+                          staleEvidenceIds: Array.isArray(parsed.checkpointRecovery.retryPolicy.evidenceReadiness.staleEvidenceIds)
+                            ? parsed.checkpointRecovery.retryPolicy.evidenceReadiness.staleEvidenceIds.map(String).filter(Boolean)
+                            : [],
+                          nextEvidenceTools: Array.isArray(parsed.checkpointRecovery.retryPolicy.evidenceReadiness.nextEvidenceTools)
+                            ? parsed.checkpointRecovery.retryPolicy.evidenceReadiness.nextEvidenceTools.map(String).filter(Boolean)
+                            : [],
+                          summary: String(parsed.checkpointRecovery.retryPolicy.evidenceReadiness.summary || ''),
+                        }
+                      : null,
+                  }
+                : null,
+            } as ComputerTaskStateCheckpointRecovery
+          : null,
+      ),
       updatedAt: String(parsed.updatedAt || nowIso()),
     };
   } catch {
@@ -96,51 +212,4 @@ export async function saveComputerTaskState(record: ComputerTaskStateRecord): Pr
 
 export async function clearComputerTaskState(circleId: string, threadId?: string | null): Promise<void> {
   await storage.removeItem(storageKey(circleId, threadId));
-}
-
-export function buildComputerTaskStateSteps(args: {
-  taskKind: string;
-  phase: ComputerTaskPhase;
-}): ComputerTaskStateStep[] {
-  const plan = { id: 'plan', label: 'Plan task', status: 'completed' as ComputerTaskStepStatus };
-  if (args.phase === 'planning') {
-    plan.status = 'active';
-  }
-
-  const needsApproval = args.taskKind === 'browser_task';
-  const approval = needsApproval
-    ? {
-        id: 'approval',
-        label: 'Approve access',
-        status: args.phase === 'awaiting_approval'
-          ? 'active' as ComputerTaskStepStatus
-          : args.phase === 'executing' || args.phase === 'completed'
-            ? 'completed' as ComputerTaskStepStatus
-            : 'pending' as ComputerTaskStepStatus,
-      }
-    : null;
-
-  const execute: ComputerTaskStateStep = {
-    id: 'execute',
-    label: args.taskKind === 'hybrid_task' ? 'Run staged computer workflow' : 'Execute task',
-    status: args.phase === 'executing'
-      ? 'active'
-      : args.phase === 'completed'
-        ? 'completed'
-        : args.phase === 'failed' || args.phase === 'blocked'
-          ? 'blocked'
-          : 'pending',
-  };
-
-  const summarize: ComputerTaskStateStep = {
-    id: 'summarize',
-    label: 'Summarize result',
-    status: args.phase === 'completed'
-      ? 'completed'
-      : args.phase === 'failed' || args.phase === 'blocked'
-        ? 'blocked'
-        : 'pending',
-  };
-
-  return [plan, ...(approval ? [approval] : []), execute, summarize];
 }

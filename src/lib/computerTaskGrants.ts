@@ -1,5 +1,8 @@
 import type { ComputerCapabilityAudit } from './computerCapabilityRegistry';
-import type { ComputerTaskPlanPreview } from './computerTaskPlanner';
+import {
+  isLowRiskLocalImageExportTask,
+  type ComputerTaskPlanPreview,
+} from './computerTaskPlanner';
 
 export type ComputerTaskGrantId =
   | 'browser_navigation'
@@ -39,8 +42,10 @@ function inferTaskRisk(task: string): {
   hasActionIntent: boolean;
 } {
   const normalized = String(task || '').toLowerCase();
+  const googleDriveDesktopCopyIntent = /\b(?:google\s+drive|gdrive|my\s+drive)\b/.test(normalized)
+    && /\b(?:open|launch|load|indesign|in\s*design|photoshop|illustrator)\b/.test(normalized);
   return {
-    hasWriteIntent: includesAny(normalized, [
+    hasWriteIntent: googleDriveDesktopCopyIntent || includesAny(normalized, [
       'write',
       'edit',
       'save',
@@ -102,10 +107,20 @@ export function buildComputerTaskGrantPlan(args: {
   grantedIds?: ComputerTaskGrantId[];
 }): ComputerTaskGrantPlan {
   const risk = inferTaskRisk(args.task);
+  const lowRiskLocalImageExport = isLowRiskLocalImageExportTask(args.task);
   const grants = new Map<ComputerTaskGrantId, ComputerTaskGrant>();
   const grantedSet = new Set(args.grantedIds || []);
+  const needsBrowserAutomation = args.preview.requiredCapabilities.includes('browser_automation') ||
+    args.preview.requiredCapabilities.includes('browser_sessions');
+  const needsFileAccess = args.preview.requiredCapabilities.includes('file_search') ||
+    args.preview.requiredCapabilities.includes('file_read') ||
+    args.preview.requiredCapabilities.includes('file_write');
+  const needsFileWrite = args.preview.requiredCapabilities.includes('file_write');
+  const needsAppAccess = args.preview.requiredCapabilities.includes('app_tools') ||
+    args.preview.requiredCapabilities.includes('desktop_control') ||
+    args.preview.requiredCapabilities.includes('agent_bridges');
 
-  if (args.preview.kind === 'browser_task' || args.preview.kind === 'hybrid_task' || args.preview.kind === 'unknown') {
+  if (args.preview.kind === 'browser_task' || args.preview.kind === 'unknown' || needsBrowserAutomation) {
     pushGrant(grants, {
       id: 'browser_navigation',
       label: 'Browser navigation',
@@ -115,7 +130,7 @@ export function buildComputerTaskGrantPlan(args: {
     });
   }
 
-  if (args.preview.kind === 'browser_task' || args.preview.kind === 'hybrid_task') {
+  if (args.preview.kind === 'browser_task' || needsBrowserAutomation) {
     if (risk.hasActionIntent || risk.hasWriteIntent) {
       pushGrant(grants, {
         id: 'browser_side_effect',
@@ -127,29 +142,29 @@ export function buildComputerTaskGrantPlan(args: {
     }
   }
 
-  if (args.preview.kind === 'file_task' || args.preview.kind === 'hybrid_task' || args.preview.kind === 'unknown') {
+  if (args.preview.kind === 'file_task' || args.preview.kind === 'unknown' || needsFileAccess) {
     pushGrant(grants, {
       id: 'file_read',
       label: 'File read access',
       level: 'read',
       approvalRequired: false,
-      reason: 'The task may need to locate, list, or inspect files the user has granted access to.',
+      reason: 'The runtime prepares scoped local file access automatically before locating, listing, or inspecting files.',
     });
   }
 
-  if (args.preview.kind === 'file_task' || args.preview.kind === 'hybrid_task') {
-    if (risk.hasWriteIntent) {
+  if (args.preview.kind === 'file_task' || needsFileAccess) {
+    if (needsFileWrite) {
       pushGrant(grants, {
         id: 'file_write',
         label: 'File write access',
         level: 'write',
-        approvalRequired: true,
-        reason: 'The task may edit, move, rename, create, or delete files.',
+        approvalRequired: false,
+        reason: 'The runtime prepares write-scoped local file access automatically before file edits, moves, renames, creates, deletes, or exports.',
       });
     }
   }
 
-  if (args.preview.kind === 'app_task' || args.preview.kind === 'hybrid_task' || args.preview.kind === 'unknown') {
+  if (args.preview.kind === 'app_task' || args.preview.kind === 'unknown' || needsAppAccess) {
     pushGrant(grants, {
       id: 'app_read',
       label: 'Connected app access',
@@ -159,14 +174,16 @@ export function buildComputerTaskGrantPlan(args: {
     });
   }
 
-  if (args.preview.kind === 'app_task' || args.preview.kind === 'hybrid_task') {
+  if (args.preview.kind === 'app_task' || needsAppAccess) {
     if (risk.hasActionIntent || risk.hasWriteIntent) {
       pushGrant(grants, {
         id: 'app_action',
         label: 'Connected app actions',
         level: 'action',
-        approvalRequired: true,
-        reason: 'The task may send messages, create records, or make changes in a connected app.',
+        approvalRequired: !lowRiskLocalImageExport,
+        reason: lowRiskLocalImageExport
+          ? 'The task only opens a local image in Photoshop and exports a new PNG/JPEG through Save for Web.'
+          : 'The task may send messages, create records, or make changes in a connected app.',
       });
     }
   }

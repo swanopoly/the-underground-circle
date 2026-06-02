@@ -8,9 +8,25 @@ interface Props {
   accentColor: string;
   isFullscreen?: boolean;
   onToggleFullscreen?: () => void;
+  /** The concrete model Auto has resolved to for the current input.
+   *  Shown as "Auto → Sonnet" so the user knows what will run. */
+  resolvedAutoModel?: string | null;
 }
 
-function ChatSessionHeader({ session, onBack, accentColor, isFullscreen = false, onToggleFullscreen }: Props) {
+function shortModelLabel(modelId: string): string {
+  const part = modelId.split('/').pop() || modelId;
+  return part
+    .replace(/:[a-z0-9_-]+$/i, '')
+    .replace(/\b(20\d{4,6})\b/g, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b(\w)/g, (c) => c.toUpperCase())
+    .replace(/\bClaude\s*/i, '')
+    .replace(/\bGpt\b/i, 'GPT')
+    .trim()
+    .slice(0, 22);
+}
+
+function ChatSessionHeader({ session, onBack, accentColor, isFullscreen = false, onToggleFullscreen, resolvedAutoModel }: Props) {
   if (!session) {
     return (
       <View style={[styles.container, { borderBottomColor: accentColor + '16' }]}>
@@ -56,7 +72,13 @@ function ChatSessionHeader({ session, onBack, accentColor, isFullscreen = false,
             <Text style={[styles.pillText, { color: modeConf.color }]}>{modeConf.label}</Text>
           </View>
           <View style={[styles.pill, { backgroundColor: accentColor + '12', borderColor: accentColor + '30' }]}>
-            <Text style={[styles.pillText, { color: accentColor }]}>{session.model ?? 'Auto model'}</Text>
+            <Text style={[styles.pillText, { color: accentColor }]}>
+              {(!session.model || session.model === 'auto')
+                ? (resolvedAutoModel
+                    ? `Auto → ${shortModelLabel(resolvedAutoModel)}`
+                    : 'Auto')
+                : shortModelLabel(session.model)}
+            </Text>
           </View>
           {onToggleFullscreen ? (
             <Pressable style={[styles.utilityButton, { borderColor: accentColor + '24' }]} onPress={onToggleFullscreen}>

@@ -95,6 +95,14 @@ const message = formatPersistedChatBotMessage(
       status: 'completed',
       body: 'large execution body '.repeat(200),
     })) as any,
+    recoveryOptions: [{
+      id: 'retry_with_fresh_evidence',
+      label: 'Retry after fresh evidence',
+      detail: 'Re-observe the browser DOM and screenshot before retrying the blocked action. '.repeat(12),
+      actor: 'openswan',
+      recommended: true,
+      source: 'checkpoint_guard',
+    }] as any,
   },
 );
 
@@ -107,7 +115,195 @@ if (message.includes(BOT_META_MARKER)) {
   const metadata = readPersistedChatBotMetadata(message);
   assert(!!metadata, 'metadata JSON remains parseable after compaction');
   assert((metadata?.browserPlans?.[0]?.actions?.length || 0) <= 10, 'browser plan actions are compacted');
+  assert((metadata?.recoveryOptions?.[0]?.detail?.length || 0) <= 360, 'recovery option details are compacted');
 }
+
+const recoveryOnlyMessage = formatPersistedChatBotMessage(
+  'OpenSwan',
+  'Browser task failed after the bridge lost DOM evidence.',
+  {
+    recoveryOptions: [{
+      id: 'retry_with_fresh_evidence',
+      label: 'Retry after fresh evidence',
+      detail: 'Re-observe the browser DOM and screenshot before retrying the blocked action. '.repeat(12),
+      actor: 'openswan',
+      recommended: true,
+      source: 'checkpoint_guard',
+    }] as any,
+    recoveryReliability: {
+      surfaceKind: 'browser',
+      targetName: 'Browser app',
+      taskFamily: 'browser semantic workflow',
+      failureArea: 'actionability',
+      retryAllowed: true,
+      userActionRequired: false,
+      connectedAgentAllowed: false,
+      recommendedOptionId: 'retry_with_fresh_evidence',
+      readinessStatus: 'missing',
+      nextEvidenceTools: ['browser.verification_state', 'browser.dom_snapshot', 'browser.locator_actionability'],
+      requiredEvidenceTools: ['browser.verification_state', 'browser.dom_snapshot', 'browser.locator_actionability'],
+      requiredFreshEvidence: ['fresh DOM/ARIA snapshot before retry', 'fresh screenshot when visual state or overlays matter'],
+      requiredProof: ['refreshed DOM/ARIA state or confirmation text'],
+      approvalBoundaries: ['submit, publish, send, pay, purchase, delete, invite, or external upload'],
+      failClosedRules: ['ambiguous locator or repeated actionability timeout requires fresh observation or recovery option'],
+      selectedRecoveryOptionId: 'retry_with_fresh_evidence',
+      verificationCommands: ['npm run smoke:browser-bridge', 'npm run smoke:computer-task-runtime', 'npm run typecheck:app'],
+    } as any,
+  },
+);
+const recoveryOnlyMetadata = readPersistedChatBotMetadata(recoveryOnlyMessage);
+assert((recoveryOnlyMetadata?.recoveryOptions?.[0]?.detail?.length || 0) <= 360, 'standalone recovery option details are compacted');
+assert(recoveryOnlyMetadata?.recoveryReliability?.surfaceKind === 'browser', 'standalone recovery reliability summary is persisted');
+assert((recoveryOnlyMetadata?.recoveryReliability?.nextEvidenceTools?.length || 0) <= 5, 'recovery reliability evidence tools are compacted');
+assert((recoveryOnlyMetadata?.recoveryReliability?.verificationCommands?.length || 0) <= 8, 'recovery reliability verification commands are compacted');
+
+const handoffMessage = formatPersistedChatBotMessage(
+  'OpenSwan',
+  'InDesign task is ready for review.',
+  {
+    computerHandoff: {
+      surface: 'desktop',
+      adapterId: 'hybrid_adapter',
+      taskKind: 'hybrid_task',
+      taskLabel: 'Uploaded desktop file task',
+      preflightStatus: 'ready',
+      groundingStatus: 'needs_approval',
+      warningCount: 0,
+      blockerCount: 0,
+      warnings: [],
+      blockers: [],
+      approvalSummary: 'Review before editing text, relinking assets, save, export, or package.',
+      requestNotice: {
+        visibility: 'user',
+        tone: 'approval',
+        title: 'Ready for review',
+        summary: 'I found the desktop-app path for Adobe InDesign. I will observe the document or window first, use app-native tools when available, and verify the result before saying it is done.',
+        primaryAction: {
+          kind: 'approve_desktop',
+          label: 'Approve desktop run',
+          detail: 'Review desktop control before app or file mutation.',
+        },
+        secondaryActions: [{
+          kind: 'connect_bridge',
+          label: 'Check desktop bridge',
+          detail: 'Use the desktop bridge only when local app or file access is needed.',
+        }],
+        badges: ['Desktop app', 'Approval', 'Adobe InDesign'],
+        proof: ['App-native document status, text inventory, proof screenshot or exported proof, and output file stat.'],
+        hiddenReason: null,
+      },
+      appRouteDecision: {
+        status: 'needs_observation',
+        targetName: 'Adobe InDesign',
+        taskFamily: 'layout document mutation',
+        chosenSurfaceId: 'adobe_indesign_uxp_dom',
+        chosenSurfaceLabel: 'InDesign UXP script/plugin DOM',
+        chosenSurfaceFit: 'primary',
+        score: 64,
+        missingConfirmations: [
+          'InDesign installed',
+          'active document identity matches the staged file',
+          'local file grants for source/assets/output',
+        ],
+        missingApprovals: ['copy/link/layer mutation', 'save/export/package/write'],
+        userActionBlockers: [],
+        nextSteps: ['Collect fresh evidence for active document identity and grants'],
+        sourceRefs: [{
+          label: 'Adobe InDesign UXP scripts',
+          url: 'https://developer.adobe.com/indesign/uxp/scripts/',
+        }],
+      },
+      evidenceContract: {
+        schemaVersion: 1,
+        kind: 'desktop_app',
+        targetName: 'Adobe InDesign',
+        taskFamily: 'design app execution',
+        observeBefore: [
+          'confirm app/window identity and active document identity before mutation',
+          'capture InDesign document status plus layer/text/link/font or preflight inventory',
+        ],
+        actionabilityChecks: [
+          'InDesign mutation runs through UXP script/plugin DOM or documented app API when available',
+          'active document matches the staged file or user-selected target',
+        ],
+        approvalBefore: ['document mutation', 'save, export, package, render, overwrite, delete, flatten, rasterize, or destructive edit'],
+        mutationGuardrails: ['app-native DOM/API/scripted tools run before accessibility, menu, screenshot, or coordinate fallback'],
+        proofAfter: ['refreshed InDesign document status plus text/link/layer or preflight inventory', 'proof screenshot or exported proof artifact'],
+        failClosedRules: ['active document mismatch blocks mutation', 'missing before/after inventory or proof blocks completion'],
+        freshEvidenceRequired: ['fresh app-native document status before retry', 'fresh file_stat after output writes'],
+        sourceRefs: [{
+          label: 'Adobe InDesign UXP scripts',
+          url: 'https://developer.adobe.com/indesign/uxp/scripts/',
+          takeaway: 'InDesign UXP scripts are the direct automation surface for local layout/document tasks.',
+        }],
+        userSummary: 'Use app-native Adobe InDesign automation first, require approval for mutation/output work, and verify with refreshed inventory plus proof artifacts.',
+      },
+      desktopAttachmentPackage: {
+        fileCount: 2,
+        primaryFileCount: 1,
+        stageDirectory: '/Users/chris/Downloads/Underground Circle Attachments/banner',
+        manifestPath: '/Users/chris/Downloads/Underground Circle Attachments/banner/_underground-circle-upload-manifest.json',
+        sha256Count: 2,
+        files: [{
+          name: 'dealer-banner.indd',
+          localPath: '/Users/chris/Downloads/Underground Circle Attachments/banner/dealer-banner.indd',
+          appName: 'Adobe InDesign',
+          sha256: 'a'.repeat(64),
+        }],
+      },
+      designAppTask: {
+        appId: 'adobe_indesign',
+        appName: 'Adobe InDesign',
+        taskKind: 'marketing_banner_layout',
+        documentSignals: ['marketing/campaign deliverable', 'named layers/text frames'],
+        operations: ['inspect_layers', 'update_text_layers', 'replace_linked_asset', 'export_proof'],
+        requiredInventory: ['active document name/path and saved/modified state', 'layer count plus locked/hidden layers'],
+        approvalGates: ['editing text frames or object/layer state', 'exporting or packaging deliverables'],
+        verificationSignals: ['post-change InDesign text inventory shows requested layer/copy updates', 'fresh screenshot or proof export shows the visible banner/layout state'],
+        recommendedTools: ['desktop.indesign_document_status', 'desktop.indesign_text_inventory', 'desktop.indesign_batch_update_text_layers'],
+      },
+      designObjectManifestArtifact: {
+        schemaVersion: 1,
+        artifactKind: 'design_object_manifest',
+        appId: 'adobe_indesign',
+        appName: 'Adobe InDesign',
+        taskKind: 'marketing_banner_layout',
+        operations: ['inspect_layers', 'update_text_layers', 'replace_linked_asset', 'export_proof'],
+        generatedAt: '2026-05-27T12:00:00.000Z',
+        auditOk: true,
+        blockerCount: 0,
+        warningCount: 0,
+        beforeToolCount: 3,
+        afterToolCount: 2,
+        actionCount: 2,
+        artifactCount: 1,
+        activeDocumentName: 'dealer-banner.indd',
+        activeDocumentBasename: 'dealer-banner.indd',
+        changedEntityKinds: ['text_frame', 'link'],
+        artifactKinds: ['proof'],
+        comparisonStatuses: [{ label: 'active document identity before vs after', status: 'pass' }],
+        proofArtifacts: [{ label: 'InDesign proof PDF', basename: 'dealer-banner-proof.pdf', format: 'pdf', sizeBytes: 42000, pageCount: 1 }],
+        packageArtifacts: [],
+        blockers: [],
+        warnings: [],
+        redaction: 'basename_hash_only',
+      },
+    } as any,
+  },
+);
+const handoffMetadata = readPersistedChatBotMetadata(handoffMessage);
+assert(handoffMetadata?.computerHandoff?.designAppTask?.appName === 'Adobe InDesign', 'computer handoff design app metadata is persisted');
+assert((handoffMetadata?.computerHandoff?.desktopAttachmentPackage?.files?.[0]?.sha256 || '').length <= 16, 'computer handoff file hashes are compacted');
+assert(handoffMetadata?.computerHandoff?.designObjectManifestArtifact?.auditOk === true, 'design object manifest artifact summary is persisted');
+assert(handoffMetadata?.computerHandoff?.designObjectManifestArtifact?.proofArtifacts?.[0]?.basename === 'dealer-banner-proof.pdf', 'design object manifest proof summary is persisted');
+assert(handoffMetadata?.computerHandoff?.requestNotice?.primaryAction?.kind === 'approve_desktop', 'computer request user notice is persisted with handoff metadata');
+assert((handoffMetadata?.computerHandoff?.requestNotice?.summary || '').includes('desktop-app path'), 'computer request user notice summary is persisted');
+assert(handoffMetadata?.computerHandoff?.appRouteDecision?.status === 'needs_observation', 'computer app route decision is persisted with handoff metadata');
+assert(handoffMetadata?.computerHandoff?.appRouteDecision?.chosenSurfaceId === 'adobe_indesign_uxp_dom', 'computer app route decision chosen surface is persisted');
+assert((handoffMetadata?.computerHandoff?.appRouteDecision?.sourceRefs || []).some((ref) => ref.url.includes('/indesign/uxp/scripts')), 'computer app route decision source refs are persisted');
+assert(handoffMetadata?.computerHandoff?.evidenceContract?.targetName === 'Adobe InDesign', 'computer task evidence contract is persisted with handoff metadata');
+assert((handoffMetadata?.computerHandoff?.evidenceContract?.proofAfter || []).some((item) => /InDesign document status/i.test(item)), 'computer task evidence contract proof rules are persisted');
+assert(!JSON.stringify(handoffMetadata?.computerHandoff?.designObjectManifestArtifact || {}).includes('/Users/'), 'design object manifest artifact summary hides local paths');
 
 const openswanMessage = formatPersistedChatBotMessage(
   'OpenSwan',
@@ -153,12 +349,21 @@ const openswanMessage = formatPersistedChatBotMessage(
       executed: true,
       summary: 'Verified tab list response.',
     }] as any,
+    recoveryOptions: [{
+      id: 'let_connected_agent_repair',
+      label: 'Let Codex repair it',
+      detail: 'Send the failure context to the connected coding agent.',
+      actor: 'connected_agent',
+      recommended: true,
+      source: 'connected_agent_runbook',
+    }] as any,
   },
 );
 const openswanMetadata = readPersistedChatBotMetadata(openswanMessage);
 assert(!!openswanMetadata?.taskPlan, 'OpenSwan task plan is persisted');
 assert((openswanMetadata?.toolEvents?.length || 0) === 1, 'OpenSwan tool events are persisted');
 assert((openswanMetadata?.verificationResults?.length || 0) === 1, 'OpenSwan verification results are persisted');
+assert((openswanMetadata?.recoveryOptions?.length || 0) === 1, 'recovery options are persisted');
 
 if (failures > 0) {
   console.error(`\n${failures} persisted-chat metadata smoke-test failure(s)`);

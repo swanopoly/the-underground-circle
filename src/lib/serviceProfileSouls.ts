@@ -10,7 +10,6 @@
 import type { SessionCodingProfile } from './chatSessionProfile';
 import {
   BLACKSWAN_ENDPOINT_MODEL_ID,
-  shouldUseBlackSwanForAuto,
 } from './blackswanRouting';
 
 export const PROFILE_SOUL_MAP: Record<SessionCodingProfile, string> = {
@@ -53,25 +52,25 @@ export function resolveModelForProfile(
 // Per-SOUL model preferences. User's explicit model pick always wins;
 // this is the fallback when the user has "auto" selected.
 //
-// Defaults to Haiku across the board — the explicit-architect /
-// explicit-research / heavy-complexity branches in the intent table
-// below escalate to Opus / Sonnet on their own when the message
-// actually needs more reasoning. Pinning Sonnet as the SOUL default
-// meant chris was paying Sonnet rates for "thanks" and "got it" turns
-// just because he's signed in as the sr-engineer SOUL.
+// Sonnet is the baseline across all souls — casual/social/status turns
+// are still routed to Haiku below, but any task with real intent
+// (build, review, question, research) gets at least Sonnet capability.
+// This prevents "auto" from silently routing a non-trivial coding
+// message to GPT-4.1 Mini or a nano-tier model just because a cheap
+// provider is connected.
 const SOUL_MODEL_DEFAULTS: Record<string, string> = {
-  'sr-engineer':   'claude-haiku-4-5',
-  'code-reviewer': 'claude-haiku-4-5',
-  architect:       'claude-haiku-4-5',
-  'civil-engineer':'claude-haiku-4-5',
-  debugger:        'claude-haiku-4-5',
-  designer:        'claude-haiku-4-5',
-  writer:          'claude-haiku-4-5',
-  'ml-engineer':   'claude-haiku-4-5',
-  'ai-researcher': 'claude-haiku-4-5',
+  'sr-engineer':   'claude-sonnet-4-6',
+  'code-reviewer': 'claude-sonnet-4-6',
+  architect:       'claude-sonnet-4-6',
+  'civil-engineer':'claude-sonnet-4-6',
+  debugger:        'claude-sonnet-4-6',
+  designer:        'claude-sonnet-4-6',
+  writer:          'claude-sonnet-4-6',
+  'ml-engineer':   'claude-sonnet-4-6',
+  'ai-researcher': 'claude-sonnet-4-6',
 };
 
-const DEFAULT_MODEL = 'claude-haiku-4-5';
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
 /**
  * Resolve the model to use for a given SOUL + user preference.
@@ -84,8 +83,9 @@ const DEFAULT_MODEL = 'claude-haiku-4-5';
  *   3. SOUL defaults.
  *   4. Haiku fallback.
  *
- * Opus is intentionally not part of Auto. It remains available as an
- * explicit user pick, but Auto should not create surprise Opus spend.
+ * Opus and BlackSwan are intentionally not part of Auto. They remain
+ * available as explicit picks, but Auto should not create surprise spend or
+ * route tool/computer work through an app-grounding model that may fall back.
  */
 /**
  * Connected marketplace providers used to bias the Auto router. OpenRouter
@@ -135,8 +135,6 @@ export function resolveModelForSoul(
 
   const HAIKU = 'claude-haiku-4-5';
   const SONNET = 'claude-sonnet-4-6';
-  const blackSwanConnected = hasProvider(connectedProviders, 'blackswan');
-
   // Auto should prefer user-connected BYOK providers first, not the
   // platform Claude key. The ladders below model provider strengths:
   // cheap/local for low-value turns, search-grounded for research,
@@ -158,9 +156,9 @@ export function resolveModelForSoul(
   const directFast = firstConnected(connectedProviders, [
     ['groq', 'groq/llama-3.3-70b-versatile'],
     ['google_ai', 'google_ai/gemini-2.5-flash'],
-    ['openai', 'openai/gpt-4.1-mini'],
+    ['openai', 'openai/gpt-4.1'],           // full GPT-4.1 — mini is too weak for auto routing
     ['deepseek', 'deepseek/deepseek-chat'],
-    ['mistral_ai', 'mistral_ai/mistral-small-latest'],
+    ['mistral_ai', 'mistral_ai/mistral-large-latest'],
     ['together_ai', 'together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo'],
     ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/llama-v3p1-405b-instruct'],
     ['huggingface', 'huggingface/Qwen/Qwen3-32B'],
@@ -226,7 +224,7 @@ export function resolveModelForSoul(
   // faster than Sonnet. User-visible latency drops hard here because
   // discovery turns are the most latency-sensitive part of the flow
   // (each one gates the next user action).
-  if (buildExploring) return blackSwanConnected ? BLACKSWAN_ENDPOINT_MODEL_ID : (directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? HAIKU : DEFAULT_MODEL));
+  if (buildExploring) return directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? HAIKU : DEFAULT_MODEL);
 
   // Build-converging needs more reasoning than a clarifying question, but
   // Sonnet / connected reasoners are enough for the first brief. Opus stays
@@ -242,7 +240,6 @@ export function resolveModelForSoul(
     // nano tier (gpt-4.1-nano) which is even cheaper than Haiku on
     // a per-token basis.
     if (intent === 'casual' || intent === 'social' || intent === 'status' || intent === 'memory') {
-      if (blackSwanConnected && shouldUseBlackSwanForAuto(intent, complexity)) return BLACKSWAN_ENDPOINT_MODEL_ID;
       return directNano || directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? HAIKU : DEFAULT_MODEL);
     }
 
@@ -250,7 +247,6 @@ export function resolveModelForSoul(
     // question is heavy (compare / tradeoffs / which-is-better caught
     // as `complex`) — and even then, only Sonnet, not Opus.
     if (intent === 'question') {
-      if (blackSwanConnected && shouldUseBlackSwanForAuto(intent, complexity)) return BLACKSWAN_ENDPOINT_MODEL_ID;
       if (isHeavy) {
         return directStrong || (orConnected ? OR_SONNET : null) || (anthropicConnected ? SONNET : DEFAULT_MODEL);
       }
@@ -266,43 +262,44 @@ export function resolveModelForSoul(
       return directReasoner || directStrong || (orConnected ? OR_REASONER : null) || (anthropicConnected ? SONNET : DEFAULT_MODEL);
     }
 
-    // Coding intents — Haiku by default, escalate to a code
-    // specialist when the message itself signals heavy complexity.
-    // GPT-5 Codex variants are tuned for diff generation + multi-file
-    // refactors, so they outperform generic frontier models on heavy
-    // builds when OpenAI is wired.
+    // Coding intents — Sonnet minimum even for non-heavy turns.
+    // Real code tasks need a capable model regardless of complexity
+    // classification; routing a build message to a nano-tier model
+    // because it looked "simple" produces bad diffs and missed context.
     if (intent === 'build' || intent === 'debug' || intent === 'review') {
       if (isHeavy) {
         return directCode || (orConnected ? OR_REASONER : null) || (anthropicConnected ? SONNET : DEFAULT_MODEL);
       }
-      return directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? HAIKU : DEFAULT_MODEL);
+      return directFast || (orConnected ? OR_SONNET : null) || (anthropicConnected ? SONNET : DEFAULT_MODEL);
     }
 
-    // Design / creative — Haiku by default; one-shot variations and
-    // edits don't need a frontier model to pull off.
+    // Design / creative — directFast (now GPT-4.1 / Gemini Flash tier)
+    // is plenty for one-shot variations and edits.
     if (intent === 'design' || intent === 'creative') {
       return directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? HAIKU : DEFAULT_MODEL);
     }
 
-    // Browser / computer-use planning should use chat-compatible models.
-    // Dedicated CUA models are invoked by the browser/computer runtime,
-    // not by the normal chat-completions path.
+    // Browser / computer-use planning must use a chat-compatible model.
+    // Dedicated CUA execution is handled by the browser/computer runtime
+    // (computer-use-agent edge function) which always enforces Sonnet.
     if (intent === 'browser') {
       if (directBrowser) return directBrowser;
       if (orConnected) return OR_BROWSER;
       return anthropicConnected ? SONNET : DEFAULT_MODEL;
     }
 
-    // Task management / support — Haiku across the board. These are
-    // mostly state lookups or routing, not reasoning.
+    // Task management / support — directFast (GPT-4.1 / Flash) is
+    // fine; these are mostly state lookups not deep reasoning turns.
     if (intent === 'task_mgmt' || intent === 'support') {
-      if (blackSwanConnected && shouldUseBlackSwanForAuto(intent, complexity)) return BLACKSWAN_ENDPOINT_MODEL_ID;
       return directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? HAIKU : DEFAULT_MODEL);
     }
   }
 
+  // Unknown intent or empty input — use Sonnet as the safe default so
+  // the user never sees a mini-tier model chosen before they've typed
+  // anything meaningful.
   const soulDefault = spiritId ? (SOUL_MODEL_DEFAULTS[spiritId] || DEFAULT_MODEL) : DEFAULT_MODEL;
-  return directFast || (orConnected ? OR_FAST : null) || (anthropicConnected ? soulDefault : DEFAULT_MODEL);
+  return directFast || (orConnected ? OR_SONNET : null) || (anthropicConnected ? soulDefault : DEFAULT_MODEL);
 }
 
 // BlackSwan failover chain: if primary model fails (rate limit,

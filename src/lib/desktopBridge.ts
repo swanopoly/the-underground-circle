@@ -26,12 +26,15 @@ import {
   type DesktopHealth,
 } from './desktopBridgeProtocol';
 import { getBridgeUrl } from './bridgeEnvironment';
+import { normalizeDesktopFileSearchQuery } from './fileSearchQuery';
 
 export type { DesktopBridgeError, DesktopResult, DesktopHealth } from './desktopBridgeProtocol';
 
 const BRIDGE_PORT = 7778;
 export const BRIDGE_HEALTH_URL = 'http://localhost:7778/desktop/health';
 const TOKEN_KEY = 'uc_desktop_bridge_token_v1';
+const LOCAL_FILE_SESSION_GRANT_KEY = 'uc_local_file_session_grant_v1';
+const LOCAL_FILE_SESSION_TTL_MS = 4 * 60 * 60 * 1000;
 
 export function getDesktopBridgeBaseUrl(): string | null {
   return getBridgeUrl(BRIDGE_PORT);
@@ -275,10 +278,194 @@ export type DesktopFileEntry = {
   modifiedAt: string | null;
 };
 
+export type LocalFileSessionGrant = {
+  token: string;
+  roots: string[];
+  scope: 'read' | 'write';
+  expiresAt: string;
+};
+
+export type LocalFileSessionGrantRequest = {
+  roots?: string[];
+  ttlMs?: number;
+  reason?: string;
+  scope?: 'read' | 'write';
+};
+
+function normalizeGrantRootForCompare(raw: string): string {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  const lower = trimmed.toLowerCase();
+  if (/^(?:google[_\s-]*drive|gdrive|my\s+drive)$/.test(lower)) return '~/Library/CloudStorage';
+  if (lower === 'home' || lower === 'home folder' || lower === 'home directory') return '~';
+  if (lower === 'downloads' || lower === 'download') return '~/Downloads';
+  if (lower === 'documents' || lower === 'document') return '~/Documents';
+  if (lower === 'desktop') return '~/Desktop';
+  if (lower === 'pictures' || lower === 'photos') return '~/Pictures';
+  if (lower === 'movies' || lower === 'videos') return '~/Movies';
+  if (lower === 'music' || lower === 'audio') return '~/Music';
+  return trimmed.replace(/\/+$/, '');
+}
+
+function grantCoversRequestedRoots(grant: LocalFileSessionGrant, requestedRoots?: string[]): boolean {
+  if (!requestedRoots || requestedRoots.length === 0) return true;
+  const grantRoots = grant.roots.map(normalizeGrantRootForCompare).filter(Boolean);
+  if (grantRoots.some((root) => root === '~' || root.endsWith('/Users') || root.includes('/Users/'))) {
+    const coversHome = grantRoots.some((root) => root === '~' || /\/Users\/[^/]+$/.test(root));
+    if (coversHome) return true;
+  }
+  return requestedRoots.every((rawRoot) => {
+    const root = normalizeGrantRootForCompare(rawRoot);
+    return grantRoots.some((grantRoot) => {
+      if (grantRoot === '~') return true;
+      if (root === grantRoot || root.startsWith(`${grantRoot}/`)) return true;
+      if (root === '~' && /\/Users\/[^/]+$/.test(grantRoot)) return true;
+      const homeMatch = grantRoot.match(/^\/Users\/[^/]+(?:\/(.+))?$/);
+      if (homeMatch) {
+        const homeAlias = homeMatch[1] ? `~/${homeMatch[1]}` : '~';
+        if (root === homeAlias || root.startsWith(`${homeAlias}/`)) return true;
+      }
+      if (root.startsWith('~/') && grantRoot.endsWith(root.slice(1))) return true;
+      return false;
+    });
+  });
+}
+
+function grantSatisfiesScope(grant: LocalFileSessionGrant, requiredScope: 'read' | 'write' = 'read'): boolean {
+  if (requiredScope === 'read') return grant.scope === 'read' || grant.scope === 'write';
+  return grant.scope === 'write';
+}
+
+export function getActiveLocalFileSessionGrant(
+  requestedRoots?: string[],
+  requiredScope: 'read' | 'write' = 'read',
+): LocalFileSessionGrant | null {
+  try {
+    if (typeof sessionStorage === 'undefined') return null;
+    const raw = sessionStorage.getItem(LOCAL_FILE_SESSION_GRANT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as LocalFileSessionGrant;
+    if (!parsed?.token || !parsed?.expiresAt || Date.parse(parsed.expiresAt) <= Date.now()) {
+      sessionStorage.removeItem(LOCAL_FILE_SESSION_GRANT_KEY);
+      return null;
+    }
+    parsed.scope = parsed.scope === 'write' ? 'write' : 'read';
+    if (!grantSatisfiesScope(parsed, requiredScope)) return null;
+    if (!grantCoversRequestedRoots(parsed, requestedRoots)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function hasActiveLocalFileSessionGrant(
+  requestedRoots?: string[],
+  requiredScope: 'read' | 'write' = 'read',
+): boolean {
+  return !!getActiveLocalFileSessionGrant(requestedRoots, requiredScope);
+}
+
+export function clearLocalFileSessionGrant(): void {
+  try {
+    if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem(LOCAL_FILE_SESSION_GRANT_KEY);
+  } catch {}
+}
+
+function writeLocalFileSessionGrant(grant: LocalFileSessionGrant): void {
+  try {
+    if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(LOCAL_FILE_SESSION_GRANT_KEY, JSON.stringify(grant));
+  } catch {}
+}
+
+function localFileGrantHeaderFromGrant(grant: LocalFileSessionGrant): Record<string, string> {
+  return { 'X-UC-File-Session-Token': grant.token };
+}
+
+function localFileGrantFailure<T>(
+  result: DesktopResult<unknown>,
+  fallback = 'Local file access could not be prepared.',
+): DesktopResult<T> {
+  return {
+    ok: false,
+    error: result.error || fallback,
+    errorCode: result.errorCode || 'file_access_not_granted',
+    recoveryHint: result.recoveryHint,
+    requiredEvidence: result.requiredEvidence,
+  };
+}
+
+async function ensureLocalFileGrantHeaders(
+  requestedRoots?: string[],
+  requiredScope: 'read' | 'write' = 'read',
+  reason = 'OpenSwan local file session access',
+): Promise<DesktopResult<Record<string, string>>> {
+  const cached = getActiveLocalFileSessionGrant(requestedRoots, requiredScope);
+  if (cached) return { ok: true, data: localFileGrantHeaderFromGrant(cached) };
+  const roots = Array.isArray(requestedRoots) && requestedRoots.length > 0 ? requestedRoots : ['~'];
+  const granted = await requestLocalFileSessionGrant({ roots, scope: requiredScope, reason });
+  if (!granted.ok || !granted.data) return localFileGrantFailure<Record<string, string>>(granted);
+  return { ok: true, data: localFileGrantHeaderFromGrant(granted.data) };
+}
+
+export function inferLocalFileGrantRootsForTask(task: string): string[] {
+  const normalized = String(task || '').toLowerCase();
+  const roots = new Set<string>();
+  if (/\b(?:google\s+drive|gdrive|my\s+drive)\b/.test(normalized)) {
+    roots.add('~/Library/CloudStorage');
+    roots.add('~/Google Drive');
+    roots.add('~/My Drive');
+    roots.add('~/Drive');
+    if (/\b(?:open|launch|load|indesign|in\s*design|photoshop|illustrator)\b/.test(normalized)) {
+      roots.add('~/Desktop');
+    }
+  }
+  if (/\bdownloads?\b/.test(normalized)) roots.add('~/Downloads');
+  if (/\bdocuments?\b/.test(normalized)) roots.add('~/Documents');
+  if (/\bdesktop\b/.test(normalized)) roots.add('~/Desktop');
+  if (/\bpictures?|photos?\b/.test(normalized)) roots.add('~/Pictures');
+  if (/\bmovies?|videos?\b/.test(normalized)) roots.add('~/Movies');
+  if (/\bmusic|audio\b/.test(normalized)) roots.add('~/Music');
+  if (roots.size === 0) roots.add('~');
+  return Array.from(roots);
+}
+
+export async function requestLocalFileSessionGrant(request: LocalFileSessionGrantRequest = {}): Promise<DesktopResult<LocalFileSessionGrant>> {
+  const roots = Array.isArray(request.roots) && request.roots.length > 0 ? request.roots : ['~'];
+  const scope = request.scope === 'write' ? 'write' : 'read';
+  const cached = getActiveLocalFileSessionGrant(roots, scope);
+  if (cached) return { ok: true, data: cached };
+  const r = await callBridge('POST', '/desktop/file_grant', {
+    roots,
+    scope,
+    ttlMs: typeof request.ttlMs === 'number' ? request.ttlMs : LOCAL_FILE_SESSION_TTL_MS,
+    reason: request.reason || 'OpenSwan local file session access',
+  });
+  if (!r.ok) return r as DesktopResult<LocalFileSessionGrant>;
+  const d = r.data as any;
+  const grant: LocalFileSessionGrant = {
+    token: String(d?.token || ''),
+    roots: Array.isArray(d?.roots) ? d.roots.map(String) : roots,
+    scope: d?.scope === 'write' ? 'write' : 'read',
+    expiresAt: String(d?.expiresAt || new Date(Date.now() + LOCAL_FILE_SESSION_TTL_MS).toISOString()),
+  };
+  if (!grant.token) return { ok: false, error: 'bridge did not return a local file session token', errorCode: 'unknown' };
+  if (scope === 'write' && grant.scope !== 'write') {
+    return {
+      ok: false,
+      error: 'Running desktop bridge does not support write-scoped local file grants yet. Restart the bridge to enable local file changes.',
+      errorCode: 'stale_bridge',
+    };
+  }
+  writeLocalFileSessionGrant(grant);
+  return { ok: true, data: grant };
+}
+
 export async function listFiles(rawPath: string): Promise<DesktopResult<{ path: string; entries: DesktopFileEntry[]; truncated: boolean }>> {
   const v = validateDesktopPath(rawPath);
   if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
-  const r = await callBridge('GET', `/desktop/file_list?path=${encodeURIComponent(v.path)}`);
+  const grantHeaders = await ensureLocalFileGrantHeaders([v.path], 'read', `List files in ${v.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ path: string; entries: DesktopFileEntry[]; truncated: boolean }>(grantHeaders);
+  const r = await callBridge('GET', `/desktop/file_list?path=${encodeURIComponent(v.path)}`, undefined, { headers: grantHeaders.data });
   if (!r.ok) return r as DesktopResult<{ path: string; entries: DesktopFileEntry[]; truncated: boolean }>;
   const d = r.data as any;
   return { ok: true, data: { path: String(d?.path || v.path), entries: Array.isArray(d?.entries) ? d.entries : [], truncated: Boolean(d?.truncated) } };
@@ -287,9 +474,11 @@ export async function listFiles(rawPath: string): Promise<DesktopResult<{ path: 
 export async function readFile(rawPath: string, maxBytes?: number): Promise<DesktopResult<{ path: string; content: string; size: number; truncated: boolean }>> {
   const v = validateDesktopPath(rawPath);
   if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+  const grantHeaders = await ensureLocalFileGrantHeaders([v.path], 'read', `Read local file ${v.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ path: string; content: string; size: number; truncated: boolean }>(grantHeaders);
   const params = new URLSearchParams({ path: v.path });
   if (typeof maxBytes === 'number') params.set('maxBytes', String(maxBytes));
-  const r = await callBridge('GET', `/desktop/file_read?${params.toString()}`);
+  const r = await callBridge('GET', `/desktop/file_read?${params.toString()}`, undefined, { headers: grantHeaders.data });
   if (!r.ok) return r as DesktopResult<{ path: string; content: string; size: number; truncated: boolean }>;
   const d = r.data as any;
   return {
@@ -307,14 +496,29 @@ export type DesktopFileSearchMatch = {
   snippet?: string;
 };
 
-export async function searchFiles(rootPath: string, query: string): Promise<DesktopResult<{ rootPath: string; query: string; matches: DesktopFileSearchMatch[]; visited: number; truncated: boolean }>> {
+export type DesktopFileSearchOptions = {
+  maxResults?: number;
+  maxFiles?: number;
+  maxDepth?: number;
+  includeContent?: boolean;
+  extensions?: string[];
+};
+
+export async function searchFiles(rootPath: string, query: string, options: DesktopFileSearchOptions = {}): Promise<DesktopResult<{ rootPath: string; query: string; matches: DesktopFileSearchMatch[]; visited: number; searchedContent?: number; truncated: boolean }>> {
   const v = validateDesktopPath(rootPath);
   if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
-  const q = String(query || '').trim();
+  const q = normalizeDesktopFileSearchQuery(query);
   if (!q || q.length > 120) return { ok: false, error: 'query is required and must be <= 120 chars', errorCode: 'invalid_input' };
+  const grantHeaders = await ensureLocalFileGrantHeaders([v.path], 'read', `Search local files in ${v.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ rootPath: string; query: string; matches: DesktopFileSearchMatch[]; visited: number; searchedContent?: number; truncated: boolean }>(grantHeaders);
   const params = new URLSearchParams({ rootPath: v.path, query: q });
-  const r = await callBridge('GET', `/desktop/file_search?${params.toString()}`);
-  if (!r.ok) return r as DesktopResult<{ rootPath: string; query: string; matches: DesktopFileSearchMatch[]; visited: number; truncated: boolean }>;
+  if (typeof options.maxResults === 'number') params.set('maxResults', String(options.maxResults));
+  if (typeof options.maxFiles === 'number') params.set('maxFiles', String(options.maxFiles));
+  if (typeof options.maxDepth === 'number') params.set('maxDepth', String(options.maxDepth));
+  if (typeof options.includeContent === 'boolean') params.set('includeContent', String(options.includeContent));
+  if (Array.isArray(options.extensions) && options.extensions.length > 0) params.set('extensions', options.extensions.join(','));
+  const r = await callBridge('GET', `/desktop/file_search?${params.toString()}`, undefined, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<{ rootPath: string; query: string; matches: DesktopFileSearchMatch[]; visited: number; searchedContent?: number; truncated: boolean }>;
   const d = r.data as any;
   return {
     ok: true,
@@ -323,7 +527,172 @@ export async function searchFiles(rootPath: string, query: string): Promise<Desk
       query: String(d?.query || q),
       matches: Array.isArray(d?.matches) ? d.matches : [],
       visited: Number(d?.visited || 0),
+      searchedContent: Number(d?.searchedContent || 0),
       truncated: Boolean(d?.truncated),
+    },
+  };
+}
+
+export type DesktopFileStat = {
+  path: string;
+  exists: boolean;
+  kind: 'file' | 'directory' | 'symlink' | 'other' | null;
+  size: number | null;
+  modifiedAt: string | null;
+  createdAt: string | null;
+};
+
+export async function statFile(rawPath: string): Promise<DesktopResult<DesktopFileStat>> {
+  const v = validateDesktopPath(rawPath);
+  if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+  const grantHeaders = await ensureLocalFileGrantHeaders([v.path], 'read', `Inspect local file ${v.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<DesktopFileStat>(grantHeaders);
+  const r = await callBridge('GET', `/desktop/file_stat?path=${encodeURIComponent(v.path)}`, undefined, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<DesktopFileStat>;
+  const d = r.data as any;
+  const kind = d?.kind === 'file' || d?.kind === 'directory' || d?.kind === 'symlink' || d?.kind === 'other'
+    ? d.kind
+    : null;
+  return {
+    ok: true,
+    data: {
+      path: String(d?.path || v.path),
+      exists: Boolean(d?.exists),
+      kind,
+      size: typeof d?.size === 'number' ? d.size : null,
+      modifiedAt: typeof d?.modifiedAt === 'string' ? d.modifiedAt : null,
+      createdAt: typeof d?.createdAt === 'string' ? d.createdAt : null,
+    },
+  };
+}
+
+export async function renameFile(
+  fromRawPath: string,
+  toRawPath: string,
+  options: { overwrite?: boolean } = {},
+): Promise<DesktopResult<{ fromPath: string; toPath: string; kind: 'file' | 'directory' | 'other' }>> {
+  const from = validateDesktopPath(fromRawPath);
+  if (!from.ok) return { ok: false, error: from.error, errorCode: 'invalid_input' };
+  const to = validateDesktopPath(toRawPath);
+  if (!to.ok) return { ok: false, error: to.error, errorCode: 'invalid_input' };
+  const grantHeaders = await ensureLocalFileGrantHeaders([from.path, to.path], 'write', `Rename local file ${from.path} to ${to.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ fromPath: string; toPath: string; kind: 'file' | 'directory' | 'other' }>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/file_rename', {
+    fromPath: from.path,
+    toPath: to.path,
+    overwrite: Boolean(options.overwrite),
+  }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<{ fromPath: string; toPath: string; kind: 'file' | 'directory' | 'other' }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      fromPath: String(d?.fromPath || from.path),
+      toPath: String(d?.toPath || to.path),
+      kind: d?.kind === 'directory' ? 'directory' : d?.kind === 'other' ? 'other' : 'file',
+    },
+  };
+}
+
+export async function writeTextFile(
+  rawPath: string,
+  content: string,
+  options: { append?: boolean; overwrite?: boolean } = {},
+): Promise<DesktopResult<{ path: string; kind: 'file'; bytes: number; size: number; append: boolean; overwrite: boolean }>> {
+  const v = validateDesktopPath(rawPath);
+  if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+  if (typeof content !== 'string') return { ok: false, error: 'content must be a string', errorCode: 'invalid_input' };
+  const grantHeaders = await ensureLocalFileGrantHeaders([v.path], 'write', `Write local file ${v.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ path: string; kind: 'file'; bytes: number; size: number; append: boolean; overwrite: boolean }>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/file_write_text', {
+    path: v.path,
+    content,
+    append: Boolean(options.append),
+    overwrite: Boolean(options.overwrite),
+  }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<{ path: string; kind: 'file'; bytes: number; size: number; append: boolean; overwrite: boolean }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      path: String(d?.path || v.path),
+      kind: 'file',
+      bytes: Number(d?.bytes || 0),
+      size: Number(d?.size || 0),
+      append: Boolean(d?.append),
+      overwrite: Boolean(d?.overwrite),
+    },
+  };
+}
+
+export async function createDirectory(
+  rawPath: string,
+  options: { recursive?: boolean } = {},
+): Promise<DesktopResult<{ path: string; kind: 'directory'; existed: boolean }>> {
+  const v = validateDesktopPath(rawPath);
+  if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+  const grantHeaders = await ensureLocalFileGrantHeaders([v.path], 'write', `Create local directory ${v.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ path: string; kind: 'directory'; existed: boolean }>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/file_mkdir', {
+    path: v.path,
+    recursive: options.recursive !== false,
+  }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<{ path: string; kind: 'directory'; existed: boolean }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      path: String(d?.path || v.path),
+      kind: 'directory',
+      existed: Boolean(d?.existed),
+    },
+  };
+}
+
+export async function copyFile(
+  fromRawPath: string,
+  toRawPath: string,
+  options: { overwrite?: boolean } = {},
+): Promise<DesktopResult<{ fromPath: string; toPath: string; kind: 'file' | 'directory' }>> {
+  const from = validateDesktopPath(fromRawPath);
+  if (!from.ok) return { ok: false, error: from.error, errorCode: 'invalid_input' };
+  const to = validateDesktopPath(toRawPath);
+  if (!to.ok) return { ok: false, error: to.error, errorCode: 'invalid_input' };
+  const grantHeaders = await ensureLocalFileGrantHeaders([from.path, to.path], 'write', `Copy local file ${from.path} to ${to.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ fromPath: string; toPath: string; kind: 'file' | 'directory' }>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/file_copy', {
+    fromPath: from.path,
+    toPath: to.path,
+    overwrite: Boolean(options.overwrite),
+  }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<{ fromPath: string; toPath: string; kind: 'file' | 'directory' }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      fromPath: String(d?.fromPath || from.path),
+      toPath: String(d?.toPath || to.path),
+      kind: d?.kind === 'directory' ? 'directory' : 'file',
+    },
+  };
+}
+
+export async function trashFile(
+  rawPath: string,
+): Promise<DesktopResult<{ path: string; trashPath: string; kind: 'file' | 'directory' }>> {
+  const v = validateDesktopPath(rawPath);
+  if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+  const grantHeaders = await ensureLocalFileGrantHeaders([v.path], 'write', `Move local file to Trash ${v.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ path: string; trashPath: string; kind: 'file' | 'directory' }>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/file_trash', { path: v.path }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<{ path: string; trashPath: string; kind: 'file' | 'directory' }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      path: String(d?.path || v.path),
+      trashPath: String(d?.trashPath || ''),
+      kind: d?.kind === 'directory' ? 'directory' : 'file',
     },
   };
 }
@@ -377,6 +746,46 @@ export async function mouseClick(args: {
   if (!r.ok) return r as DesktopResult<{ x: number; y: number; button: string; count: number }>;
   const d = r.data as any;
   return { ok: true, data: { x: Number(d?.x ?? v.x), y: Number(d?.y ?? v.y), button: String(d?.button || button), count: Number(d?.count || count) } };
+}
+
+export async function mouseDown(args: {
+  x: number;
+  y: number;
+  button?: 'left' | 'right';
+}): Promise<DesktopResult<{ x: number; y: number; button: string }>> {
+  const v = validateClickCoords(args.x, args.y);
+  if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+  const button = args.button === 'right' ? 'right' : 'left';
+  const r = await callBridge('POST', '/desktop/mouse_down', { x: v.x, y: v.y, button });
+  if (!r.ok) return r as DesktopResult<{ x: number; y: number; button: string }>;
+  const d = r.data as any;
+  return { ok: true, data: { x: Number(d?.x ?? v.x), y: Number(d?.y ?? v.y), button: String(d?.button || button) } };
+}
+
+export async function mouseUp(args: {
+  x?: number;
+  y?: number;
+  button?: 'left' | 'right';
+} = {}): Promise<DesktopResult<{ x: number | null; y: number | null; button: string }>> {
+  const hasX = typeof args.x === 'number';
+  const hasY = typeof args.y === 'number';
+  if (hasX !== hasY) return { ok: false, error: 'x and y must be supplied together', errorCode: 'invalid_input' };
+  const button = args.button === 'right' ? 'right' : 'left';
+  const body: Record<string, unknown> = { button };
+  let x: number | null = null;
+  let y: number | null = null;
+  if (hasX && hasY) {
+    const v = validateClickCoords(Number(args.x), Number(args.y));
+    if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+    x = v.x;
+    y = v.y;
+    body.x = v.x;
+    body.y = v.y;
+  }
+  const r = await callBridge('POST', '/desktop/mouse_up', body);
+  if (!r.ok) return r as DesktopResult<{ x: number | null; y: number | null; button: string }>;
+  const d = r.data as any;
+  return { ok: true, data: { x: d?.x == null ? x : Number(d.x), y: d?.y == null ? y : Number(d.y), button: String(d?.button || button) } };
 }
 
 export async function mouseDrag(args: {
@@ -443,6 +852,40 @@ export async function typeText(text: string): Promise<DesktopResult<{ chars: num
   return { ok: true, data: { chars: (r.data as any)?.chars ?? text.length } };
 }
 
+export async function pasteText(
+  text: string,
+  options: { appName?: string; restoreClipboard?: boolean; focusMode?: 'require' | 'best_effort' | 'skip' } = {},
+): Promise<DesktopResult<{ chars: number; appName: string | null; restoredClipboard: boolean; focusWarning?: string | null }>> {
+  if (typeof text !== 'string' || text.length === 0) {
+    return { ok: false, error: 'text must be a non-empty string', errorCode: 'invalid_input' };
+  }
+  if (text.length > 20_000) {
+    return { ok: false, error: 'text too long (max 20000 chars per paste)', errorCode: 'invalid_input' };
+  }
+  const appName = String(options.appName || '').trim();
+  if (appName && !isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  const focusMode = options.focusMode || 'require';
+  if (!['require', 'best_effort', 'skip'].includes(focusMode)) {
+    return { ok: false, error: 'Invalid paste focusMode', errorCode: 'invalid_input' };
+  }
+  const body: Record<string, unknown> = { text, restoreClipboard: options.restoreClipboard !== false, focusMode };
+  if (appName) body.appName = appName;
+  const r = await callBridge('POST', '/desktop/paste_text', body);
+  if (!r.ok) return r as DesktopResult<{ chars: number; appName: string | null; restoredClipboard: boolean; focusWarning?: string | null }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      chars: Number(d?.chars ?? text.length),
+      appName: d?.appName ? String(d.appName) : null,
+      restoredClipboard: Boolean(d?.restoredClipboard),
+      focusWarning: d?.focusWarning ? String(d.focusWarning) : null,
+    },
+  };
+}
+
 /** Phase 1c — waits until `appName` shows up in the running-app list.
  *  Replaces the old `sleep(1200)` race in auto-chain — we start typing
  *  only after the app has rendered its first window. */
@@ -496,19 +939,94 @@ export async function openUrl(rawUrl: string): Promise<DesktopResult<{ url: stri
 
 /** Phase 1d — `open <path>` in the default app. Path must not contain
  *  shell metacharacters. */
-export async function openPath(rawPath: string): Promise<DesktopResult<{ path: string }>> {
+export async function openPath(rawPath: string, options: { appName?: string } = {}): Promise<DesktopResult<{ path: string; appName: string | null }>> {
   const v = validateDesktopPath(rawPath);
   if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
-  const r = await callBridge('POST', '/desktop/open_path', { path: v.path });
+  const appName = String(options.appName || '').trim();
+  if (appName && !isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/open_path', {
+    path: v.path,
+    appName: appName || undefined,
+  });
   if (!r.ok) {
     // Surface `path_not_found` as a typed errorCode so callers can
     // choose a better fallback than a generic HTTP 400.
     if (String(r.error || '').includes('path_not_found')) {
-      return { ok: false, error: 'File or folder does not exist at that path.', errorCode: 'app_not_found' };
+      return { ok: false, error: 'File or folder does not exist at that path.', errorCode: 'path_not_found' };
     }
-    return r as DesktopResult<{ path: string }>;
+    return r as DesktopResult<{ path: string; appName: string | null }>;
   }
-  return { ok: true, data: { path: (r.data as any)?.path || v.path } };
+  return {
+    ok: true,
+    data: {
+      path: (r.data as any)?.path || v.path,
+      appName: (r.data as any)?.appName ? String((r.data as any).appName) : (appName || null),
+    },
+  };
+}
+
+export async function stageAttachmentForDesktop(args: {
+  filename: string;
+  mimeType?: string | null;
+  sourceUrl?: string | null;
+  base64?: string | null;
+  groupId?: string | null;
+}): Promise<DesktopResult<{ path: string; filename: string; sizeBytes: number; directory?: string; sha256?: string }>> {
+  const filename = String(args.filename || '').trim();
+  if (!filename) return { ok: false, error: 'filename is required', errorCode: 'invalid_input' };
+  if (!args.sourceUrl && !args.base64) {
+    return { ok: false, error: 'sourceUrl or base64 is required', errorCode: 'invalid_input' };
+  }
+  if (args.sourceUrl) {
+    const v = validateDesktopUrl(args.sourceUrl);
+    if (!v.ok || (v.scheme !== 'http' && v.scheme !== 'https')) {
+      return { ok: false, error: v.ok ? 'sourceUrl must be http or https' : v.error, errorCode: 'invalid_input' };
+    }
+  }
+  const r = await callBridge('POST', '/desktop/stage_attachment', {
+    filename,
+    mimeType: args.mimeType || 'application/octet-stream',
+    sourceUrl: args.sourceUrl || undefined,
+    base64: args.base64 || undefined,
+    groupId: args.groupId || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<{ path: string; filename: string; sizeBytes: number; directory?: string; sha256?: string }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      path: String(d?.path || ''),
+      filename: String(d?.filename || filename),
+      sizeBytes: Number(d?.sizeBytes || 0),
+      directory: d?.directory ? String(d.directory) : undefined,
+      sha256: d?.sha256 ? String(d.sha256) : undefined,
+    },
+  };
+}
+
+export async function stageAttachmentManifestForDesktop(args: {
+  groupId: string;
+  manifest: unknown;
+}): Promise<DesktopResult<{ path: string; directory: string; sizeBytes: number; sha256?: string }>> {
+  const groupId = String(args.groupId || '').trim();
+  if (!groupId) return { ok: false, error: 'groupId is required', errorCode: 'invalid_input' };
+  const r = await callBridge('POST', '/desktop/stage_attachment_manifest', {
+    groupId,
+    manifest: args.manifest,
+  });
+  if (!r.ok) return r as DesktopResult<{ path: string; directory: string; sizeBytes: number; sha256?: string }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      path: String(d?.path || ''),
+      directory: String(d?.directory || ''),
+      sizeBytes: Number(d?.sizeBytes || 0),
+      sha256: d?.sha256 ? String(d.sha256) : undefined,
+    },
+  };
 }
 
 /** Phase 1d — mouse click at absolute screen coords. Uses cliclick when
@@ -626,6 +1144,29 @@ export async function clickElement(args: { pid: number; path: string }): Promise
   return { ok: true, data: { method: String(d?.method || 'unknown') } };
 }
 
+export async function setElementValue(args: { pid: number; path: string; text: string }): Promise<DesktopResult<{ method: string; chars: number }>> {
+  if (!args.pid || args.pid <= 0) {
+    return { ok: false, error: 'pid required', errorCode: 'invalid_input' };
+  }
+  if (!args.path || !/^[0-9]+(\.[0-9]+)*$/.test(args.path)) {
+    return { ok: false, error: 'path must be a dotted integer sequence', errorCode: 'invalid_input' };
+  }
+  if (typeof args.text !== 'string' || args.text.length === 0) {
+    return { ok: false, error: 'text must be a non-empty string', errorCode: 'invalid_input' };
+  }
+  if (args.text.length > 20_000) {
+    return { ok: false, error: 'text too long (max 20000 chars)', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/set_element_value', {
+    pid: args.pid,
+    path: args.path,
+    text: args.text,
+  });
+  if (!r.ok) return r as DesktopResult<{ method: string; chars: number }>;
+  const d = r.data as any;
+  return { ok: true, data: { method: String(d?.method || 'ax_set_value'), chars: Number(d?.chars ?? args.text.length) } };
+}
+
 /**
  * Flatten a pruned tree into a list of addressable nodes + a compact
  * rendering suitable for LLM consumption (one line per node, indented
@@ -654,12 +1195,1529 @@ export async function pressKeys(combo: string): Promise<DesktopResult<{ combo: s
   return { ok: true, data: { combo: (r.data as any)?.combo || combo } };
 }
 
+export async function clickMenu(args: {
+  appName?: string;
+  menuPath: string[];
+}): Promise<DesktopResult<{ appName: string | null; menuPath: string[] }>> {
+  const appName = String(args.appName || '').trim();
+  if (appName && !isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  const menuPath = Array.isArray(args.menuPath)
+    ? args.menuPath.map((part) => String(part || '').trim()).filter(Boolean)
+    : [];
+  if (menuPath.length < 2 || menuPath.length > 6) {
+    return { ok: false, error: 'menuPath must contain 2-6 menu labels', errorCode: 'invalid_input' };
+  }
+  if (menuPath.some((part) => part.length > 80 || /[\x00-\x1f]/.test(part))) {
+    return { ok: false, error: 'menuPath labels must be <= 80 chars and cannot contain control characters', errorCode: 'invalid_input' };
+  }
+  const body: Record<string, unknown> = { menuPath };
+  if (appName) body.appName = appName;
+  const r = await callBridge('POST', '/desktop/menu_click', body);
+  if (!r.ok) return r as DesktopResult<{ appName: string | null; menuPath: string[] }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : null,
+      menuPath: Array.isArray(d?.menuPath) ? d.menuPath.map(String) : menuPath,
+    },
+  };
+}
+
+export async function indesignFindChange(args: {
+  appName?: string;
+  findText: string;
+  changeText: string;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}): Promise<DesktopResult<{
+  appName: string | null;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  findText: string;
+  changeText: string;
+  matched: number;
+  changed: number;
+  remaining: number;
+  replacementMatches: number;
+  method: string | null;
+  unlockedCount: number;
+  lockedLayers: number;
+  hiddenLayers: number;
+  lockedPageItems: number;
+  docWasModified: boolean;
+  docModified: boolean;
+  docSaved: boolean;
+  fallbackReason: string | null;
+  error: string | null;
+}>> {
+  const appName = String(args.appName || 'InDesign').trim() || 'InDesign';
+  const findText = String(args.findText ?? '');
+  const changeText = String(args.changeText ?? '');
+  const expectedDocumentName = args.expectedDocumentName == null ? '' : String(args.expectedDocumentName).trim();
+  const sourceDocumentPath = args.sourceDocumentPath == null ? '' : String(args.sourceDocumentPath).trim();
+  if (!isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  if (!findText || findText.length > 5000 || changeText.length > 5000 || /[\x00]/.test(`${findText}${changeText}`)) {
+    return { ok: false, error: 'findText/changeText must be 1-5000 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+    return { ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  if (sourceDocumentPath.length > 1024 || /[\x00-\x1f]/.test(sourceDocumentPath)) {
+    return { ok: false, error: 'sourceDocumentPath must be <= 1024 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/indesign_find_change', {
+    appName,
+    findText,
+    changeText,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<{
+    appName: string | null;
+    documentName: string | null;
+    expectedDocumentName: string | null;
+    sourceDocumentPath: string | null;
+    findText: string;
+    changeText: string;
+    matched: number;
+    changed: number;
+    remaining: number;
+    replacementMatches: number;
+    method: string | null;
+    unlockedCount: number;
+    lockedLayers: number;
+    hiddenLayers: number;
+    lockedPageItems: number;
+    docWasModified: boolean;
+    docModified: boolean;
+    docSaved: boolean;
+    fallbackReason: string | null;
+    error: string | null;
+  }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      findText: String(d?.findText ?? findText),
+      changeText: String(d?.changeText ?? changeText),
+      matched: Number.isFinite(Number(d?.matched)) ? Number(d.matched) : 0,
+      changed: Number.isFinite(Number(d?.changed)) ? Number(d.changed) : 0,
+      remaining: Number.isFinite(Number(d?.remaining)) ? Number(d.remaining) : 0,
+      replacementMatches: Number.isFinite(Number(d?.replacementMatches)) ? Number(d.replacementMatches) : 0,
+      method: d?.method ? String(d.method) : null,
+      unlockedCount: Number.isFinite(Number(d?.unlockedCount)) ? Number(d.unlockedCount) : 0,
+      lockedLayers: Number.isFinite(Number(d?.lockedLayers)) ? Number(d.lockedLayers) : 0,
+      hiddenLayers: Number.isFinite(Number(d?.hiddenLayers)) ? Number(d.hiddenLayers) : 0,
+      lockedPageItems: Number.isFinite(Number(d?.lockedPageItems)) ? Number(d.lockedPageItems) : 0,
+      docWasModified: d?.docWasModified === true,
+      docModified: d?.docModified === true,
+      docSaved: d?.docSaved === true,
+      fallbackReason: d?.fallbackReason ? String(d.fallbackReason) : null,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type InDesignBatchFindChangePair = {
+  findText: string;
+  changeText: string;
+};
+
+export type InDesignBatchFindChangeItemResult = InDesignBatchFindChangePair & {
+  matched: number;
+  changed: number;
+  remaining: number;
+  replacementMatches: number;
+  method: string | null;
+  unlockedCount: number;
+  fallbackReason: string | null;
+  error: string | null;
+};
+
+export type InDesignBatchFindChangeResult = {
+  appName: string | null;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  pairCount: number;
+  matched: number;
+  changed: number;
+  remaining: number;
+  replacementMatches: number;
+  unlockedCount: number;
+  docWasModified: boolean;
+  docModified: boolean;
+  docSaved: boolean;
+  results: InDesignBatchFindChangeItemResult[];
+  error: string | null;
+};
+
+export async function indesignBatchFindChange(args: {
+  appName?: string;
+  pairs: InDesignBatchFindChangePair[];
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}): Promise<DesktopResult<InDesignBatchFindChangeResult>> {
+  const appName = String(args.appName || 'InDesign').trim() || 'InDesign';
+  const expectedDocumentName = args.expectedDocumentName == null ? '' : String(args.expectedDocumentName).trim();
+  const sourceDocumentPath = args.sourceDocumentPath == null ? '' : String(args.sourceDocumentPath).trim();
+  const pairs = Array.isArray(args.pairs)
+    ? args.pairs.slice(0, 20).map((pair) => ({
+        findText: String(pair?.findText ?? ''),
+        changeText: String(pair?.changeText ?? ''),
+      })).filter((pair) => pair.findText)
+    : [];
+  if (!isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  if (pairs.length < 1 || pairs.length > 20 || pairs.some((pair) => !pair.findText || pair.findText.length > 5000 || pair.changeText.length > 5000 || /[\x00]/.test(`${pair.findText}${pair.changeText}`))) {
+    return { ok: false, error: 'pairs must contain 1-20 find/change values, each <= 5000 chars and without NUL.', errorCode: 'invalid_input' };
+  }
+  if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+    return { ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  if (sourceDocumentPath.length > 1024 || /[\x00-\x1f]/.test(sourceDocumentPath)) {
+    return { ok: false, error: 'sourceDocumentPath must be <= 1024 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/indesign_batch_find_change', {
+    appName,
+    pairs,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<InDesignBatchFindChangeResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const results = Array.isArray(d?.results)
+    ? d.results.slice(0, pairs.length).map((item: any, index: number) => ({
+        findText: item?.findText ? String(item.findText) : pairs[index]?.findText || '',
+        changeText: item?.changeText !== undefined ? String(item.changeText) : pairs[index]?.changeText || '',
+        matched: toNumber(item?.matched),
+        changed: toNumber(item?.changed),
+        remaining: toNumber(item?.remaining),
+        replacementMatches: toNumber(item?.replacementMatches),
+        method: item?.method ? String(item.method) : null,
+        unlockedCount: toNumber(item?.unlockedCount),
+        fallbackReason: item?.fallbackReason ? String(item.fallbackReason) : null,
+        error: item?.error ? String(item.error) : null,
+      }))
+    : [];
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      pairCount: toNumber(d?.pairCount || results.length),
+      matched: toNumber(d?.matched),
+      changed: toNumber(d?.changed),
+      remaining: toNumber(d?.remaining),
+      replacementMatches: toNumber(d?.replacementMatches),
+      unlockedCount: toNumber(d?.unlockedCount),
+      docWasModified: d?.docWasModified === true,
+      docModified: d?.docModified === true,
+      docSaved: d?.docSaved === true,
+      results,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type InDesignDocumentSummary = {
+  name: string;
+  path: string | null;
+  modified: boolean;
+  saved: boolean;
+  pageCount: number;
+};
+
+export type InDesignDocumentStatus = {
+  appName: string | null;
+  appRunning: boolean;
+  status: string;
+  documentCount: number;
+  activeDocumentName: string | null;
+  activeDocumentPath: string | null;
+  activeDocumentModified: boolean;
+  activeDocumentSaved: boolean;
+  pageCount: number;
+  spreadCount: number;
+  layerCount: number;
+  lockedLayers: number;
+  hiddenLayers: number;
+  linkCount: number;
+  missingLinks: number;
+  modifiedLinks: number;
+  problemLinks: number;
+  fontCount: number;
+  missingFonts: number;
+  selectionCount: number;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  documents: InDesignDocumentSummary[];
+  error: string | null;
+};
+
+export async function indesignDocumentStatus(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+} = {}): Promise<DesktopResult<InDesignDocumentStatus>> {
+  const appName = String(args.appName || 'InDesign').trim() || 'InDesign';
+  const expectedDocumentName = args.expectedDocumentName == null ? '' : String(args.expectedDocumentName).trim();
+  const sourceDocumentPath = args.sourceDocumentPath == null ? '' : String(args.sourceDocumentPath).trim();
+  if (!isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+    return { ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  if (sourceDocumentPath.length > 1024 || /[\x00-\x1f]/.test(sourceDocumentPath)) {
+    return { ok: false, error: 'sourceDocumentPath must be <= 1024 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/indesign_document_status', {
+    appName,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<InDesignDocumentStatus>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const documents = Array.isArray(d?.documents)
+    ? d.documents.slice(0, 12).map((doc: any) => ({
+        name: doc?.name ? String(doc.name) : '',
+        path: doc?.path ? String(doc.path) : null,
+        modified: doc?.modified === true,
+        saved: doc?.saved === true,
+        pageCount: toNumber(doc?.pageCount),
+      })).filter((doc: InDesignDocumentSummary) => !!doc.name)
+    : [];
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      appRunning: d?.appRunning === true,
+      status: d?.status ? String(d.status) : 'unknown',
+      documentCount: toNumber(d?.documentCount),
+      activeDocumentName: d?.activeDocumentName ? String(d.activeDocumentName) : null,
+      activeDocumentPath: d?.activeDocumentPath ? String(d.activeDocumentPath) : null,
+      activeDocumentModified: d?.activeDocumentModified === true,
+      activeDocumentSaved: d?.activeDocumentSaved === true,
+      pageCount: toNumber(d?.pageCount),
+      spreadCount: toNumber(d?.spreadCount),
+      layerCount: toNumber(d?.layerCount),
+      lockedLayers: toNumber(d?.lockedLayers),
+      hiddenLayers: toNumber(d?.hiddenLayers),
+      linkCount: toNumber(d?.linkCount),
+      missingLinks: toNumber(d?.missingLinks),
+      modifiedLinks: toNumber(d?.modifiedLinks),
+      problemLinks: toNumber(d?.problemLinks),
+      fontCount: toNumber(d?.fontCount),
+      missingFonts: toNumber(d?.missingFonts),
+      selectionCount: toNumber(d?.selectionCount),
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      documents,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type InDesignUpdateTextLayerResult = {
+  appName: string | null;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  fieldName: string;
+  replacementText: string;
+  matchedLayers: number;
+  matchedFrames: number;
+  updatedFrames: number;
+  replacementMatches: number;
+  layerNames: string[];
+  unlockedCount: number;
+  docWasModified: boolean;
+  docModified: boolean;
+  docSaved: boolean;
+  error: string | null;
+};
+
+export type InDesignBatchUpdateTextLayerUpdate = {
+  fieldName: string;
+  replacementText: string;
+};
+
+export type InDesignBatchUpdateTextLayerItemResult = InDesignBatchUpdateTextLayerUpdate & {
+  matchedLayers: number;
+  matchedFrames: number;
+  updatedFrames: number;
+  replacementMatches: number;
+  layerNames: string[];
+  unlockedCount: number;
+  error: string | null;
+};
+
+export type InDesignBatchUpdateTextLayersResult = {
+  appName: string | null;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  fieldCount: number;
+  matchedLayers: number;
+  matchedFrames: number;
+  updatedFrames: number;
+  replacementMatches: number;
+  unlockedCount: number;
+  docWasModified: boolean;
+  docModified: boolean;
+  docSaved: boolean;
+  results: InDesignBatchUpdateTextLayerItemResult[];
+  error: string | null;
+};
+
+export type InDesignExportProofResult = {
+  appName: string | null;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  outputPath: string;
+  format: 'pdf';
+  pageCount: number;
+  spreadCount: number;
+  fileExists: boolean;
+  sizeBytes: number;
+  docWasModified: boolean;
+  docModified: boolean;
+  docSaved: boolean;
+  error: string | null;
+};
+
+export type InDesignRelinkAssetResult = {
+  appName: string | null;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  assetPath: string;
+  linkQuery: string | null;
+  matchedLinks: number;
+  relinkedLinks: number;
+  missingBefore: number;
+  missingAfter: number;
+  linkNames: string[];
+  docWasModified: boolean;
+  docModified: boolean;
+  docSaved: boolean;
+  error: string | null;
+};
+
+export type InDesignPackageDocumentResult = {
+  appName: string | null;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  outputFolderPath: string;
+  packageOk: boolean;
+  includeIdml: boolean;
+  includePdf: boolean;
+  copyFonts: boolean;
+  copyLinkedGraphics: boolean;
+  copyProfiles: boolean;
+  createReport: boolean;
+  fileCount: number;
+  folderCount: number;
+  sizeBytes: number;
+  sampleFiles: string[];
+  missingLinksBefore: number;
+  modifiedLinksBefore: number;
+  missingFontsBefore: number;
+  linkCount: number;
+  fontCount: number;
+  docWasModified: boolean;
+  docModified: boolean;
+  docSaved: boolean;
+  error: string | null;
+};
+
+export type InDesignTextInventoryFrame = {
+  layerName: string;
+  itemName: string;
+  label: string;
+  pageName: string;
+  contentPreview: string;
+  chars: number;
+  matchCount: number;
+  overflows: boolean;
+  locked: boolean;
+  visible: boolean;
+};
+
+export type InDesignTextInventoryResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  query: string;
+  textFrameCount: number;
+  matchedFrames: number;
+  oversetFrames: number;
+  lockedLayers: number;
+  hiddenLayers: number;
+  queryMatches: number;
+  layerNames: string[];
+  frames: InDesignTextInventoryFrame[];
+  error: string | null;
+};
+
+export type InDesignLayerStateAction = 'show' | 'hide' | 'lock' | 'unlock';
+
+export type InDesignLayerStateSummary = {
+  name: string;
+  visible: boolean;
+  locked: boolean;
+  printable: boolean;
+};
+
+export type InDesignSetLayerStateResult = {
+  appName: string | null;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  layerName: string;
+  action: InDesignLayerStateAction;
+  matchedLayers: number;
+  changedLayers: number;
+  beforeVisible: boolean;
+  afterVisible: boolean;
+  beforeLocked: boolean;
+  afterLocked: boolean;
+  beforePrintable: boolean;
+  afterPrintable: boolean;
+  docWasModified: boolean;
+  docModified: boolean;
+  docSaved: boolean;
+  matches: InDesignLayerStateSummary[];
+  error: string | null;
+};
+
+export async function indesignTextInventory(args: {
+  appName?: string;
+  query?: string | null;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+  maxItems?: number;
+} = {}): Promise<DesktopResult<InDesignTextInventoryResult>> {
+  const appName = String(args.appName || 'InDesign').trim() || 'InDesign';
+  const query = args.query == null ? '' : String(args.query).trim();
+  const expectedDocumentName = args.expectedDocumentName == null ? '' : String(args.expectedDocumentName).trim();
+  const sourceDocumentPath = args.sourceDocumentPath == null ? '' : String(args.sourceDocumentPath).trim();
+  const maxItems = Math.max(1, Math.min(80, Math.trunc(Number(args.maxItems || 30))));
+  if (!isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  if (query.length > 160 || /[\x00-\x1f]/.test(query)) {
+    return { ok: false, error: 'query must be <= 160 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+    return { ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  if (sourceDocumentPath.length > 1024 || /[\x00-\x1f]/.test(sourceDocumentPath)) {
+    return { ok: false, error: 'sourceDocumentPath must be <= 1024 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/indesign_text_inventory', {
+    appName,
+    query: query || undefined,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+    maxItems,
+  });
+  if (!r.ok) return r as DesktopResult<InDesignTextInventoryResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const frames = Array.isArray(d?.frames)
+    ? d.frames.slice(0, maxItems).map((frame: any) => ({
+        layerName: frame?.layerName ? String(frame.layerName) : '',
+        itemName: frame?.itemName ? String(frame.itemName) : '',
+        label: frame?.label ? String(frame.label) : '',
+        pageName: frame?.pageName ? String(frame.pageName) : '',
+        contentPreview: frame?.contentPreview ? String(frame.contentPreview) : '',
+        chars: toNumber(frame?.chars),
+        matchCount: toNumber(frame?.matchCount),
+        overflows: frame?.overflows === true,
+        locked: frame?.locked === true,
+        visible: frame?.visible !== false,
+      }))
+    : [];
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      query: d?.query ? String(d.query) : query,
+      textFrameCount: toNumber(d?.textFrameCount),
+      matchedFrames: toNumber(d?.matchedFrames),
+      oversetFrames: toNumber(d?.oversetFrames),
+      lockedLayers: toNumber(d?.lockedLayers),
+      hiddenLayers: toNumber(d?.hiddenLayers),
+      queryMatches: toNumber(d?.queryMatches),
+      layerNames: Array.isArray(d?.layerNames) ? d.layerNames.map((name: unknown) => String(name)).filter(Boolean).slice(0, 80) : [],
+      frames,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export async function indesignSetLayerState(args: {
+  appName?: string;
+  layerName: string;
+  action: InDesignLayerStateAction;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}): Promise<DesktopResult<InDesignSetLayerStateResult>> {
+  const appName = String(args.appName || 'InDesign').trim() || 'InDesign';
+  const layerName = String(args.layerName || '').trim();
+  const action = String(args.action || '').trim().toLowerCase() as InDesignLayerStateAction;
+  const expectedDocumentName = args.expectedDocumentName == null ? '' : String(args.expectedDocumentName).trim();
+  const sourceDocumentPath = args.sourceDocumentPath == null ? '' : String(args.sourceDocumentPath).trim();
+  if (!isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  if (!layerName || layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+    return { ok: false, error: 'layerName must be 1-160 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  if (!['show', 'hide', 'lock', 'unlock'].includes(action)) {
+    return { ok: false, error: 'action must be show, hide, lock, or unlock.', errorCode: 'invalid_input' };
+  }
+  if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+    return { ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  if (sourceDocumentPath.length > 1024 || /[\x00-\x1f]/.test(sourceDocumentPath)) {
+    return { ok: false, error: 'sourceDocumentPath must be <= 1024 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/indesign_set_layer_state', {
+    appName,
+    layerName,
+    action,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<InDesignSetLayerStateResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const matches = Array.isArray(d?.matches)
+    ? d.matches.slice(0, 12).map((item: any) => ({
+        name: item?.name ? String(item.name) : '',
+        visible: item?.visible !== false,
+        locked: item?.locked === true,
+        printable: item?.printable === true,
+      })).filter((item: InDesignLayerStateSummary) => !!item.name)
+    : [];
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      layerName: String(d?.layerName ?? layerName),
+      action: (['show', 'hide', 'lock', 'unlock'].includes(String(d?.action || '').toLowerCase())
+        ? String(d.action).toLowerCase()
+        : action) as InDesignLayerStateAction,
+      matchedLayers: toNumber(d?.matchedLayers),
+      changedLayers: toNumber(d?.changedLayers),
+      beforeVisible: d?.beforeVisible === true,
+      afterVisible: d?.afterVisible === true,
+      beforeLocked: d?.beforeLocked === true,
+      afterLocked: d?.afterLocked === true,
+      beforePrintable: d?.beforePrintable === true,
+      afterPrintable: d?.afterPrintable === true,
+      docWasModified: d?.docWasModified === true,
+      docModified: d?.docModified === true,
+      docSaved: d?.docSaved === true,
+      matches,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export async function indesignUpdateTextLayer(args: {
+  appName?: string;
+  fieldName: string;
+  replacementText: string;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}): Promise<DesktopResult<InDesignUpdateTextLayerResult>> {
+  const appName = String(args.appName || 'InDesign').trim() || 'InDesign';
+  const fieldName = String(args.fieldName || '').trim();
+  const replacementText = String(args.replacementText ?? '');
+  const expectedDocumentName = args.expectedDocumentName == null ? '' : String(args.expectedDocumentName).trim();
+  const sourceDocumentPath = args.sourceDocumentPath == null ? '' : String(args.sourceDocumentPath).trim();
+  if (!isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  if (!fieldName || fieldName.length > 160 || /[\x00-\x1f]/.test(fieldName)) {
+    return { ok: false, error: 'fieldName must be 1-160 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  if (replacementText.length > 5000 || /[\x00]/.test(replacementText)) {
+    return { ok: false, error: 'replacementText must be <= 5000 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+    return { ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  if (sourceDocumentPath.length > 1024 || /[\x00-\x1f]/.test(sourceDocumentPath)) {
+    return { ok: false, error: 'sourceDocumentPath must be <= 1024 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/indesign_update_text_layer', {
+    appName,
+    fieldName,
+    replacementText,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<InDesignUpdateTextLayerResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      fieldName: String(d?.fieldName ?? fieldName),
+      replacementText: String(d?.replacementText ?? replacementText),
+      matchedLayers: toNumber(d?.matchedLayers),
+      matchedFrames: toNumber(d?.matchedFrames),
+      updatedFrames: toNumber(d?.updatedFrames),
+      replacementMatches: toNumber(d?.replacementMatches),
+      layerNames: Array.isArray(d?.layerNames) ? d.layerNames.map((name: unknown) => String(name)).filter(Boolean).slice(0, 20) : [],
+      unlockedCount: toNumber(d?.unlockedCount),
+      docWasModified: d?.docWasModified === true,
+      docModified: d?.docModified === true,
+      docSaved: d?.docSaved === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export async function indesignBatchUpdateTextLayers(args: {
+  appName?: string;
+  updates: InDesignBatchUpdateTextLayerUpdate[];
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}): Promise<DesktopResult<InDesignBatchUpdateTextLayersResult>> {
+  const appName = String(args.appName || 'InDesign').trim() || 'InDesign';
+  const expectedDocumentName = args.expectedDocumentName == null ? '' : String(args.expectedDocumentName).trim();
+  const sourceDocumentPath = args.sourceDocumentPath == null ? '' : String(args.sourceDocumentPath).trim();
+  const updates = Array.isArray(args.updates)
+    ? args.updates.slice(0, 12).map((update) => ({
+        fieldName: String(update?.fieldName ?? '').trim(),
+        replacementText: String(update?.replacementText ?? ''),
+      })).filter((update) => update.fieldName)
+    : [];
+  if (!isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  if (
+    updates.length < 1 ||
+    updates.length > 12 ||
+    updates.some((update) => !update.fieldName || update.fieldName.length > 160 || /[\x00-\x1f]/.test(update.fieldName) || update.replacementText.length > 5000 || /[\x00]/.test(update.replacementText))
+  ) {
+    return { ok: false, error: 'updates must contain 1-12 field/replacement values with valid field names and replacement text <= 5000 chars.', errorCode: 'invalid_input' };
+  }
+  if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+    return { ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  if (sourceDocumentPath.length > 1024 || /[\x00-\x1f]/.test(sourceDocumentPath)) {
+    return { ok: false, error: 'sourceDocumentPath must be <= 1024 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/indesign_batch_update_text_layers', {
+    appName,
+    updates,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<InDesignBatchUpdateTextLayersResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const results = Array.isArray(d?.results)
+    ? d.results.slice(0, updates.length).map((item: any, index: number) => ({
+        fieldName: item?.fieldName ? String(item.fieldName) : updates[index]?.fieldName || '',
+        replacementText: item?.replacementText !== undefined ? String(item.replacementText) : updates[index]?.replacementText || '',
+        matchedLayers: toNumber(item?.matchedLayers),
+        matchedFrames: toNumber(item?.matchedFrames),
+        updatedFrames: toNumber(item?.updatedFrames),
+        replacementMatches: toNumber(item?.replacementMatches),
+        layerNames: Array.isArray(item?.layerNames) ? item.layerNames.map((name: unknown) => String(name)).filter(Boolean).slice(0, 20) : [],
+        unlockedCount: toNumber(item?.unlockedCount),
+        error: item?.error ? String(item.error) : null,
+      }))
+    : [];
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      fieldCount: toNumber(d?.fieldCount || results.length),
+      matchedLayers: toNumber(d?.matchedLayers),
+      matchedFrames: toNumber(d?.matchedFrames),
+      updatedFrames: toNumber(d?.updatedFrames),
+      replacementMatches: toNumber(d?.replacementMatches),
+      unlockedCount: toNumber(d?.unlockedCount),
+      docWasModified: d?.docWasModified === true,
+      docModified: d?.docModified === true,
+      docSaved: d?.docSaved === true,
+      results,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export async function indesignRelinkAsset(args: {
+  appName?: string;
+  assetPath: string;
+  linkQuery?: string | null;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}): Promise<DesktopResult<InDesignRelinkAssetResult>> {
+  const appName = String(args.appName || 'InDesign').trim() || 'InDesign';
+  const assetPathResult = validateDesktopPath(String(args.assetPath || '').trim());
+  if (!assetPathResult.ok) return { ok: false, error: assetPathResult.error, errorCode: 'invalid_input' };
+  const linkQuery = args.linkQuery == null ? '' : String(args.linkQuery).trim();
+  const expectedDocumentName = args.expectedDocumentName == null ? '' : String(args.expectedDocumentName).trim();
+  const sourceDocumentPath = args.sourceDocumentPath == null ? '' : String(args.sourceDocumentPath).trim();
+  if (!isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  if (linkQuery.length > 240 || /[\x00-\x1f]/.test(linkQuery)) {
+    return { ok: false, error: 'linkQuery must be <= 240 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+    return { ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  if (sourceDocumentPath.length > 1024 || /[\x00-\x1f]/.test(sourceDocumentPath)) {
+    return { ok: false, error: 'sourceDocumentPath must be <= 1024 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  const grantHeaders = await ensureLocalFileGrantHeaders([assetPathResult.path], 'read', `Relink InDesign asset ${assetPathResult.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<InDesignRelinkAssetResult>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/indesign_relink_asset', {
+    appName,
+    assetPath: assetPathResult.path,
+    linkQuery: linkQuery || undefined,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<InDesignRelinkAssetResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      assetPath: d?.assetPath ? String(d.assetPath) : assetPathResult.path,
+      linkQuery: d?.linkQuery ? String(d.linkQuery) : (linkQuery || null),
+      matchedLinks: toNumber(d?.matchedLinks),
+      relinkedLinks: toNumber(d?.relinkedLinks),
+      missingBefore: toNumber(d?.missingBefore),
+      missingAfter: toNumber(d?.missingAfter),
+      linkNames: Array.isArray(d?.linkNames) ? d.linkNames.map((name: unknown) => String(name)).filter(Boolean).slice(0, 20) : [],
+      docWasModified: d?.docWasModified === true,
+      docModified: d?.docModified === true,
+      docSaved: d?.docSaved === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export async function indesignPackageDocument(args: {
+  appName?: string;
+  outputFolderPath: string;
+  includeIdml?: boolean;
+  includePdf?: boolean;
+  copyFonts?: boolean;
+  copyLinkedGraphics?: boolean;
+  copyProfiles?: boolean;
+  updateGraphics?: boolean;
+  includeHiddenLayers?: boolean;
+  ignorePreflightErrors?: boolean;
+  createReport?: boolean;
+  forceSave?: boolean;
+  pdfStyle?: string | null;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}): Promise<DesktopResult<InDesignPackageDocumentResult>> {
+  const appName = String(args.appName || 'InDesign').trim() || 'InDesign';
+  const outputPathResult = validateDesktopPath(String(args.outputFolderPath || '').trim());
+  if (!outputPathResult.ok) return { ok: false, error: outputPathResult.error, errorCode: 'invalid_input' };
+  const expectedDocumentName = args.expectedDocumentName == null ? '' : String(args.expectedDocumentName).trim();
+  const sourceDocumentPath = args.sourceDocumentPath == null ? '' : String(args.sourceDocumentPath).trim();
+  const pdfStyle = args.pdfStyle == null ? '' : String(args.pdfStyle).trim();
+  if (!isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+    return { ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  if (sourceDocumentPath.length > 1024 || /[\x00-\x1f]/.test(sourceDocumentPath)) {
+    return { ok: false, error: 'sourceDocumentPath must be <= 1024 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  if (pdfStyle.length > 180 || /[\x00-\x1f]/.test(pdfStyle)) {
+    return { ok: false, error: 'pdfStyle must be <= 180 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  const grantHeaders = await ensureLocalFileGrantHeaders([outputPathResult.path], 'write', `Package InDesign document to ${outputPathResult.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<InDesignPackageDocumentResult>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/indesign_package_document', {
+    appName,
+    outputFolderPath: outputPathResult.path,
+    includeIdml: args.includeIdml === true,
+    includePdf: args.includePdf === true,
+    copyFonts: args.copyFonts !== false,
+    copyLinkedGraphics: args.copyLinkedGraphics !== false,
+    copyProfiles: args.copyProfiles !== false,
+    updateGraphics: args.updateGraphics !== false,
+    includeHiddenLayers: args.includeHiddenLayers !== false,
+    ignorePreflightErrors: args.ignorePreflightErrors === true,
+    createReport: args.createReport !== false,
+    forceSave: args.forceSave !== false,
+    pdfStyle: pdfStyle || undefined,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<InDesignPackageDocumentResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      outputFolderPath: d?.outputFolderPath ? String(d.outputFolderPath) : outputPathResult.path,
+      packageOk: d?.packageOk === true,
+      includeIdml: d?.includeIdml === true,
+      includePdf: d?.includePdf === true,
+      copyFonts: d?.copyFonts !== false,
+      copyLinkedGraphics: d?.copyLinkedGraphics !== false,
+      copyProfiles: d?.copyProfiles !== false,
+      createReport: d?.createReport !== false,
+      fileCount: toNumber(d?.fileCount),
+      folderCount: toNumber(d?.folderCount),
+      sizeBytes: toNumber(d?.sizeBytes),
+      sampleFiles: Array.isArray(d?.sampleFiles) ? d.sampleFiles.map((name: unknown) => String(name)).filter(Boolean).slice(0, 40) : [],
+      missingLinksBefore: toNumber(d?.missingLinksBefore),
+      modifiedLinksBefore: toNumber(d?.modifiedLinksBefore),
+      missingFontsBefore: toNumber(d?.missingFontsBefore),
+      linkCount: toNumber(d?.linkCount),
+      fontCount: toNumber(d?.fontCount),
+      docWasModified: d?.docWasModified === true,
+      docModified: d?.docModified === true,
+      docSaved: d?.docSaved === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export async function indesignExportProof(args: {
+  appName?: string;
+  outputPath: string;
+  format?: 'pdf';
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}): Promise<DesktopResult<InDesignExportProofResult>> {
+  const appName = String(args.appName || 'InDesign').trim() || 'InDesign';
+  const outputPathResult = validateDesktopPath(String(args.outputPath || '').trim());
+  if (!outputPathResult.ok) return { ok: false, error: outputPathResult.error, errorCode: 'invalid_input' };
+  const format = String(args.format || 'pdf').trim().toLowerCase();
+  const expectedDocumentName = args.expectedDocumentName == null ? '' : String(args.expectedDocumentName).trim();
+  const sourceDocumentPath = args.sourceDocumentPath == null ? '' : String(args.sourceDocumentPath).trim();
+  if (!isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  if (format !== 'pdf') {
+    return { ok: false, error: 'format must be pdf.', errorCode: 'invalid_input' };
+  }
+  if (!/\.pdf$/i.test(outputPathResult.path)) {
+    return { ok: false, error: 'outputPath must end in .pdf for InDesign proof export.', errorCode: 'invalid_input' };
+  }
+  if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+    return { ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  if (sourceDocumentPath.length > 1024 || /[\x00-\x1f]/.test(sourceDocumentPath)) {
+    return { ok: false, error: 'sourceDocumentPath must be <= 1024 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  const grantHeaders = await ensureLocalFileGrantHeaders([outputPathResult.path], 'write', `Export InDesign proof to ${outputPathResult.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<InDesignExportProofResult>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/indesign_export_proof', {
+    appName,
+    outputPath: outputPathResult.path,
+    format: 'pdf',
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<InDesignExportProofResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      outputPath: d?.outputPath ? String(d.outputPath) : outputPathResult.path,
+      format: 'pdf',
+      pageCount: toNumber(d?.pageCount),
+      spreadCount: toNumber(d?.spreadCount),
+      fileExists: d?.fileExists === true,
+      sizeBytes: toNumber(d?.sizeBytes),
+      docWasModified: d?.docWasModified === true,
+      docModified: d?.docModified === true,
+      docSaved: d?.docSaved === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type PhotoshopDocumentSummary = {
+  name: string;
+  path: string | null;
+  modified: boolean;
+  saved: boolean;
+  widthPx: number;
+  heightPx: number;
+};
+
+export type PhotoshopDocumentStatus = {
+  appName: string | null;
+  appRunning: boolean;
+  status: string;
+  documentCount: number;
+  activeDocumentName: string | null;
+  activeDocumentPath: string | null;
+  activeDocumentModified: boolean;
+  activeDocumentSaved: boolean;
+  widthPx: number;
+  heightPx: number;
+  resolution: number;
+  mode: string | null;
+  bitsPerChannel: string | null;
+  layerCount: number;
+  groupCount: number;
+  textLayerCount: number;
+  smartObjectCount: number;
+  adjustmentLayerCount: number;
+  lockedLayers: number;
+  hiddenLayers: number;
+  selectionActive: boolean;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  documents: PhotoshopDocumentSummary[];
+  error: string | null;
+};
+
+export type PhotoshopLayerInventoryLayer = {
+  name: string;
+  path: string;
+  type: string;
+  kind: string;
+  visible: boolean;
+  locked: boolean;
+  opacity: number;
+  textPreview: string;
+  hasMask: boolean;
+  bounds: number[];
+  depth: number;
+};
+
+export type PhotoshopLayerInventoryResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  query: string;
+  layerCount: number;
+  matchedLayers: number;
+  textLayerCount: number;
+  smartObjectCount: number;
+  adjustmentLayerCount: number;
+  groupCount: number;
+  lockedLayers: number;
+  hiddenLayers: number;
+  selectionActive: boolean;
+  maskLayerCount: number;
+  layers: PhotoshopLayerInventoryLayer[];
+  error: string | null;
+};
+
+export type PhotoshopLayerStateAction = 'show' | 'hide' | 'lock' | 'unlock';
+
+export type PhotoshopLayerStateSummary = {
+  name: string;
+  path: string;
+  type: string;
+  kind: string;
+  visible: boolean;
+  locked: boolean;
+};
+
+export type PhotoshopSetLayerStateResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  layerName: string;
+  action: PhotoshopLayerStateAction;
+  matchedLayers: number;
+  changedLayers: number;
+  beforeVisible: boolean;
+  afterVisible: boolean;
+  beforeLocked: boolean;
+  afterLocked: boolean;
+  docWasModified: boolean;
+  docModified: boolean;
+  docSaved: boolean;
+  matches: PhotoshopLayerStateSummary[];
+  error: string | null;
+};
+
+export type PhotoshopUpdateTextLayerResult = {
+  appName: string | null;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  layerName: string;
+  replacementText: string;
+  matchedLayers: number;
+  updatedLayers: number;
+  replacementMatches: number;
+  layerNames: string[];
+  docWasModified: boolean;
+  docModified: boolean;
+  docSaved: boolean;
+  error: string | null;
+};
+
+export type PhotoshopPlaceAssetResult = {
+  appName: string | null;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  assetPath: string;
+  layerName: string | null;
+  placedLayerName: string | null;
+  docWasModified: boolean;
+  docModified: boolean;
+  docSaved: boolean;
+  error: string | null;
+};
+
+export type PhotoshopExportProofResult = {
+  appName: string | null;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  sourceDocumentPath: string | null;
+  outputPath: string;
+  format: string;
+  quality: number | null;
+  widthPx: number;
+  heightPx: number;
+  fileExists: boolean;
+  sizeBytes: number;
+  docModified: boolean;
+  docSaved: boolean;
+  error: string | null;
+};
+
+function normalizePhotoshopAppName(value?: string): string {
+  return String(value || 'Photoshop').trim() || 'Photoshop';
+}
+
+function validatePhotoshopDocumentGuards(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}): DesktopResult<{ appName: string; expectedDocumentName: string; sourceDocumentPath: string }> {
+  const appName = normalizePhotoshopAppName(args.appName);
+  const expectedDocumentName = args.expectedDocumentName == null ? '' : String(args.expectedDocumentName).trim();
+  const sourceDocumentPath = args.sourceDocumentPath == null ? '' : String(args.sourceDocumentPath).trim();
+  if (!isValidAppName(appName)) {
+    return { ok: false, error: 'Invalid appName', errorCode: 'invalid_input' };
+  }
+  if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+    return { ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  if (sourceDocumentPath.length > 1024 || /[\x00-\x1f]/.test(sourceDocumentPath)) {
+    return { ok: false, error: 'sourceDocumentPath must be <= 1024 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  return { ok: true, data: { appName, expectedDocumentName, sourceDocumentPath } };
+}
+
+export async function photoshopDocumentStatus(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+} = {}): Promise<DesktopResult<PhotoshopDocumentStatus>> {
+  const guards = validatePhotoshopDocumentGuards(args);
+  if (!guards.ok || !guards.data) return guards as DesktopResult<PhotoshopDocumentStatus>;
+  const { appName, expectedDocumentName, sourceDocumentPath } = guards.data;
+  const r = await callBridge('POST', '/desktop/photoshop_document_status', {
+    appName,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopDocumentStatus>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const documents = Array.isArray(d?.documents)
+    ? d.documents.slice(0, 12).map((doc: any) => ({
+        name: doc?.name ? String(doc.name) : '',
+        path: doc?.path ? String(doc.path) : null,
+        modified: doc?.modified === true,
+        saved: doc?.saved === true,
+        widthPx: toNumber(doc?.widthPx),
+        heightPx: toNumber(doc?.heightPx),
+      })).filter((doc: PhotoshopDocumentSummary) => !!doc.name)
+    : [];
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      appRunning: d?.appRunning === true,
+      status: d?.status ? String(d.status) : 'unknown',
+      documentCount: toNumber(d?.documentCount),
+      activeDocumentName: d?.activeDocumentName ? String(d.activeDocumentName) : null,
+      activeDocumentPath: d?.activeDocumentPath ? String(d.activeDocumentPath) : null,
+      activeDocumentModified: d?.activeDocumentModified === true,
+      activeDocumentSaved: d?.activeDocumentSaved === true,
+      widthPx: toNumber(d?.widthPx),
+      heightPx: toNumber(d?.heightPx),
+      resolution: toNumber(d?.resolution),
+      mode: d?.mode ? String(d.mode) : null,
+      bitsPerChannel: d?.bitsPerChannel ? String(d.bitsPerChannel) : null,
+      layerCount: toNumber(d?.layerCount),
+      groupCount: toNumber(d?.groupCount),
+      textLayerCount: toNumber(d?.textLayerCount),
+      smartObjectCount: toNumber(d?.smartObjectCount),
+      adjustmentLayerCount: toNumber(d?.adjustmentLayerCount),
+      lockedLayers: toNumber(d?.lockedLayers),
+      hiddenLayers: toNumber(d?.hiddenLayers),
+      selectionActive: d?.selectionActive === true,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      documents,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export async function photoshopLayerInventory(args: {
+  appName?: string;
+  query?: string | null;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+  maxItems?: number;
+} = {}): Promise<DesktopResult<PhotoshopLayerInventoryResult>> {
+  const guards = validatePhotoshopDocumentGuards(args);
+  if (!guards.ok || !guards.data) return guards as DesktopResult<PhotoshopLayerInventoryResult>;
+  const { appName, expectedDocumentName, sourceDocumentPath } = guards.data;
+  const query = args.query == null ? '' : String(args.query).trim();
+  const maxItems = Math.max(1, Math.min(120, Math.trunc(Number(args.maxItems || 40))));
+  if (query.length > 160 || /[\x00-\x1f]/.test(query)) {
+    return { ok: false, error: 'query must be <= 160 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/photoshop_layer_inventory', {
+    appName,
+    query: query || undefined,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+    maxItems,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopLayerInventoryResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const layers = Array.isArray(d?.layers)
+    ? d.layers.slice(0, maxItems).map((layer: any) => ({
+        name: layer?.name ? String(layer.name) : '',
+        path: layer?.path ? String(layer.path) : '',
+        type: layer?.type ? String(layer.type) : '',
+        kind: layer?.kind ? String(layer.kind) : '',
+        visible: layer?.visible !== false,
+        locked: layer?.locked === true,
+        opacity: toNumber(layer?.opacity),
+        textPreview: layer?.textPreview ? String(layer.textPreview) : '',
+        hasMask: layer?.hasMask === true,
+        bounds: Array.isArray(layer?.bounds) ? layer.bounds.slice(0, 4).map(toNumber) : [],
+        depth: toNumber(layer?.depth),
+      }))
+    : [];
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      query: d?.query ? String(d.query) : query,
+      layerCount: toNumber(d?.layerCount),
+      matchedLayers: toNumber(d?.matchedLayers),
+      textLayerCount: toNumber(d?.textLayerCount),
+      smartObjectCount: toNumber(d?.smartObjectCount),
+      adjustmentLayerCount: toNumber(d?.adjustmentLayerCount),
+      groupCount: toNumber(d?.groupCount),
+      lockedLayers: toNumber(d?.lockedLayers),
+      hiddenLayers: toNumber(d?.hiddenLayers),
+      selectionActive: d?.selectionActive === true,
+      maskLayerCount: toNumber(d?.maskLayerCount),
+      layers,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export async function photoshopSetLayerState(args: {
+  appName?: string;
+  layerName: string;
+  action: PhotoshopLayerStateAction;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}): Promise<DesktopResult<PhotoshopSetLayerStateResult>> {
+  const guards = validatePhotoshopDocumentGuards(args);
+  if (!guards.ok || !guards.data) return guards as DesktopResult<PhotoshopSetLayerStateResult>;
+  const { appName, expectedDocumentName, sourceDocumentPath } = guards.data;
+  const layerName = String(args.layerName || '').trim();
+  const action = String(args.action || '').trim().toLowerCase() as PhotoshopLayerStateAction;
+  if (!layerName || layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+    return { ok: false, error: 'layerName must be 1-160 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  if (!['show', 'hide', 'lock', 'unlock'].includes(action)) {
+    return { ok: false, error: 'action must be show, hide, lock, or unlock.', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/photoshop_set_layer_state', {
+    appName,
+    layerName,
+    action,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopSetLayerStateResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const matches = Array.isArray(d?.matches)
+    ? d.matches.slice(0, 12).map((item: any) => ({
+        name: item?.name ? String(item.name) : '',
+        path: item?.path ? String(item.path) : '',
+        type: item?.type ? String(item.type) : '',
+        kind: item?.kind ? String(item.kind) : '',
+        visible: item?.visible !== false,
+        locked: item?.locked === true,
+      })).filter((item: PhotoshopLayerStateSummary) => !!(item.name || item.path))
+    : [];
+  const normalizedAction = ['show', 'hide', 'lock', 'unlock'].includes(String(d?.action || action))
+    ? String(d?.action || action) as PhotoshopLayerStateAction
+    : action;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      layerName: String(d?.layerName ?? layerName),
+      action: normalizedAction,
+      matchedLayers: toNumber(d?.matchedLayers),
+      changedLayers: toNumber(d?.changedLayers),
+      beforeVisible: d?.beforeVisible === true,
+      afterVisible: d?.afterVisible === true,
+      beforeLocked: d?.beforeLocked === true,
+      afterLocked: d?.afterLocked === true,
+      docWasModified: d?.docWasModified === true,
+      docModified: d?.docModified === true,
+      docSaved: d?.docSaved === true,
+      matches,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export async function photoshopUpdateTextLayer(args: {
+  appName?: string;
+  layerName: string;
+  replacementText: string;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}): Promise<DesktopResult<PhotoshopUpdateTextLayerResult>> {
+  const guards = validatePhotoshopDocumentGuards(args);
+  if (!guards.ok || !guards.data) return guards as DesktopResult<PhotoshopUpdateTextLayerResult>;
+  const { appName, expectedDocumentName, sourceDocumentPath } = guards.data;
+  const layerName = String(args.layerName || '').trim();
+  const replacementText = String(args.replacementText ?? '');
+  if (!layerName || layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+    return { ok: false, error: 'layerName must be 1-160 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  if (replacementText.length > 5000 || /[\x00]/.test(replacementText)) {
+    return { ok: false, error: 'replacementText must be <= 5000 chars and cannot contain NUL.', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/photoshop_update_text_layer', {
+    appName,
+    layerName,
+    replacementText,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopUpdateTextLayerResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      layerName: String(d?.layerName ?? layerName),
+      replacementText: String(d?.replacementText ?? replacementText),
+      matchedLayers: toNumber(d?.matchedLayers),
+      updatedLayers: toNumber(d?.updatedLayers),
+      replacementMatches: toNumber(d?.replacementMatches),
+      layerNames: Array.isArray(d?.layerNames) ? d.layerNames.map((name: unknown) => String(name)).filter(Boolean).slice(0, 20) : [],
+      docWasModified: d?.docWasModified === true,
+      docModified: d?.docModified === true,
+      docSaved: d?.docSaved === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export async function photoshopPlaceAsset(args: {
+  appName?: string;
+  assetPath: string;
+  layerName?: string | null;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}): Promise<DesktopResult<PhotoshopPlaceAssetResult>> {
+  const guards = validatePhotoshopDocumentGuards(args);
+  if (!guards.ok || !guards.data) return guards as DesktopResult<PhotoshopPlaceAssetResult>;
+  const { appName, expectedDocumentName, sourceDocumentPath } = guards.data;
+  const assetPathResult = validateDesktopPath(String(args.assetPath || '').trim());
+  if (!assetPathResult.ok) return { ok: false, error: assetPathResult.error, errorCode: 'invalid_input' };
+  const layerName = args.layerName == null ? '' : String(args.layerName).trim();
+  if (layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+    return { ok: false, error: 'layerName must be <= 160 chars and cannot contain control characters.', errorCode: 'invalid_input' };
+  }
+  const grantHeaders = await ensureLocalFileGrantHeaders([assetPathResult.path], 'read', `Place Photoshop asset ${assetPathResult.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<PhotoshopPlaceAssetResult>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/photoshop_place_asset', {
+    appName,
+    assetPath: assetPathResult.path,
+    layerName: layerName || undefined,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<PhotoshopPlaceAssetResult>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      assetPath: d?.assetPath ? String(d.assetPath) : assetPathResult.path,
+      layerName: d?.layerName ? String(d.layerName) : (layerName || null),
+      placedLayerName: d?.placedLayerName ? String(d.placedLayerName) : null,
+      docWasModified: d?.docWasModified === true,
+      docModified: d?.docModified === true,
+      docSaved: d?.docSaved === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export async function photoshopExportProof(args: {
+  appName?: string;
+  outputPath: string;
+  format?: 'png' | 'jpg' | 'jpeg';
+  quality?: number;
+  expectedDocumentName?: string | null;
+  sourceDocumentPath?: string | null;
+}): Promise<DesktopResult<PhotoshopExportProofResult>> {
+  const guards = validatePhotoshopDocumentGuards(args);
+  if (!guards.ok || !guards.data) return guards as DesktopResult<PhotoshopExportProofResult>;
+  const { appName, expectedDocumentName, sourceDocumentPath } = guards.data;
+  const outputPathResult = validateDesktopPath(String(args.outputPath || '').trim());
+  if (!outputPathResult.ok) return { ok: false, error: outputPathResult.error, errorCode: 'invalid_input' };
+  const format = String(args.format || '').trim().toLowerCase() || (
+    /\.jpe?g$/i.test(outputPathResult.path) ? 'jpg' : 'png'
+  );
+  if (!['png', 'jpg', 'jpeg'].includes(format)) {
+    return { ok: false, error: 'format must be png, jpg, or jpeg.', errorCode: 'invalid_input' };
+  }
+  const quality = Number.isFinite(Number(args.quality)) ? Math.max(1, Math.min(12, Math.trunc(Number(args.quality)))) : undefined;
+  const grantHeaders = await ensureLocalFileGrantHeaders([outputPathResult.path], 'write', `Export Photoshop proof to ${outputPathResult.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<PhotoshopExportProofResult>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/photoshop_export_proof', {
+    appName,
+    outputPath: outputPathResult.path,
+    format,
+    quality,
+    expectedDocumentName: expectedDocumentName || undefined,
+    sourceDocumentPath: sourceDocumentPath || undefined,
+  }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<PhotoshopExportProofResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : appName,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (expectedDocumentName || null),
+      sourceDocumentPath: d?.sourceDocumentPath ? String(d.sourceDocumentPath) : (sourceDocumentPath || null),
+      outputPath: d?.outputPath ? String(d.outputPath) : outputPathResult.path,
+      format: d?.format ? String(d.format) : format,
+      quality: d?.quality == null ? (quality ?? null) : toNumber(d.quality),
+      widthPx: toNumber(d?.widthPx),
+      heightPx: toNumber(d?.heightPx),
+      fileExists: d?.fileExists === true,
+      sizeBytes: toNumber(d?.sizeBytes),
+      docModified: d?.docModified === true,
+      docSaved: d?.docSaved === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
 // ─── Internals ────────────────────────────────────────────────────────────
 
 async function callBridge(
   method: 'GET' | 'POST',
   pathname: string,
   body?: Record<string, unknown>,
+  options?: { headers?: Record<string, string> },
 ): Promise<DesktopResult> {
   let token = readToken();
   // Auto-pair on first call — the bridge binds to localhost so a same-
@@ -681,6 +2739,7 @@ async function callBridge(
       headers: {
         'Content-Type': 'application/json',
         'X-UC-Desktop-Token': token,
+        ...(options?.headers || {}),
       },
       body: method === 'POST' ? JSON.stringify(body || {}) : undefined,
     });
@@ -701,17 +2760,35 @@ async function callBridge(
 
 function failFromStatus(status: number, bodyText: string): DesktopResult {
   if (status === 401) return { ok: false, error: 'Desktop token rejected — re-pair.', errorCode: 'not_paired' };
-  if (status === 403) return { ok: false, error: 'Origin blocked by bridge.', errorCode: 'origin_blocked' };
+  if (status === 403) {
+    const parsed = tryParseJsonError(bodyText);
+    if (parsed && parsed.toLowerCase().includes('local file access')) {
+      return { ok: false, error: parsed, errorCode: 'file_access_not_granted' };
+    }
+    return { ok: false, error: parsed || 'Origin blocked by bridge.', errorCode: parsed ? mapBodyErrorToCode(parsed) : 'origin_blocked' };
+  }
   if (status === 501) return { ok: false, error: 'Bridge is on a platform that does not support desktop automation.', errorCode: 'platform_unsupported' };
   if (status === 400) {
     const parsed = tryParseJsonError(bodyText);
     return { ok: false, error: parsed || 'bad request', errorCode: mapBodyErrorToCode(parsed || '') };
   }
-  return { ok: false, error: bodyText || `HTTP ${status}`, errorCode: 'unknown' };
+  if (status === 404) {
+    const parsed = tryParseJsonError(bodyText);
+    const message = parsed || bodyText || 'not found';
+    return { ok: false, error: message, errorCode: mapBodyErrorToCode(message) };
+  }
+  if (status === 409) {
+    const parsed = tryParseJsonError(bodyText);
+    const message = parsed || bodyText || 'conflict';
+    return { ok: false, error: message, errorCode: mapBodyErrorToCode(message) };
+  }
+  return { ok: false, error: bodyText || `HTTP ${status}`, errorCode: mapBodyErrorToCode(bodyText || '') };
 }
 
 function mapBodyErrorToCode(err: string | undefined | null): DesktopBridgeError {
   const m = String(err || '').toLowerCase();
+  if (m.includes('unknown /desktop endpoint')) return 'stale_bridge';
+  if (m.includes('local file access') || m.includes('file access grant')) return 'file_access_not_granted';
   if (m.includes('app_not_found') || m.includes('not found')) return 'app_not_found';
   if (m.includes('not allowed') || m.includes('permission')) return 'permission_denied';
   if (m.includes('timed out')) return 'timeout';

@@ -26,6 +26,19 @@ import SkillAdminPanel from './SkillAdminPanel';
 import { soulKeyForProfile } from '../../../../lib/serviceProfileSouls';
 import { copyToClipboard } from '../../../../lib/dataExport';
 
+function shortModelLabel(modelId: string): string {
+  const part = modelId.split('/').pop() || modelId;
+  return part
+    .replace(/:[a-z0-9_-]+$/i, '')
+    .replace(/\b(20\d{4,6})\b/g, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b(\w)/g, (c) => c.toUpperCase())
+    .replace(/\bClaude\s*/i, '')
+    .replace(/\bGpt\b/i, 'GPT')
+    .trim()
+    .slice(0, 22);
+}
+
 interface Props {
   threadId: string | null;
   circleId: string;
@@ -47,6 +60,7 @@ interface Props {
   onDelegationModeChange?: (mode: SessionDelegationMode) => void;
   onOpenControlPanel?: () => void;
   onOpenRunHistory?: () => void;
+  resolvedAutoModel?: string | null;
 }
 
 interface CircleMemberOption {
@@ -71,6 +85,7 @@ export default function ChatThreadHeader({
   onDelegationModeChange,
   onOpenControlPanel,
   onOpenRunHistory,
+  resolvedAutoModel,
 }: Props) {
   const [thread, setThread] = useState<CircleChatThread | null>(null);
   const [members, setMembers] = useState<CircleChatThreadMember[]>([]);
@@ -205,7 +220,16 @@ export default function ChatThreadHeader({
           {(onSessionProfileChange || onDelegationModeChange) && (
             <Pressable onPress={() => setShowServiceMenu(true)} style={styles.serviceBtn}>
               {isAllAuto ? (
-                <Text style={[styles.serviceBtnTag, { color: '#f59e0b' }]}>Auto ▾</Text>
+                resolvedAutoModel ? (
+                  <>
+                    <Text style={[styles.serviceBtnTag, { color: '#f59e0b' }]}>Auto</Text>
+                    <Text style={[styles.serviceBtnSep]}>→</Text>
+                    <Text style={[styles.serviceBtnTag, { color: '#94a3b8' }]}>{shortModelLabel(resolvedAutoModel)}</Text>
+                    <Text style={styles.serviceBtnCaret}>▾</Text>
+                  </>
+                ) : (
+                  <Text style={[styles.serviceBtnTag, { color: '#f59e0b' }]}>Auto ▾</Text>
+                )
               ) : (
                 <>
                   <Text style={[styles.serviceBtnTag, { color: currentProfile.color }]}>{currentProfile.shortLabel}</Text>

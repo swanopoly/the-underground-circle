@@ -24,8 +24,8 @@ export type ConnectToken = {
 
 export type AgentType =
   | 'claude-code' | 'codex' | 'gemini-cli'
-  | 'cursor' | 'windsurf' | 'copilot'
-  | 'aider' | 'cline';
+  | 'cursor' | 'opencode' | 'windsurf' | 'copilot'
+  | 'aider' | 'cline' | 'continue' | 'amp';
 
 export type HookConfig = {
   agentType: AgentType;
@@ -114,10 +114,13 @@ export function generateHookConfig(
     case 'codex':       return generateCodexHook(token);
     case 'gemini-cli':  return generateGeminiHook(token);
     case 'cursor':      return generateCursorHook(token);
+    case 'opencode':    return generateOpenCodeHook(token);
     case 'windsurf':    return generateWindsurfHook(token);
     case 'copilot':     return generateCopilotHook(token);
     case 'aider':       return generateAiderHook(token);
     case 'cline':       return generateClineHook(token);
+    case 'continue':    return generateContinueHook(token);
+    case 'amp':         return generateAmpHook(token);
     default:            return generateClaudeCodeHook(token);
   }
 }
@@ -313,6 +316,34 @@ ${mcpConfig}
   };
 }
 
+// ── OpenCode: shell wrapper / heartbeat ─────────────────────────────────────
+
+function generateOpenCodeHook(token: string): HookConfig {
+  const curlCmd = buildCurlCmd(token, 'opencode');
+
+  const configSnippet = `# OpenCode can be connected with a shell alias or wrapper.
+# Add to ~/.bashrc or ~/.zshrc:
+alias opencode='${curlCmd} && command opencode'
+
+# Or create a wrapper script at ~/bin/opencode-uc:
+#!/bin/bash
+${curlCmd}
+exec opencode "$@"`;
+
+  return {
+    agentType: 'opencode',
+    label: 'OpenCode',
+    description: 'Connect OpenCode via shell alias or wrapper script',
+    configPath: '~/.bashrc or ~/bin/opencode-uc',
+    configSnippet,
+    instructions: [
+      'Add the shell alias to ~/.bashrc or ~/.zshrc, or use the wrapper script.',
+      'When OpenCode starts, it will publish a heartbeat to your circle.',
+      'For direct chat task dispatch, also run or expose a bridge with POST /task, /message, /chat, or /run.',
+    ],
+  };
+}
+
 // ── Windsurf: similar to Cursor ──────────────────────────────────────────────
 
 function generateWindsurfHook(token: string): HookConfig {
@@ -440,6 +471,70 @@ function generateClineHook(token: string): HookConfig {
       'Cline runs inside VS Code with no hook system.',
       'Option A: Add the VS Code task (auto-fires on folder open)',
       'Option B: Add the cron job to fire while VS Code runs',
+    ],
+  };
+}
+
+// ── Continue: IDE extension based ────────────────────────────────────────────
+
+function generateContinueHook(token: string): HookConfig {
+  const curlCmd = buildCurlCmd(token, 'continue');
+
+  const configSnippet = `# Continue runs inside VS Code / JetBrains.
+# Use a workspace task or cron heartbeat:
+
+# VS Code .vscode/tasks.json:
+{
+  "version": "2.0.0",
+  "tasks": [{
+    "label": "UC Continue Heartbeat",
+    "type": "shell",
+    "command": "${curlCmd}",
+    "runOptions": { "runOn": "folderOpen" }
+  }]
+}
+
+# Or add to crontab -e:
+*/5 * * * * pgrep -f "code|continue" > /dev/null && ${curlCmd}`;
+
+  return {
+    agentType: 'continue',
+    label: 'Continue',
+    description: 'Connect Continue via IDE task or heartbeat',
+    configPath: '.vscode/tasks.json or crontab',
+    configSnippet,
+    instructions: [
+      'Continue runs inside an IDE, so use a workspace task or cron heartbeat.',
+      'The agent appears in Circle Office once the heartbeat runs.',
+      'For direct chat task dispatch, expose a bridge endpoint with the generic task contract.',
+    ],
+  };
+}
+
+// ── Amp: shell wrapper / heartbeat ───────────────────────────────────────────
+
+function generateAmpHook(token: string): HookConfig {
+  const curlCmd = buildCurlCmd(token, 'amp');
+
+  const configSnippet = `# Amp can be connected with a shell alias or wrapper.
+# Add to ~/.bashrc or ~/.zshrc:
+alias amp='${curlCmd} && command amp'
+
+# Or create a wrapper script at ~/bin/amp-uc:
+#!/bin/bash
+${curlCmd}
+exec amp "$@"`;
+
+  return {
+    agentType: 'amp',
+    label: 'Amp',
+    description: 'Connect Amp via shell alias or wrapper script',
+    configPath: '~/.bashrc or ~/bin/amp-uc',
+    configSnippet,
+    instructions: [
+      'Add the shell alias to ~/.bashrc or ~/.zshrc, or use the wrapper script.',
+      'Amp will appear in the circle when it launches.',
+      'For direct chat task dispatch, expose a bridge endpoint with the generic task contract.',
     ],
   };
 }

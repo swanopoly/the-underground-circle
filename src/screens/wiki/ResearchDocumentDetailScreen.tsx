@@ -97,10 +97,10 @@ export default function ResearchDocumentDetailScreen({ navigation, route }: any)
             <Text style={styles.backText}>{'<-'} Back</Text>
           </Pressable>
           <View style={styles.headerCopy}>
-            <Text style={styles.kicker}>Research Detail</Text>
+            <Text style={styles.kicker}>Wiki Source Detail</Text>
             <Text style={styles.title}>{doc?.title || 'Loading research document...'}</Text>
             <Text style={styles.subtitle}>
-              Full digest context, source metadata, affected SOULs, and review controls.
+              Full source context, provenance, affected SOULs, review controls, and Wiki integration metadata.
             </Text>
           </View>
         </View>

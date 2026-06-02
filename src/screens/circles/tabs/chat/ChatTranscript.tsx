@@ -9,9 +9,14 @@ import {
   readMessageArtifacts,
   readMessageMemoriesUsed,
   readMessageMemoryRefs,
+  readMessageRecoveryOptions,
   readMessageResearchRefs,
   readMessageWikiRefs,
 } from '../../../../lib/messageMetadataReaders';
+import {
+  buildChatFailureRecoveryExecutionPlan,
+  stripChatFailureRecoveryOptionsText,
+} from '../../../../lib/chatFailureRecovery';
 
 interface Props {
   entries: ChatEntry[];
@@ -80,6 +85,126 @@ function formatEntryTime(iso: string): string {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+type EntryRouteSource = {
+  actor?: string;
+  surface?: string;
+  selectedModel?: string | null;
+  effectiveModel?: string | null;
+  provider?: string | null;
+  showRouteChips?: boolean;
+};
+
+type EntryRouteChip = {
+  label: string;
+  value: string;
+  tone: 'route' | 'model' | 'local' | 'provider';
+};
+
+function readEntryRouteSource(metadata: Record<string, unknown> | null | undefined): EntryRouteSource | null {
+  const source = metadata?.source;
+  if (!source || typeof source !== 'object') return null;
+  return source as EntryRouteSource;
+}
+
+function formatModelDisplayName(model: string | null | undefined): string {
+  const raw = String(model || '').trim();
+  if (!raw) return 'unknown';
+  if (raw.toLowerCase() === 'auto') return 'Auto';
+  return raw
+    .replace(/^openrouter\//i, '')
+    .replace(/^huggingface_endpoint\//i, '')
+    .replace(/^huggingface\//i, '')
+    .replace(/^google_ai\//i, '')
+    .replace(/^openai\//i, '')
+    .replace(/^anthropic\//i, '')
+    .replace(/^groq\//i, '')
+    .replace(/^mistral_ai\//i, '')
+    .replace(/^deepseek\//i, '')
+    .replace(/^zai\//i, '')
+    .replace(/^z_ai\//i, '')
+    .replace(/^minimax\//i, '');
+}
+
+function formatRouteSurfaceLabel(surface: string | null | undefined): string {
+  const raw = String(surface || '').trim();
+  if (!raw) return 'Main chat';
+  const normalized = raw.toLowerCase();
+  if (normalized.includes('desktop_bridge')) return 'Desktop bridge';
+  if (normalized.includes('computer_task')) return 'Computer task';
+  if (normalized.includes('file')) return 'File tools';
+  if (normalized.includes('openswan')) return 'OpenSwan';
+  if (normalized.includes('browser')) return 'Browser';
+  if (normalized.includes('local')) return 'Local';
+  return raw
+    .replace(/^main_chat_?/i, '')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase()) || 'Main chat';
+}
+
+function buildEntryRouteChips(entry: ChatEntry): EntryRouteChip[] {
+  const source = readEntryRouteSource(entry.metadata);
+  if (!source) return [];
+  if (source.showRouteChips !== true) return [];
+  const usage = entry.metadata?.usage as { model?: string | null } | null | undefined;
+  const effectiveModel = source.effectiveModel || usage?.model || null;
+  const selectedModel = source.selectedModel || null;
+  const provider = source.provider || null;
+  const surface = String(source.surface || '').toLowerCase();
+  const model = String(effectiveModel || '').toLowerCase();
+  const localExecution = surface.includes('desktop_bridge')
+    || surface.includes('computer_task')
+    || surface.includes('local')
+    || model === 'local-desktop-bridge'
+    || model === 'computer-file-adapter';
+  if (localExecution) return [];
+  const chips: EntryRouteChip[] = [
+    { label: 'Route', value: formatRouteSurfaceLabel(source.surface), tone: localExecution ? 'local' : 'route' },
+  ];
+
+  if (selectedModel) {
+    chips.push({
+      label: selectedModel.toLowerCase() === 'auto' ? 'Picker' : 'Selected',
+      value: formatModelDisplayName(selectedModel),
+      tone: 'model',
+    });
+  }
+  if (effectiveModel) {
+    chips.push({
+      label: localExecution ? 'Engine' : selectedModel?.toLowerCase() === 'auto' ? 'Resolved' : 'Model',
+      value: localExecution && effectiveModel === 'local-desktop-bridge'
+        ? 'Local desktop bridge'
+        : localExecution && effectiveModel === 'computer-file-adapter'
+          ? 'Computer file adapter'
+          : formatModelDisplayName(effectiveModel),
+      tone: localExecution ? 'local' : 'model',
+    });
+  }
+  if (provider && !String(effectiveModel || '').toLowerCase().startsWith(`${provider}/`)) {
+    chips.push({ label: 'Provider', value: formatModelDisplayName(provider), tone: 'provider' });
+  }
+
+  return chips.slice(0, 4);
+}
+
+type TranscriptRecoveryOption = ReturnType<typeof readMessageRecoveryOptions>[number];
+
+function recoveryOptionAccent(option: TranscriptRecoveryOption): string {
+  if (option.actor === 'user') return '#f59e0b';
+  if (option.actor === 'connected_agent') return '#a78bfa';
+  if (option.actor === 'openswan') return '#22c55e';
+  if (option.actor === 'llm') return '#38bdf8';
+  return '#94a3b8';
+}
+
+function recoveryOptionActorLabel(actor: TranscriptRecoveryOption['actor']): string {
+  if (actor === 'connected_agent') return 'Connected agent';
+  if (actor === 'openswan') return 'OpenSwan';
+  if (actor === 'user') return 'User';
+  if (actor === 'llm') return 'LLM';
+  return 'Stop';
+}
+
 function UserBubble({ entry, accentColor }: { entry: ChatEntry; accentColor: string }) {
   return (
     <View style={styles.userRow}>
@@ -98,6 +223,13 @@ function AssistantBubble({ entry, accentColor }: { entry: ChatEntry; accentColor
   const memoryRefs = readMessageMemoryRefs(entry.metadata) as PromptMemoryReference[];
   const memoriesUsed = readMessageMemoriesUsed(entry.metadata);
   const artifacts = readMessageArtifacts(entry.metadata) as SwanBotStructuredArtifact[];
+  const recoveryOptions = readMessageRecoveryOptions(entry.metadata);
+  const source = readEntryRouteSource(entry.metadata);
+  const routeChips = buildEntryRouteChips(entry);
+  const assistantLabel = source?.actor?.trim() || 'OpenSwan';
+  const visibleContent = recoveryOptions.length > 0
+    ? stripChatFailureRecoveryOptionsText(entry.content)
+    : entry.content;
 
   return (
     <View style={styles.assistantRow}>
@@ -105,8 +237,59 @@ function AssistantBubble({ entry, accentColor }: { entry: ChatEntry; accentColor
         <Text style={[styles.agentIconText, { color: accentColor }]}>✦</Text>
       </View>
       <View style={styles.assistantBubble}>
-        <Text style={[styles.assistantLabel, { color: accentColor }]}>BlackSwan</Text>
-        <Text style={styles.assistantText}>{entry.content}</Text>
+        <Text style={[styles.assistantLabel, { color: accentColor }]}>{assistantLabel}</Text>
+        {routeChips.length > 0 ? (
+          <View style={styles.routeChipRow}>
+            {routeChips.map((chip) => (
+              <View
+                key={`${entry.id}-${chip.label}-${chip.value}`}
+                style={[
+                  styles.routeChip,
+                  chip.tone === 'local' && styles.routeChipLocal,
+                  chip.tone === 'model' && styles.routeChipModel,
+                  chip.tone === 'provider' && styles.routeChipProvider,
+                ]}
+              >
+                <Text style={styles.routeChipLabel}>{chip.label}</Text>
+                <Text
+                  style={[
+                    styles.routeChipValue,
+                    chip.tone === 'local' && styles.routeChipValueLocal,
+                    chip.tone === 'model' && styles.routeChipValueModel,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {chip.value}
+                </Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
+        <Text style={styles.assistantText}>{visibleContent}</Text>
+        {recoveryOptions.length > 0 ? (
+          <View style={styles.recoveryOptionStack}>
+            <Text style={styles.recoveryOptionLabel}>Recovery Options</Text>
+            {recoveryOptions.slice(0, 5).map((option) => {
+              const color = recoveryOptionAccent(option);
+              const plan = buildChatFailureRecoveryExecutionPlan(option as any);
+              return (
+                <View
+                  key={`${entry.id}-${option.id}`}
+                  style={[styles.recoveryOptionCard, { borderColor: `${color}55`, backgroundColor: `${color}10` }]}
+                >
+                  <View style={styles.recoveryOptionHeader}>
+                    <Text style={[styles.recoveryOptionTitle, { color }]} numberOfLines={2}>{option.label}</Text>
+                    <Text style={styles.recoveryOptionMeta}>
+                      {[recoveryOptionActorLabel(option.actor).toUpperCase(), option.recommended ? 'RECOMMENDED' : ''].filter(Boolean).join(' · ')}
+                    </Text>
+                  </View>
+                  <Text style={styles.recoveryOptionDetail} numberOfLines={3}>{option.detail}</Text>
+                  <Text style={styles.recoveryOptionPlan} numberOfLines={2}>{plan.userSummary}</Text>
+                </View>
+              );
+            })}
+          </View>
+        ) : null}
         {artifacts.length > 0 ? (
           <View style={styles.artifactStack}>
             {artifacts.map((artifact, index) => (
@@ -132,7 +315,7 @@ function AssistantBubble({ entry, accentColor }: { entry: ChatEntry; accentColor
         ) : null}
         {wikiRefs.length > 0 ? (
           <View style={styles.wikiRefsWrap}>
-            <Text style={styles.wikiRefsLabel}>Sources from the AI Wiki</Text>
+            <Text style={styles.wikiRefsLabel}>Sources from the Knowledge Wiki</Text>
             {wikiRefs.slice(0, 4).map(ref => (
               <View key={ref.id} style={[styles.wikiRefCard, { borderColor: ref.color + '40', backgroundColor: ref.color + '10' }]}>
                 <Text style={[styles.wikiRefTitle, { color: ref.color }]}>{ref.title}</Text>
@@ -212,7 +395,7 @@ function RunLinkCard({ entry, runs, onSelectRun }: { entry: ChatEntry; runs: Cha
         <Text style={styles.runCardMode}>{run.mode}</Text>
       </View>
       {run.summary ? <Text style={styles.runCardSummary} numberOfLines={2}>{run.summary}</Text> : null}
-      <Text style={styles.runCardMeta}>{run.targetLabel ?? 'BlackSwan'} • {formatEntryTime(run.createdAt)}</Text>
+      <Text style={styles.runCardMeta}>{run.targetLabel ?? 'OpenSwan'} • {formatEntryTime(run.createdAt)}</Text>
     </Pressable>
   );
 }
@@ -243,9 +426,17 @@ function ChatTranscript({ entries, runs, onSelectRun, accentColor }: Props) {
       ref={scrollRef}
       style={styles.container}
       contentContainerStyle={styles.contentContainer}
+      onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
       showsVerticalScrollIndicator
     >
-      {entries.map(renderEntry)}
+      {entries.length === 0 ? (
+        <View style={styles.emptyState}>
+          <Text style={[styles.emptyStateTitle, { color: accentColor }]}>Start a chat</Text>
+          <Text style={styles.emptyStateText}>
+            Ask OpenSwan to answer, plan, search, automate the browser, or control the paired desktop bridge.
+          </Text>
+        </View>
+      ) : entries.map(renderEntry)}
     </ScrollView>
   );
 }
@@ -314,6 +505,56 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     marginBottom: 4,
   },
+  routeChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 8,
+  },
+  routeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    maxWidth: 210,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#29412d',
+    backgroundColor: '#0b140d',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  routeChipLocal: {
+    borderColor: '#22c55e45',
+    backgroundColor: '#052e1628',
+  },
+  routeChipModel: {
+    borderColor: '#38bdf845',
+    backgroundColor: '#082f4928',
+  },
+  routeChipProvider: {
+    borderColor: '#a78bfa45',
+    backgroundColor: '#312e8128',
+  },
+  routeChipLabel: {
+    color: '#88a38a',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.7,
+    textTransform: 'uppercase' as any,
+    fontFamily: 'monospace',
+  },
+  routeChipValue: {
+    color: '#dce7d6',
+    fontSize: 10,
+    fontWeight: '800',
+    maxWidth: 132,
+  },
+  routeChipValueLocal: {
+    color: '#86efac',
+  },
+  routeChipValueModel: {
+    color: '#bae6fd',
+  },
   assistantText: {
     color: '#e2ebdc',
     fontSize: 15,
@@ -323,6 +564,70 @@ const styles = StyleSheet.create({
     color: '#768676',
     fontSize: 11,
     marginTop: 8,
+  },
+  recoveryOptionStack: {
+    marginTop: 12,
+    gap: 8,
+  },
+  recoveryOptionLabel: {
+    color: '#97aa97',
+    fontSize: 11,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  recoveryOptionCard: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 5,
+  },
+  recoveryOptionHeader: {
+    gap: 3,
+  },
+  recoveryOptionTitle: {
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  recoveryOptionMeta: {
+    color: '#89a189',
+    fontSize: 9,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  recoveryOptionDetail: {
+    color: '#d8e4d2',
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  recoveryOptionPlan: {
+    color: '#94a3b8',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  emptyState: {
+    minHeight: 280,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 28,
+    borderWidth: 1,
+    borderColor: '#203322',
+    backgroundColor: '#0b140d',
+    padding: 24,
+    gap: 8,
+  },
+  emptyStateTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  emptyStateText: {
+    color: '#97aa97',
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: 'center',
+    maxWidth: 420,
   },
   artifactStack: {
     marginTop: 12,

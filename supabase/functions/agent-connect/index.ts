@@ -27,10 +27,13 @@ const AGENT_META: Record<string, { name: string; icon: string; color: string; pr
   "codex":       { name: "Codex",       icon: "🧠", color: "#10a37f", provider: "codex" },
   "gemini-cli":  { name: "Gemini CLI",  icon: "♊", color: "#4285f4", provider: "gemini" },
   "cursor":      { name: "Cursor",      icon: "🎯", color: "#8b5cf6", provider: "cursor" },
-  "windsurf":    { name: "Windsurf",    icon: "🏄", color: "#06b6d4", provider: "generic-agent" },
-  "copilot":     { name: "Copilot",     icon: "🤖", color: "#1f6feb", provider: "generic-agent" },
-  "aider":       { name: "Aider",       icon: "🛠️", color: "#f59e0b", provider: "generic-agent" },
-  "cline":       { name: "Cline",       icon: "⚡", color: "#ec4899", provider: "generic-agent" },
+  "opencode":    { name: "OpenCode",    icon: "OC", color: "#38bdf8", provider: "opencode" },
+  "windsurf":    { name: "Windsurf",    icon: "WS", color: "#06b6d4", provider: "windsurf" },
+  "copilot":     { name: "Copilot",     icon: "CP", color: "#1f6feb", provider: "copilot" },
+  "aider":       { name: "Aider",       icon: "AI", color: "#f59e0b", provider: "aider" },
+  "cline":       { name: "Cline",       icon: "CL", color: "#ec4899", provider: "cline" },
+  "continue":    { name: "Continue",    icon: "CN", color: "#22c55e", provider: "continue" },
+  "amp":         { name: "Amp",         icon: "AM", color: "#a78bfa", provider: "amp" },
 };
 
 // Map Claude Code hook_event_name → our event type

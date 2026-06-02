@@ -15,7 +15,7 @@
 | **M1** Flag + client router + plan doc | `uc_swanbot_v2_enabled` localStorage flag, `/v2 on|off` slash command, `callSwanBotV2`, tier-2 route switcher in `swanbot.ts` | **Shipping this turn** |
 | **M2** Client-delegated tool protocol | v2 emits `event: client_tool_call` SSE frames for `desktop.*` tools; client executes via bridge + POSTs result back to `/continue`; desktop tools registered in v2 as `clientOnly: true` | Next turn |
 | **M3** Full OpenSwan tool parity | Port the 30+ tools from `openswanToolRuntime` into v2's `TOOLS: ToolDef[]` (Supabase-backed tools direct; client-delegated via M2 protocol) | After M2 |
-| **M4** Flip the default | Default `uc_swanbot_v2_enabled = true`; v1 becomes opt-out for regression escapes | After M3 + 1 week of clean v2 telemetry |
+| **M4** Flip the default | Default `uc_swanbot_v2_enabled = true`; v1 becomes opt-out for regression escapes | Blocked until `swanbotOpenSwanReadiness` reports ready |
 | **M5** Delete v1 | Retire `swanbot-ai` edge function + `BLACKSWAN_TOOLS` array | After 30 days of M4 with no rollbacks |
 
 ---
@@ -139,7 +139,8 @@ After every M3 sub-phase:
 ## M4 — Flip the default
 
 - After M3e, watch a week of mixed v1/v2 telemetry from the opt-in cohort.
-- When v2's `final_stop_reason === 'end_turn'` rate is ≥ v1's, flip the default in `isSwanbotV2Enabled()` from `false` to `true` with `!== 'false'` semantics. v1 becomes opt-out.
+- Build the decision from `src/lib/swanbotOpenSwanReadiness.ts`, not a manual checklist. It requires the 45-tool v2 catalog, the 22 client-delegated tools, the SwanBot v2 routing/delegation/writer/workspace/approval/WordPress smokes, OpenSwan approval/planner smokes, failure-recovery smoke, and enough `agent_runs.final_stop_reason` telemetry.
+- When v2's `final_stop_reason === 'end_turn'` rate is ≥ v1's and the readiness snapshot returns `canFlipDefault: true`, flip the default in `isSwanbotV2Enabled()` from `false` to `true` with `!== 'false'` semantics. v1 becomes opt-out.
 - Announce in chat + post to `agent_activity` on every circle.
 
 ---
@@ -169,5 +170,5 @@ If v2 goes sideways at any phase:
 | M1 | Flag toggle works · `/v2` command lands · v2 invocation succeeds end-to-end when enabled · v1 unchanged · typecheck + all smoke suites green |
 | M2 | `desktop.launch_app` succeeds under v2 with flag on · SSE `client_tool_call` + `/continue` round-trip works · Timeout test fires after 2 min · Rollback flag works |
 | M3 | All 35 tools from `openswanToolRuntime` reachable under v2 · smoke tests cover the contract for at least 10 representative tools · `agent_runs.metadata` captures the full trace |
-| M4 | Default flipped · one week of v1/v2 telemetry shows v2 ≥ v1 on completion rate · no regressions reported |
+| M4 | `swanbotOpenSwanReadiness` returns ready · default flipped · v1/v2 telemetry shows v2 ≥ v1 on completion rate · no regressions reported |
 | M5 | `swanbot-ai/` directory deleted · no imports remain · roadmap doc updated |

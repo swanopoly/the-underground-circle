@@ -4257,6 +4257,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                 { key: 'codex',         icon: '🧠', label: 'Codex' },
                 { key: 'cursor',        icon: '🖱️', label: 'Cursor' },
                 { key: 'gemini',        icon: '♊', label: 'Gemini' },
+                { key: 'opencode',      icon: 'OC', label: 'OpenCode' },
+                { key: 'aider',         icon: 'AI', label: 'Aider' },
+                { key: 'cline',         icon: 'CL', label: 'Cline' },
+                { key: 'windsurf',      icon: 'WS', label: 'Windsurf' },
+                { key: 'continue',      icon: 'CN', label: 'Continue' },
+                { key: 'amp',           icon: 'AM', label: 'Amp' },
                 { key: 'generic-agent', icon: '⚡', label: 'Other' },
               ].map(p => (
                 <Pressable

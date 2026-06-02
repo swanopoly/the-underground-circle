@@ -1,8 +1,12 @@
-import {
-  listSiteCredentialVault,
-  updateSiteCredentialVaultControls,
-  type SiteCredentialVaultEntry,
-} from './siteAutomation';
+import type { SiteCredentialVaultEntry } from './siteAutomation';
+
+async function loadSiteAutomationVaultApi() {
+  const mod = await import('./siteAutomation');
+  return {
+    listSiteCredentialVault: mod.listSiteCredentialVault,
+    updateSiteCredentialVaultControls: mod.updateSiteCredentialVaultControls,
+  };
+}
 
 export type VaultGranteeType = 'agent' | 'runtime' | 'chat' | 'member' | 'openswan';
 
@@ -372,6 +376,7 @@ export async function pruneExpiredVaultAccessGrants(
   if (removed === 0) {
     return { ok: true, entry, removed: 0, resultsText: `${entry.platform}/${entry.label} has no expired grants.` };
   }
+  const { updateSiteCredentialVaultControls } = await loadSiteAutomationVaultApi();
   const result = await updateSiteCredentialVaultControls({
     credentialId: entry.id,
     metadata: {
@@ -410,6 +415,7 @@ export async function hardenVaultCredential(
     issue.severity === 'critical' || issue.severity === 'high',
   );
   const currentReveal = Number(policy.reveal_duration_seconds || 30);
+  const { updateSiteCredentialVaultControls } = await loadSiteAutomationVaultApi();
   const result = await updateSiteCredentialVaultControls({
     credentialId: entry.id,
     accessPolicy: {
@@ -445,6 +451,7 @@ export async function findVaultAutomationEntries(
   input: Omit<VaultEntrySearchInput, 'credentialId'> = {},
 ): Promise<{ entries: SiteCredentialVaultEntry[]; error?: string; vaultMissing?: boolean }> {
   const platform = input.platform?.trim().toLowerCase() || undefined;
+  const { listSiteCredentialVault } = await loadSiteAutomationVaultApi();
   const result = await listSiteCredentialVault(circleId, platform);
   if (result.error) return { entries: [], error: result.error, vaultMissing: result.vaultMissing };
 
@@ -586,6 +593,7 @@ export async function grantVaultAutomationAccess(
   };
   const nextGrants = [...existing.filter((item) => item.id !== id), grant];
 
+  const { updateSiteCredentialVaultControls } = await loadSiteAutomationVaultApi();
   const updated = await updateSiteCredentialVaultControls({
     credentialId: selection.entry.id,
     metadata: {
@@ -626,6 +634,7 @@ export async function revokeVaultAutomationAccess(
   }
 
   const now = new Date().toISOString();
+  const { updateSiteCredentialVaultControls } = await loadSiteAutomationVaultApi();
   const updated = await updateSiteCredentialVaultControls({
     credentialId: selection.entry.id,
     metadata: {

@@ -39,6 +39,10 @@ function main() {
   assert(gemini?.count === 2, 'Gemini word count parsed');
   assert(gemini?.prompts[0] === 'summarize the docs', 'Gemini numbered prompt parsed');
 
+  const cursor = parseTerminalAgentLaunchRequest('launch a Cursor Composer agent for the checkout flow');
+  assert(cursor?.provider === 'cursor', 'Cursor Composer provider detected');
+  assert(cursor?.names[0] === 'Cursor Composer', 'Cursor Composer single session name generated');
+
   const unrelated = parseTerminalAgentLaunchRequest('can Claude Code explain terminal agents?');
   assert(unrelated === null, 'non-launch question ignored');
 

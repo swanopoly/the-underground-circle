@@ -191,8 +191,8 @@ function ResearchControlCard({ onPress }: { onPress: () => void }) {
           </View>
           <View style={s.continueTextWrap}>
             <Text style={[s.continueLabel, { color: '#22c55e' }]}>KNOWLEDGE OPS</Text>
-            <Text style={s.continueTitle}>Research Control Center</Text>
-            <Text style={s.continueSubtitle}>Daily digests, research-agent runs, and which SOULs are learning from them.</Text>
+            <Text style={s.continueTitle}>Wiki Knowledge Control Center</Text>
+            <Text style={s.continueSubtitle}>Daily digests, broad-domain intake, research-agent runs, and which SOULs or Digital Brains are learning from them.</Text>
           </View>
           <Text style={[s.continueArrow, { color: '#22c55e' }]}>{'-->'}</Text>
         </View>
@@ -338,9 +338,9 @@ export default function WikiScreen({ navigation }: any) {
           </Pressable>
           <View style={{ flex: 1, marginLeft: 16 }}>
             <Text style={s.headerSubtitle}>Knowledge Base</Text>
-            <Text style={s.headerTitle}>AI Wiki</Text>
+            <Text style={s.headerTitle}>Knowledge Wiki</Text>
             <Text style={s.headerBody}>
-              Durable field notes on models, agents, frameworks, research fronts, and the operating patterns behind OpenSwan.
+              Durable field notes on AI, technology, future cities, science, infrastructure, health, energy, materials, and the operating patterns behind OpenSwan.
             </Text>
           </View>
         </Animated.View>

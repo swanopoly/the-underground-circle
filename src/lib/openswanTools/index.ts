@@ -16,6 +16,10 @@ import {
   type OpenSwanToolSurface,
 } from '../openswanToolRuntime';
 import type { OpenSwanExecutionStatus } from '../openswanExecution';
+import {
+  buildDesignAppRuntimeToolCaptureMetadata,
+  withDesignAppRuntimeCaptureMetadata,
+} from '../designAppRuntimeManifest';
 
 export const MAX_TOOL_ROUNDS = 5;
 
@@ -76,11 +80,12 @@ export async function dispatchToolDetailed(
     const text = formatOpenSwanRuntimeToolResult(name as OpenSwanRuntimeToolName, result as any);
     const policy = getOpenSwanToolPolicy(name as OpenSwanRuntimeToolName, ctx.activePluginIds);
     const approvalRequest = (result as any).approvalRequest || null;
-    const metadata = {
+    const capture = buildDesignAppRuntimeToolCaptureMetadata(name, result, input);
+    const metadata = withDesignAppRuntimeCaptureMetadata({
       ...(name === 'browser.plan_task' ? { browserPlan: (result as any).plan || null } : {}),
       toolPolicy: policy,
       approvalRequest,
-    };
+    }, capture);
     const status: OpenSwanExecutionStatus = approvalRequest
       ? 'manual_required'
       : name.startsWith('verification.') && (result as any).executed === false

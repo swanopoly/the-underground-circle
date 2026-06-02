@@ -20,6 +20,30 @@ import type { BrowserPlanCardData, BrowserPlanEvent } from './computerUse';
 import { buildOpenSwanMemoryStores } from './openswanMemoryStores';
 import { OPENSWAN_RUNTIME_PLAN_VERSION } from './openswanRuntimePlan';
 import type { ConnectedProviderSet } from './serviceProfileSouls';
+import { buildUserTaskPipelinePromptBlock } from './userTaskPipelines';
+import { buildComputerAppTaskStrategyPromptBlock } from './computerAppTaskStrategy';
+import { buildChatComputerRequestRoutePromptBlock } from './chatComputerRequestRouter';
+import { buildComputerAppGroundingPromptBlock } from './computerAppGrounding';
+import { buildComputerAppExecutionReceiptPromptBlock } from './computerAppExecutionReceipts';
+import { buildDesignAppAutomationPromptBlock } from './designAppAutomation';
+import { buildDesignAppExecutionPipelinePromptBlock } from './designAppExecutionPipeline';
+import {
+  buildDesignAppCreativeAiPromptBlock,
+  buildDesignAppCreativeAiRecipePromptBlock,
+} from './designAppCreativeAi';
+import { buildDesignAppObjectManifestPromptBlock } from './designAppObjectManifest';
+import { buildDesignAppOperationRunbookPromptBlock } from './designAppOperationRunbooks';
+import { buildDesignAppProofReviewPromptBlock } from './designAppProofReview';
+import { buildEngineeringCadOperationRunbookPromptBlock } from './engineeringCadOperationRunbooks';
+import {
+  buildRelevantAgentDevelopmentStandardsPromptBlock,
+  summarizeRelevantAgentDevelopmentStandards,
+} from './agentDevelopmentStandards';
+import {
+  buildDesignAppRuntimeManifestLedgerActions,
+  stripDesignAppRuntimeCaptureMetadata,
+} from './designAppRuntimeManifest';
+import { persistAgentRunLedgerPreview, persistRuntimeToolActions } from './agentRunLedgerPersistence';
 
 export type OpenSwanRunStage =
   | 'booting'
@@ -416,8 +440,37 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   const effectiveDelegationMode = resolveEffectiveDelegationMode(opts.delegationMode || 'auto', profile);
   const modePolicy = getOpenSwanModePolicy(opts.mode || 'talk');
   const modeResponseContract = buildOpenSwanModeResponseContract(opts.mode || 'talk');
+  const agentDevelopmentStandards = summarizeRelevantAgentDevelopmentStandards(cleanMessage, { mode: opts.mode || null });
+  const standardsPrompt = buildRelevantAgentDevelopmentStandardsPromptBlock(cleanMessage, { mode: opts.mode || null });
+  const pipelinePrompt = buildUserTaskPipelinePromptBlock(cleanMessage, { limit: 3 });
+  const computerRequestRoutePrompt = buildChatComputerRequestRoutePromptBlock(cleanMessage);
+  const computerAppStrategyPrompt = buildComputerAppTaskStrategyPromptBlock(cleanMessage);
+  const computerAppGroundingPrompt = buildComputerAppGroundingPromptBlock(cleanMessage);
+  const computerAppReceiptPrompt = buildComputerAppExecutionReceiptPromptBlock(cleanMessage);
+  const designAppAutomationPrompt = buildDesignAppAutomationPromptBlock(cleanMessage);
+  const designExecutionPipelinePrompt = buildDesignAppExecutionPipelinePromptBlock(cleanMessage);
+  const designCreativeAiPrompt = buildDesignAppCreativeAiPromptBlock(cleanMessage);
+  const designCreativeAiRecipePrompt = buildDesignAppCreativeAiRecipePromptBlock(cleanMessage);
+  const designObjectManifestPrompt = buildDesignAppObjectManifestPromptBlock(cleanMessage);
+  const designOperationRunbookPrompt = buildDesignAppOperationRunbookPromptBlock(cleanMessage);
+  const designProofReviewPrompt = buildDesignAppProofReviewPromptBlock(cleanMessage);
+  const engineeringCadOperationRunbookPrompt = buildEngineeringCadOperationRunbookPromptBlock(cleanMessage);
   const prompt = [
     modeResponseContract,
+    standardsPrompt,
+    pipelinePrompt,
+    computerRequestRoutePrompt,
+    computerAppStrategyPrompt,
+    computerAppGroundingPrompt,
+    computerAppReceiptPrompt,
+    designAppAutomationPrompt,
+    designExecutionPipelinePrompt,
+    designCreativeAiPrompt,
+    designCreativeAiRecipePrompt,
+    designObjectManifestPrompt,
+    designOperationRunbookPrompt,
+    designProofReviewPrompt,
+    engineeringCadOperationRunbookPrompt,
     buildAgenticCodingPrompt(cleanMessage, { surface: opts.surface, profile }),
   ].filter(Boolean).join('\n\n');
   const runSurface = opts.runSurface || opts.surface;
@@ -491,7 +544,19 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
           modeDescription: modePolicy.description,
           modeOutcome: modePolicy.outcome,
           modeResponseContract: modePolicy.responseContract || null,
+          agentDevelopmentStandards,
           taskKind: taskPlan.kind,
+          taskPipeline: taskPlan.pipeline || null,
+          taskPipelineDecision: taskPlan.pipelineDecision || null,
+          scenarioPolicy: taskPlan.scenarioPolicy || null,
+          surfacePlan: taskPlan.surfacePlan || null,
+          ledgerPreview: taskPlan.ledgerPreview || null,
+          failureAssessment: taskPlan.failureAssessment || null,
+          computerAppStrategy: taskPlan.computerAppStrategy || null,
+          computerAppGrounding: taskPlan.computerAppGrounding || null,
+          computerAppGroundingRunbook: taskPlan.computerAppGroundingRunbook || null,
+          computerAppGroundingNextStep: taskPlan.computerAppGroundingNextStep || null,
+          computerAppGroundingTrace: taskPlan.computerAppGroundingTrace || null,
           runtimeToolNames,
           toolRoundBudget,
           activeSkills: skillResolution.skills.map((skill) => ({
@@ -507,6 +572,17 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         },
       })
     : null;
+
+  if (run && opts.context.circleId) {
+    void persistAgentRunLedgerPreview({
+      preview: taskPlan.ledgerPreview,
+      actualRunId: run.id,
+      circleId: opts.context.circleId,
+      userId: opts.context.userId,
+      outcomeStatus: 'running',
+      source: 'openswan_session_start',
+    }).catch(() => undefined);
+  }
 
   const transcriptKey = buildOpenSwanTranscriptKey({
     runId: run?.id,
@@ -533,6 +609,14 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     data: {
       runId: run?.id || null,
       recommendedTools: taskPlan.recommendedTools.map((tool) => tool.tool),
+      taskPipeline: taskPlan.pipeline || null,
+      taskPipelineDecision: taskPlan.pipelineDecision || null,
+      computerAppStrategy: taskPlan.computerAppStrategy || null,
+      computerAppGrounding: taskPlan.computerAppGrounding || null,
+      computerAppGroundingRunbook: taskPlan.computerAppGroundingRunbook || null,
+      computerAppGroundingNextStep: taskPlan.computerAppGroundingNextStep || null,
+      computerAppGroundingTrace: taskPlan.computerAppGroundingTrace || null,
+      agentDevelopmentStandards,
       verificationPlan: taskPlan.verification.map((check) => ({
         label: check.label,
         kind: check.kind,
@@ -567,6 +651,15 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         '',
         `Task profile: ${taskPlan.summary}`,
         '',
+        ...(agentDevelopmentStandards
+          ? [
+              'Agent development standards:',
+              `- ${agentDevelopmentStandards.title}`,
+              ...agentDevelopmentStandards.standardDocPaths.map((docPath) => `- ${docPath}`),
+              '',
+            ]
+          : []),
+        '',
         'Verification plan:',
         ...taskPlan.verification.map((check) => `- ${check.required ? '[required]' : '[optional]'} ${check.label}: ${check.reason}`),
         '',
@@ -589,6 +682,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         label: check.label,
         required: check.required,
       })),
+      agentDevelopmentStandards,
     },
   })) || transcript;
   if (run && opts.context.circleId) {
@@ -609,6 +703,13 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       body: [
         `Task kind: ${taskPlan.kind}`,
         `Profile: ${taskPlan.profile}`,
+        taskPlan.pipeline ? `Pipeline: ${taskPlan.pipeline.title} (${taskPlan.pipeline.id})` : 'Pipeline: none',
+        taskPlan.pipelineDecision ? `Pipeline pattern: ${taskPlan.pipelineDecision.pattern} / risk ${taskPlan.pipelineDecision.aggregateRisk}` : '',
+        taskPlan.computerAppStrategy ? `Computer/app strategy: ${taskPlan.computerAppStrategy.label} (${taskPlan.computerAppStrategy.id})` : '',
+        taskPlan.computerAppGrounding ? `Grounding: ${taskPlan.computerAppGrounding.primarySurface} / ${taskPlan.computerAppGrounding.observationRules.map((item) => item.tool).join(', ')}` : '',
+        taskPlan.computerAppGroundingRunbook ? `Grounding runbook steps: ${taskPlan.computerAppGroundingRunbook.steps.length}` : '',
+        taskPlan.computerAppGroundingNextStep ? `Grounding next step: ${taskPlan.computerAppGroundingNextStep.kind} ${taskPlan.computerAppGroundingNextStep.tool || ''}` : '',
+        taskPlan.computerAppGroundingTrace ? `Grounding trace status: ${taskPlan.computerAppGroundingTrace.status}` : '',
         '',
         'Recommended tools:',
         ...taskPlan.recommendedTools.map((tool) => `- ${tool.tool} [${tool.priority}]: ${tool.reason}`),
@@ -902,7 +1003,15 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         toolApprovalGate: opts.onToolApproval,
       });
 
-      // Map tool events to the SwanBotStructuredToolAction shape expected downstream
+      const designManifestLedgerActions = buildDesignAppRuntimeManifestLedgerActions({
+        task: cleanMessage,
+        toolEvents: toolLoopResult.toolEvents,
+        runId: run?.id,
+      });
+
+      // Map tool events to the SwanBotStructuredToolAction shape expected downstream.
+      // Design-app captures are intentionally hidden: they are used only to
+      // create the redacted design.object_manifest ledger action below.
       runtimeToolActions = toolLoopResult.toolEvents.map((evt) => {
         const status: 'completed' | 'failed' | 'manual_required' | 'blocked' =
           evt.status === 'passed' ? 'completed' : evt.status === 'manual_required' ? 'manual_required' : evt.status === 'blocked' ? 'blocked' : 'failed';
@@ -913,9 +1022,19 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
           status,
           input_preview: typeof evt.input === 'string' ? evt.input.slice(0, 500) : JSON.stringify(evt.input).slice(0, 500),
           output_preview: typeof evt.result === 'string' ? evt.result.slice(0, 1200) : '',
-          metadata: evt.metadata || {},
+          metadata: stripDesignAppRuntimeCaptureMetadata(evt.metadata || {}),
         };
       });
+      runtimeToolActions.push(...designManifestLedgerActions.map((action) => ({
+        kind: 'tool' as const,
+        tool_name: action.tool_name || 'design.object_manifest',
+        title: action.title || 'Design object manifest',
+        status: action.status === 'completed' || action.status === 'blocked' ? action.status : 'failed',
+        input_preview: action.input_preview || null,
+        output_preview: action.output_preview || null,
+        artifact_refs: action.artifact_refs || [],
+        metadata: action.metadata || {},
+      })));
 
       browserPlans = extractBrowserPlansFromToolActions(runtimeToolActions);
       browserPlanEvents = buildInitialBrowserPlanEvents(browserPlans);
@@ -927,6 +1046,17 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         usage: {},
         ...(toolLoopResult.routing ? { routing: toolLoopResult.routing } : {}),
       };
+
+      // The tool loop hit its per-turn step cap before producing a final
+      // answer. Record it so the run transcript shows the result is partial
+      // rather than a clean finish.
+      if (toolLoopResult.incomplete) {
+        transcript = (await appendTranscriptEvent(transcriptKey, {
+          kind: 'tool_activity',
+          title: 'Tool-step limit reached',
+          summary: 'The tool loop hit its per-turn step cap before finishing — the response may be partial and can be continued.',
+        })) || transcript;
+      }
     }
 
     // Log tool activity to transcript
@@ -977,9 +1107,18 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     }
   } catch (toolErr) {
     console.warn('[OpenSwanRuntime] Tool-use loop failed, falling back to text-only:', toolErr);
-    // Fallback: use the old text-only path if the tool loop fails
+    // Fallback: use the old text-only path if the tool loop fails. Make the
+    // degradation visible instead of silently answering without tools — emit a
+    // stage update and record it in the transcript so the run shows it ran in a
+    // reduced mode and why.
+    emitStage(opts, 'reasoning', 'Tool loop failed — answering in text-only mode');
     structured = await runTextOnlyResponse();
     runtimeToolActions = structured.tool_actions || [];
+    transcript = (await appendTranscriptEvent(transcriptKey, {
+      kind: 'tool_activity',
+      title: 'Degraded to text-only mode',
+      summary: `Tool loop failed; answered without tools. Reason: ${toolErr instanceof Error ? toolErr.message : String(toolErr)}`,
+    })) || transcript;
   }
 
   const toolStepIndex = assistantResponseStepIndex;
@@ -1035,14 +1174,25 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
             title: action.title,
             status: action.status,
             outputPreview: action.output_preview || null,
+            artifactRefs: action.artifact_refs || null,
             browserPlan: action.metadata?.browserPlan || null,
             toolPolicy: action.metadata?.toolPolicy || null,
             approvalRequest: action.metadata?.approvalRequest || null,
+            ledgerArtifactKind: action.metadata?.ledgerArtifactKind || null,
           })),
           browserPlans,
           browserPlanEvents,
           execution_stream: executionStream,
         });
+        void persistRuntimeToolActions({
+          runId: run.id,
+          circleId: opts.context.circleId,
+          userId: opts.context.userId,
+          scenarioId: taskPlan.pipeline?.id || null,
+          surface: taskPlan.surfacePlan?.primarySurface || opts.surface,
+          risk: taskPlan.scenarioPolicy?.risk || taskPlan.pipeline?.risk || null,
+          actions: runtimeToolActions,
+        }).catch(() => undefined);
     }
     await addStep({
       runId: run.id,

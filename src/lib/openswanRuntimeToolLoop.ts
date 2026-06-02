@@ -4,6 +4,7 @@ import type { OpenSwanExecutionStatus } from './openswanExecution';
 import { buildOpenSwanTaskPlan, type OpenSwanTaskKind, type OpenSwanToolName } from './openswanTaskPlanner';
 import type { OpenSwanToolSurface, OpenSwanRuntimeToolName } from './openswanToolRuntime';
 import { analyzeMessageRouting } from './messageRouting';
+import { stripDesignAppRuntimeCaptureMetadata } from './designAppRuntimeManifest';
 
 export type OpenSwanRuntimeToolLoopOptions = {
   circleId: string;
@@ -87,7 +88,7 @@ function toToolActions(toolEvents: Array<{ tool: string; input: unknown; result:
     output_preview: event.result.slice(0, 1200),
     metadata: {
       source: 'openswan_runtime_tool_loop',
-      ...(event.metadata || {}),
+      ...stripDesignAppRuntimeCaptureMetadata(event.metadata || {}),
     },
   }));
 }

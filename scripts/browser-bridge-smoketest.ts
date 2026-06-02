@@ -7,6 +7,8 @@
  * Run: npm run smoke:browser-bridge
  */
 
+import { describeBrowserBridgeFailure } from '../src/lib/browserBridgeFailure';
+
 type BrowserA11yNode = {
   id: string;
   role: string;
@@ -174,6 +176,60 @@ function main() {
   assert(!validateUrl('file:///etc/passwd'), 'url: file: scheme rejected');
   assert(!validateUrl(''), 'url: empty rejected');
   assert(!validateUrl('example.com'), 'url: missing scheme rejected');
+
+  // Browser failure classification: the chat recovery path should see
+  // deterministic failure classes, not raw Playwright text only.
+  {
+    const failure = describeBrowserBridgeFailure('Timeout 5000ms exceeded while waiting for locator("button").click()');
+    assert(failure.errorCode === 'selector_not_found', 'failure: Playwright timeout maps to selector recovery');
+    assert(failure.message.includes('fresh DOM snapshot'), 'failure: selector recovery names fresh DOM evidence');
+    assert(failure.requiredEvidence.includes('browser.dom_snapshot'), 'failure: selector recovery requires DOM evidence');
+    assert(failure.requiredEvidence.includes('browser.screenshot'), 'failure: selector recovery requires screenshot evidence');
+  }
+  {
+    const failure = describeBrowserBridgeFailure('page.goto: Timeout 30000ms exceeded while waiting for load');
+    assert(failure.errorCode === 'timeout', 'failure: navigation timeout maps to bounded timeout recovery');
+    assert(failure.message.includes('current URL'), 'failure: timeout recovery asks for current page evidence');
+    assert(failure.requiredEvidence.includes('browser.health'), 'failure: timeout recovery requires browser health');
+    assert(failure.message.includes('Evidence: browser.health'), 'failure: user/agent message includes evidence plan');
+  }
+  {
+    const failure = describeBrowserBridgeFailure('locator.click: Error: strict mode violation: resolved to 2 elements');
+    assert(failure.errorCode === 'uncertain_ui_target', 'failure: strict-mode ambiguity maps to UI target recovery');
+    assert(failure.message.includes('ask for confirmation'), 'failure: ambiguity recovery can ask for confirmation');
+  }
+  {
+    const failure = describeBrowserBridgeFailure('Token rejected.', 'token_rejected');
+    assert(failure.errorCode === 'token_rejected', 'failure: explicit token rejection is preserved');
+    assert(failure.message.includes('Re-pair'), 'failure: token recovery asks for re-pairing');
+  }
+  {
+    const failure = describeBrowserBridgeFailure('Cloudflare security check requires human verification.');
+    assert(failure.errorCode === 'human_verification_required', 'failure: human verification is protected');
+    assert(failure.message.includes('Pause automation'), 'failure: human verification pauses automation');
+    assert(failure.requiredEvidence.includes('user.complete_browser_verification'), 'failure: human verification requires user evidence');
+  }
+  {
+    const failure = describeBrowserBridgeFailure('Browser dialog blocked: "lmao.png" already exists. Decision: requested output not confirmed.');
+    assert(failure.errorCode === 'browser_dialog_blocked', 'failure: browser popup maps to dialog recovery');
+    assert(failure.requiredEvidence.includes('browser.dialog_observation'), 'failure: browser popup requires dialog observation');
+    assert(failure.message.includes('guarded modal advisor'), 'failure: browser popup recovery names modal advisor');
+  }
+
+  // App-side bridge result shape: later recovery code should not parse
+  // prose to know which evidence is required.
+  {
+    const failure = describeBrowserBridgeFailure('Token rejected.', 'token_rejected');
+    const bridgeResult = {
+      ok: false,
+      error: failure.message,
+      errorCode: failure.errorCode,
+      recoveryHint: failure.recoveryHint,
+      requiredEvidence: failure.requiredEvidence,
+    };
+    assert(bridgeResult.requiredEvidence.includes('desktop.bridge_pairing'), 'failure result: pairing evidence is structured');
+    assert(bridgeResult.recoveryHint.includes('Re-pair'), 'failure result: recovery hint is structured');
+  }
 
   if (failures > 0) {
     console.error(`\n${failures} browser-bridge smoke-test failure(s)`);

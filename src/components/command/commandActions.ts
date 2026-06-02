@@ -46,11 +46,11 @@ export function buildAppActions(navigate: (screen: string, params?: any) => void
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  //  LEARN — Schools & AI Wiki
+  //  LEARN — Schools & Knowledge Wiki
   // ═══════════════════════════════════════════════════════════════════════════
   actions.push(
     { id: 'learn-schools',  name: 'Schools',          section: 'Learn', perform: () => navigate('Schools'),  keywords: 'schools learn education courses lessons modules tracks' },
-    { id: 'learn-wiki',     name: 'AI Wiki',          section: 'Learn', perform: () => navigate('Wiki'),     keywords: 'wiki articles knowledge ai agents reference glossary' },
+    { id: 'learn-wiki',     name: 'Knowledge Wiki',   section: 'Learn', perform: () => navigate('Wiki'),     keywords: 'wiki articles knowledge ai agents science cities reference glossary' },
   );
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -96,7 +96,7 @@ export function buildAppActions(navigate: (screen: string, params?: any) => void
   //  SEARCH — jump to search/browse screens
   // ═══════════════════════════════════════════════════════════════════════════
   actions.push(
-    { id: 'search-wiki',    name: 'Search AI Wiki...',    section: 'Search', keywords: 'wiki search article ai agent reference',         perform: () => navigate('Wiki') },
+    { id: 'search-wiki',    name: 'Search Knowledge Wiki...', section: 'Search', keywords: 'wiki search article ai agent science cities reference', perform: () => navigate('Wiki') },
     { id: 'search-schools', name: 'Search Schools...',    section: 'Search', keywords: 'schools search lessons learn education courses',  perform: () => navigate('Schools') },
     { id: 'search-circles', name: 'Browse Circles...',    section: 'Search', keywords: 'circles browse find discover teams',              perform: () => navigate('CirclesList') },
     { id: 'search-friends', name: 'Find Friends...',      section: 'Search', keywords: 'friends search find people users',                perform: () => navigate('Friends') },

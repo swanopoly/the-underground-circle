@@ -117,6 +117,13 @@ export const PROVIDER_DISPLAY: Record<string, { icon: string; color: string; lab
   'codex':         { icon: '🧠', color: '#10a37f', label: 'OpenAI Codex' },
   'gemini':        { icon: '♊', color: '#4285f4', label: 'Google Gemini' },
   'cursor':        { icon: '🎯', color: '#8b5cf6', label: 'Cursor' },
+  'opencode':      { icon: 'OC', color: '#38bdf8', label: 'OpenCode' },
+  'aider':         { icon: 'AI', color: '#f97316', label: 'Aider' },
+  'cline':         { icon: 'CL', color: '#ec4899', label: 'Cline' },
+  'windsurf':      { icon: 'WS', color: '#06b6d4', label: 'Windsurf' },
+  'copilot':       { icon: 'CP', color: '#1f6feb', label: 'Copilot' },
+  'continue':      { icon: 'CN', color: '#22c55e', label: 'Continue' },
+  'amp':           { icon: 'AM', color: '#a78bfa', label: 'Amp' },
   'generic-agent': { icon: '⚡', color: '#06b6d4', label: 'AI Agent' },
   // BYO LLM providers
   'openai':        { icon: '🟢', color: '#10a37f', label: 'OpenAI' },

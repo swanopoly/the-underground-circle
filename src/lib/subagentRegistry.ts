@@ -18,6 +18,7 @@ import { supabase } from './supabase';
 import { logActivity } from '../services/agentActivityLogger';
 import type { PromptMemoryReference } from './memoryService';
 import type { OpenSwanExecutionContract } from './openswanExecution';
+import { stripDesignAppRuntimeCaptureMetadata } from './designAppRuntimeManifest';
 import { buildOpenSwanObservedEvalSummary } from './openswanObservedEvals';
 import { OPENSWAN_RUNTIME_PLAN_VERSION } from './openswanRuntimePlan';
 import { buildOpenSwanMemoryStores } from './openswanMemoryStores';
@@ -537,7 +538,7 @@ export async function delegateToSubagent(opts: {
         status,
         input_preview: typeof evt.input === 'string' ? evt.input.slice(0, 500) : JSON.stringify(evt.input).slice(0, 500),
         output_preview: typeof evt.result === 'string' ? evt.result.slice(0, 1200) : '',
-        metadata: evt.metadata || {},
+        metadata: stripDesignAppRuntimeCaptureMetadata(evt.metadata || {}),
       };
     });
 

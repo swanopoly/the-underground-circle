@@ -10,6 +10,22 @@ short. Detailed context lives in the linked docs.
 2. `docs/UC_APP_STACK_REFERENCE.md` - current app stack and navigation map.
 3. `CLAUDE.md` - human-readable project context and current app review.
 4. Tool-specific notes only as needed:
+   - `docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md` to choose the right coding,
+     TypeScript, design, or web-page standard for the task.
+   - `docs/CODING_AGENT_BEST_PRACTICES.md` for general code quality, security,
+     testing, review, and handoff standards.
+   - `docs/TYPESCRIPT_AGENT_BEST_PRACTICES.md` for TypeScript and React Native
+     type-safety standards.
+   - `docs/DESIGN_AGENT_BEST_PRACTICES.md` for product design, design-system,
+     UX writing, and automation UI standards.
+   - `docs/MODERN_WEB_PAGE_DESIGN_AGENT_GUIDE.md` for modern web page, layout,
+     accessibility, and responsive design standards.
+   - `docs/AGENTIC_COMPUTER_APP_AUTOMATION_GUIDE.md` for browser, desktop,
+     local-file, native-app, Adobe/CAD, approval, evidence, and recovery
+     automation standards.
+   - `docs/AGENT_TOOL_CONTRACTS_AND_EVALS_GUIDE.md` for OpenSwan, bridge, MCP,
+     connected-agent tool contracts, approval metadata, recovery, redaction,
+     and eval standards.
    - `AGENT.md` for Codex-style repo work.
    - `Gemini.md` for Gemini CLI.
    - `MEMORY.md` for persistent gotchas and project memory.

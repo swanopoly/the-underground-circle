@@ -3,6 +3,8 @@
 // Usage:
 //   uc-input-helper move --x 120 --y 240
 //   uc-input-helper click --x 120 --y 240 [--button left|right] [--count 1|2]
+//   uc-input-helper down --x 120 --y 240 [--button left|right]
+//   uc-input-helper up [--x 120 --y 240] [--button left|right]
 //   uc-input-helper drag --from-x 120 --from-y 240 --to-x 600 --to-y 500 [--duration-ms 450]
 //   uc-input-helper scroll --x 120 --y 240 [--delta-x 0] [--delta-y -600]
 //
@@ -124,6 +126,18 @@ func postClick(at p: CGPoint, button: MouseButton, count: Int) {
     }
 }
 
+func postMouseDown(at p: CGPoint, button: MouseButton) {
+    postMove(to: p)
+    usleep(25_000)
+    let down = CGEvent(mouseEventSource: nil, mouseType: button.downType, mouseCursorPosition: p, mouseButton: button.cgButton)
+    down?.post(tap: .cghidEventTap)
+}
+
+func postMouseUp(at p: CGPoint, button: MouseButton) {
+    let up = CGEvent(mouseEventSource: nil, mouseType: button.upType, mouseCursorPosition: p, mouseButton: button.cgButton)
+    up?.post(tap: .cghidEventTap)
+}
+
 func postDrag(from start: CGPoint, to end: CGPoint, durationMs: Int) {
     postMove(to: start)
     usleep(35_000)
@@ -162,7 +176,7 @@ func postScroll(at p: CGPoint, deltaX: Int, deltaY: Int) {
 }
 
 guard CommandLine.arguments.count >= 2 else {
-    emitError("usage: uc-input-helper <move|click|drag|scroll> ...")
+    emitError("usage: uc-input-helper <move|click|down|up|drag|scroll> ...")
 }
 
 if !AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt" as CFString: false] as CFDictionary) {
@@ -184,6 +198,21 @@ case "click":
     let count = intArg("--count", min: 1, max: 3, default: 1)
     postClick(at: point(x, y), button: button, count: count)
     emitOk("\"x\":\(x),\"y\":\(y),\"button\":\(jsonEscape(button.rawValue)),\"count\":\(count)")
+case "down":
+    let x = intArg("--x", min: 0, max: 20_000)
+    let y = intArg("--y", min: 0, max: 20_000)
+    let button = parsedButton()
+    postMouseDown(at: point(x, y), button: button)
+    emitOk("\"x\":\(x),\"y\":\(y),\"button\":\(jsonEscape(button.rawValue))")
+case "up":
+    let rawX = arg("--x")
+    let rawY = arg("--y")
+    let x = rawX != nil ? intArg("--x", min: 0, max: 20_000) : -1
+    let y = rawY != nil ? intArg("--y", min: 0, max: 20_000) : -1
+    let button = parsedButton()
+    let p = x >= 0 && y >= 0 ? point(x, y) : CGEvent(source: nil)?.location ?? CGPoint(x: 0, y: 0)
+    postMouseUp(at: p, button: button)
+    emitOk("\"x\":\(Int(p.x)),\"y\":\(Int(p.y)),\"button\":\(jsonEscape(button.rawValue))")
 case "drag":
     let fromX = intArg("--from-x", min: 0, max: 20_000)
     let fromY = intArg("--from-y", min: 0, max: 20_000)

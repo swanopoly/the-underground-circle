@@ -68,6 +68,20 @@ function main() {
     assert(r.detail?.includes('Terminal'), 'type_text: app in detail');
   }
 
+  // ─── desktop.set_element_value → named native field ─────────────
+  {
+    const r = renderApprovalAction({
+      tool: 'desktop.set_element_value',
+      app: 'TextEdit',
+      role: 'AXTextField',
+      label: 'Email',
+      text: 'foo@example.com',
+    }, 'x');
+    assert(r.headline.includes('Set field in'), 'set_element_value: verb');
+    assert(r.headline.includes('**Email**'), 'set_element_value: label shown');
+    assert(r.detail?.includes('TextEdit'), 'set_element_value: app in detail');
+  }
+
   // ─── desktop.press_keys → combo shown ───────────────────────────
   {
     const r = renderApprovalAction({

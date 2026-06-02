@@ -32,9 +32,13 @@ import { isPlanSafeForPlanMode, describePlanModeRefusal } from './chatAutomation
  */
 export type ChatAutomationOutcome = {
   /** Which transport ran (matches plan.execution.kind on success). */
-  executionKind: ChatAutomationExecutionKind | 'skipped' | 'deferred';
-  /** Coarse-grained status. `deferred` = HITL required, nothing ran yet. */
-  status: 'completed' | 'failed' | 'blocked' | 'deferred' | 'skipped';
+  executionKind: ChatAutomationExecutionKind | 'skipped' | 'deferred' | 'needs_input';
+  /**
+   * Coarse-grained status. `deferred` = HITL required, nothing ran yet.
+   * `needs_input` = the request was underspecified; a clarifying question was
+   * surfaced and nothing ran (the caller should wait for the user's reply).
+   */
+  status: 'completed' | 'failed' | 'blocked' | 'deferred' | 'skipped' | 'needs_input';
   /** Human-facing message the chat UI renders. */
   message: string;
   /** Optional structured payload — per-transport shape, documented there. */

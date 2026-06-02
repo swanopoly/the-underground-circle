@@ -16,6 +16,7 @@ import {
   validateClickCoords,
   DESKTOP_MODIFIERS,
   DESKTOP_NAMED_KEYS,
+  DESKTOP_PUNCTUATION_KEYS,
 } from '../src/lib/desktopBridgeProtocol';
 
 let failures = 0;
@@ -55,6 +56,22 @@ function assert(cond: unknown, name: string, detail?: string) {
   const r = parseKeyCombo('  Cmd  +  Shift  +  P  ');
   assert(r.ok, 'combo: whitespace trimmed');
 }
+{
+  const r = parseKeyCombo('Cmd+,');
+  assert(r.ok, 'combo: Cmd+, parses (preferences punctuation key)');
+}
+{
+  const r = parseKeyCombo('Cmd+=');
+  assert(r.ok, 'combo: Cmd+= parses (zoom punctuation key)');
+}
+{
+  const r = parseKeyCombo('Cmd+`');
+  assert(r.ok, 'combo: Cmd+` parses (window cycling punctuation key)');
+}
+{
+  const r = parseKeyCombo('PageDown');
+  assert(r.ok, 'combo: bare PageDown parses');
+}
 
 // ─── parseKeyCombo — rejects ───────────────────────────────────────────
 for (const bad of [
@@ -89,6 +106,12 @@ for (const key of Array.from(DESKTOP_NAMED_KEYS)) {
   assert(r.ok, `combo: named key "${key}" accepted`);
 }
 
+// ─── parseKeyCombo — every safe punctuation key ────────────────────────
+for (const key of Array.from(DESKTOP_PUNCTUATION_KEYS)) {
+  const r = parseKeyCombo(`Cmd+${key}`);
+  assert(r.ok, `combo: punctuation key "${key}" accepted`);
+}
+
 // ─── escapeAppleScriptString ──────────────────────────────────────────
 assert(escapeAppleScriptString('hello')  === 'hello',          'escape: no-op on plain ascii');
 assert(escapeAppleScriptString('he said "hi"') === 'he said \\"hi\\"', 'escape: escapes double quotes');
@@ -110,6 +133,7 @@ for (const bad of ['', ' ', 'Bad|Name', 'no;semi', '`echo`', '$(whoami)', "'", '
 {
   assert(DESKTOP_MODIFIERS.size >= 10, `modifier set ≥10 entries (got ${DESKTOP_MODIFIERS.size})`);
   assert(DESKTOP_NAMED_KEYS.size >= 20, `named-key set ≥20 entries (got ${DESKTOP_NAMED_KEYS.size})`);
+  assert(DESKTOP_PUNCTUATION_KEYS.size >= 7, `punctuation-key set ≥7 entries (got ${DESKTOP_PUNCTUATION_KEYS.size})`);
 }
 
 // Phase 1c introduced `waitForApp` + `takeScreenshot`. The pure shape

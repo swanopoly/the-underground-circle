@@ -614,7 +614,7 @@ export default function MemoryViewer({ circleId, threadId, userId, accentColor =
         scope,
         circleId,
         userId,
-        memoryKind: recommendation.kind === 'failure_pattern' ? 'finding' : 'instruction',
+        memoryKind: recommendation.kind === 'failure_pattern' || recommendation.kind === 'recovery_pattern' ? 'finding' : 'instruction',
         title: `Archive pattern: ${recommendation.title}`.slice(0, 120),
         content: recommendation.content,
         visibility: scope === 'circle' ? 'circle_shared' : 'private',

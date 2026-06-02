@@ -4,6 +4,17 @@ import type { OpenSwanExecutionContract } from './openswanExecution';
 import type { OpenSwanToolEvent } from './openswanToolRuntime';
 import type { OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import type { BrowserPlanCardData, BrowserPlanEvent, BrowserSessionRecord } from './computerUse';
+import type {
+  PersistedChatRecoveryOption,
+  PersistedChatRecoveryReliabilitySummary,
+} from './persistedChatMetadata';
+import { buildChatFailureRecoveryExecutionPlan, summarizeChatFailureRecoveryOptionForArchive } from './chatFailureRecovery';
+import {
+  collectChatSessionArchiveRecoveryReliabilityTouched,
+  deriveChatSessionArchiveRecoveryRecommendations,
+  summarizeChatSessionArchiveRecoveryReliability,
+} from './chatSessionArchiveRecovery';
+import { formatChatSessionArchiveRecommendationPromptLines } from './chatSessionArchivePrompt';
 
 const STORAGE_PREFIX = '@chat_session_archive_v1';
 const MAX_ARCHIVED_MESSAGES = 240;
@@ -48,6 +59,8 @@ export type ChatSessionArchivedMessage = {
   browserPlanSummaries?: string[];
   browserEventSummaries?: string[];
   browserSessionSummaries?: string[];
+  recoveryOptionSummaries?: string[];
+  recoveryReliabilitySummaries?: string[];
   touched?: string[];
 };
 
@@ -72,7 +85,7 @@ export type ChatSessionArchiveSearchMatch = {
 
 export type ChatSessionArchiveRecommendation = {
   id: string;
-  kind: 'failure_pattern' | 'tool_pattern' | 'browser_pattern';
+  kind: 'failure_pattern' | 'tool_pattern' | 'browser_pattern' | 'recovery_pattern';
   title: string;
   summary: string;
   content: string;
@@ -107,6 +120,8 @@ export type UpsertChatSessionArchiveMessageInput = {
   browserPlans?: BrowserPlanCardData[];
   browserPlanEvents?: BrowserPlanEvent[];
   browserSessions?: BrowserSessionRecord[];
+  recoveryOptions?: PersistedChatRecoveryOption[];
+  recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
 };
 
 function archiveKey(circleId: string, threadId?: string | null): string {
@@ -141,6 +156,10 @@ function summarizeBrowserSessions(sessions?: BrowserSessionRecord[]): string[] {
   return (sessions || []).map((session) => `${session.task} (${session.status})`);
 }
 
+function summarizeRecoveryOptions(options?: PersistedChatRecoveryOption[]): string[] {
+  return (options || []).map((option) => summarizeChatFailureRecoveryOptionForArchive(option)).filter(Boolean);
+}
+
 function collectTouchedFromMessage(input: UpsertChatSessionArchiveMessageInput): string[] {
   return uniqueTrimmed([
     ...(input.memoriesUsed || []).map((value) => `memory:${value}`),
@@ -170,6 +189,17 @@ function collectTouchedFromMessage(input: UpsertChatSessionArchiveMessageInput):
         action.description ? `action:${action.description}` : null,
       ]),
     ])),
+    ...((input.recoveryOptions || []).flatMap((option) => {
+      const policy = buildChatFailureRecoveryExecutionPlan(option).policy;
+      return [
+        'surface:failure_recovery',
+        option.id ? `recovery_option:${option.id}` : null,
+        option.actor ? `recovery_actor:${option.actor}` : null,
+        `recovery_action:${policy.action}`,
+        `recovery_safety:${policy.safetyMode}`,
+      ];
+    })),
+    ...collectChatSessionArchiveRecoveryReliabilityTouched(input.recoveryReliability),
   ]);
 }
 
@@ -213,6 +243,8 @@ function areArchivedMessagesEquivalent(
     browserPlanSummaries: a.browserPlanSummaries || [],
     browserEventSummaries: a.browserEventSummaries || [],
     browserSessionSummaries: a.browserSessionSummaries || [],
+    recoveryOptionSummaries: a.recoveryOptionSummaries || [],
+    recoveryReliabilitySummaries: a.recoveryReliabilitySummaries || [],
     touched: a.touched || [],
   }) === JSON.stringify({
     dbId: b.dbId || null,
@@ -231,6 +263,8 @@ function areArchivedMessagesEquivalent(
     browserPlanSummaries: b.browserPlanSummaries || [],
     browserEventSummaries: b.browserEventSummaries || [],
     browserSessionSummaries: b.browserSessionSummaries || [],
+    recoveryOptionSummaries: b.recoveryOptionSummaries || [],
+    recoveryReliabilitySummaries: b.recoveryReliabilitySummaries || [],
     touched: b.touched || [],
   });
 }
@@ -289,6 +323,8 @@ export async function upsertChatSessionArchiveMessage(
     browserPlanSummaries: summarizeBrowserPlans(input.browserPlans).slice(0, 12),
     browserEventSummaries: summarizeBrowserPlanEvents(input.browserPlanEvents).slice(0, 20),
     browserSessionSummaries: summarizeBrowserSessions(input.browserSessions).slice(0, 10),
+    recoveryOptionSummaries: summarizeRecoveryOptions(input.recoveryOptions).slice(0, 8),
+    recoveryReliabilitySummaries: summarizeChatSessionArchiveRecoveryReliability(input.recoveryReliability).slice(0, 4),
     touched: collectTouchedFromMessage(input),
   };
 
@@ -372,6 +408,8 @@ export function searchChatSessionArchive(
       ...(message.verificationSummaries || []),
       ...(message.browserPlanSummaries || []),
       ...(message.browserSessionSummaries || []),
+      ...(message.recoveryOptionSummaries || []),
+      ...(message.recoveryReliabilitySummaries || []),
     ].filter(Boolean).join('\n').toLowerCase();
     if (haystack.includes(trimmed)) {
       matches.push({
@@ -503,6 +541,12 @@ export function deriveChatSessionArchiveRecommendations(
     });
   }
 
+  recommendations.push(...deriveChatSessionArchiveRecoveryRecommendations({
+    threadId: archive.threadId || 'main',
+    messages: archive.messages,
+    handledRecommendationIds: archive.recommendationState,
+  }, limit));
+
   return recommendations
     .sort((a, b) => {
       const rank = (value: ChatSessionArchiveRecommendation) => value.confidence === 'high' ? 1 : 0;
@@ -549,6 +593,7 @@ export function formatChatSessionArchiveBlock(
   opts: {
     maxMessages?: number;
     maxEvents?: number;
+    maxRecommendations?: number;
     maxTouched?: number;
     maxChars?: number;
   } = {},
@@ -556,12 +601,16 @@ export function formatChatSessionArchiveBlock(
   if (!archive) return null;
   const maxMessages = opts.maxMessages || 10;
   const maxEvents = opts.maxEvents || 12;
+  const maxRecommendations = opts.maxRecommendations ?? 3;
   const maxTouched = opts.maxTouched || 24;
   const maxChars = opts.maxChars || 3600;
 
   const recentMessages = archive.messages.slice(-maxMessages);
   const recentEvents = archive.events.slice(-maxEvents);
   const recentErrors = archive.events.filter((event) => event.kind === 'error').slice(-6);
+  const archiveRecommendations = maxRecommendations > 0
+    ? deriveChatSessionArchiveRecommendations(archive, maxRecommendations)
+    : [];
 
   const lines: string[] = ['## Session Archive'];
   if (archive.touched.length > 0) {
@@ -581,6 +630,9 @@ export function formatChatSessionArchiveBlock(
       lines.push(`- [${event.kind}] ${event.summary}`);
     }
   }
+  if (archiveRecommendations.length > 0) {
+    lines.push(...formatChatSessionArchiveRecommendationPromptLines(archiveRecommendations, maxRecommendations));
+  }
   if (recentMessages.length > 0) {
     lines.push('');
     lines.push('Recent transcript:');
@@ -595,6 +647,12 @@ export function formatChatSessionArchiveBlock(
       }
       if (message.browserPlanSummaries?.length || message.browserSessionSummaries?.length) {
         lines.push(`  browser: ${[...(message.browserPlanSummaries || []), ...(message.browserSessionSummaries || [])].slice(-3).join(' | ')}`);
+      }
+      if (message.recoveryOptionSummaries?.length) {
+        lines.push(`  recovery: ${message.recoveryOptionSummaries.slice(0, 3).join(' | ')}`);
+      }
+      if (message.recoveryReliabilitySummaries?.length) {
+        lines.push(`  recovery status: ${message.recoveryReliabilitySummaries.slice(0, 3).join(' | ')}`);
       }
       if (message.memoryRecommendations?.length) {
         lines.push(`  learned: ${message.memoryRecommendations.slice(-3).join(' | ')}`);
