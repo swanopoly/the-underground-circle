@@ -66,7 +66,22 @@ export interface TerminalAgentLaunchPlan {
   names: string[];
   usedDefaultPrompts: boolean;
   basePrompt?: string;
+  /**
+   * Launch each session in its own git worktree. Set when the user asks for
+   * isolation ("isolated", "worktree", "sandboxed", "its own branch"). Never
+   * set for cursor (GUI injection can't be worktree-isolated).
+   */
+  useWorktree: boolean;
   raw: string;
+}
+
+// Phrases that signal the user wants each agent isolated in its own worktree.
+// "branch"/"isolated" are constrained to session-context to avoid matching a
+// task prompt that merely mentions those words.
+const WORKTREE_INTENT_RE = /\b(worktree|work\s*tree|sandbox(?:ed)?|(?:its|their)\s+own\s+(?:branch|worktree|checkout|copy)|separate\s+(?:branch|worktree|checkout)|isolated(?:\s+\w+){0,2}\s+(?:sessions?|agents?|terminals?|windows?|worktrees?|branch|checkout|copy|workspace))\b/i;
+
+function detectWorktreeIntent(message: string): boolean {
+  return WORKTREE_INTENT_RE.test(message);
 }
 
 function clampCount(value: number): number {
@@ -186,6 +201,8 @@ export function parseTerminalAgentLaunchRequest(message: string): TerminalAgentL
   const count = clampCount(Math.max(extractCount(raw), promptList.length || 0));
   const basePrompt = promptList.length > 0 ? '' : extractBasePrompt(raw);
   const built = buildPrompts(meta.label, count, promptList, basePrompt);
+  // Cursor is GUI-injection — it can't be worktree-isolated, so never claim it.
+  const useWorktree = provider !== 'cursor' && detectWorktreeIntent(raw);
 
   return {
     provider,
@@ -195,6 +212,7 @@ export function parseTerminalAgentLaunchRequest(message: string): TerminalAgentL
     names: Array.from({ length: count }, (_, i) => count === 1 ? meta.label : `${meta.namePrefix} #${i + 1}`),
     usedDefaultPrompts: built.usedDefaultPrompts,
     basePrompt: basePrompt || undefined,
+    useWorktree,
     raw,
   };
 }
@@ -223,6 +241,9 @@ export function formatTerminalAgentLaunchResponse(plan: TerminalAgentLaunchPlan,
   ];
 
   if (result.projectDir) lines.push(`Project: ${result.projectDir}`);
+  if (plan.useWorktree) {
+    lines.push('Each session runs in its own isolated git worktree (`.openswan-worktrees/`), so edits stay off the shared tree.');
+  }
   if (plan.usedDefaultPrompts) {
     lines.push('No individual prompts were included, so I sent standby prompts. Use `with prompts:` to give each session its own task.');
   } else {

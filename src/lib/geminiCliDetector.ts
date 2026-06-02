@@ -360,6 +360,8 @@ export interface GeminiCliLaunchRequest {
   projectDir?: string;
   model?: string;
   yolo?: boolean;
+  /** Launch each session in its own git worktree (fail-open to the shared cwd). */
+  useWorktree?: boolean;
   circleId?: string;
   userId?: string;
 }
@@ -396,6 +398,7 @@ export async function launchGeminiCliSessions(input: GeminiCliLaunchRequest): Pr
       projectDir: input.projectDir,
       model: input.model,
       yolo: input.yolo,
+      useWorktree: input.useWorktree,
     });
     const postLaunch = async (token: string | null) => {
       const controller = new AbortController();

@@ -46,6 +46,22 @@ function main() {
   const unrelated = parseTerminalAgentLaunchRequest('can Claude Code explain terminal agents?');
   assert(unrelated === null, 'non-launch question ignored');
 
+  // ── Worktree isolation intent ──────────────────────────────────────────
+  assert(claude?.useWorktree === false, 'plain "separate sessions" does NOT request a worktree');
+  const wtCodex = parseTerminalAgentLaunchRequest('launch 3 isolated codex sessions in my terminal');
+  assert(wtCodex?.useWorktree === true, 'isolated codex sessions → useWorktree (provider name between isolated+sessions)');
+  const wtClaude = parseTerminalAgentLaunchRequest('spin up 2 claude code sessions, each in its own worktree');
+  assert(wtClaude?.useWorktree === true, '"each in its own worktree" → useWorktree');
+  const wtSandbox = parseTerminalAgentLaunchRequest('start a codex agent to refactor auth, sandboxed');
+  assert(wtSandbox?.useWorktree === true, '"sandboxed" → useWorktree');
+  const wtCursor = parseTerminalAgentLaunchRequest('launch 2 isolated cursor agents in their own worktree');
+  assert(wtCursor?.provider === 'cursor', 'cursor still detected');
+  assert(wtCursor?.useWorktree === false, 'cursor never claims worktree isolation (GUI injection)');
+  const wtSummary = formatTerminalAgentLaunchResponse(wtClaude!, {
+    ok: true, sessions: [], launched: 2, failed: [], projectDir: '/tmp/p',
+  });
+  assert(wtSummary.includes('.openswan-worktrees/'), 'response surfaces worktree isolation when requested');
+
   const summary = formatTerminalAgentLaunchResponse(claude!, {
     ok: true,
     sessions: [],

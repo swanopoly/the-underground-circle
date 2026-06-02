@@ -69,3 +69,7 @@ scripts/bin/uc-ax-helper.dSYM/
 docs/traces/
 
 .openswan-worktrees/
+
+# Local Remember runtime artifacts; keep curated .remember docs/assets tracked.
+.remember/logs/
+.remember/tmp/

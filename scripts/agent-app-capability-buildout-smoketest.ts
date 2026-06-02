@@ -115,6 +115,45 @@ assert(
   'known app strategy does not request connected buildout',
 );
 
+// Phase 3 — broadened buildout: specific app/desktop/browser strategies now
+// escalate to a built capability when they hit a clear gap, so the chat can
+// fulfil a request even if that exact adapter isn't configured yet.
+assert(
+  shouldRequestAgentAppCapabilityBuildoutFromOutcome({
+    strategyId: 'creative_layout_control',
+    agentResponse: 'I cannot complete this — no app adapter exists for that action yet.',
+  }),
+  'specific app strategy + capability-gap response now requests buildout',
+);
+assert(
+  shouldRequestAgentAppCapabilityBuildoutFromOutcome({
+    strategyId: 'ops_console_control',
+    errorMessage: 'bridge tool not found for this action',
+  }),
+  'specific app strategy + runtime error requests buildout',
+);
+assert(
+  shouldRequestAgentAppCapabilityBuildoutFromOutcome({
+    strategyId: 'browser_semantic',
+    appAdapterMessage: 'No connected app surfaces are available for this circle yet — missing an app adapter or bridge tool to drive this app.',
+  }),
+  'adapter dead-end message routes a browser/app request to buildout (loop closed)',
+);
+assert(
+  !shouldRequestAgentAppCapabilityBuildoutFromOutcome({
+    strategyId: 'creative_layout_control',
+    agentResponse: 'Done — exported the layout to brochure.pdf as requested.',
+  }),
+  'specific app strategy + clean success does NOT request buildout',
+);
+assert(
+  !shouldRequestAgentAppCapabilityBuildoutFromOutcome({
+    strategyId: 'desktop_readonly',
+    errorMessage: 'some error',
+  }),
+  'read-only strategy never requests buildout (nothing to build)',
+);
+
 const gapSummary = buildAgentAppCapabilityGapSummary({
   strategyId: 'universal_app_control',
   previewLabel: 'App task',

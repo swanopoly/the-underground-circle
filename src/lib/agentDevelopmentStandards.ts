@@ -1,4 +1,8 @@
 import { formatAgentToolContractChecklistPromptBlock } from './agentToolContractStandards';
+import {
+  formatOpenSwanWorktreeConfigPromptBlock,
+  type OpenSwanWorktreeConfigSnapshot,
+} from './openswanWorktreeConfig';
 
 export type AgentDevelopmentStandardId =
   | 'standards_index'
@@ -58,6 +62,7 @@ export interface ApplyAgentDevelopmentStandardsOptions {
   label?: string;
   changedPaths?: string[] | null;
   hasUnrelatedChanges?: boolean | null;
+  worktreeConfigSnapshot?: OpenSwanWorktreeConfigSnapshot | null;
 }
 
 export type AgentWorktreeRiskId =
@@ -132,8 +137,10 @@ const AGENT_WORKTREE_OWNER_RULES: AgentWorktreeOwnerRule[] = [
       /^docs\/AGENT_TOOL_CONTRACTS_AND_EVALS_GUIDE\.md$/,
       /^src\/lib\/agentDevelopmentStandards\.ts$/,
       /^src\/lib\/agentToolContractStandards\.ts$/,
+      /^src\/lib\/openswanWorktreeConfig\.ts$/,
       /^src\/lib\/wikiData\.ts$/,
       /^scripts\/agent-(?:standards-wiki|tool-contract-standards)-smoketest\.ts$/,
+      /^scripts\/openswan-worktree-config-(?:report|smoketest)\.ts$/,
     ],
     canonicalDocs: [
       'docs/AGENTS_ROADMAP.md',
@@ -142,6 +149,8 @@ const AGENT_WORKTREE_OWNER_RULES: AgentWorktreeOwnerRule[] = [
     action: 'Keep the typed standards registry, canonical Markdown guide, app wiki article, and smoke assertions in sync.',
     verificationCommands: [
       'npm run smoke:agent-standards-wiki',
+      'npm run smoke:openswan-worktree-config',
+      'npm run check:openswan-worktree-config',
       'npm run typecheck:app',
       'git diff --check',
     ],
@@ -291,6 +300,7 @@ const AGENT_WORKTREE_OWNER_RULES: AgentWorktreeOwnerRule[] = [
       /^src\/lib\/terminalAgent/,
       /^scripts\/(?:claude|codex|cursor|gemini)-bridge\.js$/,
       /^scripts\/codex-session-summary(?:-smoketest)?\.js$/,
+      /^scripts\/terminal-launch-utils\.js$/,
       /^scripts\/(?:custom-agent|terminal-agent|openswan|swanbot-v2|agent-(?!standards-wiki|tool-contract-standards))/,
       /^scripts\/blackswan-llm\/launchd\//,
       /^supabase\/functions\/(?:swanbot|agent|heartbeat)/,
@@ -441,11 +451,20 @@ export const AGENT_DEVELOPMENT_STANDARD_DOCS: AgentDevelopmentStandardDoc[] = [
       'Worktree Integration Checklist',
       'applyAgentDevelopmentStandardsToPrompt',
       'buildAgentWorktreeQualityChecklist',
+      'src/lib/openswanWorktreeConfig.ts',
+      'buildOpenSwanWorktreeConfigSnapshot',
+      'worktreeConfigSnapshot',
+      'check:openswan-worktree-config',
+      'appendOpenSwanWorktreeConfigPrompt',
       'npm run smoke:agent-standards-wiki',
     ],
     requiredArticleSnippets: [
       'docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md',
       'Worktree Integration Checklist',
+      'buildOpenSwanWorktreeConfigSnapshot',
+      'worktreeConfigSnapshot',
+      'check:openswan-worktree-config',
+      'terminal-launch-utils',
       'smoke:agent-standards-wiki',
     ],
     articleSearchQueries: ['agent standards', 'development standards', 'coding standards'],
@@ -1074,7 +1093,9 @@ export function summarizeRelevantAgentDevelopmentStandards(
 export function formatAgentDevelopmentStandardsPromptBlock(
   route: AgentDevelopmentTaskRoute,
   taskDescription?: string,
-  opts: Pick<AgentWorktreeQualityChecklistOptions, 'changedPaths' | 'hasUnrelatedChanges'> = {},
+  opts: Pick<AgentWorktreeQualityChecklistOptions, 'changedPaths' | 'hasUnrelatedChanges'> & {
+    worktreeConfigSnapshot?: OpenSwanWorktreeConfigSnapshot | null;
+  } = {},
 ): string {
   const standards = getStandardsForTaskType(route.taskType);
   const docs = standards.map((standard) => `- ${standard.title} (${standard.docPath}): ${standard.summary}`).join('\n');
@@ -1089,6 +1110,9 @@ export function formatAgentDevelopmentStandardsPromptBlock(
       hasUnrelatedChanges: opts.hasUnrelatedChanges,
     }),
   );
+  const worktreeConfigBlock = opts.worktreeConfigSnapshot
+    ? ['', formatOpenSwanWorktreeConfigPromptBlock(opts.worktreeConfigSnapshot)]
+    : [];
 
   return [
     '=== AGENT DEVELOPMENT STANDARDS ===',
@@ -1100,13 +1124,16 @@ export function formatAgentDevelopmentStandardsPromptBlock(
     verification,
     '',
     worktreeBlock,
+    ...worktreeConfigBlock,
     ...extraContractBlock,
   ].join('\n');
 }
 
 export function buildAgentDevelopmentStandardsPromptBlock(
   taskDescription: string,
-  opts: Pick<AgentWorktreeQualityChecklistOptions, 'changedPaths' | 'hasUnrelatedChanges'> = {},
+  opts: Pick<AgentWorktreeQualityChecklistOptions, 'changedPaths' | 'hasUnrelatedChanges'> & {
+    worktreeConfigSnapshot?: OpenSwanWorktreeConfigSnapshot | null;
+  } = {},
 ): string {
   return formatAgentDevelopmentStandardsPromptBlock(
     resolveAgentDevelopmentTaskRoute(taskDescription),
@@ -1121,6 +1148,7 @@ export function buildRelevantAgentDevelopmentStandardsPromptBlock(
     mode?: string | null;
     changedPaths?: string[] | null;
     hasUnrelatedChanges?: boolean | null;
+    worktreeConfigSnapshot?: OpenSwanWorktreeConfigSnapshot | null;
   } = {},
 ): string | null {
   const route = inferAgentDevelopmentTaskRoute(taskDescription, opts);
@@ -1143,6 +1171,7 @@ export function applyAgentDevelopmentStandardsToPrompt(
     mode: opts.mode,
     changedPaths: opts.changedPaths,
     hasUnrelatedChanges: opts.hasUnrelatedChanges,
+    worktreeConfigSnapshot: opts.worktreeConfigSnapshot,
   });
   if (!block) return cleanPrompt;
 

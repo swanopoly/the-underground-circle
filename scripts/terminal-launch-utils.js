@@ -1,10 +1,11 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn, execFile } = require('child_process');
+const { spawn, execFile, execFileSync } = require('child_process');
 
 const MAX_LAUNCH_COUNT = 20;
 const TERMINAL_SESSION_REGISTRY = path.join(osHomeDir(), '.uc-terminal-agent-sessions.json');
+const OPENSWAN_WORKTREE_CONFIG_MARKER = '## SwanBot/OpenSwan Worktree Config';
 
 function osHomeDir() {
   try { return require('os').homedir(); } catch { return process.env.HOME || process.cwd(); }
@@ -46,6 +47,121 @@ function safeProjectDir(input, fallback = process.cwd()) {
     if (stat.isDirectory()) return candidate;
   } catch {}
   return fallback;
+}
+
+function looksLikeOpenSwanRepo(projectDir) {
+  const dir = safeProjectDir(projectDir);
+  return fs.existsSync(path.join(dir, 'AGENTS.md'))
+    && fs.existsSync(path.join(dir, 'docs', 'AGENTS_ROADMAP.md'));
+}
+
+function readOpenSwanWorktreeConfigPrompt(projectDir) {
+  const repoRoot = path.resolve(__dirname, '..');
+  const reportPath = path.join(__dirname, 'openswan-worktree-config-report.ts');
+  if (!fs.existsSync(reportPath)) return '';
+  const dir = safeProjectDir(projectDir);
+  if (!looksLikeOpenSwanRepo(dir)) return '';
+  try {
+    return execFileSync('npx', ['tsx', reportPath, '--prompt', '--repo', dir], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      timeout: 10_000,
+      maxBuffer: 256 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+function appendOpenSwanWorktreeConfigPrompt(prompt, projectDir) {
+  const cleanPrompt = normalizeCliPrompt(prompt);
+  if (!cleanPrompt || cleanPrompt.includes(OPENSWAN_WORKTREE_CONFIG_MARKER)) return cleanPrompt;
+  if (String(process.env.UC_DISABLE_OPENSWAN_WORKTREE_CONFIG || '').trim() === '1') return cleanPrompt;
+  const configBlock = readOpenSwanWorktreeConfigPrompt(projectDir);
+  if (!configBlock || !configBlock.includes(OPENSWAN_WORKTREE_CONFIG_MARKER)) return cleanPrompt;
+  return [
+    cleanPrompt,
+    '',
+    'Hidden SwanBot/OpenSwan worktree configuration for this launched agent:',
+    configBlock,
+  ].join('\n');
+}
+
+// Git-worktree isolation for a launched agent. When `useWorktree` is set, each
+// session gets its own `.openswan-worktrees/openswan-agent-<ts>-<i>` checkout on
+// a fresh branch off HEAD, so parallel/risky edits never collide with the shared
+// tree. Fail-open: any git failure falls back to the shared workspace so a
+// launch is never blocked by worktree trouble. Uses execFileSync (no shell) to
+// avoid injection from the cwd path.
+function ensureOpenSwanWorktree({ baseCwd, useWorktree = false, index = 0, label = 'openswan-agent' } = {}) {
+  const resolvedBase = safeProjectDir(baseCwd);
+  if (!useWorktree) {
+    return { cwd: resolvedBase, isWorktree: false, branch: null, worktreeDir: null };
+  }
+  try {
+    const branch = `${label}-${Date.now()}-${index}`;
+    const worktreeDir = path.join(resolvedBase, '.openswan-worktrees', branch);
+    fs.mkdirSync(path.dirname(worktreeDir), { recursive: true });
+    try {
+      // New branch off the current HEAD.
+      execFileSync('git', ['worktree', 'add', worktreeDir, '-b', branch, 'HEAD'], {
+        cwd: resolvedBase, timeout: 20_000, stdio: ['ignore', 'ignore', 'ignore'],
+      });
+    } catch {
+      // The branch may already exist — attach a worktree to it instead.
+      execFileSync('git', ['worktree', 'add', worktreeDir, branch], {
+        cwd: resolvedBase, timeout: 20_000, stdio: ['ignore', 'ignore', 'ignore'],
+      });
+    }
+    return { cwd: worktreeDir, isWorktree: true, branch, worktreeDir };
+  } catch (err) {
+    console.warn('[worktree] creation failed, using shared workspace:', err && err.message ? err.message : err);
+    return { cwd: resolvedBase, isWorktree: false, branch: null, worktreeDir: null };
+  }
+}
+
+// Remove a single OpenSwan worktree. Non-force by design: git refuses to remove
+// a worktree with uncommitted changes, which protects an agent's unsaved work.
+// Pass force:true only when the caller has confirmed the work is disposable.
+function removeOpenSwanWorktree(baseCwd, worktreeDir, { force = false } = {}) {
+  const resolvedBase = safeProjectDir(baseCwd);
+  const args = ['worktree', 'remove'];
+  if (force) args.push('--force');
+  args.push(worktreeDir);
+  execFileSync('git', args, { cwd: resolvedBase, timeout: 20_000, stdio: ['ignore', 'ignore', 'ignore'] });
+}
+
+// Reclaim finished OpenSwan worktrees safely. First prunes stale admin entries
+// (dirs already deleted), then removes each `.openswan-worktrees/*` worktree
+// that git considers clean. Dirty/in-use worktrees are KEPT (the remove throws
+// and we swallow it), so unsaved agent work is never destroyed. Returns the
+// lists of removed and kept worktree dirs.
+function pruneOpenSwanWorktrees(baseCwd, { force = false } = {}) {
+  const resolvedBase = safeProjectDir(baseCwd);
+  const removed = [];
+  const kept = [];
+  try {
+    execFileSync('git', ['worktree', 'prune'], { cwd: resolvedBase, timeout: 20_000, stdio: ['ignore', 'ignore', 'ignore'] });
+    const out = execFileSync('git', ['worktree', 'list', '--porcelain'], {
+      cwd: resolvedBase, encoding: 'utf8', timeout: 20_000,
+    });
+    const dirs = out.split('\n')
+      .filter((line) => line.startsWith('worktree '))
+      .map((line) => line.slice('worktree '.length).trim())
+      .filter((dir) => dir.includes('.openswan-worktrees'));
+    for (const dir of dirs) {
+      try {
+        removeOpenSwanWorktree(resolvedBase, dir, { force });
+        removed.push(dir);
+      } catch {
+        kept.push(dir); // dirty or in-use — leave it to protect unsaved work
+      }
+    }
+  } catch (err) {
+    console.warn('[worktree] prune failed:', err && err.message ? err.message : err);
+  }
+  return { removed, kept };
 }
 
 function makeLaunchId(prefix) {
@@ -245,6 +361,10 @@ module.exports = {
   shellTextArg,
   clampLaunchCount,
   normalizeCliPrompt,
+  appendOpenSwanWorktreeConfigPrompt,
+  ensureOpenSwanWorktree,
+  removeOpenSwanWorktree,
+  pruneOpenSwanWorktrees,
   promptPreview,
   safeProjectDir,
   makeLaunchId,

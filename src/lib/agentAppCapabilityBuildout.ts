@@ -174,13 +174,42 @@ export function inferAppNameForCapabilityBuildout(task: string, explicitAppName?
   return undefined;
 }
 
+// Capability-gap language in an agent response: the run reports it lacks the
+// adapter/tool/recipe to finish, so we escalate to building that capability.
+const CAPABILITY_GAP_RE = /\b(?:unsupported|no (?:app )?(?:adapter|recipe|pipeline|connector|bridge|tool|capability)|missing (?:an? )?(?:app )?(?:adapter|recipe|pipeline|connector|bridge|tool|capability)|do(?:es)? not have|don'?t have|need(?:s|ed)? (?:an? )?(?:app )?(?:adapter|recipe|pipeline|connector|bridge|tool|capability))\b/i;
+const CAPABILITY_BLOCKED_RE = /\b(?:can'?t|cannot|unable)\b.{0,120}\b(?:continue|complete|finish|control|execute|automate|use)\b/i;
+
+// Strategies that should NOT escalate to building an app capability: read-only
+// inspection has nothing to build, and asset acquisition owns its own dedicated
+// connected-agent flow.
+const NON_BUILDOUT_STRATEGIES = new Set(['desktop_readonly', 'agent_asset_acquisition']);
+
 export function shouldRequestAgentAppCapabilityBuildoutFromOutcome(input: AgentAppCapabilityOutcomeInput): boolean {
-  if (input.strategyId !== 'universal_app_control') return false;
-  if (clean(input.errorMessage)) return true;
+  const strategyId = clean(input.strategyId);
+  if (!strategyId || NON_BUILDOUT_STRATEGIES.has(strategyId)) return false;
+
+  const hasError = Boolean(clean(input.errorMessage));
   const response = clean(input.agentResponse);
-  if (!response) return true;
-  return /\b(?:unsupported|no (?:app )?(?:adapter|recipe|pipeline|connector|bridge|tool|capability)|missing (?:an? )?(?:app )?(?:adapter|recipe|pipeline|connector|bridge|tool|capability)|do(?:es)? not have|don'?t have|need(?:s|ed)? (?:an? )?(?:app )?(?:adapter|recipe|pipeline|connector|bridge|tool|capability))\b/i.test(response)
-    || /\b(?:can'?t|cannot|unable)\b.{0,120}\b(?:continue|complete|finish|control|execute|automate|use)\b/i.test(response);
+  // Check both the agent's response AND the app-adapter result: a generic-app
+  // adapter that dead-ends ("missing an app adapter…") signals the gap directly,
+  // even when the agent never echoed it.
+  const gapIn = (text: string) => !!text && (CAPABILITY_GAP_RE.test(text) || CAPABILITY_BLOCKED_RE.test(text));
+  const hasGapLanguage = gapIn(response) || gapIn(clean(input.appAdapterMessage));
+
+  // `universal_app_control` is the generic last-resort runtime: any failure —
+  // including an empty response — means the generic path could not do it, so
+  // escalate to a purpose-built capability.
+  if (strategyId === 'universal_app_control') {
+    return hasError || !response || hasGapLanguage;
+  }
+
+  // Every other actionable app/desktop/browser strategy: escalate only on a
+  // concrete failure or a capability-gap signal — never on a clean/empty
+  // response that may be a legitimate result. This lets a specific-but-
+  // incomplete strategy (a creative, CAD, ops, or browser flow whose exact
+  // adapter/recipe is missing) BUILD the capability and fulfil the request
+  // instead of dead-ending with "I can't do that yet".
+  return hasError || hasGapLanguage;
 }
 
 export function buildAgentAppCapabilityGapSummary(input: AgentAppCapabilityOutcomeInput): string {

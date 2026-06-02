@@ -166,6 +166,29 @@ const scopedWrappedHandoff = applyAgentDevelopmentStandardsToPrompt('fix desktop
 });
 assert(scopedWrappedHandoff.includes('src/lib/chatComputerRequestUx.ts: Chat computer/browser/desktop runtime'),
   'handoff wrapper carries scoped changed path ownership');
+const configWrappedHandoff = applyAgentDevelopmentStandardsToPrompt('fix desktop bridge app automation for Photoshop', {
+  worktreeConfigSnapshot: {
+    status: 'watch',
+    score: 92,
+    label: 'WORKTREE WATCH',
+    summary: 'Synthetic worktree config warning for smoke coverage.',
+    isOpenSwanWorktree: false,
+    blockers: [],
+    warnings: ['.remember/logs/ is visible in git status and should be ignored or cleaned before review.'],
+    nextActions: ['Keep runtime artifacts local-only.'],
+    items: [
+      {
+        id: 'synthetic-runtime-artifact',
+        label: 'Synthetic runtime artifact',
+        status: 'warn',
+        detail: 'Synthetic smoke warning.',
+      },
+    ],
+  },
+});
+assert(configWrappedHandoff.includes('SwanBot/OpenSwan Worktree Config'),
+  'handoff wrapper carries OpenSwan worktree config block');
+assert(configWrappedHandoff.includes('status: watch'), 'handoff wrapper carries OpenSwan worktree config status');
 
 const worktreeChecklist = buildAgentWorktreeQualityChecklist({
   taskDescription: 'keep optimizing chat desktop app automation',
@@ -194,6 +217,18 @@ assert(worktreeChecklist.verificationCommands.includes('npm run smoke:generic-ap
   'worktree checklist includes generic navigator smoke');
 assert(worktreeChecklist.verificationCommands.includes('npm run smoke:chat-computer-request-router'),
   'worktree checklist includes chat computer router smoke');
+
+const openswanConfigChecklist = buildAgentWorktreeQualityChecklist({
+  taskDescription: 'tighten SwanBot OpenSwan worktree configuration',
+  changedPaths: [
+    '?? src/lib/openswanWorktreeConfig.ts',
+    '?? scripts/openswan-worktree-config-smoketest.ts',
+  ],
+});
+assert(openswanConfigChecklist.pathFindings.every((finding) => finding.ownerRuleId === 'agent_standards'),
+  'worktree checklist maps OpenSwan worktree config to standards owner');
+assert(openswanConfigChecklist.verificationCommands.includes('npm run smoke:openswan-worktree-config'),
+  'worktree checklist includes OpenSwan worktree config smoke');
 
 const worktreePrompt = formatAgentWorktreeQualityChecklistPromptBlock(worktreeChecklist);
 assert(worktreePrompt.includes('Generic unfamiliar-app navigation'), 'worktree prompt names generic app owner');

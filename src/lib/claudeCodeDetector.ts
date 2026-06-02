@@ -493,6 +493,8 @@ export interface ClaudeCodeLaunchRequest {
   projectDir?: string;
   model?: string;
   permissionMode?: 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'dontAsk' | 'plan' | string;
+  /** Launch each session in its own git worktree (fail-open to the shared cwd). */
+  useWorktree?: boolean;
   circleId?: string;
   userId?: string;
 }
@@ -529,6 +531,7 @@ export async function launchClaudeCodeSessions(input: ClaudeCodeLaunchRequest): 
       projectDir: input.projectDir,
       model: input.model,
       permissionMode: input.permissionMode,
+      useWorktree: input.useWorktree,
     });
     const postLaunch = async (token: string | null) => {
       const controller = new AbortController();

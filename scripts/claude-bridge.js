@@ -13,7 +13,10 @@ const os = require('os');
 const crypto = require('crypto');
 const { exec, execSync, execFile, execFileSync } = require('child_process');
 const {
+  appendOpenSwanWorktreeConfigPrompt,
   clampLaunchCount,
+  ensureOpenSwanWorktree,
+  pruneOpenSwanWorktrees,
   loadManagedTerminalSessions,
   makeLaunchId,
   makeTerminalTitle,
@@ -588,6 +591,9 @@ function registerLaunchedClaudeSession(data) {
   const session = {
     sessionId: data.sessionId,
     projectDir: data.projectDir || process.cwd(),
+    branch: data.branch || null,
+    worktree: data.worktreeDir || null,
+    isWorktree: Boolean(data.isWorktree),
     projectHash: data.projectHash || 'manual-launch',
     model: data.model || 'claude-code',
     status: data.status || 'active',
@@ -652,15 +658,25 @@ async function launchClaudeCodeSessions(data) {
   for (let i = 0; i < count; i++) {
     const sessionId = `${launchId}-${i + 1}`;
     const displayName = Array.isArray(data.names) && data.names[i] ? String(data.names[i]) : `Claude Code #${i + 1}`;
+    // Per-session git-worktree isolation when requested (fail-open to shared cwd).
+    const { cwd: sessionCwd, branch, worktreeDir, isWorktree } = ensureOpenSwanWorktree({
+      baseCwd: cwd, useWorktree: data.useWorktree, index: i,
+    });
     const cleanPrompt = prompts[i] || basePrompt || `Stand by as ${displayName}. Wait for a delegated task from The Underground Circle.`;
-    const cliPrompt = buildClaudeManagedPrompt({ sessionId, displayName, index: i, count, prompt: cleanPrompt });
-    const command = buildClaudeLaunchCommand({ cwd, prompt: cliPrompt, model, permissionMode, displayName });
+    const cliPrompt = appendOpenSwanWorktreeConfigPrompt(
+      buildClaudeManagedPrompt({ sessionId, displayName, index: i, count, prompt: cleanPrompt }),
+      sessionCwd,
+    );
+    const command = buildClaudeLaunchCommand({ cwd: sessionCwd, prompt: cliPrompt, model, permissionMode, displayName });
     const launchedAt = new Date().toISOString();
     const terminalTitle = makeTerminalTitle('Claude Code', displayName, sessionId);
     const terminalResult = await openTerminal(command, terminalTitle);
     const session = registerLaunchedClaudeSession({
       sessionId,
-      projectDir: cwd,
+      projectDir: sessionCwd,
+      branch,
+      worktreeDir,
+      isWorktree,
       model: model || 'claude-code',
       status: terminalResult.ok ? 'active' : 'idle',
       displayName,
@@ -845,6 +861,33 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       res.writeHead(400, CORS);
       res.end(JSON.stringify({ ok: false, error: e.message || 'Send failed' }));
+    }
+    return;
+  }
+
+  // ── POST /worktree/prune — reclaim finished OpenSwan worktrees ──────────────
+  // Body: { workdir?, force? }. Safe by default: only clean worktrees are
+  // removed; dirty ones (unsaved agent work) are kept.
+  if (url === '/worktree/prune' && req.method === 'POST') {
+    if (!isDesktopTokenValid(req)) {
+      res.writeHead(401, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop token. Pair first via POST /desktop/pair.' }));
+      return;
+    }
+    try {
+      const data = await readJsonBodyPromise(req).catch(() => ({}));
+      const baseCwd = data?.workdir || process.cwd();
+      const { removed, kept } = pruneOpenSwanWorktrees(baseCwd, { force: !!data?.force });
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({
+        ok: true,
+        removed,
+        kept,
+        message: `Pruned ${removed.length} worktree${removed.length === 1 ? '' : 's'}${kept.length ? `, kept ${kept.length} with unsaved work` : ''}.`,
+      }));
+    } catch (e) {
+      res.writeHead(400, CORS);
+      res.end(JSON.stringify({ ok: false, error: e.message || 'Prune failed' }));
     }
     return;
   }
@@ -1178,21 +1221,8 @@ const server = http.createServer(async (req, res) => {
       for (let i = 0; i < items.length; i++) {
         const { task, model } = items[i];
         const modelFlag = model ? `--model ${model}` : '';
-        let cwd = baseCwd;
-
-        // Optional: git worktree isolation per agent
-        if (useWorktree) {
-          try {
-            const branch = `openswan-agent-${Date.now()}-${i}`;
-            const worktreeDir = path.join(baseCwd, '.openswan-worktrees', branch);
-            execSync(`mkdir -p "${path.dirname(worktreeDir)}"`, { cwd: baseCwd });
-            execSync(`git worktree add "${worktreeDir}" -b "${branch}" HEAD 2>/dev/null || git worktree add "${worktreeDir}" "${branch}" 2>/dev/null`, { cwd: baseCwd, timeout: 15000 });
-            cwd = worktreeDir;
-          } catch (wtErr) {
-            // Fall back to shared workspace if worktree fails
-            console.warn(`[spawn] Worktree creation failed for agent ${i}:`, wtErr.message);
-          }
-        }
+        // Optional: git worktree isolation per agent (shared helper, fail-open).
+        const { cwd } = ensureOpenSwanWorktree({ baseCwd, useWorktree, index: i });
 
         const escaped = task.replace(/'/g, "'\\''");
         const logFile = `/tmp/claude-spawn-${Date.now()}-${i}.log`;

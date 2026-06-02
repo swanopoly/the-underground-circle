@@ -18,7 +18,9 @@ const os = require('os');
 const crypto = require('crypto');
 const { exec, execSync } = require('child_process');
 const {
+  appendOpenSwanWorktreeConfigPrompt,
   clampLaunchCount,
+  ensureOpenSwanWorktree,
   loadManagedTerminalSessions,
   makeLaunchId,
   makeTerminalTitle,
@@ -486,6 +488,9 @@ function registerLaunchedGeminiSession(data) {
   const session = {
     sessionId: data.sessionId,
     projectDir: data.projectDir || process.cwd(),
+    branch: data.branch || null,
+    worktree: data.worktreeDir || null,
+    isWorktree: Boolean(data.isWorktree),
     model: data.model || 'gemini-cli',
     status: data.status || 'active',
     task: data.task || 'Gemini CLI terminal session',
@@ -536,15 +541,25 @@ async function launchGeminiCliSessions(data) {
   for (let i = 0; i < count; i++) {
     const sessionId = `${launchId}-${i + 1}`;
     const displayName = Array.isArray(data.names) && data.names[i] ? String(data.names[i]) : `Gemini CLI #${i + 1}`;
+    // Per-session git-worktree isolation when requested (fail-open to shared cwd).
+    const { cwd: sessionCwd, branch, worktreeDir, isWorktree } = ensureOpenSwanWorktree({
+      baseCwd: cwd, useWorktree: data.useWorktree, index: i,
+    });
     const cleanPrompt = prompts[i] || basePrompt || `Stand by as ${displayName}. Wait for a delegated task from The Underground Circle.`;
-    const cliPrompt = buildGeminiManagedPrompt({ sessionId, displayName, index: i, count, prompt: cleanPrompt });
-    const command = buildGeminiLaunchCommand({ cwd, prompt: cliPrompt, model, yolo });
+    const cliPrompt = appendOpenSwanWorktreeConfigPrompt(
+      buildGeminiManagedPrompt({ sessionId, displayName, index: i, count, prompt: cleanPrompt }),
+      sessionCwd,
+    );
+    const command = buildGeminiLaunchCommand({ cwd: sessionCwd, prompt: cliPrompt, model, yolo });
     const launchedAt = new Date().toISOString();
     const terminalTitle = makeTerminalTitle('Gemini CLI', displayName, sessionId);
     const terminalResult = await openTerminal(command, terminalTitle);
     const session = registerLaunchedGeminiSession({
       sessionId,
-      projectDir: cwd,
+      projectDir: sessionCwd,
+      branch,
+      worktreeDir,
+      isWorktree,
       model: model || 'gemini-cli',
       status: terminalResult.ok ? 'active' : 'idle',
       displayName,

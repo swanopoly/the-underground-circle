@@ -4331,75 +4331,27 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
         const prompt = policy.prompt;
         const policySummary = formatAgentAppCapabilityBuildoutPolicySummary(policy);
 
-        const { fetchCodexSessions, launchCodexSessions } = await import('./codexDetector');
-        const { sendTerminalAgentSessionMessage } = await import('./bridgeTaskDispatcher');
-        let targetSessionId = String(a.sessionId || '').trim();
-
-        if (!targetSessionId) {
-          const sessions = await fetchCodexSessions().catch(() => []);
-          const managed = sessions.find((session) => Boolean(session.terminalTitle || session.launchId || session.manageable));
-          targetSessionId = managed?.sessionId || '';
-        }
-
-        if (targetSessionId) {
-          const sent = await sendTerminalAgentSessionMessage('codex', targetSessionId, prompt);
-          if (!sent.ok) {
-            return {
-              ok: false,
-              provider: 'codex',
-              sessionId: targetSessionId,
-              buildoutKind: policy.kind,
-              risk: policy.risk,
-              appName: policy.appName,
-              resultsText: sent.error || 'Could not send app capability buildout task to Codex.',
-            } as any;
-          }
-          return {
-            ok: true,
-            provider: 'codex',
-            sessionId: sent.sessionId || targetSessionId,
-            launched: false,
-            buildoutKind: policy.kind,
-            risk: policy.risk,
-            appName: policy.appName,
-            resultsText: `Sent Codex app capability buildout task to ${sent.displayName || targetSessionId}. ${policySummary}`,
-          } as any;
-        }
-
-        if (a.launchIfMissing === false) {
-          return {
-            ok: false,
-            provider: 'codex',
-            launched: false,
-            buildoutKind: policy.kind,
-            risk: policy.risk,
-            appName: policy.appName,
-            resultsText: 'No managed Codex session is available and launchIfMissing is false.',
-          } as any;
-        }
-
-        const launched = await launchCodexSessions({
-          count: 1,
+        // Provider-agnostic: route the buildout to whichever connected coding
+        // agent is available (Codex, Claude Code, Gemini, Cursor) instead of
+        // hard-failing when Codex isn't connected.
+        const { dispatchConnectedAgentTask } = await import('./connectedAgentDispatch');
+        const dispatch = await dispatchConnectedAgentTask({
           prompt,
-          names: ['Codex App Capability Buildout'],
+          sessionName: 'App Capability Buildout',
+          sessionId: a.sessionId,
+          launchIfMissing: a.launchIfMissing,
           circleId: context.circleId,
           userId: context.userId,
         });
-        if (!launched.ok || launched.launched < 1) {
-          const error = launched.error || launched.failed?.[0]?.error || 'Could not launch Codex app capability buildout session.';
-          return { ok: false, provider: 'codex', launched: false, buildoutKind: policy.kind, risk: policy.risk, appName: policy.appName, resultsText: error } as any;
-        }
-
-        const session = launched.sessions[0];
         return {
-          ok: true,
-          provider: 'codex',
-          sessionId: session?.sessionId,
-          launched: true,
+          ok: dispatch.ok,
+          provider: dispatch.provider || undefined,
+          sessionId: dispatch.sessionId,
+          launched: dispatch.launched,
           buildoutKind: policy.kind,
           risk: policy.risk,
           appName: policy.appName,
-          resultsText: `Launched Codex app capability buildout session${session?.displayName ? ` (${session.displayName})` : ''}. ${policySummary}`,
+          resultsText: dispatch.ok ? `${dispatch.resultsText} ${policySummary}` : dispatch.resultsText,
         } as any;
       } catch (e: any) {
         return { ok: false, provider: 'codex', resultsText: e.message || 'App capability buildout handoff failed.' } as any;

@@ -361,6 +361,8 @@ export interface CodexLaunchRequest {
   model?: string;
   fullAuto?: boolean;
   search?: boolean;
+  /** Launch each session in its own git worktree (fail-open to the shared cwd). */
+  useWorktree?: boolean;
   circleId?: string;
   userId?: string;
 }
@@ -398,6 +400,7 @@ export async function launchCodexSessions(input: CodexLaunchRequest): Promise<Co
       model: input.model,
       fullAuto: input.fullAuto,
       search: input.search,
+      useWorktree: input.useWorktree,
     });
     const postLaunch = async (token: string | null) => {
       const controller = new AbortController();

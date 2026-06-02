@@ -56,6 +56,13 @@ export interface TerminalSpawnOptions {
   model?: string;
   sessionName?: string;
   workdir?: string;
+  /**
+   * When true, the bridge launches the CLI agent in its own git worktree
+   * (`.openswan-worktrees/openswan-agent-*`) so edits stay isolated from the
+   * shared tree. Honored by the claude-code/codex/gemini launch paths; cursor
+   * (GUI injection) ignores it. Fail-open: bridge falls back to the shared cwd.
+   */
+  useWorktree?: boolean;
 }
 
 async function probeBridge(port: number): Promise<boolean> {
@@ -306,6 +313,7 @@ export async function spawnNewClaudeSession(
         names: [options?.sessionName || 'Claude Code #1'],
         model: options?.model,
         projectDir: options?.workdir,
+        useWorktree: options?.useWorktree,
         permissionMode: options?.launchMode === 'full-auto'
           ? 'bypassPermissions'
           : options?.launchMode === 'auto'
@@ -350,6 +358,7 @@ export async function spawnNewCodexSession(
         names: [options?.sessionName || 'Codex'],
         model: options?.model,
         projectDir: options?.workdir,
+        useWorktree: options?.useWorktree,
         fullAuto: options?.launchMode === 'full-auto',
       }),
     });
@@ -396,6 +405,7 @@ export async function spawnNewGeminiCliSession(
         names: [options?.sessionName || 'Gemini CLI #1'],
         model: options?.model,
         projectDir: options?.workdir,
+        useWorktree: options?.useWorktree,
         yolo: options?.launchMode === 'full-auto',
       }),
     });
@@ -456,6 +466,36 @@ export async function spawnNewCursorComposerSession(
     };
   } catch (e: any) {
     return { ok: false, error: e.message, dispatchedVia: 'none', provider: 'cursor' };
+  }
+}
+
+/**
+ * Reclaim finished OpenSwan worktrees (`.openswan-worktrees/*`). Routed through
+ * the Claude Code bridge since worktrees are shared across providers in one
+ * repo. Safe by default — only clean worktrees are removed; dirty ones (unsaved
+ * agent work) are kept unless `force` is set.
+ */
+export async function pruneTerminalAgentWorktrees(
+  options?: { workdir?: string; force?: boolean },
+): Promise<{ ok: boolean; removed?: string[]; kept?: string[]; message?: string; error?: string }> {
+  const port = BRIDGE_PORTS['claude-code'];
+  const bridgeUrl = getBridgeUrl(port) || `http://localhost:${port}`;
+  try {
+    const online = await probeBridge(port);
+    if (!online) return { ok: false, error: 'Claude Code bridge not reachable for worktree prune' };
+    const token = await ensureBridgeToken();
+    const res = await fetch(`${bridgeUrl}/worktree/prune`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...bridgeAuthHeaders(token) },
+      body: JSON.stringify({ workdir: options?.workdir, force: options?.force }),
+    });
+    const data = await res.json().catch(() => null);
+    if (res.ok && data?.ok) {
+      return { ok: true, removed: data.removed || [], kept: data.kept || [], message: data.message };
+    }
+    return { ok: false, error: data?.error || `Worktree prune failed with HTTP ${res.status}` };
+  } catch (e: any) {
+    return { ok: false, error: e.message };
   }
 }
 

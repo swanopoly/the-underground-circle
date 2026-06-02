@@ -39,6 +39,7 @@ async function launchForProvider(
     count: plan.count,
     prompts,
     names: plan.names,
+    useWorktree: plan.useWorktree,
     circleId: context.circleId,
     userId: context.userId,
   };

@@ -388,6 +388,50 @@ wire dead code. Small diffs, immediate user-visible improvement.
 
 ### Phase 3 — Generalize capability buildout (build what's missing)
 
+> **Status (shipped 2026-06-02):** the buildout trigger no longer dead-ends
+> unconfigured browser/app requests. `shouldRequestAgentAppCapabilityBuildoutFromOutcome`
+> (`agentAppCapabilityBuildout.ts`) was broadened from `universal_app_control`-only
+> to **every actionable app/desktop/browser strategy** — gated on a concrete
+> failure or capability-gap signal (error / "no adapter" / "can't continue"),
+> excluding `desktop_readonly` and `agent_asset_acquisition`. `universal_app_control`
+> stays most permissive (empty response also escalates). The trigger now also
+> inspects the **app-adapter message**, and the generic-app dead-ends in
+> `computerAppAdapter.ts` were sharpened to emit explicit gap language and
+> threaded into the runtime gate (`computerTaskRuntime.shouldRequestConnectedAppCapabilityBuildout`)
+> — so the "no surfaces / no adapter" dead-end now routes to capability buildout
+> instead of a passive "I can't". Verified: `smoke:agent-app-capability-buildout`
+> (+5 cases), `smoke:computer-task-runtime`, `smoke:chat-computer-request-router`,
+> typecheck. **Also shipped (worktree):** managed `/launch` worktree isolation
+> (all CLI bridges) + a safe cleanup lifecycle (`pruneOpenSwanWorktrees`, bridge
+> `/worktree/prune`, app `pruneTerminalAgentWorktrees`).
+>
+> **P3.3 shipped (2026-06-02):** capability buildout is no longer Codex-hardwired.
+> New `connectedAgentDispatch.ts` (`dispatchConnectedAgentTask`) reuses a
+> manageable session across providers in preference order (codex → claude-code →
+> gemini → cursor) via `sendTerminalAgentSessionMessage`, or launches the first
+> provider whose bridge is online (`checkAllBridges` + the per-provider
+> launchers), failing closed with an actionable "start a bridge" message.
+> `agent.build_app_capability` now routes through it. So the full chain —
+> broadened trigger (P3.2) → adapter dead-end emits a gap signal (P3.1) →
+> provider-agnostic dispatch (P3.3) — lets the chat build and fulfil a
+> browser/app request through whichever connected agent exists. Verified:
+> typecheck + `smoke:agent-app-capability-buildout` + `smoke:openswan-runtime-approval`
+> + `smoke:multi-agent-dispatch`.
+>
+> **File-adapter dead-ends fixed (2026-06-02):** `computerFileAdapter`'s two
+> terse dead-ends ("No filesystem MCP tools active" / "none matched") are now
+> **actionable and bridge-aware**. Since the desktop-bridge path returns null
+> only when the bridge is offline, the no-tools case now re-checks bridge health
+> and tailors guidance — local files → "start `npm run bridge` + grant the
+> folder", remote/cloud → "connect a filesystem integration" — and emits a
+> `file_capability_gap` data signal. (Deliberately NOT routed to connected-agent
+> buildout: for local files the correct fix is starting the bridge, not building
+> a tool.)
+>
+> **Deferred:** P3.4 (generalize the Adobe-only typed gap contract to any app);
+> P3.5 (reconcile capability audit vs profiles); applying
+> `dispatchConnectedAgentTask` to `agent.codex_acquire_asset` too.
+
 - **P3.1 — Replace the generic-app dead-end with a buildout request.**
   `computerAppAdapter.ts:3667-3691`: emit `agent.build_app_capability` (or a
   typed `{kind:'needs_capability_buildout', connectedAgentTask}` signal) instead

@@ -1,6 +1,6 @@
 # Agent Development Standards Index
 
-**Last synced:** 2026-06-01
+**Last synced:** 2026-06-02
 
 This is the routing page for agent-facing engineering, TypeScript, design,
 web-page, app-automation, and tool-contract standards. It exists so contributing
@@ -75,6 +75,11 @@ npm run smoke:agent-standards-wiki
 standards. Use it when app code, prompt builders, wiki surfaces, or smoke tests
 need the standards map without scraping Markdown.
 
+`src/lib/openswanWorktreeConfig.ts` is the pure SwanBot/OpenSwan worktree
+configuration guard. It audits required root docs, package scripts, ignored
+runtime artifacts, local worktree deferral notes, and git-status noise before a
+connected agent receives a worktree handoff.
+
 `src/lib/agentToolContractStandards.ts` is the concrete helper for OpenSwan,
 bridge, MCP, and connected-agent tool work. It builds risk tags, approval
 decisions, recovery fields, eval plans, prompt blocks, and recommended
@@ -97,9 +102,9 @@ It exports:
 - `getStandardsForTaskType(taskType)`
 - `summarizeRelevantAgentDevelopmentStandards(taskDescription, { mode })`
 - `buildAgentDevelopmentStandardsPromptBlock(taskDescription, { changedPaths, hasUnrelatedChanges })`
-- `buildRelevantAgentDevelopmentStandardsPromptBlock(taskDescription, { mode, changedPaths, hasUnrelatedChanges })`
-- `applyAgentDevelopmentStandardsToPrompt(prompt, { taskDescription, mode, label, changedPaths, hasUnrelatedChanges })`
-- `applyAgentDevelopmentStandardsToPrompts(prompts, { taskDescription, mode, label, changedPaths, hasUnrelatedChanges })`
+- `buildRelevantAgentDevelopmentStandardsPromptBlock(taskDescription, { mode, changedPaths, hasUnrelatedChanges, worktreeConfigSnapshot })`
+- `applyAgentDevelopmentStandardsToPrompt(prompt, { taskDescription, mode, label, changedPaths, hasUnrelatedChanges, worktreeConfigSnapshot })`
+- `applyAgentDevelopmentStandardsToPrompts(prompts, { taskDescription, mode, label, changedPaths, hasUnrelatedChanges, worktreeConfigSnapshot })`
 - `buildAgentToolContractChecklist(taskDescription, { toolName, surface })`
 - `formatAgentToolContractChecklistPromptBlock(taskDescription, { toolName, surface })`
 - `applyAgentToolContractChecklistToPrompt(prompt, { taskDescription, toolName, surface })`
@@ -111,6 +116,8 @@ It exports:
 - `buildAgentWorktreeQualityChecklist(options)`
 - `formatAgentWorktreeQualityChecklistPromptBlock(checklist)`
 - `buildAgentWorktreeQualityPromptBlock(options)`
+- `buildOpenSwanWorktreeConfigSnapshot(options)`
+- `formatOpenSwanWorktreeConfigPromptBlock(snapshot)`
 
 ## Worktree Integration Checklist
 
@@ -129,6 +136,27 @@ for hidden handoffs to connected agents. The regular standards helpers
 `hasUnrelatedChanges`, so callers can add file scope without learning a second
 handoff path.
 
+Use `buildOpenSwanWorktreeConfigSnapshot({ files, packageScripts,
+ignoredPatterns, statusLines, currentPath })` when SwanBot/OpenSwan needs to
+decide whether a repo checkout or `.openswan-worktrees/` checkout is ready for a
+connected-agent handoff. Use `formatOpenSwanWorktreeConfigPromptBlock(...)` for
+hidden prompt context, or pass the snapshot as `worktreeConfigSnapshot` into the
+standards prompt helpers. User-facing chat should only expose these details when
+the config is blocked or the user asks to see setup details.
+
+Use `npm run check:openswan-worktree-config` as the operator-facing preflight.
+It reads the live checkout, prints a short readiness report, and exits non-zero
+only when required SwanBot/OpenSwan worktree configuration is blocked. Use
+`npx tsx scripts/openswan-worktree-config-report.ts --prompt` when a bridge or
+local agent launcher needs the hidden prompt block.
+
+Managed Claude Code, Codex, Cursor Composer, and Gemini CLI launches call
+`appendOpenSwanWorktreeConfigPrompt(...)` from `scripts/terminal-launch-utils.js`
+so launched agents receive the hidden worktree config block when their
+`projectDir` is this repo or an OpenSwan worktree. The helper is best-effort:
+it skips non-UC repos and never blocks launch if the report command is
+unavailable.
+
 The checklist:
 
 - uses the official Git porcelain status shape for stable path snapshots;
@@ -143,6 +171,13 @@ The checklist:
   parallel-path, verification-gap, and cross-surface risks;
 - recommends the narrowest relevant smoke, then `npm run typecheck:app` and
   `git diff --check`.
+- checks OpenSwan worktree config with `npm run smoke:openswan-worktree-config`
+  when `src/lib/openswanWorktreeConfig.ts`, `.openswan-worktrees/`, package
+  scripts, or runtime artifact ignore rules change.
+- runs `npm run check:openswan-worktree-config` before risky connected-agent
+  handoffs when the checkout state matters.
+- appends hidden worktree config to managed terminal-agent launch prompts
+  through `scripts/terminal-launch-utils.js`.
 
 Research anchors:
 
@@ -201,5 +236,8 @@ When adding or changing a canonical standards doc:
 5. Update `scripts/agent-standards-wiki-smoketest.ts`.
 6. Run `npm run smoke:agent-standards-wiki`, `npm run typecheck:app`, and
    `git diff --check`.
-7. If the tool-contract helper changed, also run
+7. If the OpenSwan worktree config helper changed, also run
+   `npm run smoke:openswan-worktree-config` and
+   `npm run check:openswan-worktree-config`.
+8. If the tool-contract helper changed, also run
    `npm run smoke:agent-tool-contract-standards`.

@@ -807,10 +807,19 @@ export async function executeComputerFileTask(args: {
   const allTools = await fetchAllMcpTools(args.circleId).catch(() => [] as McpTool[]);
   const filesystemTools = allTools.filter(isFilesystemTool);
   if (filesystemTools.length === 0) {
+    // We reach here only after the desktop-bridge path declined (it returns
+    // null when the bridge is offline). Tailor the guidance: local files need
+    // the bridge running; remote/cloud files need a filesystem integration.
+    const bridgeUp = await isDesktopBridgeAvailable().catch(() => false);
     return {
       ok: false,
-      message: 'No filesystem MCP tools are active for this circle yet.',
-      warnings: ['Missing filesystem MCP surface.'],
+      message: bridgeUp
+        ? 'No filesystem integration is connected for remote files, and this did not match a local-file action. For cloud/remote files, connect a filesystem integration in Marketplace; for local files, name the exact path (e.g. `~/Downloads/report.pdf`).'
+        : 'To work with local files I need the desktop bridge running — start it with `npm run bridge` and grant the folder, then ask again. For remote/cloud files instead, connect a filesystem integration in Marketplace.',
+      warnings: [bridgeUp
+        ? 'No filesystem MCP surface; desktop bridge up but task unmatched.'
+        : 'Desktop bridge offline and no filesystem MCP surface.'],
+      data: { kind: 'file_capability_gap', bridgeAvailable: bridgeUp },
     };
   }
 
@@ -831,8 +840,9 @@ export async function executeComputerFileTask(args: {
   if (!chosenTool) {
     return {
       ok: false,
-      message: 'Filesystem tools exist, but none matched this task shape well enough to run safely.',
+      message: 'Filesystem tools are connected, but none safely matched this request. Name the exact file or folder path, or connect a filesystem integration that supports this operation in Marketplace.',
       warnings: ['No suitable filesystem MCP tool found.'],
+      data: { kind: 'file_capability_gap', bridgeAvailable: true },
     };
   }
 

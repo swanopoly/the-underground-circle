@@ -16,6 +16,8 @@ const os = require('os');
 const crypto = require('crypto');
 const { exec, spawn } = require('child_process');
 const {
+  appendOpenSwanWorktreeConfigPrompt,
+  ensureOpenSwanWorktree,
   isAllowedPairOrigin,
   loadManagedTerminalSessions,
   makeTerminalTitle,
@@ -272,15 +274,25 @@ async function launchCodexSessions(data) {
     const displayName = Array.isArray(data.names) && data.names[i]
       ? String(data.names[i])
       : `Codex #${i + 1}`;
+    // Per-session git-worktree isolation when requested (fail-open to shared cwd).
+    const { cwd: sessionCwd, branch, worktreeDir, isWorktree } = ensureOpenSwanWorktree({
+      baseCwd: cwd, useWorktree: data.useWorktree, index: i,
+    });
     const cleanPrompt = prompts[i] || basePrompt || `Stand by as ${displayName}. Wait for a delegated task from The Underground Circle.`;
-    const cliPrompt = buildManagedCodexPrompt({ sessionId, displayName, index: i, count, prompt: cleanPrompt });
-    const command = buildCodexCommand({ cwd, prompt: cliPrompt, model, fullAuto, search });
+    const cliPrompt = appendOpenSwanWorktreeConfigPrompt(
+      buildManagedCodexPrompt({ sessionId, displayName, index: i, count, prompt: cleanPrompt }),
+      sessionCwd,
+    );
+    const command = buildCodexCommand({ cwd: sessionCwd, prompt: cliPrompt, model, fullAuto, search });
     const launchedAt = new Date().toISOString();
     const terminalTitle = makeTerminalTitle('Codex', displayName, sessionId);
     const terminalResult = await openTerminal(command, terminalTitle);
     const session = registerSession({
       sessionId,
-      projectDir: cwd,
+      projectDir: sessionCwd,
+      branch,
+      worktreeDir,
+      isWorktree,
       model: model || 'codex',
       status: terminalResult.ok ? 'active' : 'idle',
       task: promptPreview(cleanPrompt, 240),
@@ -509,6 +521,9 @@ function registerSession(data) {
   const session = {
     sessionId: data.sessionId || `codex-manual-${Date.now()}`,
     projectDir: data.projectDir || process.cwd(),
+    branch: data.branch || null,
+    worktree: data.worktreeDir || null,
+    isWorktree: Boolean(data.isWorktree),
     model: data.model || 'codex',
     status: data.status || 'active',
     task: data.task || 'Deep research',

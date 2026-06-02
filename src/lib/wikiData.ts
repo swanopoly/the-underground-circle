@@ -947,10 +947,14 @@ function parseAutomationRequest(input: unknown): AutomationRequest | null {
       {
         title: 'Worktree Integration Checklist',
         content:
-          'The standards registry also builds a hidden worktree-quality checklist for delegated agents. It uses git status --porcelain=v1 -uall path snapshots, starts from AGENTS.md plus the roadmap and stack reference, maps changed files to canonical owners, flags duplicate-path and verification risk, and recommends the narrowest smoke before typecheck and git diff --check.',
+          'The standards registry also builds hidden worktree-quality and SwanBot/OpenSwan configuration checks for delegated agents. It uses git status --porcelain=v1 -uall path snapshots, starts from AGENTS.md plus the roadmap and stack reference, maps changed files to canonical owners, checks required worktree docs/scripts/ignore rules with buildOpenSwanWorktreeConfigSnapshot, flags duplicate-path and verification risk, and recommends the narrowest smoke before typecheck and git diff --check.',
         bulletPoints: [
           'Use buildAgentWorktreeQualityChecklist when a bounded file list or git status output is available',
           'Use buildAgentWorktreeQualityPromptBlock or pass changedPaths into applyAgentDevelopmentStandardsToPrompt when handing work to Codex, Claude Code, Cursor Composer, Gemini, or a custom connected agent',
+          'Use buildOpenSwanWorktreeConfigSnapshot and formatOpenSwanWorktreeConfigPromptBlock before SwanBot/OpenSwan hands a repo or .openswan-worktrees checkout to a connected agent, or pass the snapshot as worktreeConfigSnapshot into the standards prompt helpers',
+          'Managed terminal bridge launches append the hidden worktree config block through terminal-launch-utils when projectDir is this repo or an OpenSwan worktree',
+          'Run check:openswan-worktree-config before risky connected-agent handoffs when checkout state matters',
+          'Run smoke:openswan-worktree-config when the worktree config helper, report script, package scripts, .gitignore runtime artifacts, or OpenSwan worktree notes change',
           'Prefer extending mapped owners such as genericAppNavigator, appAutomationControlSurfaces, chat planning/metadata, chat computer runtime, OpenSwan runtime, product UI, second brain/research, standards/wiki, package scripts, or agent-runtime SQL before creating another file',
           'Escalate to a new roadmap owner only when no existing owner fits the concern',
         ],

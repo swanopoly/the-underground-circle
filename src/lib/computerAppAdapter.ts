@@ -3667,7 +3667,7 @@ export async function executeComputerAppTask(args: {
   if (lines.length === 0) {
     return {
       ok: false,
-      message: 'No connected app surfaces are available for this circle yet.',
+      message: 'No connected app surfaces are available for this circle yet — missing an app adapter or bridge tool to drive this app.',
       warnings: ['Missing app MCP / integration / bridge surface.'],
     };
   }
@@ -3675,11 +3675,11 @@ export async function executeComputerAppTask(args: {
   return {
     ok: true,
     message: [
-      'App-capable surfaces are available, but no single MCP app tool was a clear execution match yet.',
+      'App-capable surfaces are available, but this task is missing an app adapter for the exact action requested.',
       '',
       ...lines.map((line) => `- ${line}`),
       '',
-      'The next step is to use these surfaces through a richer app-specific action adapter or with explicit access guidance.',
+      'The next step is to build an app-specific action adapter for these surfaces (or provide explicit access guidance).',
     ].join('\n'),
     warnings: ['No direct app MCP tool match; returning surface inventory instead.'],
     data: {

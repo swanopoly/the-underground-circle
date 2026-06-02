@@ -9,9 +9,15 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 
 import { applyAgentDevelopmentStandardsToPrompt } from '../src/lib/agentDevelopmentStandards';
+
+const require = createRequire(import.meta.url);
+const {
+  appendOpenSwanWorktreeConfigPrompt,
+} = require('./terminal-launch-utils');
 
 let failures = 0;
 function fail(message: string) { failures += 1; console.error('FAIL:', message); }
@@ -42,6 +48,27 @@ function main() {
     'terminal launch payloads use profiled prompts');
   assert(launcher.includes('applyAgentDevelopmentStandardsToPrompt(prompt'),
     'chat-launched terminal sessions profile each launch prompt');
+  assert(dispatcher.includes('const profiledTask = applyAgentDevelopmentStandardsToPrompt(task'),
+    'direct terminal session launch profiles delegated task');
+
+  const worktreePrompt = appendOpenSwanWorktreeConfigPrompt('fix a bridge runtime bug', repoRoot);
+  assert(worktreePrompt.includes('SwanBot/OpenSwan Worktree Config'),
+    'terminal launch utility appends OpenSwan worktree config');
+  assert(worktreePrompt.includes('status:'),
+    'terminal launch utility config block includes status');
+  assert(appendOpenSwanWorktreeConfigPrompt(worktreePrompt, repoRoot) === worktreePrompt,
+    'terminal launch utility does not duplicate OpenSwan worktree config');
+
+  const bridgeSources = [
+    readFileSync(resolve(repoRoot, 'scripts/claude-bridge.js'), 'utf8'),
+    readFileSync(resolve(repoRoot, 'scripts/codex-bridge.js'), 'utf8'),
+    readFileSync(resolve(repoRoot, 'scripts/cursor-bridge.js'), 'utf8'),
+    readFileSync(resolve(repoRoot, 'scripts/gemini-bridge.js'), 'utf8'),
+  ].join('\n');
+  const attachmentCalls = bridgeSources.match(/appendOpenSwanWorktreeConfigPrompt/g) || [];
+  assert(attachmentCalls.length >= 8,
+    'all managed terminal bridge launchers import and call OpenSwan worktree config attachment',
+    `found ${attachmentCalls.length}`);
 
   if (failures > 0) {
     console.error(`\n${failures} terminal-agent standards handoff smoke-test failure(s)`);

@@ -160,4 +160,3 @@ Reason: no deployable energy system can skip conservation, losses, safety, and m
 - OSHA RF and microwave exposure evaluation: https://www.osha.gov/radiofrequency-and-microwave-radiation/exposure-evaluation
 - ICNIRP RF EMF guidelines: https://www.icnirp.org/en/frequencies/radiofrequenc
 - FDA wireless medical devices: https://www.fda.gov/medical-devices/digital-health-center-excellence/wireless-medical-devices
-

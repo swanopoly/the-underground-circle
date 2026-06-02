@@ -22,6 +22,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { execFile, execSync } = require('child_process');
 const {
+  appendOpenSwanWorktreeConfigPrompt,
   clampLaunchCount,
   isAllowedPairOrigin,
   loadManagedTerminalSessions,
@@ -411,6 +412,11 @@ async function launchCursorComposerSessions(data) {
     ? data.prompts.map((p) => normalizeCliPrompt(p)).filter(Boolean)
     : [];
   const count = clampLaunchCount(data.count || prompts.length || 1);
+  // NOTE: Cursor Composer is driven by GUI injection into the already-open
+  // Cursor window, not a process launched in a cwd — so git-worktree isolation
+  // (ensureOpenSwanWorktree) is intentionally NOT applied here. Pointing at a
+  // worktree dir would not reliably change what Cursor edits, which would be
+  // false isolation. Cursor operates on the workspace the user has open.
   const projectDir = safeProjectDir(data.cwd || data.projectDir || process.cwd());
   const launchId = data.launchId || makeLaunchId('cursor-composer-launch');
   const basePrompt = normalizeCliPrompt(data.prompt || data.task || '');
@@ -423,14 +429,14 @@ async function launchCursorComposerSessions(data) {
       ? String(data.names[i])
       : count > 1 ? `Cursor Composer #${i + 1}` : 'Cursor Composer';
     const cleanPrompt = prompts[i] || basePrompt || `Stand by as ${displayName}. Wait for delegated work from The Underground Circle.`;
-    const handoffPrompt = [
+    const handoffPrompt = appendOpenSwanWorktreeConfigPrompt([
       `[UC-CURSOR-COMPOSER:${sessionId}]`,
       `You are ${displayName}, a Cursor Composer agent selected from The Underground Circle chat.`,
       'Complete the task in this workspace. Keep changes focused and report what changed when done.',
       '',
       'User task:',
       cleanPrompt,
-    ].join('\n');
+    ].join('\n'), projectDir);
     const launchedAt = new Date().toISOString();
     const result = await sendPromptToCursorComposer({
       prompt: handoffPrompt,

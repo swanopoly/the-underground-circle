@@ -164,4 +164,3 @@ Safety boundary: do not open panels or work on pump until lockout/tagout is hand
 - IEA, Energy-Efficiency Policy Opportunities for Electric Motor-Driven Systems: https://www.iea.org/reports/energy-efficiency-policy-opportunities-for-electric-motor-driven-systems
 - OSHA, Lockout/Tagout fact sheet: https://www.osha.gov/sites/default/files/publications/OSHAFS3529.pdf
 - Companion Tesla report: /Users/cswanson/the-underground-circle/docs/wiki/nikola-tesla-projects-planetary-impact-2026-06-01.md
-

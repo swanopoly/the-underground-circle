@@ -85,11 +85,13 @@ function shouldRequestConnectedAppCapabilityBuildout(args: {
   task: string;
   agentResponse?: string | null;
   errorMessage?: string | null;
+  appAdapterMessage?: string | null;
 }): boolean {
   return shouldRequestAgentAppCapabilityBuildoutFromOutcome({
     strategyId: args.execution.computerAppGrounding?.strategy.id || args.execution.preflight.strategy?.id || null,
     agentResponse: args.agentResponse,
     errorMessage: args.errorMessage,
+    appAdapterMessage: args.appAdapterMessage,
   });
 }
 
@@ -112,6 +114,7 @@ async function requestConnectedAppCapabilityBuildout(args: {
     task: args.task,
     agentResponse: args.agentResponse,
     errorMessage: args.errorMessage,
+    appAdapterMessage: args.appAdapterMessage,
   })) {
     return null;
   }

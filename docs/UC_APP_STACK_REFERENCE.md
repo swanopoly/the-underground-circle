@@ -47,7 +47,7 @@ ownership. This file maps the app.
 
 | Concern | File(s) |
 |---|---|
-| Agent standards and worktree quality | `src/lib/agentDevelopmentStandards.ts`, `docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md` |
+| Agent standards and worktree quality | `src/lib/agentDevelopmentStandards.ts`, `src/lib/openswanWorktreeConfig.ts`, `docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md` |
 | Chat classification | `src/lib/chatAutomationPlanner.ts` |
 | Chat computer request route | `src/lib/chatComputerRequestRouter.ts` |
 | Chat computer request UX | `src/lib/chatComputerRequestUx.ts` |

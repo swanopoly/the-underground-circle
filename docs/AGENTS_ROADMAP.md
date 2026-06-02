@@ -52,7 +52,7 @@ This table is the tie-breaker. When two files overlap, the one listed under "Can
 
 | Concern | Canonical | Role | Status |
 |---|---|---|---|
-| **Agent development standards index** | `docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md` + `src/lib/agentDevelopmentStandards.ts` | Routing index and typed registry that tells agents which coding, TypeScript, design, web-page, app automation, tool-contract/eval, local style, and worktree-quality standards to read by task type and changed path. | Current 2026-06-01 |
+| **Agent development standards index** | `docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md` + `src/lib/agentDevelopmentStandards.ts` + `src/lib/openswanWorktreeConfig.ts` | Routing index, typed worktree-quality registry, and SwanBot/OpenSwan worktree configuration audit that tells agents which coding, TypeScript, design, web-page, app automation, tool-contract/eval, local style, worktree, package-script, ignore, and config checks to read before changing the runtime. | Current 2026-06-02 |
 | **General coding standards** | `docs/CODING_AGENT_BEST_PRACTICES.md` | Agent-facing code quality, security, testing, review, change-shape, and handoff standard across languages and surfaces. | Current 2026-05-28 |
 | **TypeScript agent standards** | `docs/TYPESCRIPT_AGENT_BEST_PRACTICES.md` | Agent-facing type-safety, React Native / Expo, trust-boundary parsing, and verification standard for TypeScript changes. | Current 2026-05-28 |
 | **Product design standards** | `docs/DESIGN_AGENT_BEST_PRACTICES.md` + `docs/UC_STYLE_GUIDE.md` | Agent-facing product design, design-system, UX writing, automation UI, state, and proof/recovery design standard. | Current 2026-05-28 |
@@ -256,6 +256,24 @@ This table is the tie-breaker. When two files overlap, the one listed under "Can
   connected-agent buildout, with official source refs, proof requirements, and
   focused smoke commands. This keeps future "make it able to do more tasks"
   work tied to concrete build actions instead of broad prose.
+
+#### 2026-06-02 SwanBot/OpenSwan worktree configuration guard
+
+- `openswanWorktreeConfig` and `openswan-worktree-config-report` now audit the local agent/worktree configuration
+  before SwanBot/OpenSwan or connected agents take work: root guidance files,
+  required package scripts, OpenSwan worktree-local stale-doc deferral,
+  generated-artifact ignore rules, and noisy git-status lines. It formats a
+  compact prompt block so the chat/runtime can keep worktree blockers hidden
+  until an agent handoff needs them.
+- Smoke coverage: `npm run smoke:openswan-worktree-config` validates synthetic
+  blocker/watch cases and the live repo configuration. `npm run
+  check:openswan-worktree-config` is the operator-facing live preflight and
+  `smoke:all` runs the smoke next to bridge and Office roster/readiness checks.
+- Managed Claude Code, Codex, Cursor Composer, and Gemini CLI bridge launches
+  now append the hidden SwanBot/OpenSwan worktree config block through
+  `terminal-launch-utils`, but only when the target `projectDir` looks like the
+  Underground Circle/OpenSwan repo. Launches never fail solely because the
+  config report cannot be generated.
 
 #### 2026-05-18 desktop file-write bridge expansion
 
