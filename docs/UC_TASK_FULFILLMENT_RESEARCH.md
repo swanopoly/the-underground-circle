@@ -428,9 +428,59 @@ wire dead code. Small diffs, immediate user-visible improvement.
 > buildout: for local files the correct fix is starting the bridge, not building
 > a tool.)
 >
-> **Deferred:** P3.4 (generalize the Adobe-only typed gap contract to any app);
-> P3.5 (reconcile capability audit vs profiles); applying
-> `dispatchConnectedAgentTask` to `agent.codex_acquire_asset` too.
+> **P3.4 assessed as low-ROI (2026-06-02):** `buildAgentAppCapabilityBuildoutPolicy`
+> is already generic and rich for ANY app (control-surface plan, research
+> checklist, capability ladder, guardrails, output contract are app-agnostic;
+> the smoke proves it for "Ableton Live"). The Adobe `designAppAdapterGaps`
+> contract's value is its *hard-coded specificity* (Firefly tools, Adobe docs),
+> which can't be meaningfully generalized — so generalizing it adds little.
+> Pivoted to the higher-value item instead:
+>
+> **Failure recovery is now provider-agnostic (2026-06-02):**
+> `startConnectedAgentFailureRecovery` (`agentFailureRecovery.ts`) was
+> Codex-hardwired just like buildout was; it now routes through
+> `dispatchConnectedAgentTask`, so when a browser/app task fails, recovery runs
+> on whichever connected agent exists (Codex/Claude Code/Gemini/Cursor). Result
+> `provider` widened from `'codex'` to `ConnectedAgentProvider | null`. Verified:
+> typecheck + `smoke:agent-failure-recovery` + `smoke:chat-failure-recovery` +
+> `smoke:openswan-runtime-approval`.
+>
+> **Deferred:** P3.5 (reconcile capability audit vs profiles); `agent.codex_acquire_asset`
+> stays Codex-named by design (de-Codex-ing it means renaming the registered tool).
+>
+> **Hardening pass (2026-06-03) — adversarial self-review + research:** ran an
+> adversarial correctness review of the cumulative Phase 0-3 + worktree + recovery
+> changes (no high-severity bugs; many tricky spots verified clean) and a research
+> pass on the capability-reconciliation state. Findings acted on: (1) **tightened
+> the broadened buildout trigger** — a *specific* strategy now requires an explicit
+> gap signal (`CAPABILITY_GAP_RE`), not the loose "can't continue" hedge, so a
+> successful-but-hedging run no longer spuriously triggers buildout; the loose
+> hedge is trusted only for `universal_app_control` (2 new smoke guards). (2)
+> **Closed the single-verb dead-end gap** — the generic-app surface-inventory
+> dead-end is tagged `app_capability_gap` and the runtime's pure-launch
+> short-circuit now skips gaps, so single-verb "no adapter" app tasks route to
+> buildout like multi-verb ones do. (3) **Made `pruneOpenSwanWorktrees` repo-scoped**
+> (exact `/.openswan-worktrees/` prefix, not a bare substring). Verified: typecheck
+> + node --check + `smoke:agent-app-capability-buildout` + `smoke:computer-task-runtime`.
+>
+> **Research finding — P3.5 already covered:** `computerAppPreflight` already
+> reconciles required capabilities vs the live `auditComputerCapabilities` and
+> emits blocker-severity items with verbatim "connect X / start the bridge" fixes
+> pre-execution (in the dispatch prompt + persisted metadata), and
+> `buildComputerCapabilityExpansionPlan` adds buildout guidance. A fresh P3.5
+> reconciler would duplicate it.
+>
+> **Preflight-blocker chips UI shipped (2026-06-03):** the genuine remaining gap
+> (the reconciled blockers were prompt/metadata-only) is closed. New
+> `src/screens/circles/tabs/chat/PreflightBlockersCard.tsx` renders the blocked
+> preflight's `blockers` as a user-facing card with tappable chips — bridge
+> capabilities → **Connect the bridge** (`addDesktopBridgeAutoConnectMessage`),
+> browser capabilities → **Open Computer Use** (`setShowComputerUseConsole`), plus
+> **Try again** (`sendMessage(originalTask)`). Wired via a new
+> `computerPreflightBlockers` field on the chat message (carrying task + blocker
+> items), attached at the blocked-preflight `addBotMessage` and rendered in
+> `renderMessage`. Verified: typecheck (UI isn't smoke-testable; the
+> capability→action mapping is a pure helper in the card).
 
 - **P3.1 — Replace the generic-app dead-end with a buildout request.**
   `computerAppAdapter.ts:3667-3691`: emit `agent.build_app_capability` (or a

@@ -1,5 +1,6 @@
 import { classifyAgentFailure, isHumanTakeoverFailure, type AgentFailureAssessment } from './agentFailureTaxonomy';
 import { applyAgentDevelopmentStandardsToPrompt } from './agentDevelopmentStandards';
+import type { ConnectedAgentProvider } from './connectedAgentDispatch';
 
 export type AgentFailureRecoveryAction =
   | 'diagnose_only'
@@ -91,7 +92,8 @@ export interface AgentFailureRecoveryPolicy {
 
 export interface AgentFailureRecoveryStartResult {
   ok: boolean;
-  provider: 'codex';
+  /** Which connected agent ran the recovery (null when none was dispatched). */
+  provider: ConnectedAgentProvider | null;
   sessionId?: string;
   displayName?: string;
   launched?: boolean;
@@ -544,7 +546,7 @@ export async function startConnectedAgentFailureRecovery(
   if (!shouldLaunchConnectedAgentRecovery(policy)) {
     return {
       ok: false,
-      provider: 'codex',
+      provider: null,
       launched: false,
       recoveryAction: policy.action,
       assessment: policy.assessment,
@@ -553,86 +555,33 @@ export async function startConnectedAgentFailureRecovery(
     };
   }
   try {
-    const { fetchCodexSessions, launchCodexSessions } = await import('./codexDetector');
-    const { sendTerminalAgentSessionMessage } = await import('./bridgeTaskDispatcher');
-    let targetSessionId = clean(input.sessionId, 240);
-    if (!targetSessionId) {
-      const sessions = await fetchCodexSessions().catch(() => []);
-      const managed = sessions.find((session) => Boolean(session.terminalTitle || session.launchId || session.manageable));
-      targetSessionId = managed?.sessionId || '';
-    }
-
-    if (targetSessionId) {
-      const sent = await sendTerminalAgentSessionMessage('codex', targetSessionId, policy.prompt);
-      if (!sent.ok) {
-        return {
-          ok: false,
-          provider: 'codex',
-          sessionId: targetSessionId,
-          recoveryAction: policy.action,
-          assessment: policy.assessment,
-          runbook: policy.runbook,
-          message: sent.error || 'Could not send failure recovery task to Codex.',
-        };
-      }
-      return {
-        ok: true,
-        provider: 'codex',
-        sessionId: sent.sessionId || targetSessionId,
-        displayName: sent.displayName,
-        launched: false,
-        recoveryAction: policy.action,
-        assessment: policy.assessment,
-        runbook: policy.runbook,
-        message: `Sent failure recovery to ${sent.displayName || targetSessionId}. ${summarizeAgentFailureRecoveryPolicy(policy)}`,
-      };
-    }
-
-    if (input.launchIfMissing === false) {
-      return {
-        ok: false,
-        provider: 'codex',
-        recoveryAction: policy.action,
-        assessment: policy.assessment,
-        runbook: policy.runbook,
-        message: 'No managed Codex session is available and launchIfMissing is false.',
-      };
-    }
-
-    const launched = await launchCodexSessions({
-      count: 1,
+    // Provider-agnostic: hand recovery to whichever connected agent is
+    // available (Codex / Claude Code / Gemini / Cursor), not just Codex.
+    const { dispatchConnectedAgentTask } = await import('./connectedAgentDispatch');
+    const dispatch = await dispatchConnectedAgentTask({
       prompt: policy.prompt,
-      names: ['Codex Failure Recovery'],
+      sessionName: 'Failure Recovery',
+      sessionId: input.sessionId,
+      launchIfMissing: input.launchIfMissing,
       circleId: input.circleId,
       userId: input.userId,
     });
-    if (!launched.ok || launched.launched < 1) {
-      return {
-        ok: false,
-        provider: 'codex',
-        launched: false,
-        recoveryAction: policy.action,
-        assessment: policy.assessment,
-        runbook: policy.runbook,
-        message: launched.error || launched.failed?.[0]?.error || 'Could not launch Codex failure recovery session.',
-      };
-    }
-    const session = launched.sessions[0];
     return {
-      ok: true,
-      provider: 'codex',
-      sessionId: session?.sessionId,
-      displayName: session?.displayName,
-      launched: true,
+      ok: dispatch.ok,
+      provider: dispatch.provider,
+      sessionId: dispatch.sessionId,
+      launched: dispatch.launched,
       recoveryAction: policy.action,
       assessment: policy.assessment,
       runbook: policy.runbook,
-      message: `Launched Codex failure recovery${session?.displayName ? ` (${session.displayName})` : ''}. ${summarizeAgentFailureRecoveryPolicy(policy)}`,
+      message: dispatch.ok
+        ? `${dispatch.resultsText} ${summarizeAgentFailureRecoveryPolicy(policy)}`
+        : dispatch.resultsText,
     };
   } catch (error: any) {
     return {
       ok: false,
-      provider: 'codex',
+      provider: null,
       recoveryAction: policy.action,
       assessment: policy.assessment,
       runbook: policy.runbook,

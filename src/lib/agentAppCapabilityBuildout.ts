@@ -190,26 +190,35 @@ export function shouldRequestAgentAppCapabilityBuildoutFromOutcome(input: AgentA
 
   const hasError = Boolean(clean(input.errorMessage));
   const response = clean(input.agentResponse);
-  // Check both the agent's response AND the app-adapter result: a generic-app
-  // adapter that dead-ends ("missing an app adapter…") signals the gap directly,
-  // even when the agent never echoed it.
-  const gapIn = (text: string) => !!text && (CAPABILITY_GAP_RE.test(text) || CAPABILITY_BLOCKED_RE.test(text));
-  const hasGapLanguage = gapIn(response) || gapIn(clean(input.appAdapterMessage));
+  const adapterMessage = clean(input.appAdapterMessage);
+
+  // Strong, EXPLICIT capability-gap signal ("no adapter / missing tool /
+  // unsupported"). Checked in both the agent response and the app-adapter
+  // result, so a generic-app adapter that dead-ends routes to buildout even if
+  // the agent never echoed it.
+  const strongGap = (text: string) => !!text && CAPABILITY_GAP_RE.test(text);
+  // Looser "can't continue/complete" hedge — only trusted for the generic
+  // last-resort strategy. On a SPECIFIC strategy a successful run may hedge
+  // ("couldn't use the official API, did it via the UI — done"), so trusting
+  // the loose phrase there would spuriously trigger a buildout.
+  const looseBlocked = (text: string) => !!text && CAPABILITY_BLOCKED_RE.test(text);
 
   // `universal_app_control` is the generic last-resort runtime: any failure —
-  // including an empty response — means the generic path could not do it, so
-  // escalate to a purpose-built capability.
+  // empty response, a loose hedge, or an explicit gap — means the generic path
+  // could not do it, so escalate to a purpose-built capability.
   if (strategyId === 'universal_app_control') {
-    return hasError || !response || hasGapLanguage;
+    return hasError || !response
+      || strongGap(response) || strongGap(adapterMessage)
+      || looseBlocked(response) || looseBlocked(adapterMessage);
   }
 
   // Every other actionable app/desktop/browser strategy: escalate only on a
-  // concrete failure or a capability-gap signal — never on a clean/empty
-  // response that may be a legitimate result. This lets a specific-but-
+  // concrete failure or an EXPLICIT capability-gap signal — never on a loose
+  // hedge in an otherwise-successful response. This lets a specific-but-
   // incomplete strategy (a creative, CAD, ops, or browser flow whose exact
-  // adapter/recipe is missing) BUILD the capability and fulfil the request
-  // instead of dead-ending with "I can't do that yet".
-  return hasError || hasGapLanguage;
+  // adapter/recipe is missing) BUILD the capability and fulfil the request,
+  // without false-triggering when the run actually succeeded.
+  return hasError || strongGap(response) || strongGap(adapterMessage);
 }
 
 export function buildAgentAppCapabilityGapSummary(input: AgentAppCapabilityOutcomeInput): string {

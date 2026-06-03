@@ -459,23 +459,25 @@ export async function executeComputerTaskWithAgent(args: {
       task: args.task,
     });
     warnings.push(...appResult.warnings);
-    if (appResult.ok) {
-      const hasFollowUp = hasFollowUpIntent(args.task);
-      const wasBridgeLaunch = (appResult.data as any)?.kind === 'desktop_bridge_launch';
-      if (!hasFollowUp && !readyCapabilityBuildout) {
-        // Pure launch — return the bridge result as-is, no agent needed.
-        return {
-          adapterId: 'app_adapter',
-          execution,
-          response: appResult.message,
-          warnings,
-        };
-      }
-      // Multi-intent: remember that the launch already happened (or at
-      // least tried to) so the agent prompt can skip re-launching.
-      appAdapterMessage = appResult.message;
-      appBridgeLaunched = wasBridgeLaunch;
+    const wasBridgeLaunch = (appResult.data as any)?.kind === 'desktop_bridge_launch';
+    // A capability gap (no adapter matched) is NOT a success even when the
+    // adapter returns ok:true with a surface inventory — it must reach the
+    // buildout gate, not short-circuit as a pure launch.
+    const isCapabilityGap = (appResult.data as any)?.kind === 'app_capability_gap';
+    if (appResult.ok && !isCapabilityGap && !hasFollowUpIntent(args.task) && !readyCapabilityBuildout) {
+      // Pure launch or a completed single-shot app action — no agent needed.
+      return {
+        adapterId: 'app_adapter',
+        execution,
+        response: appResult.message,
+        warnings,
+      };
     }
+    // Multi-intent, a capability gap, or a non-launch failure: carry the
+    // adapter message so the agent prompt + buildout gate can act on it
+    // (this is what routes a single-verb "no adapter" task to buildout).
+    appAdapterMessage = appResult.message;
+    appBridgeLaunched = wasBridgeLaunch;
   }
   if (attachedDesktopFiles.length > 0) {
     const openMessages: string[] = [];

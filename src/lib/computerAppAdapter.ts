@@ -3683,6 +3683,9 @@ export async function executeComputerAppTask(args: {
     ].join('\n'),
     warnings: ['No direct app MCP tool match; returning surface inventory instead.'],
     data: {
+      // Tag so the runtime routes this to capability buildout instead of
+      // short-circuiting it as a "successful" pure launch.
+      kind: 'app_capability_gap',
       providers,
       capabilities,
       enabledBridgeProviders: enabledConnections.map((connection) => connection.provider),

@@ -153,6 +153,23 @@ assert(
   }),
   'read-only strategy never requests buildout (nothing to build)',
 );
+// A SPECIFIC strategy that succeeded but hedged ("couldn't use the API, did it
+// via the UI — done") must NOT spuriously trigger a buildout — only an explicit
+// gap signal does. (Loose hedges are trusted only for universal_app_control.)
+assert(
+  !shouldRequestAgentAppCapabilityBuildoutFromOutcome({
+    strategyId: 'productivity_app_control',
+    agentResponse: 'I cannot use the official API directly, so I completed it via the UI — exported successfully.',
+  }),
+  'specific strategy + successful-but-hedging prose does NOT trigger buildout',
+);
+assert(
+  shouldRequestAgentAppCapabilityBuildoutFromOutcome({
+    strategyId: 'universal_app_control',
+    agentResponse: 'I cannot use this app to continue.',
+  }),
+  'universal_app_control still escalates on a loose hedge (generic last resort)',
+);
 
 const gapSummary = buildAgentAppCapabilityGapSummary({
   strategyId: 'universal_app_control',

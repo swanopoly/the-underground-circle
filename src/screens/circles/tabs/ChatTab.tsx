@@ -81,6 +81,7 @@ import SearchResultsCard, { type SearchResultRow } from './chat/SearchResultsCar
 import CommandsHelpCard from './chat/CommandsHelpCard';
 import AssignPickerCard, { type AssignPickerAgent } from './chat/AssignPickerCard';
 import BridgeDiagCard from './chat/BridgeDiagCard';
+import PreflightBlockersCard, { type PreflightBlockerItem } from './chat/PreflightBlockersCard';
 import { probeBridges, type BridgeProbeResult } from '../../../lib/bridgeHealthDiag';
 import { getBridgeUrl } from '../../../lib/bridgeEnvironment';
 import { ensureBridgeToken, bridgeAuthHeaders } from '../../../lib/bridgeAuth';
@@ -789,6 +790,7 @@ type ChatMessage = {
   recoveryOptions?: ChatFailureRecoveryOption[];
   recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
   computerHandoff?: ChatComputerHandoffMetadata;
+  computerPreflightBlockers?: { task: string; items: PreflightBlockerItem[] };
   delegatedTo?: string;       // subagent that handled this message
   delegatedSubagents?: string[];
   runId?: string | null;
@@ -829,6 +831,7 @@ type ChatBotMessageExtra = {
   recoveryOptions?: ChatFailureRecoveryOption[];
   recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
   computerHandoff?: ChatComputerHandoffMetadata;
+  computerPreflightBlockers?: { task: string; items: PreflightBlockerItem[] };
   localOnly?: boolean;
   runId?: string | null;
   agentPlan?: AgentPlanDraft | Record<string, unknown>;
@@ -2557,6 +2560,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           recoveryOptions: recovery.recoveryOptions,
           recoveryReliability: recovery.recoveryReliability,
           computerHandoff: preflightHandoffContext.metadata,
+          computerPreflightBlockers: execution.preflight.blockers.length > 0
+            ? { task: trimmed, items: execution.preflight.blockers }
+            : undefined,
           source: {
             actor: 'OpenSwan',
             surface: 'main_chat_computer_task',
@@ -4541,6 +4547,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       recoveryOptions: extra?.recoveryOptions,
       recoveryReliability: extra?.recoveryReliability,
       computerHandoff: extra?.computerHandoff,
+      computerPreflightBlockers: extra?.computerPreflightBlockers,
       taskPlan: extra?.taskPlan,
       toolEvents: extra?.toolEvents,
       verificationResults: extra?.verificationResults,
@@ -8932,6 +8939,18 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 onRefresh={async () => {
                   const fresh = await probeBridges({ urlForPort: (port) => getBridgeUrl(port) });
                   setMessages(prev => prev.map(m => m.id === item.id ? { ...m, bridgeDiagResults: fresh } : m));
+                }}
+              />
+            ) : null}
+            {item.computerPreflightBlockers && item.computerPreflightBlockers.items.length > 0 ? (
+              <PreflightBlockersCard
+                items={item.computerPreflightBlockers.items}
+                accentColor={accentColor}
+                onConnectBridge={() => { void addDesktopBridgeAutoConnectMessage(); }}
+                onOpenComputerUse={() => setShowComputerUseConsole(true)}
+                onRetry={() => {
+                  const retryTask = item.computerPreflightBlockers?.task;
+                  if (retryTask) void sendMessage(retryTask);
                 }}
               />
             ) : null}

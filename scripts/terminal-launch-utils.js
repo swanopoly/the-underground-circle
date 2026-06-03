@@ -146,10 +146,13 @@ function pruneOpenSwanWorktrees(baseCwd, { force = false } = {}) {
     const out = execFileSync('git', ['worktree', 'list', '--porcelain'], {
       cwd: resolvedBase, encoding: 'utf8', timeout: 20_000,
     });
+    // Repo-scoped exact prefix so we never touch a coincidentally-named
+    // foreign worktree (e.g. `.openswan-worktrees-backup/`) or one in another repo.
+    const worktreeRoot = `${path.join(resolvedBase, '.openswan-worktrees')}${path.sep}`;
     const dirs = out.split('\n')
       .filter((line) => line.startsWith('worktree '))
       .map((line) => line.slice('worktree '.length).trim())
-      .filter((dir) => dir.includes('.openswan-worktrees'));
+      .filter((dir) => dir.startsWith(worktreeRoot));
     for (const dir of dirs) {
       try {
         removeOpenSwanWorktree(resolvedBase, dir, { force });
