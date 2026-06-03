@@ -1689,9 +1689,15 @@ async function buildSystemPromptAsync(
           surface: 'main_chat',
           limit: 8,
         })));
-        if (stores?.userProfile) extras.push(stores.userProfile);
-        if (stores?.runtimeMemory) extras.push(stores.runtimeMemory);
-        if (stores?.workingMemory) extras.push(`## Working Memory\n${stores.workingMemory}`);
+        // Recalled content is untrusted (rule 5) — a circle member, a prior
+        // session, or a connected agent may have written into user notes,
+        // runtime memory, or the working-memory bundle (which also carries
+        // cross-agent bridge context). Fence each so the model treats them as
+        // data, not instructions (the v1 prompt already explains the tag; the
+        // separate retrieveForTurn block is fenced at its source).
+        if (stores?.userProfile) extras.push(`<untrusted_quoted>\n${stores.userProfile}\n</untrusted_quoted>`);
+        if (stores?.runtimeMemory) extras.push(`<untrusted_quoted>\n${stores.runtimeMemory}\n</untrusted_quoted>`);
+        if (stores?.workingMemory) extras.push(`## Working Memory\n<untrusted_quoted>\n${stores.workingMemory}\n</untrusted_quoted>`);
       }
     } catch (e) { console.warn('[SwanBot] Memory context failed:', e); }
   }

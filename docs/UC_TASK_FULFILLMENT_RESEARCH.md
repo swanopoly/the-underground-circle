@@ -232,6 +232,22 @@ roadmap is about closing the arrows between the boxes.
 > reverted. **Do not re-attempt G3 tool-widening.** Phase-0 P0.3 already makes
 > the rare text-only/max-round degradations explicit, which is the right fix.
 
+> **G5 recall — investigated 2026-06-03; one real build shipped.** Skeptical
+> validation of the three Phase-4 sub-items: **P4.2 cross-fill = SPECULATIVE**
+> (the pipeline's `recommendedTools` are tool-ID strings, not semantic content;
+> semantic + task-affinity retrieval already surfaces domain-relevant memory —
+> the same dead-fallback class as G3, so NOT built). **P4.1 auto-select library
+> SKILL.md = REAL** but behavior-changing (threshold tuning + extra fetch + cap
+> interactions) — deferred. **Shipped — untrusted-wrap the remaining recalled
+> content (security, CLAUDE.md rule 5):** P0.5 only fenced `retrieveForTurn`;
+> user notes, runtime memory, and the working-memory bundle (which also carries
+> **cross-agent bridge context** — the sharpest injection risk) still reached the
+> v1 model raw at `swanbot.ts:1692-1694`. All three are now fenced in
+> `<untrusted_quoted>` at the model-facing push sites (model-only — the
+> underlying `stores.*` are untouched, so no UI shows tags), and the v1 prompt
+> already explains the tag (added in P0.5). Verified: typecheck; no double-wrap
+> with the already-fenced `retrieveForTurn` block.
+
 ---
 
 ## 5. External best-practice alignment (2024–2026)
