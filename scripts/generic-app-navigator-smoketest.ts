@@ -87,6 +87,11 @@ assert(strategyPrompt.includes('## Computer/App Execution Strategy'));
 assert(strategyPrompt.includes('## Generic App Navigator'));
 assert(strategyPrompt.includes('Can navigate without a dedicated adapter: yes'));
 assert(strategyPrompt.includes('Visibility rule: hide internal route'));
+// The generic app-adapter-gap contract (find ladder + research-before-guess)
+// rides along in the live strategy prompt for any-app tasks.
+assert(strategyPrompt.includes('## App Adapter Gap Contract (generic)'));
+assert(strategyPrompt.includes('Find the target (basics every app shares)'));
+assert(strategyPrompt.includes('Research when unfamiliar'));
 
 const controlPlan = buildAppAutomationControlSurfacePlan(abletonTask);
 assert.equal(controlPlan.targetId, 'generic_native_app');

@@ -602,15 +602,21 @@ wire dead code. Small diffs, immediate user-visible improvement.
   **researchPlan** + researchTriggers + officialSourceRefs ("research how this app
   exposes the action before guessing"); (4) the buildout contract (proposed
   `desktop.<app>_<op>` tool, required evidence, approval-before, fail-closed,
-  smoke cases, connectedAgentTask, retryPrompt). Wired into
-  `buildAgentAppCapabilityBuildoutPolicy` as the **fallback for any non-Adobe app**
-  (Adobe keeps its richer design contract): adds the generic prompt block +
-  research-before-guessing checklist. The runtime "call agent.build_app_capability"
-  line is filtered out of the buildout-agent prompt (it's circular there).
+  smoke cases, connectedAgentTask, retryPrompt). Wired into TWO places:
+  (a) `buildAgentAppCapabilityBuildoutPolicy` as the **fallback for any non-Adobe
+  app** (Adobe keeps its richer design contract) — adds the generic prompt block
+  + research-before-guessing checklist; (b) the **live
+  `buildComputerAppTaskStrategyPromptBlock`** (OpenSwan + SwanBot grounding via
+  `openswanSessionRuntime.ts:447` / `swanbot.ts:1625`) so the agent gets the
+  universal find-ladder + research-plan inline for any-app tasks — prompt-only,
+  no persistence-budget cost. The runtime "call agent.build_app_capability" line
+  is filtered out of the buildout-agent prompt (it's circular there).
   Verified: typecheck 0; `smoke:app-adapter-gap-contract` (new) +
+  `smoke:generic-app-navigator` + `smoke:computer-app-task-strategy` +
   `smoke:agent-app-capability-buildout` + `smoke:app-automation-control-surfaces`
-  + design/computer/chat suites green. Now "fulfil the task even if it's not
-  built out beforehand" holds for the whole long tail of apps, not just Adobe.
+  + design/computer/chat/swanbot/openswan suites green. Now "fulfil the task even
+  if it's not built out beforehand" holds for the whole long tail of apps — the
+  live agent navigates/finds/researches/acts on any app, not just Adobe.
 - **P3.5 — Reconcile capability models.** `computerCapabilityRegistry.ts` +
   `taskCapabilityProfiles.ts`: map each profile capability string to an audit
   `ComputerCapabilityId`; when the audit reports `missing`/`partial`, emit an

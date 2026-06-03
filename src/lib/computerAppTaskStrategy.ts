@@ -14,6 +14,7 @@ import {
   formatGenericAppNavigatorPromptBlock,
   shouldUseGenericAppNavigator,
 } from './genericAppNavigator';
+import { buildAppAdapterGapPromptBlock } from './appAdapterGapContract';
 
 export type ComputerAppStrategyId =
   | 'browser_semantic'
@@ -628,6 +629,11 @@ export function buildComputerAppTaskStrategyPromptBlock(
     `Blind action budget: ${strategy.maxBlindActions}. Never perform blind clicks/typing when this is 0.`,
     strategy.id === 'universal_app_control' || shouldUseGenericAppNavigator(message)
       ? formatGenericAppNavigatorPromptBlock(message)
+      : '',
+    // Universal find-ladder + research-before-guess + buildout contract so the
+    // live agent can find/research/act in any app, not just pre-configured ones.
+    strategy.id === 'universal_app_control' || shouldUseGenericAppNavigator(message)
+      ? buildAppAdapterGapPromptBlock(message)
       : '',
   ].filter(Boolean).join('\n');
 }
