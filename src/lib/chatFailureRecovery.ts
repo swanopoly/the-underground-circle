@@ -16,6 +16,7 @@ import {
   type ComputerTaskAppRouteDecisionInput,
   type ComputerTaskEvidenceRecoveryContext,
 } from './computerTaskEvidenceRecovery';
+import { buildAppAdapterGapPlan } from './appAdapterGapContract';
 import type { ComputerTaskEvidenceContract } from './computerTaskEvidenceContract';
 import {
   buildChatComputerRequestRoute,
@@ -781,6 +782,9 @@ function resolveEvidenceRecovery(input: ChatFailureRecoveryInput): ComputerTaskE
   return diagnoseComputerTaskEvidenceFailure({
     contract: input.evidenceContract || inferredRoute?.evidenceContract || null,
     appRouteDecision: input.appRouteDecision || inferredRoute?.appAutomationRouteDecision || null,
+    // Unfamiliar-app failures get research-first buildout guidance (self-gating:
+    // null for non-app tasks, so browser/file/Adobe recovery is unchanged).
+    appAdapterGap: buildAppAdapterGapPlan(input.task || '')?.contract || null,
     task: input.task,
     failureMessage: input.failureMessage,
     outcomeStatus: input.outcomeStatus,

@@ -1,4 +1,5 @@
 import type { ComputerTaskEvidenceContract } from './computerTaskEvidenceContract';
+import type { AppAdapterGapContract } from './appAdapterGapContract';
 import type {
   AppAutomationControlSurfaceId,
   AppAutomationRouteDecision,
@@ -18,6 +19,13 @@ export type ComputerTaskEvidenceFailureArea =
 export interface ComputerTaskEvidenceRecoveryInput {
   contract?: ComputerTaskEvidenceContract | null;
   appRouteDecision?: ComputerTaskAppRouteDecisionInput | null;
+  /**
+   * Generic app-adapter-gap contract for the target app. When the failure is on
+   * an unfamiliar/not-pre-configured app, this lets recovery prescribe
+   * research-before-guess + the precise connected-agent buildout instead of a
+   * generic "use a code agent" hint. Optional and additive.
+   */
+  appAdapterGap?: AppAdapterGapContract | null;
   task?: string | null;
   failureMessage?: string | null;
   outcomeStatus?: string | null;
@@ -26,6 +34,16 @@ export interface ComputerTaskEvidenceRecoveryInput {
   groundingSummary?: string | null;
   preflightSummary?: string | null;
   observations?: ComputerTaskEvidenceRecoveryObservation[];
+}
+
+export interface AppCapabilityRecoveryResearch {
+  missingTool: string;
+  controlSurface: string;
+  findLadder: string[];
+  researchPlan: string[];
+  researchTriggers: string[];
+  buildoutTask: string;
+  retryPrompt: string;
 }
 
 export interface ComputerTaskAppRouteDecisionSummaryInput {
@@ -107,6 +125,8 @@ export interface ComputerTaskEvidenceRecoveryContext {
   recommendedOptionId: 'retry_with_fresh_evidence' | 'resolve_contract_blocker' | 'let_connected_agent_repair' | 'stop_and_report';
   resumeInstruction: string;
   evidenceReadiness?: ComputerTaskEvidenceRecoveryReadiness | null;
+  /** Research-first buildout guidance for an unfamiliar app (when an app-adapter-gap is supplied). */
+  appCapabilityResearch?: AppCapabilityRecoveryResearch | null;
 }
 
 function clean(value: unknown, max = 1_200): string {
@@ -437,6 +457,7 @@ function resumeInstructionFor(args: {
   userActionRequired: boolean;
   connectedAgentAllowed: boolean;
   requiredFreshEvidence: string[];
+  gap?: AppAdapterGapContract | null;
 }): string {
   const routeNextStep = args.routeDecision?.nextSteps?.[0];
   if (args.userActionRequired) {
@@ -446,6 +467,10 @@ function resumeInstructionFor(args: {
     return 'Stop automation and ask the user to resolve the approval, login, verification, permission, app install, license, or bridge blocker before retrying.';
   }
   if (args.connectedAgentAllowed) {
+    // Unfamiliar app: prescribe research-before-guess + the precise buildout.
+    if (args.gap) {
+      return `${routeNextStep ? `${routeNextStep} ` : ''}${args.gap.connectedAgentTask} Then retry: ${args.gap.retryPrompt}`;
+    }
     if (routeNextStep) {
       return `${routeNextStep} Then verify with a focused smoke and retry the original task once with fresh evidence.`;
     }
@@ -469,6 +494,7 @@ export function diagnoseComputerTaskEvidenceFailure(
     rawArea: classifyFailureArea(text, contract),
     routeDecision: appRouteDecision,
   });
+  const gap = input.appAdapterGap || null;
   const userActionRequired = requiresUserAction(area, text, appRouteDecision);
   const connectedAgentAllowed = allowsConnectedAgent(area, text, contract, appRouteDecision);
   const retryAllowed = allowsRetry(area, userActionRequired, connectedAgentAllowed, appRouteDecision);
@@ -477,6 +503,10 @@ export function diagnoseComputerTaskEvidenceFailure(
     ...(appRouteDecision?.missingConfirmations.map((item) => `App route confirmation: ${item}`) || []),
     area === 'actionability' ? contract.actionabilityChecks.join('; ') : null,
     area === 'proof_after' ? contract.proofAfter.join('; ') : null,
+    // Unfamiliar app: the next observation should walk the universal find ladder.
+    ...(gap && (area === 'fresh_evidence' || area === 'actionability' || area === 'observe_before')
+      ? gap.universalFindLadder.slice(0, 2)
+      : []),
   ], 6);
   const requiredProof = unique(contract.proofAfter, 5);
   const approvalBoundaries = unique([
@@ -498,10 +528,20 @@ export function diagnoseComputerTaskEvidenceFailure(
       ...contract.proofAfter,
       ...contract.failClosedRules,
     ], 5),
+    ...(gap ? gap.researchPlan.slice(0, 2).map((item) => `Research before guessing: ${item}`) : []),
     area === 'unknown' ? 'No exact contract rule matched; recover conservatively.' : null,
   ], 6);
   const recommended = recommendedOptionId({ retryAllowed, userActionRequired, connectedAgentAllowed });
   const requiredEvidence = toolRequirementsForContract(area, contract);
+  // Unfamiliar app capability gap: research the control surface before buildout.
+  if (gap && area === 'capability_gap') {
+    requiredEvidence.unshift(requirement(
+      'app-control-research',
+      'research.search',
+      `Research how ${gap.appName} exposes "${gap.operationLabel}" (scripting API, CLI, accessibility, menu/shortcut) before building or retrying.`,
+      300_000,
+    ));
+  }
   const context: ComputerTaskEvidenceRecoveryContext = {
     schemaVersion: 1,
     targetName: contract.targetName,
@@ -528,7 +568,19 @@ export function diagnoseComputerTaskEvidenceFailure(
       userActionRequired,
       connectedAgentAllowed,
       requiredFreshEvidence,
+      gap,
     }),
+    appCapabilityResearch: gap
+      ? {
+          missingTool: gap.missingBridgeTools[0] || '',
+          controlSurface: gap.controlSurface,
+          findLadder: gap.universalFindLadder.slice(0, 4),
+          researchPlan: gap.researchPlan.slice(0, 4),
+          researchTriggers: gap.researchTriggers.slice(0, 3),
+          buildoutTask: gap.connectedAgentTask,
+          retryPrompt: gap.retryPrompt,
+        }
+      : null,
   };
   return {
     ...context,
@@ -656,6 +708,9 @@ export function formatComputerTaskEvidenceRecoveryForPrompt(
     approvalBoundaries.length ? `- approval boundaries: ${approvalBoundaries.join(' | ')}` : '',
     failClosedRules.length ? `- fail closed: ${failClosedRules.join(' | ')}` : '',
     matchedRules.length ? `- matched contract rules: ${matchedRules.join(' | ')}` : '',
+    context.appCapabilityResearch ? `- app find ladder: ${context.appCapabilityResearch.findLadder.join(' | ')}` : '',
+    context.appCapabilityResearch ? `- research before guessing: ${context.appCapabilityResearch.researchPlan.join(' | ')}` : '',
+    context.appCapabilityResearch?.missingTool ? `- propose app tool: ${context.appCapabilityResearch.missingTool}` : '',
     `- resume instruction: ${context.resumeInstruction}`,
   ].filter(Boolean).join('\n');
 }

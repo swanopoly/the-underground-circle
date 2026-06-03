@@ -602,15 +602,25 @@ wire dead code. Small diffs, immediate user-visible improvement.
   **researchPlan** + researchTriggers + officialSourceRefs ("research how this app
   exposes the action before guessing"); (4) the buildout contract (proposed
   `desktop.<app>_<op>` tool, required evidence, approval-before, fail-closed,
-  smoke cases, connectedAgentTask, retryPrompt). Wired into TWO places:
+  smoke cases, connectedAgentTask, retryPrompt). Wired into THREE places:
   (a) `buildAgentAppCapabilityBuildoutPolicy` as the **fallback for any non-Adobe
   app** (Adobe keeps its richer design contract) — adds the generic prompt block
   + research-before-guessing checklist; (b) the **live
   `buildComputerAppTaskStrategyPromptBlock`** (OpenSwan + SwanBot grounding via
   `openswanSessionRuntime.ts:447` / `swanbot.ts:1625`) so the agent gets the
   universal find-ladder + research-plan inline for any-app tasks — prompt-only,
-  no persistence-budget cost. The runtime "call agent.build_app_capability" line
-  is filtered out of the buildout-agent prompt (it's circular there).
+  no persistence-budget cost; (c) the **failure-recovery loop**
+  (`computerTaskEvidenceRecovery.ts` ← `chatFailureRecovery.ts`): on a failure
+  for an unfamiliar app, recovery now prescribes **research-before-guess** (a
+  `research.search` evidence requirement precedes the buildout for a
+  `capability_gap`) + the precise connected-agent buildout (`appCapabilityResearch`
+  carries the find-ladder, research plan, proposed `desktop.<app>_<op>` tool, and
+  research-anchored resume), and a `fresh_evidence` failure pulls the find-ladder
+  into the next observation — so "research at some point, then take the steps"
+  holds on failure, not just up front. Browser/file/Adobe recovery is unchanged
+  (the field self-gates to null for non-app tasks). The runtime
+  "call agent.build_app_capability" line is filtered out of the buildout-agent
+  prompt (it's circular there).
   Verified: typecheck 0; `smoke:app-adapter-gap-contract` (new) +
   `smoke:generic-app-navigator` + `smoke:computer-app-task-strategy` +
   `smoke:agent-app-capability-buildout` + `smoke:app-automation-control-surfaces`

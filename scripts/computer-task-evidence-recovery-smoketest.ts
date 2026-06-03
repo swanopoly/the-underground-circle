@@ -23,6 +23,7 @@ import {
   formatComputerTaskEvidenceRecoveryForPrompt,
 } from '../src/lib/computerTaskEvidenceRecovery';
 import { buildAppAutomationRouteDecision } from '../src/lib/appAutomationControlSurfaces';
+import { buildAppAdapterGapPlan } from '../src/lib/appAdapterGapContract';
 import {
   buildAgentFailureRecoveryPolicy,
   type AgentFailureRecoveryStartResult,
@@ -217,5 +218,47 @@ assert(userMessage.includes('Retry with required evidence') || userMessage.inclu
 const archive = buildChatFailureRecoveryArchive(input, fakeRecovery);
 assert((archive.archiveMetadata.evidenceRecovery as any)?.failureArea === 'actionability', 'archive metadata stores evidence recovery context');
 assert((archive.archiveMetadata.recoveryOptions as any[])?.some((option) => option.source === 'evidence_contract'), 'archive recovery options preserve evidence source');
+
+// ── Unfamiliar-app failures get research-first buildout + find-ladder guidance ─
+const acmeTask = 'Open AcmeDesigner and rename the active board.';
+const acmeRoute = buildChatComputerRequestRoute(acmeTask);
+const acmeGap = buildAppAdapterGapPlan(acmeTask)?.contract || null;
+assert(acmeGap, 'unfamiliar app task yields an app-adapter-gap contract');
+assert(acmeRoute?.evidenceContract, 'unfamiliar app route carries evidence contract');
+
+const acmeCapabilityRecovery = diagnoseComputerTaskEvidenceFailure({
+  contract: acmeRoute!.evidenceContract,
+  appAdapterGap: acmeGap,
+  task: acmeTask,
+  failureMessage: 'Missing adapter: no AcmeDesigner bridge tool is implemented for renaming boards.',
+});
+assert.equal(acmeCapabilityRecovery?.failureArea, 'capability_gap', 'unfamiliar-app missing adapter → capability gap');
+assert.equal(acmeCapabilityRecovery?.recommendedOptionId, 'let_connected_agent_repair');
+// Research the control surface BEFORE buildout, then still require the buildout result.
+assert(acmeCapabilityRecovery?.requiredEvidence[0]?.tool === 'research.search', 'research.search precedes buildout in required evidence');
+assert(acmeCapabilityRecovery?.requiredEvidence.some((item) => item.tool === 'agent.build_app_capability.result'), 'buildout result still required');
+assert(acmeCapabilityRecovery?.appCapabilityResearch?.findLadder.length, 'recovery carries the universal find ladder');
+assert(acmeCapabilityRecovery?.appCapabilityResearch?.missingTool.startsWith('desktop.'), 'recovery proposes a desktop adapter tool');
+assert(/research/i.test(acmeCapabilityRecovery?.resumeInstruction || ''), 'resume instruction is research-anchored');
+assert(/retry/i.test(acmeCapabilityRecovery?.resumeInstruction || ''), 'resume instruction ends in a bounded retry');
+assert(acmeCapabilityRecovery?.matchedRules.some((item) => /Research before guessing/i.test(item)), 'matched rules carry research-before-guessing');
+
+const acmePrompt = formatComputerTaskEvidenceRecoveryForPrompt(acmeCapabilityRecovery) || '';
+assert(acmePrompt.includes('research before guessing'), 'recovery prompt surfaces the research plan');
+assert(acmePrompt.includes('propose app tool'), 'recovery prompt names the proposed adapter tool');
+assert(!acmePrompt.includes('/Users/'), 'recovery prompt does not leak local paths');
+
+// A fresh-evidence failure on an unfamiliar app walks the universal find ladder.
+const acmeFreshRecovery = diagnoseComputerTaskEvidenceFailure({
+  contract: acmeRoute!.evidenceContract,
+  appAdapterGap: acmeGap,
+  task: acmeTask,
+  failureMessage: 'Could not read the accessibility tree snapshot; the control target was stale.',
+});
+assert.equal(acmeFreshRecovery?.failureArea, 'fresh_evidence');
+assert(acmeFreshRecovery?.requiredFreshEvidence.some((item) => /accessibility|semantic tree|command palette|menu bar/i.test(item)), 'fresh-evidence recovery walks the find ladder');
+
+// Non-app failures are unchanged: no app capability research is attached.
+assert.equal(browserRecovery?.appCapabilityResearch ?? null, null, 'browser recovery has no app capability research');
 
 console.log('All computer task evidence recovery smoke cases passed.');
