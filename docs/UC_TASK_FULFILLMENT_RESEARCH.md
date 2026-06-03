@@ -214,9 +214,23 @@ roadmap is about closing the arrows between the boxes.
 |---|---|---|---|
 | G1 | **Clarify when uncertain** | `conversationalBuild` (orphaned), `agentPlanMode` Qs (`/plan` only), `userTaskPipelines.needsClarification` (dropped), `analyzeBuildBrief` (dead) | First-class `ask_clarification` plan kind + `needs_input` dispatch outcome + a `clarify` interactive tool |
 | G2 | **Gather / observe before acting** | `openswanContextDiscovery` (markdown-only), evidence contracts + route decisions (inert) | Feed real observations into route decisions; enforce observe→re-decide loop; broaden discovery to providers/tools/repo/memory |
-| G3 | **Re-plan under uncertainty** | none (frozen plan) | Re-plan after first tool round / after a discovery tool returns; widen the tool allowlist post-observation |
+| G3 | **Re-plan under uncertainty** | none (frozen plan) | Re-plan after first tool round / after a discovery tool returns; widen the tool allowlist post-observation — **see validated-non-gap note below: tool-stranding is not a real problem** |
 | G4 | **Build the missing capability** | real Codex buildout, rich design-gap contract | Broaden triggers (all strategies), providers (any connected agent), and generalize the gap contract to any app; reconcile capability models |
 | G5 | **Recall stored knowledge to fill gaps** | 4 independent recall systems | Keyword fallback; auto-select library skills; cross-fill between pipeline/memory/skill/integration; relax complexity gate; untrusted-wrap |
+
+> **Validated non-gap — G3 tool-stranding (2026-06-03):** the worry that an
+> actionable request gets stranded text-only (empty tool plan) was tested
+> empirically against `buildOpenSwanTaskPlan`. It does NOT happen: the planner's
+> browser/desktop strategy + local-intent + browserbase detection gives EVERY
+> external/actionable phrasing a rich concrete tool set (verified across
+> connect/sync/fetch/email/schedule/reminder/notify requests — all returned
+> desktop.*/browser.*/schedule_action tools, never "only inspect"). Only
+> genuinely conversational requests (questions, chit-chat, "help me think")
+> return an empty tool plan — and for those, text-only is the CORRECT behavior,
+> not a bug. A speculative discovery-tool fallback was prototyped, found to be
+> dead code (`onlyInspect && external` is mutually exclusive in practice), and
+> reverted. **Do not re-attempt G3 tool-widening.** Phase-0 P0.3 already makes
+> the rare text-only/max-round degradations explicit, which is the right fix.
 
 ---
 
