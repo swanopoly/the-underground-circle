@@ -82,6 +82,7 @@ import CommandsHelpCard from './chat/CommandsHelpCard';
 import AssignPickerCard, { type AssignPickerAgent } from './chat/AssignPickerCard';
 import BridgeDiagCard from './chat/BridgeDiagCard';
 import PreflightBlockersCard, { type PreflightBlockerItem } from './chat/PreflightBlockersCard';
+import QuickReplyChips from './chat/QuickReplyChips';
 import { probeBridges, type BridgeProbeResult } from '../../../lib/bridgeHealthDiag';
 import { getBridgeUrl } from '../../../lib/bridgeEnvironment';
 import { ensureBridgeToken, bridgeAuthHeaders } from '../../../lib/bridgeAuth';
@@ -791,6 +792,7 @@ type ChatMessage = {
   recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
   computerHandoff?: ChatComputerHandoffMetadata;
   computerPreflightBlockers?: { task: string; items: PreflightBlockerItem[] };
+  quickReplies?: string[];    // tappable suggested replies (e.g. clarification answers)
   delegatedTo?: string;       // subagent that handled this message
   delegatedSubagents?: string[];
   runId?: string | null;
@@ -832,6 +834,7 @@ type ChatBotMessageExtra = {
   recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
   computerHandoff?: ChatComputerHandoffMetadata;
   computerPreflightBlockers?: { task: string; items: PreflightBlockerItem[] };
+  quickReplies?: string[];
   localOnly?: boolean;
   runId?: string | null;
   agentPlan?: AgentPlanDraft | Record<string, unknown>;
@@ -4548,6 +4551,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       recoveryReliability: extra?.recoveryReliability,
       computerHandoff: extra?.computerHandoff,
       computerPreflightBlockers: extra?.computerPreflightBlockers,
+      quickReplies: extra?.quickReplies,
       taskPlan: extra?.taskPlan,
       toolEvents: extra?.toolEvents,
       verificationResults: extra?.verificationResults,
@@ -6475,12 +6479,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           gap: { missingParams: clarification.missingParams },
         });
         const lines = [clarification.question];
-        if (clarification.examples?.length) {
-          lines.push('', 'For example:', ...clarification.examples.map((ex) => `• ${ex}`));
-        }
         if (fill.contextNote) lines.push('', fill.contextNote);
+        // Examples render as tappable chips (QuickReplyChips) rather than inline
+        // text — one tap sends the answer, which the pending-clarification resume
+        // path reconstructs into the completed task.
         addBotMessage(lines.join('\n'), undefined, {
           localOnly: true,
+          quickReplies: clarification.examples,
           source: {
             actor: 'OpenSwan',
             surface: 'main_chat_clarification',
@@ -8952,6 +8957,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   const retryTask = item.computerPreflightBlockers?.task;
                   if (retryTask) void sendMessage(retryTask);
                 }}
+              />
+            ) : null}
+            {item.quickReplies && item.quickReplies.length > 0 ? (
+              <QuickReplyChips
+                replies={item.quickReplies}
+                accentColor={accentColor}
+                onPick={(reply) => { void sendMessage(reply); }}
               />
             ) : null}
             {item.showRunTrace && item.runId ? (

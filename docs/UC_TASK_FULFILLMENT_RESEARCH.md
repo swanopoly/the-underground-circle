@@ -298,6 +298,15 @@ wire dead code. Small diffs, immediate user-visible improvement.
 > `smoke:chat-planner` cases assert reconstruction shape AND that reconstructed
 > messages route to a handler (never back to a question).
 >
+> **Answer chips shipped (2026-06-03):** the clarification examples are now
+> rendered as tappable chips (new `chat/QuickReplyChips.tsx` + a generic
+> `quickReplies` chat-message field) instead of inline text — one tap sends the
+> example, which flows through the pending-clarification resume path and
+> completes the task. This is the "tappable answer chips" deferred at Phase 1,
+> unblocked once the `PreflightBlockersCard` established the chip-card + message-
+> field pattern. Verified: typecheck + `smoke:chat-planner` (plan still carries
+> the examples the chips consume).
+>
 > **Deferred:** P1.4b (the multi-turn `conversationalBuild.ts` state machine +
 > `buildChatStream` streaming) — its `buildSystemAddendum → systemDirective`
 > injection isn't on the current `runOpenSwanSessionTurn` reply path, so wiring
