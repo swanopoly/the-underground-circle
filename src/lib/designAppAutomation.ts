@@ -21,7 +21,21 @@ export type DesignAppAutomationOperation =
   | 'generate_ai_asset'
   | 'generative_expand_asset'
   | 'create_creative_variants'
-  | 'export_raster_proof';
+  | 'export_raster_proof'
+  | 'apply_layer_effects'
+  | 'manage_layers'
+  | 'apply_text_style'
+  | 'manage_pages'
+  | 'transform_layer'
+  | 'convert_color_mode'
+  | 'manage_tables'
+  | 'resolve_fonts'
+  | 'manage_artboards'
+  | 'manage_hyperlinks'
+  | 'build_toc'
+  | 'manage_text_flow'
+  | 'manage_smart_objects'
+  | 'manage_swatches';
 
 export interface DesignAppAutomationPlan {
   appId: DesignAppAutomationAppId;
@@ -46,7 +60,7 @@ const PHOTOSHOP_RE = /\b(photoshop|photo\s*shop|\.psd\b|\.psb\b|psd|psb|generati
 const LAYOUT_RE = /\b(layout|banner|ad\b|advert|display ad|marketing|campaign|flyer|brochure|poster|print|spread|page|template|data merge|proof|preflight|package)\b/i;
 const LAYER_RE = /\b(layer|layers|text frame|frame|headline|subhead|cta|button|disclaimer|legal|fine print|offer|price|apr|dealer|link|asset|image|logo|swatch|bleed|margin)\b/i;
 const IMAGE_EDIT_RE = /\b(image|photo|picture|psd|psb|composite|retouch|remove background|replace background|generative fill|content-aware|mask|selection|select subject|adjustment layer|curves|levels|crop|resize|export|save for web)\b/i;
-const PHOTOSHOP_TASK_RE = /\b(open|launch|focus|edit|change|update|replace|remove|erase|delete|clean up|retouch|crop|resize|export|save|place|insert|add|generate|generative|content-aware|firefly|select|mask|background|proof|preview|\.psd\b|\.psb\b)\b/i;
+const PHOTOSHOP_TASK_RE = /\b(open|launch|focus|edit|change|update|replace|remove|erase|delete|clean up|retouch|crop|resize|convert|rotate|flip|transform|warp|create|artboard|export|save|place|insert|add|generate|generative|content-aware|firefly|select|mask|background|proof|preview|\.psd\b|\.psb\b)\b/i;
 
 function unique<T>(items: T[]): T[] {
   return Array.from(new Set(items));
@@ -104,6 +118,30 @@ function detectInDesignOperations(text: string): DesignAppAutomationOperation[] 
   if (/\b(data merge|csv|spreadsheet|personalized|localized|localised|versions?|variants?|campaign variations?|variable data|batch)\b/i.test(text)) {
     operations.push('create_creative_variants');
   }
+  if (/\b(paragraph style|character style|object style|cell style|table style|apply (?:the )?style|text style|style sheet|stylesheet|typograph)\b/i.test(text)) {
+    operations.push('apply_text_style');
+  }
+  if (/\b(add|insert|delete|remove|duplicate|move|reorder|rearrange)\b[\s\S]{0,40}\b(pages?|spreads?)\b|\b(master page|parent page|apply (?:the )?master|apply (?:the )?parent)\b/i.test(text)) {
+    operations.push('manage_pages');
+  }
+  if (/\b(create|insert|add|build|edit|populate|fill|format|delete|remove|merge|split|convert)\b[\s\S]{0,40}\b(tables?|cells?|rows?|columns?)\b|\btable from data\b|\bconvert (?:the )?(?:text )?to (?:a )?table\b/i.test(text)) {
+    operations.push('manage_tables');
+  }
+  if (/\b(missing fonts?|activate (?:the |missing )?fonts?|font activation|adobe fonts|typekit|sync (?:the )?fonts?|substitute (?:the )?fonts?|font substitution|replace (?:the )?fonts?|missing glyphs?|font conflict|swap (?:the )?fonts?|install (?:the )?fonts?)\b/i.test(text)) {
+    operations.push('resolve_fonts');
+  }
+  if (/\b(hyperlinks?|hyper ?links?|cross[\s-]?references?|cross[\s-]?refs?|xrefs?|bookmarks?|interactive pdf|button actions?|add (?:a )?link to)\b/i.test(text)) {
+    operations.push('manage_hyperlinks');
+  }
+  if (/\b(table of contents|\btoc\b|generate (?:an? )?index|build (?:an? )?index|create (?:an? )?index|running header|running footer|section marker)\b/i.test(text)) {
+    operations.push('build_toc');
+  }
+  if (/\b(thread|unthread|autoflow|auto[\s-]?flow|overset|text flow|flow (?:the )?text|link (?:the )?(?:text )?frames?|connect (?:the )?(?:text )?frames?|reflow)\b/i.test(text)) {
+    operations.push('manage_text_flow');
+  }
+  if (/\b(swatch|swatches|spot colou?rs?|process colou?rs?|pantone|ink manager|colou?r group|tint swatch|gradient swatch|mixed ink)\b/i.test(text)) {
+    operations.push('manage_swatches');
+  }
   if (operations.length === 1 && /\b(make|create|build|finish|fix|revise)\b/i.test(text)) {
     operations.push('update_text_layers', 'export_proof');
   }
@@ -141,6 +179,24 @@ function detectPhotoshopOperations(text: string): DesignAppAutomationOperation[]
   }
   if (/\b(adjust|retouch|curves|levels|color|tone|contrast|brightness|exposure|filter|blur|sharpen|neural filter|camera raw|harmonize)\b/i.test(text)) {
     operations.push('edit_adjustment_layers');
+  }
+  if (/\b(drop shadow|layer style|layer effect|layer fx|stroke|bevel|emboss|inner shadow|outer glow|inner glow|gradient overlay|color overlay|pattern overlay|satin|blend mode|blending mode|opacity)\b/i.test(text)) {
+    operations.push('apply_layer_effects');
+  }
+  if (/\b(create|add|new|duplicate|copy|delete|remove|merge|flatten|group|ungroup|rasterize|rename)\b[\s\S]{0,40}\b(layers?|groups?)\b/i.test(text)) {
+    operations.push('manage_layers');
+  }
+  if (/\b(rotate|flip|mirror|free transform|free-transform|skew|distort|warp|perspective|straighten|transform the layer|transform layer)\b/i.test(text)) {
+    operations.push('transform_layer');
+  }
+  if (/\b(cmyk|grayscale|greyscale|duotone|bitmap mode|lab color|color mode|colour mode|color space|colour space|color profile|colour profile|icc profile|bit depth|8[\s-]?bit|16[\s-]?bit|32[\s-]?bit|convert to profile|assign profile|color settings|to rgb\b|rgb mode|srgb|adobe rgb)\b/i.test(text)) {
+    operations.push('convert_color_mode');
+  }
+  if (/\b(artboards?|art ?boards?|new (?:photoshop )?document|create (?:a )?(?:new )?(?:document|psd|file))\b/i.test(text)) {
+    operations.push('manage_artboards');
+  }
+  if (/\bconvert\b[\s\S]{0,30}?\bto (?:a )?smart object\b|\b(smart object contents|edit (?:the )?smart object|rasterize (?:the )?smart object|replace (?:the )?(?:smart object )?contents|smart filters?)\b/i.test(text)) {
+    operations.push('manage_smart_objects');
   }
   if (/\b(export|save for web|png|jpg|jpeg|webp|proof|preview|layers to files)\b/i.test(text)) {
     operations.push('export_raster_proof');

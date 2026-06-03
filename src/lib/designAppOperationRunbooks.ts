@@ -164,6 +164,20 @@ function operationLabel(operation: DesignAppAutomationOperation): string {
     generative_expand_asset: 'Generative expand asset/canvas',
     create_creative_variants: 'Create creative variants',
     export_raster_proof: 'Export Photoshop raster proof',
+    apply_layer_effects: 'Apply layer styles/effects',
+    manage_layers: 'Create, duplicate, group, merge, or delete layers',
+    apply_text_style: 'Apply or define paragraph/character styles',
+    manage_pages: 'Add, delete, move, or apply master/parent pages',
+    transform_layer: 'Transform layer (rotate, flip, scale, skew, warp)',
+    convert_color_mode: 'Convert color mode, bit depth, or profile',
+    manage_tables: 'Create, edit, populate, or format tables',
+    resolve_fonts: 'Activate, sync, or substitute fonts',
+    manage_artboards: 'Create, duplicate, resize, or delete artboards/documents',
+    manage_hyperlinks: 'Add or update hyperlinks, cross-references, bookmarks',
+    build_toc: 'Build table of contents, index, or running headers',
+    manage_text_flow: 'Thread/unthread frames, autoflow, or fix overset',
+    manage_smart_objects: 'Convert, edit, replace, or rasterize smart objects',
+    manage_swatches: 'Add, edit, convert, or delete swatches/spot colors/inks',
   };
   return labels[operation];
 }
@@ -177,6 +191,19 @@ function riskForOperation(operation: DesignAppAutomationOperation): DesignAppOpe
     || operation === 'create_creative_variants'
   ) return 'high';
   if (operation === 'package_handoff' || operation === 'replace_linked_asset') return 'high';
+  // Destructive/irreversible-ish ops — merge/flatten/delete layers, delete/move
+  // pages, create/delete tables, raster transforms (resampling), and color-mode
+  // or bit-depth conversion (gamut/precision loss) — treat as high so approval
+  // is mandatory. Font activation/substitution stays at review (recoverable).
+  if (
+    operation === 'manage_layers'
+    || operation === 'manage_pages'
+    || operation === 'manage_tables'
+    || operation === 'transform_layer'
+    || operation === 'convert_color_mode'
+    || operation === 'manage_artboards'
+    || operation === 'manage_smart_objects'
+  ) return 'high';
   return 'review';
 }
 

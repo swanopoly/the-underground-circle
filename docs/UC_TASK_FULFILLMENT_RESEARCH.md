@@ -521,6 +521,61 @@ wire dead code. Small diffs, immediate user-visible improvement.
 > `renderMessage`. Verified: typecheck (UI isn't smoke-testable; the
 > capability→action mapping is a pure helper in the card).
 
+> **Photoshop/InDesign operation coverage expanded (2026-06-03):** widened the
+> design-app automation taxonomy from 15 → 29 typed operations so "anything a
+> user asks on those apps" routes to a precise runbook + adapter-gap buildout
+> contract. Batch 1: PS `apply_layer_effects`, PS `manage_layers`, ID
+> `apply_text_style`, ID `manage_pages`. Batch 2: PS `transform_layer`, PS
+> `convert_color_mode`, ID `manage_tables`, ID `resolve_fonts`. Batch 3: PS
+> `manage_artboards`, ID `manage_hyperlinks`, ID `build_toc`. Batch 4: ID
+> `manage_text_flow` (threading/overset), PS `manage_smart_objects`
+> (verb-specific so it never collides with `replace_linked_asset`'s "place X
+> smart object"), ID `manage_swatches` (spot colors/inks). Each adds a
+> detector in `designAppAutomation.ts`, an `operationLabel` entry in both
+> `designAppOperationRunbooks.ts` and `designAppAdapterGaps.ts` (the two
+> exhaustive `Record<DesignAppAutomationOperation,…>` maps act as a TS
+> completeness net), a `GAP_OPERATIONS` membership, and a missing-tool mapping.
+> Destructive/irreversible ops (`manage_layers`, `manage_pages`, `manage_tables`,
+> `transform_layer`, `convert_color_mode`, `manage_artboards`,
+> `manage_smart_objects`) are `high` risk; recoverable ops (font activation,
+> hyperlinks/cross-refs, TOC/index, text flow/overset, swatches/inks) → `review`.
+> The `inDesignGap` deterministic branch was refactored from an `isPages` ternary
+> into an operation-spec map (cleaner altitude as ops grow); detectors use
+> plural-tolerant patterns (`artboards?`, `hyperlinks?`) after a `\bartboard\b`
+> word-boundary miss on the plural. `convert`/`rotate`/`flip`/`transform`/`warp`/
+> `create`/`artboard` were added to `PHOTOSHOP_TASK_RE` so those tasks gate into
+> automation without needing "open". Verified: typecheck 0 errors; the full
+> `smoke:design-app-*` suite + `smoke:chat-{computer-handoff-context,design-task-card}`
+> + `smoke:chat-recording` + `smoke:computer-task-{evidence-contract,runtime}` +
+> `smoke:computer-app-execution-receipts` + `check-persisted-chat-metadata.mjs`
+> all green (focused per-operation assertion cases — including a negative guard
+> that "place X smart object" stays `replace_linked_asset` — added to the
+> adapter-gaps smoke).
+
+> **Pre-existing persistence-budget failure RESOLVED — `smoke:design-app-object-manifest` (2026-06-03):**
+> surfaced (NOT introduced — confirmed by reverting all design edits to HEAD and
+> re-running; it failed there too) while verifying the op build-out. Root cause:
+> a rich PS task's full handoff metadata is ~20–28 KB; the persisted-row budget
+> (`MAX_PERSISTED_BOT_MESSAGE_CHARS=9000`) forced compaction down to the `tiny`
+> tier, which kept the **narrative** (execution pipeline / creative-AI) but
+> nulled the **evidence** (object manifest, operation runbooks, proof review).
+> `smoke:design-app-object-manifest` asserts the evidence survives;
+> `smoke:design-app-execution-pipeline` asserts the narrative survives — opposing
+> lowest-tier priorities under a fixed byte cap. **Fix (non-regressing):** the
+> `tiny` tier in `compactComputerHandoff` now packs the proof-critical fields
+> alongside the narrative — compact object manifest (`entityKinds` kept at 10 so
+> no kind is dropped), risk-sorted top-3 operation runbooks (via the new shared
+> `sortDesignRunbooksByRisk` helper, de-duplicated from the minimal path), and a
+> compact proof review. A new candidate tier in `formatPersistedChatBotMessage`
+> sits between this evidence-bearing tiny and the existing narrative-only variant:
+> the loop picks the evidence-bearing tier when it fits (≤9000), else falls back
+> to a guaranteed-smaller narrative-only tier (today's behavior), else to no
+> metadata — so the worst case is never made worse. Measured: the object-manifest
+> task fits the evidence-bearing tier at 8447; the heavier Firefly task overflows
+> it and lands on the narrative-only fallback at 7402. Both smokes now pass, plus
+> the full persistence suite. The 9000-char cap (documented "keep payloads
+> bounded") is unchanged.
+
 - **P3.1 — Replace the generic-app dead-end with a buildout request.**
   `computerAppAdapter.ts:3667-3691`: emit `agent.build_app_capability` (or a
   typed `{kind:'needs_capability_buildout', connectedAgentTask}` signal) instead

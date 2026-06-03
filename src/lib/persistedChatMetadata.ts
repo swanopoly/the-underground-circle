@@ -317,6 +317,19 @@ function hasPersistedMetadata(metadata?: PersistedChatBotMetadata): boolean {
   );
 }
 
+// Highest-risk / proof-bearing operations first, so a tight slice at a low
+// persistence tier keeps the operations that matter most for accountability.
+function sortDesignRunbooksByRisk<T extends { risk?: unknown; operation?: unknown }>(runbooks: readonly T[]): T[] {
+  return runbooks.slice().sort((a, b) => {
+    const score = (item: T) => {
+      let value = item.risk === 'high' ? 30 : item.risk === 'review' ? 20 : 10;
+      if (/generative|destructive|relink|asset|package|export|proof/i.test(String(item.operation))) value += 5;
+      return value;
+    };
+    return score(b) - score(a);
+  });
+}
+
 function compactComputerHandoff(
   handoff?: ChatComputerHandoffMetadata | null,
   mode: 'full' | 'minimal' | 'tiny' = 'full',
@@ -422,7 +435,18 @@ function compactComputerHandoff(
             })),
           }
         : null,
-      designOperationRunbooks: null,
+      designOperationRunbooks: handoff.designOperationRunbooks?.length
+        ? sortDesignRunbooksByRisk(handoff.designOperationRunbooks).slice(0, 3).map((runbook) => ({
+            operation: runbook.operation,
+            label: truncateText(String(runbook.label || ''), 90),
+            risk: truncateText(String(runbook.risk || ''), 60),
+            controlSurface: '',
+            requiredInputs: [],
+            approvalBefore: (runbook.approvalBefore || []).slice(0, 1).map((value) => truncateText(String(value), 90)),
+            successCriteria: [],
+            failClosedConditions: [],
+          }))
+        : null,
       engineeringCadOperationRunbooks: null,
       designAdapterGaps: handoff.designAdapterGaps?.length
         ? handoff.designAdapterGaps.slice(0, 2).map((gap) => ({
@@ -436,24 +460,38 @@ function compactComputerHandoff(
             failClosedRules: [],
           }))
         : null,
-      designObjectManifest: null,
+      designObjectManifest: handoff.designObjectManifest
+        ? {
+            schemaVersion: 1,
+            artifactKind: 'design_object_manifest',
+            beforeSnapshotTools: handoff.designObjectManifest.beforeSnapshotTools.slice(0, 4),
+            afterSnapshotTools: handoff.designObjectManifest.afterSnapshotTools.slice(0, 4),
+            entityKinds: handoff.designObjectManifest.entityKinds.slice(0, 10).map((value) => truncateText(String(value), 80)),
+            comparisons: [],
+            approvalEvidence: [],
+            failClosedConditions: handoff.designObjectManifest.failClosedConditions.slice(0, 2).map((value) => truncateText(String(value), 140)),
+            redactionRules: handoff.designObjectManifest.redactionRules.slice(0, 2).map((value) => truncateText(String(value), 140)),
+          }
+        : null,
       designObjectManifestArtifact: null,
       requestNotice: compactComputerRequestNotice(handoff.requestNotice, 'tiny'),
       evidenceContract: compactComputerTaskEvidenceContract(handoff.evidenceContract, 'tiny'),
       appRouteDecision: compactComputerAppRouteDecision(handoff.appRouteDecision, 'tiny'),
-      designProofReview: null,
+      designProofReview: handoff.designProofReview
+        ? {
+            reviewTitle: truncateText(String(handoff.designProofReview.reviewTitle || ''), 120),
+            userVisibleSummary: truncateText(String(handoff.designProofReview.userVisibleSummary || ''), 140),
+            checklist: [],
+            requiredEvidence: handoff.designProofReview.requiredEvidence.slice(0, 2).map((value) => truncateText(String(value), 140)),
+            approvalBefore: [],
+            passCriteria: handoff.designProofReview.passCriteria.slice(0, 2).map((value) => truncateText(String(value), 140)),
+            failClosedConditions: [],
+            artifactKinds: handoff.designProofReview.artifactKinds.slice(0, 3).map((value) => truncateText(String(value), 80)),
+          }
+        : null,
     };
   }
-  const designRunbooks = (handoff.designOperationRunbooks || [])
-    .slice()
-    .sort((a, b) => {
-      const score = (item: typeof a) => {
-        let value = item.risk === 'high' ? 30 : item.risk === 'review' ? 20 : 10;
-        if (/generative|destructive|relink|asset|package|export|proof/i.test(String(item.operation))) value += 5;
-        return value;
-      };
-      return score(b) - score(a);
-    });
+  const designRunbooks = sortDesignRunbooksByRisk(handoff.designOperationRunbooks || []);
   const cadRunbooks = (handoff.engineeringCadOperationRunbooks || [])
     .slice()
     .sort((a, b) => {
@@ -959,14 +997,31 @@ export function formatPersistedChatBotMessage(
       }
     : undefined;
 
+  // The 'tiny' tier now carries the proof-critical design fields (object
+  // manifest, operation runbooks, proof review) packed alongside the narrative,
+  // so large design tasks persist their evidence instead of dropping it. The
+  // narrative-only variant follows as a guaranteed-smaller fallback: if the
+  // evidence-bearing tier still exceeds the byte cap, we fall back to today's
+  // behavior rather than collapsing straight to no metadata.
+  const tinyHandoff = normalizedMetadata?.computerHandoff
+    ? compactComputerHandoff(normalizedMetadata.computerHandoff, 'tiny')
+    : undefined;
   const candidates = [
     normalizedMetadata,
     compactPersistedMetadata(normalizedMetadata),
     minimalPersistedMetadata(normalizedMetadata),
-    normalizedMetadata?.computerHandoff
+    tinyHandoff
+      ? { ...minimalPersistedMetadata(normalizedMetadata), computerHandoff: tinyHandoff }
+      : undefined,
+    tinyHandoff
       ? {
           ...minimalPersistedMetadata(normalizedMetadata),
-          computerHandoff: compactComputerHandoff(normalizedMetadata.computerHandoff, 'tiny'),
+          computerHandoff: {
+            ...tinyHandoff,
+            designObjectManifest: null,
+            designOperationRunbooks: null,
+            designProofReview: null,
+          },
         }
       : undefined,
     undefined,

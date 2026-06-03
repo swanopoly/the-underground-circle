@@ -111,6 +111,20 @@ const GAP_OPERATIONS = new Set<DesignAppAutomationOperation>([
   'generate_ai_asset',
   'generative_expand_asset',
   'create_creative_variants',
+  'apply_layer_effects',
+  'manage_layers',
+  'apply_text_style',
+  'manage_pages',
+  'transform_layer',
+  'convert_color_mode',
+  'manage_tables',
+  'resolve_fonts',
+  'manage_artboards',
+  'manage_hyperlinks',
+  'build_toc',
+  'manage_text_flow',
+  'manage_smart_objects',
+  'manage_swatches',
 ]);
 
 function uniqueRefs(refs: AppAutomationResearchRef[]): AppAutomationResearchRef[] {
@@ -143,6 +157,20 @@ function operationLabel(operation: DesignAppAutomationOperation): string {
     generative_expand_asset: 'Generative expand asset/canvas',
     create_creative_variants: 'Create creative variants',
     export_raster_proof: 'Export Photoshop raster proof',
+    apply_layer_effects: 'Apply layer styles/effects',
+    manage_layers: 'Create, duplicate, group, merge, or delete layers',
+    apply_text_style: 'Apply or define paragraph/character styles',
+    manage_pages: 'Add, delete, move, or apply master/parent pages',
+    transform_layer: 'Transform layer (rotate, flip, scale, skew, warp)',
+    convert_color_mode: 'Convert color mode, bit depth, or profile',
+    manage_tables: 'Create, edit, populate, or format tables',
+    resolve_fonts: 'Activate, sync, or substitute fonts',
+    manage_artboards: 'Create, duplicate, resize, or delete artboards/documents',
+    manage_hyperlinks: 'Add or update hyperlinks, cross-references, bookmarks',
+    build_toc: 'Build table of contents, index, or running headers',
+    manage_text_flow: 'Thread/unthread frames, autoflow, or fix overset',
+    manage_smart_objects: 'Convert, edit, replace, or rasterize smart objects',
+    manage_swatches: 'Add, edit, convert, or delete swatches/spot colors/inks',
   };
   return labels[operation];
 }
@@ -154,8 +182,16 @@ function refsForGap(appId: DesignAppAutomationAppId, operation: DesignAppAutomat
       INDESIGN_DOM_REF,
       INDESIGN_DOCUMENT_REF,
     ];
-    if (operation === 'toggle_layer_visibility') refs.push(INDESIGN_LAYER_REF);
+    if (operation === 'toggle_layer_visibility' || operation === 'manage_pages') refs.push(INDESIGN_LAYER_REF);
     if (operation === 'resize_layout') refs.push(INDESIGN_TEXT_FRAME_REF, INDESIGN_LAYER_REF);
+    if (
+      operation === 'apply_text_style'
+      || operation === 'manage_tables'
+      || operation === 'resolve_fonts'
+      || operation === 'manage_hyperlinks'
+      || operation === 'build_toc'
+      || operation === 'manage_text_flow'
+    ) refs.push(INDESIGN_TEXT_FRAME_REF);
     if (operation === 'generate_ai_asset' || operation === 'generative_expand_asset') refs.push(INDESIGN_APIS_REF, FIREFLY_API_REF, FIREFLY_API_REFERENCE_REF);
     if (operation === 'create_creative_variants') refs.push(INDESIGN_APIS_REF);
     return uniqueRefs(refs);
@@ -173,6 +209,12 @@ function refsForGap(appId: DesignAppAutomationAppId, operation: DesignAppAutomat
     || operation === 'generate_ai_asset'
     || operation === 'generative_expand_asset'
     || operation === 'create_creative_variants'
+    || operation === 'apply_layer_effects'
+    || operation === 'manage_layers'
+    || operation === 'transform_layer'
+    || operation === 'convert_color_mode'
+    || operation === 'manage_artboards'
+    || operation === 'manage_smart_objects'
   ) {
     refs.push(PHOTOSHOP_BATCHPLAY_REF);
   }
@@ -183,6 +225,146 @@ function refsForGap(appId: DesignAppAutomationAppId, operation: DesignAppAutomat
 }
 
 function inDesignGap(plan: DesignAppAutomationPlan, operation: DesignAppAutomationOperation): DesignAppAdapterGapContract | null {
+  // Deterministic InDesign structural ops (paragraph/character styles, page
+  // management, tables, font activation/substitution) — script-backed via the
+  // InDesign DOM, same shape as resize. Each carries an operation-specific spec
+  // so the contract names the real target/mutation instead of a one-size
+  // ternary that grows unreadable as more ops land here.
+  const deterministicSpecByOperation: Partial<Record<DesignAppAutomationOperation, {
+    tool: string;
+    beforeAfterEvidence: string;
+    targetEvidence: string;
+    approvalMutation: string;
+    ambiguityStop: string;
+    refusalSmoke: string;
+  }>> = {
+    apply_text_style: {
+      tool: 'desktop.indesign_apply_text_style',
+      beforeAfterEvidence: 'before/after text inventory with the target story/frame/paragraph range and the applied style name',
+      targetEvidence: 'target paragraph/character/object style name and whether it is applied or (re)defined',
+      approvalMutation: 'applying or redefining paragraph/character/object styles',
+      ambiguityStop: 'stop if the target text range or style name is ambiguous or undefined',
+      refusalSmoke: 'refuses ambiguous style targets and undefined style names without approval',
+    },
+    manage_pages: {
+      tool: 'desktop.indesign_manage_pages',
+      beforeAfterEvidence: 'before/after document status with page/spread count, order, and master/parent assignments',
+      targetEvidence: 'target page/spread id plus the requested add/delete/move/duplicate or master-apply action',
+      approvalMutation: 'adding/deleting/moving pages or changing master/parent assignments',
+      ambiguityStop: 'stop if the target page/spread or master is ambiguous',
+      refusalSmoke: 'refuses ambiguous page targets and master/parent changes without approval',
+    },
+    manage_tables: {
+      tool: 'desktop.indesign_manage_tables',
+      beforeAfterEvidence: 'before/after document status and table inventory with target table/cell range, row/column counts, and containing frame',
+      targetEvidence: 'target table/frame plus the requested create/insert/delete/merge/split/populate action and the data source when populating',
+      approvalMutation: 'creating, deleting, merging/splitting, formatting, or populating tables and cells',
+      ambiguityStop: 'stop if the target table, cell range, or data source is ambiguous',
+      refusalSmoke: 'refuses ambiguous table/cell targets and unmapped data sources without approval',
+    },
+    resolve_fonts: {
+      tool: 'desktop.indesign_resolve_fonts',
+      beforeAfterEvidence: 'before/after document font report listing missing/substituted fonts and the affected text ranges',
+      targetEvidence: 'target font family/style and whether it is being activated, synced, or substituted (with the replacement font when substituting)',
+      approvalMutation: 'activating/syncing fonts or substituting/replacing fonts across the document',
+      ambiguityStop: 'stop if the target font, replacement font, or activation source is ambiguous',
+      refusalSmoke: 'refuses ambiguous font targets and unapproved substitutions',
+    },
+    manage_hyperlinks: {
+      tool: 'desktop.indesign_manage_hyperlinks',
+      beforeAfterEvidence: 'before/after hyperlink/cross-reference inventory with source text range and destination (URL, page, anchor, or file)',
+      targetEvidence: 'target source range plus the requested add/update/delete action and the resolved destination',
+      approvalMutation: 'adding, updating, or deleting hyperlinks, cross-references, or bookmarks',
+      ambiguityStop: 'stop if the source range or hyperlink destination is ambiguous or unresolved',
+      refusalSmoke: 'refuses ambiguous source ranges and unresolved destinations without approval',
+    },
+    build_toc: {
+      tool: 'desktop.indesign_build_toc',
+      beforeAfterEvidence: 'before/after document status with the TOC/index style, source paragraph styles, and target frame/page',
+      targetEvidence: 'TOC/index style name, the source styles it gathers, and the target frame/story for the generated list',
+      approvalMutation: 'generating or regenerating a table of contents, index, or running-header variable',
+      ambiguityStop: 'stop if the TOC/index style or source paragraph styles are ambiguous or undefined',
+      refusalSmoke: 'refuses ambiguous TOC/index styles and undefined source styles without approval',
+    },
+    manage_text_flow: {
+      tool: 'desktop.indesign_manage_text_flow',
+      beforeAfterEvidence: 'before/after text inventory with the story/thread chain, frame order, and overset state per frame',
+      targetEvidence: 'target story/frame thread plus the requested thread/unthread/autoflow/overset-fix action',
+      approvalMutation: 'threading/unthreading frames, autoflowing text, or adding frames/pages to clear overset',
+      ambiguityStop: 'stop if the target story, frame thread, or flow order is ambiguous',
+      refusalSmoke: 'refuses ambiguous story/frame threads and unresolved overset without approval',
+    },
+    manage_swatches: {
+      tool: 'desktop.indesign_manage_swatches',
+      beforeAfterEvidence: 'before/after swatch/ink inventory with swatch names, color values/space, spot vs process, and affected objects',
+      targetEvidence: 'target swatch/ink name plus the requested add/edit/delete/convert action and the destination color value/space',
+      approvalMutation: 'adding, editing, deleting, or converting swatches, spot colors, or ink settings',
+      ambiguityStop: 'stop if the target swatch, color value, or spot/process intent is ambiguous',
+      refusalSmoke: 'refuses ambiguous swatch targets and undefined color values without approval',
+    },
+  };
+  const spec = deterministicSpecByOperation[operation];
+  if (spec) {
+    const sourceRefs = refsForGap(plan.appId, operation);
+    const requiredBridgeToolsBeforeRetry = uniqueStrings([
+      'desktop.indesign_document_status',
+      'desktop.indesign_text_inventory',
+      spec.tool,
+      'desktop.indesign_export_proof',
+    ]);
+    const requiredEvidence = [
+      spec.beforeAfterEvidence,
+      spec.targetEvidence,
+      'before/after text inventory proving no unexpected overset or reflow',
+      'proof export or screenshot after the change',
+    ];
+    const focusedSmokeCases = [
+      `routes InDesign ${operation.replace(/_/g, ' ')} prompt to the ${operation} adapter gap`,
+      'requires document status and text inventory before mutation',
+      spec.refusalSmoke,
+      'verifies no unexpected overset and proof/file evidence before ready_to_retry',
+    ];
+    const buildoutTrigger = `Build an InDesign ${operation.replace(/_/g, ' ')} adapter before retrying this operation.`;
+    return {
+      appId: plan.appId,
+      appName: plan.appName,
+      operation,
+      label: operationLabel(operation),
+      adapterId: `indesign.${operation}.uxp_dom`,
+      controlSurface: 'InDesign UXP script backed by the InDesign DOM',
+      missingBridgeTools: [spec.tool],
+      existingPrerequisiteTools: EXISTING_TOOLS.adobe_indesign.slice(),
+      requiredBridgeToolsBeforeRetry,
+      officialSourceRefs: sourceRefs,
+      approvalBefore: [
+        'running new InDesign script/adapter code',
+        spec.approvalMutation,
+        'saving, exporting, or packaging the document',
+      ],
+      requiredEvidence,
+      focusedSmokeCases,
+      failClosedRules: [
+        'stop if the active InDesign document does not match the staged file/package',
+        spec.ambiguityStop,
+        'stop if the action requires locked/master/hidden objects and approval is missing',
+        'stop if post-change inventory reports overset text, missing links/fonts, or absent proof evidence',
+        'do not fall back to blind coordinates for layout mutation',
+      ],
+      buildoutTrigger,
+      connectedAgentTask: [
+        buildoutTrigger,
+        `Add or propose ${spec.tool} using InDesign UXP scripts and DOM APIs.`,
+        'Extend existing desktop bridge/OpenSwan routing instead of creating a parallel runtime.',
+        `Use source refs: ${sourceRefs.map((ref) => `${ref.label} ${ref.url}`).join(' | ')}`,
+        `Return ready_to_retry only after these smoke cases pass: ${focusedSmokeCases.join(' | ')}`,
+      ].join(' '),
+      retryPrompt: [
+        `Retry the ${plan.appName} task after ${spec.tool} is available.`,
+        'Re-open or re-focus the staged document, collect fresh document status and text inventory, request approval, perform the mutation, then verify with refreshed inventory and proof evidence.',
+      ].join(' '),
+    };
+  }
+
   if (operation !== 'resize_layout') {
     const missingToolByOperation: Partial<Record<DesignAppAutomationOperation, string>> = {
       generate_ai_asset: 'desktop.indesign_generate_image_for_frame',
@@ -327,6 +509,12 @@ function photoshopGap(plan: DesignAppAutomationPlan, operation: DesignAppAutomat
     generate_ai_asset: 'desktop.firefly_generate_image_asset',
     generative_expand_asset: 'desktop.photoshop_generative_expand',
     create_creative_variants: 'desktop.firefly_batch_generate_variants',
+    apply_layer_effects: 'desktop.photoshop_apply_layer_effects',
+    manage_layers: 'desktop.photoshop_manage_layers',
+    transform_layer: 'desktop.photoshop_transform_layer',
+    convert_color_mode: 'desktop.photoshop_convert_color_mode',
+    manage_artboards: 'desktop.photoshop_manage_artboards',
+    manage_smart_objects: 'desktop.photoshop_manage_smart_objects',
   };
   const missingTool = missingToolByOperation[operation];
   if (!missingTool) return null;
