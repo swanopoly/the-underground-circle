@@ -5,6 +5,10 @@ import {
   formatAppAutomationRouteDecisionPromptBlock,
 } from './appAutomationControlSurfaces';
 import {
+  buildAppAdapterGapPlan,
+  formatAppAdapterGapPromptBlock,
+} from './appAdapterGapContract';
+import {
   buildDesignAppAdapterGapPlan,
   buildDesignAppAdapterGapPromptBlock,
 } from './designAppAdapterGaps';
@@ -698,6 +702,13 @@ export function buildAgentAppCapabilityBuildoutPolicy(input: AgentAppCapabilityB
   });
   const designAdapterGapPlan = buildDesignAppAdapterGapPlan(task);
   const designAdapterGapPromptBlock = buildDesignAppAdapterGapPromptBlock(task, { maxGaps: 4 });
+  // Generic, app-agnostic gap contract — the fallback for any non-Adobe app so
+  // the chat can still navigate/find/research/act + drive a structured buildout
+  // (P3.4). Adobe tasks keep their richer design-specific contract above.
+  const genericAppGapPlan = designAdapterGapPlan
+    ? null
+    : buildAppAdapterGapPlan(task, appName ? { appName } : undefined);
+  const genericAppGapPromptBlock = formatAppAdapterGapPromptBlock(genericAppGapPlan);
   const designCreativeAiRecipePlan = buildDesignAppCreativeAiRecipePlan(task);
   const designCreativeAiRecipePromptBlock = buildDesignAppCreativeAiRecipePromptBlock(task, { maxRecipes: 4 });
   const designExecutionPipelinePlan = buildDesignAppExecutionPipelinePlan(task);
@@ -708,6 +719,8 @@ export function buildAgentAppCapabilityBuildoutPolicy(input: AgentAppCapabilityB
     ...controlSurfacePlan.buildoutChecklist,
     ...controlSurfacePlan.sourceRefs.map((ref) => `Use source ref: ${ref.label} - ${ref.url} (${ref.takeaway})`),
     ...(designAdapterGapPlan?.sourceRefs || []).map((ref) => `Use design-app gap source ref: ${ref.label} - ${ref.url} (${ref.takeaway})`),
+    ...(genericAppGapPlan?.sourceRefs || []).map((ref) => `Use app-control gap source ref: ${ref.label} - ${ref.url} (${ref.takeaway})`),
+    ...(genericAppGapPlan ? genericAppGapPlan.contract.researchPlan.map((item) => `Research before guessing: ${item}`) : []),
     ...(designCreativeAiRecipePlan?.buildoutTools || []).map((tool) => `Satisfy creative-AI recipe buildout tool: ${tool}`),
     ...(designCreativeAiRecipePlan?.recoveryHints || []).map((hint) => `Carry creative-AI recovery hint into retry behavior: ${hint}`),
     ...(designExecutionPipelinePlan?.requiredToolSequence || []).map((tool) => `Preserve design execution pipeline tool order around: ${tool}`),
@@ -741,6 +754,7 @@ export function buildAgentAppCapabilityBuildoutPolicy(input: AgentAppCapabilityB
     `Classified buildout kind: ${kind}`,
     `Risk tier: ${risk}`,
     designAdapterGapPromptBlock ? `\n${designAdapterGapPromptBlock}` : '',
+    genericAppGapPromptBlock ? `\n${genericAppGapPromptBlock}` : '',
     designCreativeAiRecipePromptBlock ? `\n${designCreativeAiRecipePromptBlock}` : '',
     designExecutionPipelinePromptBlock ? `\n${designExecutionPipelinePromptBlock}` : '',
     '',

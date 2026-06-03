@@ -45,6 +45,7 @@
     "smoke:design-app-manifest-ledger": "npx tsx scripts/design-app-manifest-ledger-smoketest.ts",
     "smoke:design-app-runtime-manifest": "npx tsx scripts/design-app-runtime-manifest-smoketest.ts",
     "smoke:design-app-adapter-gaps": "npx tsx scripts/design-app-adapter-gaps-smoketest.ts",
+    "smoke:app-adapter-gap-contract": "npx tsx scripts/app-adapter-gap-contract-smoketest.ts",
     "smoke:design-app-operation-runbooks": "npx tsx scripts/design-app-operation-runbooks-smoketest.ts",
     "smoke:design-app-creative-ai": "npx tsx scripts/design-app-creative-ai-smoketest.ts",
     "smoke:design-app-execution-pipeline": "npx tsx scripts/design-app-execution-pipeline-smoketest.ts",

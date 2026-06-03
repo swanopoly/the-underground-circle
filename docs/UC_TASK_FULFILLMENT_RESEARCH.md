@@ -588,11 +588,29 @@ wire dead code. Small diffs, immediate user-visible improvement.
   fall back to Claude Code / Gemini / Cursor sessions (already detected by
   `agentAutoConnect.ts`) when no Codex session exists; add a `provider` arg and a
   shared `sendTerminalAgentSessionMessage(provider,…)` dispatch.
-- **P3.4 — Generalize the gap contract.** Extract a generic
-  `buildAppAdapterGapContract(appName, operation)` from `designAppAdapterGaps.ts`
-  (seeded by `genericAppNavigator`/`knownAppShortcuts`) so arbitrary apps get the
-  structured missing-tools + source-refs + smoke-cases + `connectedAgentTask`
-  contract — not just Adobe.
+- **P3.4 — Generalize the gap contract. ✅ SHIPPED 2026-06-03.** New
+  `src/lib/appAdapterGapContract.ts` exposes `buildAppAdapterGapContract(appName,
+  operation, ctx)` + `buildAppAdapterGapPlan(task)` + `formatAppAdapterGapPromptBlock`
+  — the app-agnostic sibling of `designAppAdapterGaps.ts`. It synthesizes the
+  already-generic tiers (`genericAppNavigator` navigate→find→act→verify loop,
+  `appAutomationControlSurfaces` research refs, `knownAppShortcuts`
+  matchKnownApp/detectPlatform) into one structured contract covering the user's
+  full ask: (1) a **universalFindLadder** — find any control/command/file via the
+  basics every app shares (a11y/semantic tree, command palette/search, menu-bar
+  walk, standard shortcuts, panel/inspector scan, file search; visual+OCR only as
+  last resort); (2) the navigate+act phases/ladder; (3) a platform- and app-aware
+  **researchPlan** + researchTriggers + officialSourceRefs ("research how this app
+  exposes the action before guessing"); (4) the buildout contract (proposed
+  `desktop.<app>_<op>` tool, required evidence, approval-before, fail-closed,
+  smoke cases, connectedAgentTask, retryPrompt). Wired into
+  `buildAgentAppCapabilityBuildoutPolicy` as the **fallback for any non-Adobe app**
+  (Adobe keeps its richer design contract): adds the generic prompt block +
+  research-before-guessing checklist. The runtime "call agent.build_app_capability"
+  line is filtered out of the buildout-agent prompt (it's circular there).
+  Verified: typecheck 0; `smoke:app-adapter-gap-contract` (new) +
+  `smoke:agent-app-capability-buildout` + `smoke:app-automation-control-surfaces`
+  + design/computer/chat suites green. Now "fulfil the task even if it's not
+  built out beforehand" holds for the whole long tail of apps, not just Adobe.
 - **P3.5 — Reconcile capability models.** `computerCapabilityRegistry.ts` +
   `taskCapabilityProfiles.ts`: map each profile capability string to an audit
   `ComputerCapabilityId`; when the audit reports `missing`/`partial`, emit an
