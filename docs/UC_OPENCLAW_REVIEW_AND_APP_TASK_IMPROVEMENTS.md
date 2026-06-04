@@ -106,6 +106,16 @@ already *advises* re-observation — prompt advice is skippable; a reminder on t
 tool_result is not. This converts advice → in-loop nudge without changing control
 flow (additive, low-risk).
 
+**Operationalized as a skill (2026-06-04):** `skills/app-task-automation/SKILL.md`
+(new canonical-skills home, OpenClaw's pillar applied) packages this whole
+pipeline as a reusable `SKILL.md` the agent fetches via `viewLibrarySkill` —
+observe→find→act→verify, the universal find-ladder, research-when-unfamiliar,
+connected-agent buildout on capability gaps, and proof-based completion +
+step-cap checkpoint. Validated by `smoke:app-task-automation-skill` (parsed with
+the real `parseSkillFrontmatter`; required sections, real tool references, and
+no path/secret leaks). Seedable into a circle's `circle_skills` via
+`skillLibraryWrite.ts`.
+
 ## 5. Recommended next (with the user's go-ahead — these touch the backend loop)
 
 - ~~Mirror the verify gate into the v2 edge loop~~ — **revised after investigation
