@@ -2714,6 +2714,7 @@ export async function executeToolUseLoop(opts: {
   }
   const { MAX_TOOL_ROUNDS, getToolDefinitions, dispatchToolDetailed } = await import('./openswanTools/index');
   const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
+  const { summarizeToolLoopProgress } = await import('./toolLoopProgress');
   const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode);
   if (tools.length === 0) {
     return { response: '', toolEvents: [] };
@@ -2850,8 +2851,12 @@ export async function executeToolUseLoop(opts: {
   const lastText = Array.isArray(lastAssistant?.content)
     ? lastAssistant.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('')
     : '';
+  // No silent truncation: when we hit the step cap, report which steps actually
+  // ran (✓/✗) so a "continue" turn resumes with context instead of re-deriving.
+  const limitNote = `I reached my tool-step limit for this turn (${maxRounds} steps) before finishing. Tell me to continue and I'll pick up where I left off.`;
+  const progress = summarizeToolLoopProgress(toolEvents);
   return {
-    response: lastText || `I reached my tool-step limit for this turn (${maxRounds} steps) before finishing. Tell me to continue and I'll pick up where I left off.`,
+    response: [lastText || limitNote, progress].filter(Boolean).join('\n\n'),
     toolEvents,
     routing: routingInfo,
     incomplete: true,
