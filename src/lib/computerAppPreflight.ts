@@ -13,6 +13,7 @@ import {
   type ComputerAppStrategyId,
 } from './computerAppTaskStrategy';
 import { buildDesignAppAutomationPlan } from './designAppAutomation';
+import { buildAppAdapterGapPlan } from './appAdapterGapContract';
 import {
   buildAppAutomationControlSurfacePlan,
   buildAppAutomationRouteDecision,
@@ -31,11 +32,30 @@ export interface ComputerAppPreflightItem {
   fix: string;
 }
 
+/**
+ * Research-first buildout detail for an unfamiliar app, attached up front when
+ * the preflight already indicates a connected-agent buildout is needed (route
+ * decision says so, or app_tools/desktop_control is missing/partial on a
+ * non-Adobe app). This makes the proactive "build the adapter" ask actionable —
+ * symmetric to the research-first failure-recovery path — instead of a generic
+ * "request a buildout" line. Self-gates to null for non-app and Adobe tasks.
+ */
+export interface AppCapabilityBuildoutPreflight {
+  appName: string;
+  proposedTool: string;
+  controlSurface: string;
+  findLadder: string[];
+  researchPlan: string[];
+  buildoutTask: string;
+  retryPrompt: string;
+}
+
 export interface ComputerAppPreflight {
   strategy: ComputerAppTaskStrategy | null;
   requiredCapabilities: ComputerCapabilityId[];
   routeDecision: AppAutomationRouteDecision | null;
   capabilityExpansionPlan: ComputerCapabilityExpansionPlan | null;
+  appCapabilityBuildout?: AppCapabilityBuildoutPreflight | null;
   ready: boolean;
   status: 'ready' | 'partial' | 'blocked' | 'unknown';
   blockers: ComputerAppPreflightItem[];
@@ -400,6 +420,7 @@ export function buildComputerAppPreflight(args: {
       requiredCapabilities: [],
       routeDecision: null,
       capabilityExpansionPlan: null,
+      appCapabilityBuildout: null,
       ready: true,
       status: args.audit ? 'ready' : 'unknown',
       blockers: [],
@@ -419,6 +440,30 @@ export function buildComputerAppPreflight(args: {
     ? buildAppAutomationRouteDecision(args.task, { observedEvidence: deriveAuditObservedEvidence(args.audit) })
     : null;
   const capabilityExpansionPlan = buildComputerCapabilityExpansionPlan(args.task, args.audit);
+  // Research-first buildout detail for an unfamiliar (non-Adobe) app, attached
+  // up front when a connected-agent buildout is already indicated. Adobe keeps
+  // its richer design path; self-gates to null otherwise.
+  const appAdapterGapContract = buildDesignAppAutomationPlan(args.task)
+    ? null
+    : buildAppAdapterGapPlan(args.task)?.contract || null;
+  const buildoutIndicated = !!appAdapterGapContract && (
+    routeDecision?.status === 'needs_connected_agent_buildout'
+    || requiredCapabilities.some((capability) => (
+      (capability === 'app_tools' || capability === 'desktop_control')
+      && (statusFor(args.audit, capability) === 'missing' || statusFor(args.audit, capability) === 'partial')
+    ))
+  );
+  const appCapabilityBuildout: AppCapabilityBuildoutPreflight | null = buildoutIndicated && appAdapterGapContract
+    ? {
+        appName: appAdapterGapContract.appName,
+        proposedTool: appAdapterGapContract.missingBridgeTools[0] || '',
+        controlSurface: appAdapterGapContract.controlSurface,
+        findLadder: appAdapterGapContract.universalFindLadder.slice(0, 4),
+        researchPlan: appAdapterGapContract.researchPlan.slice(0, 3),
+        buildoutTask: appAdapterGapContract.connectedAgentTask,
+        retryPrompt: appAdapterGapContract.retryPrompt,
+      }
+    : null;
   const routeDecisionItem = routeDecision ? buildRouteDecisionItem(routeDecision) : null;
   const strategyItems = buildStrategySpecificItems(strategy, args.task);
   const allItems = [...capabilityItems, ...strategyItems, routeDecisionItem].filter(Boolean) as ComputerAppPreflightItem[];
@@ -445,6 +490,7 @@ export function buildComputerAppPreflight(args: {
     requiredCapabilities,
     routeDecision,
     capabilityExpansionPlan,
+    appCapabilityBuildout,
     ready,
     status,
     blockers,
@@ -477,6 +523,14 @@ export function buildComputerAppPreflightPromptBlock(preflight: ComputerAppPrefl
     for (const action of plan.nextBuildActions.slice(0, 5)) lines.push(`- ${action}`);
     lines.push(`Expansion verification: ${plan.verificationCommands.slice(0, 6).join(' | ')}`);
     lines.push(`User effort policy: ${plan.userEffortPolicy.join(' | ')}`);
+  }
+  if (preflight.appCapabilityBuildout) {
+    const buildout = preflight.appCapabilityBuildout;
+    lines.push(`App capability buildout (research-first): ${buildout.appName} → propose ${buildout.proposedTool}`);
+    lines.push(`Control surface: ${buildout.controlSurface}`);
+    lines.push(`Find the target (basics every app shares): ${buildout.findLadder.join(' | ')}`);
+    lines.push(`Research before guessing: ${buildout.researchPlan.join(' | ')}`);
+    lines.push(`Buildout task: ${buildout.buildoutTask}`);
   }
   if (preflight.blockers.length > 0) {
     lines.push('Blockers:');

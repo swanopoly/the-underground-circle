@@ -502,12 +502,27 @@ wire dead code. Small diffs, immediate user-visible improvement.
 > (exact `/.openswan-worktrees/` prefix, not a bare substring). Verified: typecheck
 > + node --check + `smoke:agent-app-capability-buildout` + `smoke:computer-task-runtime`.
 >
-> **Research finding — P3.5 already covered:** `computerAppPreflight` already
-> reconciles required capabilities vs the live `auditComputerCapabilities` and
-> emits blocker-severity items with verbatim "connect X / start the bridge" fixes
-> pre-execution (in the dispatch prompt + persisted metadata), and
-> `buildComputerCapabilityExpansionPlan` adds buildout guidance. A fresh P3.5
-> reconciler would duplicate it.
+> **Research finding — P3.5 already covered (re-confirmed 2026-06-04):**
+> `computerAppPreflight` already reconciles required capabilities (via
+> `STRATEGY_CAPABILITIES`, keyed off the live strategy — a more accurate signal
+> than the coarse `taskCapabilityProfiles` strings) vs the live
+> `auditComputerCapabilities`, and emits blocker-severity items with verbatim
+> "connect X / start the bridge / grant Accessibility" fixes (`CAPABILITY_FIX`)
+> pre-execution, plus the route-decision's "connected-agent buildout required" and
+> `buildComputerCapabilityExpansionPlan` guidance. A fresh profile-string
+> reconciler would duplicate it → **validated non-gap, not built** (the G3/P4.2
+> pattern). **Genuine remaining piece SHIPPED 2026-06-04:** the preflight's
+> connected-agent-buildout signal was generic; `buildComputerAppPreflight` now
+> attaches `appCapabilityBuildout` — the research-first app-adapter-gap contract
+> (proposed `desktop.<app>_<op>` tool, universal find-ladder, research plan,
+> connected-agent buildout task, retry prompt) — whenever a buildout is indicated
+> for a non-Adobe app (route `needs_connected_agent_buildout`, or
+> `app_tools`/`desktop_control` missing/partial). This makes the **proactive**
+> pre-execution buildout ask actionable, symmetric to the **reactive** research-first
+> failure recovery. Self-gates to null for non-app and Adobe tasks (Adobe keeps
+> its design path). Verified: typecheck 0; `smoke:computer-app-preflight` (4 new
+> cases incl. Adobe-stays-design + ready-no-buildout) + preflight-consumer suites
+> green.
 >
 > **Preflight-blocker chips UI shipped (2026-06-03):** the genuine remaining gap
 > (the reconciled blockers were prompt/metadata-only) is closed. New
@@ -627,11 +642,18 @@ wire dead code. Small diffs, immediate user-visible improvement.
   + design/computer/chat/swanbot/openswan suites green. Now "fulfil the task even
   if it's not built out beforehand" holds for the whole long tail of apps — the
   live agent navigates/finds/researches/acts on any app, not just Adobe.
-- **P3.5 — Reconcile capability models.** `computerCapabilityRegistry.ts` +
-  `taskCapabilityProfiles.ts`: map each profile capability string to an audit
-  `ComputerCapabilityId`; when the audit reports `missing`/`partial`, emit an
-  up-front "connect X / start bridge / build adapter" prompt **before** execution
-  starts (turn mid-run failures into pre-flight asks).
+- **P3.5 — Reconcile capability models. ✅ RESOLVED 2026-06-04 (mostly a non-gap).**
+  The literal idea — map `taskCapabilityProfiles` strings → audit
+  `ComputerCapabilityId` — would duplicate `computerAppPreflight`, which already
+  reconciles the live strategy's required capabilities vs `auditComputerCapabilities`
+  and emits up-front "connect X / start bridge / grant Accessibility" fixes +
+  the route-decision buildout signal pre-execution. So the reconciler was **not
+  built** (validated non-gap). The one genuinely-missing piece — making the
+  pre-execution "build adapter" ask carry the research-first app-adapter-gap
+  contract — shipped: `buildComputerAppPreflight` now attaches
+  `appCapabilityBuildout` (find-ladder + research plan + proposed tool +
+  buildout task) for non-Adobe apps when a buildout is indicated. Proactive
+  (preflight) + reactive (recovery) buildout paths are now both research-first.
 
 ### Phase 4 — Recall that collaborates (fill gaps from knowledge)
 

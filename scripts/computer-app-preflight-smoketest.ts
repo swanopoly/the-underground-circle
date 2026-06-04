@@ -272,6 +272,59 @@ if (
   pass('Photoshop preflight prompt includes capability expansion plan');
 }
 
+// ── Research-first app capability buildout attached up front (P3.4 ↔ preflight) ─
+const abletonBuildout = buildComputerAppPreflight({
+  task: 'Use Ableton Live to create a four-bar drum loop and export it after approval',
+  audit: audit({
+    browser_automation: 'ready', browser_sessions: 'ready',
+    file_search: 'ready', file_read: 'ready', file_write: 'ready',
+    app_tools: 'missing', agent_bridges: 'ready', desktop_control: 'missing',
+  }),
+});
+if (!abletonBuildout.appCapabilityBuildout) {
+  fail('Ableton preflight did not attach research-first app capability buildout');
+} else {
+  const b = abletonBuildout.appCapabilityBuildout;
+  if (!/ableton/i.test(b.appName)) fail(`buildout appName should be Ableton, got ${b.appName}`);
+  else if (!b.proposedTool.startsWith('desktop.')) fail('buildout should propose a desktop adapter tool');
+  else if (!b.findLadder.length) fail('buildout should carry the universal find ladder');
+  else if (!b.researchPlan.length) fail('buildout should carry the research plan');
+  else if (!b.buildoutTask.toLowerCase().includes('research')) fail('buildout task should be research-first');
+  else pass('unfamiliar-app preflight attaches research-first capability buildout');
+}
+const abletonBuildoutPrompt = buildComputerAppPreflightPromptBlock(abletonBuildout) || '';
+if (
+  !abletonBuildoutPrompt.includes('App capability buildout (research-first)') ||
+  !abletonBuildoutPrompt.includes('Research before guessing') ||
+  abletonBuildoutPrompt.includes('/Users/')
+) {
+  fail('Ableton buildout prompt missing research-first block or leaked a local path');
+} else {
+  pass('preflight prompt surfaces the research-first buildout block');
+}
+
+// Adobe keeps its richer design path — the generic buildout is NOT attached.
+const photoshopNoGeneric = buildComputerAppPreflight({
+  task: 'Open Photoshop and crop this PSD after I approve desktop control',
+  audit: audit({ app_tools: 'missing', desktop_control: 'missing' }),
+});
+if (photoshopNoGeneric.appCapabilityBuildout) {
+  fail('Adobe task should not attach the generic app capability buildout');
+} else {
+  pass('Adobe task uses the design path, not the generic buildout');
+}
+
+// Ready, familiar capabilities → no buildout noise.
+const readyNoBuildout = buildComputerAppPreflight({
+  task: 'Tell me all the tabs I have open in Chrome right now',
+  audit: audit({ desktop_control: 'ready', app_tools: 'ready' }),
+});
+if (readyNoBuildout.appCapabilityBuildout) {
+  fail('ready capabilities should not attach a buildout');
+} else {
+  pass('ready capabilities attach no buildout');
+}
+
 if (failures > 0) {
   console.error(`\n${failures} computer/app preflight smoke failure(s)`);
   process.exit(1);
