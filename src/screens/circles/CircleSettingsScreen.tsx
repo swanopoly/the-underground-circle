@@ -94,6 +94,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   const [circleImageUrl, setCircleImageUrl] = useState<string | undefined>(undefined);
   const [uploadingImage, setUploadingImage] = useState(false);
   const [copiedInvite, setCopiedInvite] = useState(false);
+  const [copiedId, setCopiedId] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
   const [sessionMemoryMode, setSessionMemoryMode] = useState<'private' | 'shared'>('private');
@@ -312,6 +313,12 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
       setCopiedInvite(true);
       setTimeout(() => setCopiedInvite(false), 2000);
     }
+  };
+
+  const copyCircleId = async () => {
+    await Clipboard.setStringAsync(circleId);
+    setCopiedId(true);
+    setTimeout(() => setCopiedId(false), 2000);
   };
 
   const regenerateInvite = async () => {
@@ -1164,6 +1171,17 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
               </Pressable>
             )}
           </View>
+
+          <Text style={[styles.fieldLabel, { marginTop: 14 }]}>CIRCLE ID</Text>
+          <Text style={[styles.memoryModeDesc, { fontSize: 11, color: '#64748b', marginBottom: 6 }]}>
+            The unique id for this circle — used to connect agents, seed skills, or reference it in scripts and URLs.
+          </Text>
+          <View style={styles.inviteRow}>
+            <Text style={styles.circleIdText} selectable>{circleId}</Text>
+            <Pressable onPress={copyCircleId} style={[styles.smallBtn, { backgroundColor: accentColor }]}>
+              <Text style={styles.smallBtnText}>{copiedId ? 'COPIED!' : 'COPY'}</Text>
+            </Pressable>
+          </View>
         </Section>
 
         {/* ─── Discovery ─── */}
@@ -1429,6 +1447,7 @@ const styles = StyleSheet.create({
   // Invite
   inviteRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   inviteCode: { color: '#fff', fontSize: 16, fontWeight: '900', letterSpacing: 3, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
+  circleIdText: { color: '#cbd5e1', fontSize: 12, fontWeight: '700', flex: 1, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
 
   // Danger
   dangerBtn: {
