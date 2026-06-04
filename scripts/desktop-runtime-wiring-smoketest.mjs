@@ -25,6 +25,7 @@ const files = {
   fileAdapter: fs.readFileSync('src/lib/computerFileAdapter.ts', 'utf8'),
   fileSearchQuery: fs.readFileSync('src/lib/fileSearchQuery.ts', 'utf8'),
   failureRecovery: fs.readFileSync('src/lib/agentFailureRecovery.ts', 'utf8'),
+  connectedAgentDispatch: fs.readFileSync('src/lib/connectedAgentDispatch.ts', 'utf8'),
   chatFailureRecovery: fs.readFileSync('src/lib/chatFailureRecovery.ts', 'utf8'),
   assetAcquisitionPolicy: fs.readFileSync('src/lib/agentAssetAcquisitionPolicy.ts', 'utf8'),
   aiModalAdvisor: fs.readFileSync('src/lib/desktopAIModalAdvisor.ts', 'utf8'),
@@ -205,7 +206,13 @@ assert(files.runtime.includes("name: 'agent.codex_acquire_asset'") && files.runt
 assert(files.runtime.includes("'agent.codex_acquire_asset': ['execute', 'build']") && files.runtime.includes("tool === 'agent.codex_acquire_asset'"), 'OpenSwan runtime: Codex asset acquisition is action-mode and approval gated');
 assert(files.runtime.includes("name: 'agent.recover_failed_task'") && files.runtime.includes("case 'agent.recover_failed_task'") && files.runtime.includes('startConnectedAgentFailureRecovery'), 'OpenSwan runtime: failed-task recovery is exposed and executable');
 assert(files.runtime.includes("'agent.recover_failed_task': ['execute', 'support', 'build']") && files.runtime.includes("tool === 'agent.recover_failed_task'"), 'OpenSwan runtime: failed-task recovery is mode-scoped and approval gated');
-assert(files.failureRecovery.includes('buildAgentFailureRecoveryPolicy') && files.failureRecovery.includes('launchCodexSessions') && files.failureRecovery.includes('sendTerminalAgentSessionMessage'), 'failure recovery policy can reuse or launch connected Codex sessions');
+assert(
+  files.failureRecovery.includes('buildAgentFailureRecoveryPolicy')
+  && files.failureRecovery.includes('dispatchConnectedAgentTask')
+  && files.connectedAgentDispatch.includes('sendTerminalAgentSessionMessage')
+  && /launch(?:Codex|ClaudeCode|GeminiCli|CursorComposer)Sessions/.test(files.connectedAgentDispatch),
+  'failure recovery policy can reuse or launch connected agent sessions (provider-agnostic dispatch)',
+);
 assert(files.chatTab.includes('startMainChatFailureRecovery') && files.chatTab.includes('startChatFailureRecovery') && files.chatTab.includes('Chat failure recovery'), 'ChatTab: chat/computer failures hand off to bounded connected-agent recovery');
 assert(files.chatTab.includes('addRecoverableChatErrorMessage') && files.chatTab.includes('terminal_agent_control_error') && files.chatTab.includes('memory_bank_command_error') && files.chatTab.includes('desktop_diag_error') && files.chatTab.includes('agent_plan_mode_error'), 'ChatTab: first-pass command errors use shared recovery handoff');
 assert(files.chatTab.includes('bridge_probe_command_error') && files.chatTab.includes('assign_agent_command_error') && files.chatTab.includes('schedule_command_error') && files.chatTab.includes('github_command_error') && files.chatTab.includes('web_search_failure') && files.chatTab.includes('pair_desktop_bridge_error'), 'ChatTab: command/bridge/provider exceptions use shared recovery handoff');
