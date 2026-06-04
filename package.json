@@ -48,7 +48,7 @@
     "smoke:app-adapter-gap-contract": "npx tsx scripts/app-adapter-gap-contract-smoketest.ts",
     "smoke:app-action-verification-gate": "npx tsx scripts/app-action-verification-gate-smoketest.ts",
     "smoke:tool-loop-progress": "npx tsx scripts/tool-loop-progress-smoketest.ts",
-    "smoke:app-task-automation-skill": "npx tsx scripts/app-task-automation-skill-smoketest.ts",
+    "smoke:canonical-skills": "npx tsx scripts/canonical-skills-smoketest.ts",
     "smoke:design-app-operation-runbooks": "npx tsx scripts/design-app-operation-runbooks-smoketest.ts",
     "smoke:design-app-creative-ai": "npx tsx scripts/design-app-creative-ai-smoketest.ts",
     "smoke:design-app-execution-pipeline": "npx tsx scripts/design-app-execution-pipeline-smoketest.ts",

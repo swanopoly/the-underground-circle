@@ -111,10 +111,12 @@ flow (additive, low-risk).
 pipeline as a reusable `SKILL.md` the agent fetches via `viewLibrarySkill` —
 observe→find→act→verify, the universal find-ladder, research-when-unfamiliar,
 connected-agent buildout on capability gaps, and proof-based completion +
-step-cap checkpoint. Validated by `smoke:app-task-automation-skill` (parsed with
-the real `parseSkillFrontmatter`; required sections, real tool references, and
-no path/secret leaks). Seedable into a circle's `circle_skills` via
-`skillLibraryWrite.ts`.
+step-cap checkpoint. A small canonical-skills library now sits in `skills/`
+(`app-task-automation`, `browser-form-submission`, `design-app-export`), each
+exercising a different surface of the pipeline and all validated by
+`smoke:canonical-skills` (parsed with the real `parseSkillFrontmatter`; required
+sections, real tool references, per-skill probes, no path/secret leaks).
+Seedable into a circle's `circle_skills` via `skillLibraryWrite.ts`.
 
 ## 5. Recommended next (with the user's go-ahead — these touch the backend loop)
 
