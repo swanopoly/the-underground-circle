@@ -43,6 +43,13 @@ const PROBES: Record<string, RegExp[]> = {
     /approvals\.request/,
     /overwrite/i,
   ],
+  'file-organization': [
+    /desktop\.file_search/,
+    /desktop\.file_stat/,
+    /grant/i,
+    /approvals\.request/,
+    /scoped|approved root/i,
+  ],
 };
 
 const REAL_TOOL_RE = /\b(?:desktop|browser|approvals|agent|research)\.[a-z_]+/g;
