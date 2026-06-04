@@ -1051,10 +1051,16 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       // answer. Record it so the run transcript shows the result is partial
       // rather than a clean finish.
       if (toolLoopResult.incomplete) {
+        const checkpoint = toolLoopResult.checkpoint || null;
         transcript = (await appendTranscriptEvent(transcriptKey, {
           kind: 'tool_activity',
           title: 'Tool-step limit reached',
-          summary: 'The tool loop hit its per-turn step cap before finishing — the response may be partial and can be continued.',
+          summary: checkpoint
+            ? `Hit the per-turn step cap after ${checkpoint.stepCount} step(s); partial and resumable. ${checkpoint.resumeHint}`
+            : 'The tool loop hit its per-turn step cap before finishing — the response may be partial and can be continued.',
+          // Machine-readable resume snapshot so a continuation turn (or the UI)
+          // can resume with context instead of re-deriving from scratch.
+          ...(checkpoint ? { data: { checkpoint } } : {}),
         })) || transcript;
       }
     }

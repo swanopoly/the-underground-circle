@@ -49,3 +49,70 @@ export function summarizeToolLoopProgress(
   if (moreCount > 0) lines.push(`- …and ${moreCount} more step${moreCount === 1 ? '' : 's'}`);
   return ['Progress before the step limit:', ...lines].join('\n');
 }
+
+// Observation/read tools — their last successful result is the ground truth a
+// resume should start from (so it doesn't re-derive blindly).
+const OBSERVATION_TOOL_RE = /\b(read_a11y_tree|screenshot|dom_snapshot|window_state|list_running_apps|wait_for_app|screen_size|file_stat|file_search|verification_state|document_status|layer_inventory|text_inventory|link_inventory)\b/i;
+
+export interface ToolLoopCheckpointStep {
+  tool: string;
+  ok: boolean;
+  reason?: string;
+}
+
+/**
+ * Machine-readable snapshot of a truncated tool loop so a continuation can
+ * resume with context instead of re-deriving from scratch: which steps ran,
+ * the last ground-truth observation, the last failure to retry, and a hint.
+ */
+export interface ToolLoopCheckpoint {
+  schemaVersion: 1;
+  stepCount: number;
+  maxRounds?: number;
+  completedSteps: ToolLoopCheckpointStep[];
+  lastObservation?: { tool: string; summary: string } | null;
+  lastFailure?: ToolLoopCheckpointStep | null;
+  resumeHint: string;
+}
+
+export function buildToolLoopCheckpoint(
+  events: ToolLoopProgressEvent[] | null | undefined,
+  opts: { maxRounds?: number; maxSteps?: number } = {},
+): ToolLoopCheckpoint {
+  const list = Array.isArray(events) ? events : [];
+  const maxSteps = Math.max(1, opts.maxSteps ?? 12);
+  const completedSteps: ToolLoopCheckpointStep[] = list.slice(-maxSteps).map((event) => {
+    const ok = !failed(event.status);
+    const step: ToolLoopCheckpointStep = { tool: event.tool || 'tool', ok };
+    if (!ok) step.reason = shortReason(event.result);
+    return step;
+  });
+
+  let lastObservation: { tool: string; summary: string } | null = null;
+  let lastFailure: ToolLoopCheckpointStep | null = null;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const event = list[i];
+    const isFail = failed(event.status);
+    if (!lastObservation && !isFail && OBSERVATION_TOOL_RE.test(String(event.tool || ''))) {
+      lastObservation = { tool: event.tool || 'observation', summary: shortReason(event.result) || '(captured)' };
+    }
+    if (!lastFailure && isFail) {
+      lastFailure = { tool: event.tool || 'tool', ok: false, reason: shortReason(event.result) };
+    }
+    if (lastObservation && lastFailure) break;
+  }
+
+  const resumeHint = lastFailure
+    ? `Resume by re-observing fresh state, then retry the failed step (${lastFailure.tool}) via the next surface on the ladder (semantic → menu → shortcut → one bounded coordinate) before continuing the rest.`
+    : 'Resume by re-observing fresh state to confirm the last action took effect, then continue the remaining steps.';
+
+  return {
+    schemaVersion: 1,
+    stepCount: list.length,
+    ...(typeof opts.maxRounds === 'number' ? { maxRounds: opts.maxRounds } : {}),
+    completedSteps,
+    lastObservation,
+    lastFailure,
+    resumeHint,
+  };
+}

@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 
-import { summarizeToolLoopProgress } from '../src/lib/toolLoopProgress';
+import { summarizeToolLoopProgress, buildToolLoopCheckpoint } from '../src/lib/toolLoopProgress';
 
 // Empty / invalid input → empty string (caller filters it out).
 assert.equal(summarizeToolLoopProgress([]), '');
@@ -46,5 +46,38 @@ assert(/…and 15 more steps/.test(bounded), 'overflow count is reported');
 // Blocked/denied/timeout count as failures.
 const blocked = summarizeToolLoopProgress([{ tool: 'desktop.open_path', status: 'blocked', result: 'approval required' }]);
 assert(blocked.includes('✗ desktop.open_path'), 'blocked is treated as a non-success step');
+
+// ── Machine-readable resume checkpoint ─────────────────────────────────────
+const emptyCp = buildToolLoopCheckpoint([]);
+assert.equal(emptyCp.schemaVersion, 1);
+assert.equal(emptyCp.stepCount, 0);
+assert.deepEqual(emptyCp.completedSteps, []);
+assert.equal(emptyCp.lastObservation, null);
+assert.equal(emptyCp.lastFailure, null);
+assert(/re-observ/i.test(emptyCp.resumeHint), 'no-failure resume hint nudges re-observation');
+
+const cp = buildToolLoopCheckpoint([
+  { tool: 'desktop.launch_app', status: 'success', result: '{"ok":true}' },
+  { tool: 'desktop.read_a11y_tree', status: 'success', result: '{"ok":true,"data":{"app":"Photoshop","text":"File\\nEdit\\nExport"}}' },
+  { tool: 'desktop.click_element', status: 'error', result: '{"ok":false,"error":"element not found: Export"}' },
+], { maxRounds: 5 });
+assert.equal(cp.stepCount, 3);
+assert.equal(cp.maxRounds, 5);
+assert.equal(cp.completedSteps.length, 3);
+assert.equal(cp.completedSteps[0].ok, true);
+assert.equal(cp.completedSteps[2].ok, false);
+assert(cp.completedSteps[2].reason && cp.completedSteps[2].reason.includes('element not found'), 'failed step carries reason');
+assert(cp.lastObservation && cp.lastObservation.tool === 'desktop.read_a11y_tree', 'last observation is the ground-truth read');
+assert(cp.lastFailure && cp.lastFailure.tool === 'desktop.click_element', 'last failure is captured for retry');
+assert(/retry the failed step \(desktop\.click_element\)/i.test(cp.resumeHint), 'resume hint names the step to retry');
+assert(/ladder/i.test(cp.resumeHint), 'resume hint references the surface ladder');
+
+// Step list is bounded.
+const manyCp = buildToolLoopCheckpoint(
+  Array.from({ length: 30 }, (_, i) => ({ tool: `desktop.step_${i}`, status: 'success', result: 'ok' })),
+  { maxSteps: 8 },
+);
+assert.equal(manyCp.stepCount, 30, 'stepCount reflects the true total');
+assert.equal(manyCp.completedSteps.length, 8, 'completedSteps is bounded to maxSteps');
 
 console.log('All tool loop progress smoke cases passed.');

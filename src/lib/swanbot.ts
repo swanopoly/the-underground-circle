@@ -8,6 +8,7 @@
 import { supabase } from './supabase';
 import { getFreshAccessToken } from './authSession';
 import type { PromptMemoryReference } from './memoryService';
+import type { ToolLoopCheckpoint } from './toolLoopProgress';
 import { buildSpiritWikiKnowledgeBundle, buildWikiKnowledgeBundle, buildWikiSearchResponse } from './wikiData';
 import { buildResearchKnowledgeBundle, buildResearchSearchResponse, buildSpiritResearchKnowledgeBundle } from './researchKnowledge';
 import { getAgentIdentityKey, loadAgentIdentities } from './agentIdentity';
@@ -2708,13 +2709,16 @@ export async function executeToolUseLoop(opts: {
   /** True when the loop hit its tool-round cap before the model produced a
    *  final answer — the response may be partial and can be continued. */
   incomplete?: boolean;
+  /** Machine-readable resume snapshot when `incomplete` — which steps ran, the
+   *  last observation/failure, and a resume hint. Present only on cap exhaustion. */
+  checkpoint?: ToolLoopCheckpoint;
 }> {
   if (shouldBlockExternalAiProvider('anthropic')) {
     return { response: getStrictLocalAiModeMessage('anthropic'), toolEvents: [] };
   }
   const { MAX_TOOL_ROUNDS, getToolDefinitions, dispatchToolDetailed } = await import('./openswanTools/index');
   const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
-  const { summarizeToolLoopProgress } = await import('./toolLoopProgress');
+  const { summarizeToolLoopProgress, buildToolLoopCheckpoint } = await import('./toolLoopProgress');
   const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode);
   if (tools.length === 0) {
     return { response: '', toolEvents: [] };
@@ -2860,6 +2864,7 @@ export async function executeToolUseLoop(opts: {
     toolEvents,
     routing: routingInfo,
     incomplete: true,
+    checkpoint: buildToolLoopCheckpoint(toolEvents, { maxRounds }),
   };
 }
 

@@ -115,13 +115,17 @@ flow (additive, low-risk).
   function (`swanbot-v2-ai/index.ts`) is low-value for app tasks (and that file is
   not covered by `npm run typecheck`/smoke), so it's skipped unless server-only
   tools grow. Both live model-loop app-task paths (v1 + v2 client) are gated.
-- **Structured resume checkpoint on cap** (weak spot #3): **partially SHIPPED
-  2026-06-04** — `executeToolUseLoop` now appends a `summarizeToolLoopProgress`
-  block (`src/lib/toolLoopProgress.ts`) on cap exhaustion, listing which steps
-  ran (✓) / failed (✗ + reason) so a "continue" turn resumes with context
-  instead of a bare "I hit my limit" (no silent truncation). Remaining: a
-  machine-readable `{stepsDone, nextStep, freshObservations}` field the
-  continuation auto-resumes from (vs. the model re-reading the summary).
+- **Structured resume checkpoint on cap** (weak spot #3): **SHIPPED 2026-06-04.**
+  `executeToolUseLoop` now (a) appends a human `summarizeToolLoopProgress` block
+  (✓/✗ + reason — no silent truncation) and (b) returns a machine-readable
+  `checkpoint: ToolLoopCheckpoint` (`src/lib/toolLoopProgress.ts`):
+  `{schemaVersion, stepCount, maxRounds, completedSteps[], lastObservation
+  (ground truth), lastFailure (to retry), resumeHint}`. `openswanSessionRuntime`
+  persists it to the run transcript's "Tool-step limit reached" event (`data.checkpoint`),
+  so a continuation turn / the UI can resume from the last observation + retry
+  the failed step instead of re-deriving. Smoke: `tool-loop-progress`. Remaining
+  (optional): have the continuation turn *auto-consume* the checkpoint rather
+  than the model re-reading it from the transcript.
 - **Deterministic retry-with-fallback executor** (weak spot #4): on a failed
   semantic action, auto-try the next surface (menu/shortcut) once with a fresh
   observation before handing back to the model.
