@@ -36,6 +36,7 @@ import {
   GOOGLE_SERVICE_LABELS,
   type GoogleService,
 } from '../../lib/googleCreds';
+import { listLibrarySkills, type LibrarySkillMetadata } from '../../lib/skillLibrary';
 import { Circle, CheckInFormat } from '../../types';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -95,6 +96,8 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   const [uploadingImage, setUploadingImage] = useState(false);
   const [copiedInvite, setCopiedInvite] = useState(false);
   const [copiedId, setCopiedId] = useState(false);
+  const [librarySkills, setLibrarySkills] = useState<LibrarySkillMetadata[]>([]);
+  const [librarySkillsLoading, setLibrarySkillsLoading] = useState(true);
   const [hasChanges, setHasChanges] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
   const [sessionMemoryMode, setSessionMemoryMode] = useState<'private' | 'shared'>('private');
@@ -122,6 +125,17 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
 
   useEffect(() => {
     loadData();
+  }, [circleId]);
+
+  // Circle SKILL.md library (read-only view) — members can SELECT via RLS.
+  useEffect(() => {
+    let cancelled = false;
+    setLibrarySkillsLoading(true);
+    listLibrarySkills(circleId, { limit: 50 })
+      .then((rows) => { if (!cancelled) setLibrarySkills(rows); })
+      .catch(() => { if (!cancelled) setLibrarySkills([]); })
+      .finally(() => { if (!cancelled) setLibrarySkillsLoading(false); });
+    return () => { cancelled = true; };
   }, [circleId]);
 
   const loadData = async () => {
@@ -654,6 +668,41 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
               thumbColor={sessionMemoryMode === 'shared' ? accentColor : '#52525b'}
             />
           </View>
+        </Section>
+
+        {/* ─── Skill Library (read-only) ─── */}
+        <Section title="SKILL LIBRARY" accentColor={accentColor}>
+          <Text style={styles.memoryModeDesc}>
+            SKILL.md procedures your agents can use — reusable observe→act→verify runbooks (app automation, browser forms, file work, and more). Agents see these ranked by relevance and pull the full body on demand.
+          </Text>
+          {librarySkillsLoading ? (
+            <Text style={[styles.memoryModeDesc, { marginTop: 10, color: '#475569', fontStyle: 'italic' }]}>Loading…</Text>
+          ) : librarySkills.length === 0 ? (
+            <Text style={[styles.memoryModeDesc, { marginTop: 10, color: '#475569' }]}>
+              No skills in this circle's library yet. Members can author SKILL.md procedures (chat: “/skill”) or seed the canonical set.
+            </Text>
+          ) : (
+            <View style={{ marginTop: 10, gap: 10 }}>
+              {librarySkills.map((s) => (
+                <View key={s.name} style={styles.skillRow}>
+                  <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                    <Text style={styles.skillName}>{s.name}</Text>
+                    <Text style={styles.skillVersion}>v{s.version}</Text>
+                  </View>
+                  {s.tags?.length > 0 ? (
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
+                      {s.tags.slice(0, 6).map((t) => (
+                        <View key={t} style={[styles.typeChip, { paddingVertical: 3, paddingHorizontal: 7, backgroundColor: accentColor + '15', borderColor: accentColor + '40' }]}>
+                          <Text style={[styles.typeChipText, { color: accentColor, fontSize: 9 }]}>{t}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  ) : null}
+                  <Text style={[styles.memoryModeDesc, { marginTop: 5, fontSize: 11 }]} numberOfLines={3}>{s.description}</Text>
+                </View>
+              ))}
+            </View>
+          )}
         </Section>
 
         {/* ─── AI Spend Last 24h — unified view across every agent ─── */}
@@ -1448,6 +1497,11 @@ const styles = StyleSheet.create({
   inviteRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   inviteCode: { color: '#fff', fontSize: 16, fontWeight: '900', letterSpacing: 3, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
   circleIdText: { color: '#cbd5e1', fontSize: 12, fontWeight: '700', flex: 1, fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
+
+  // Skill library
+  skillRow: { backgroundColor: '#000000', borderWidth: 1, borderColor: '#1a1a1a', borderRadius: 8, padding: 10 },
+  skillName: { color: '#e2e8f0', fontSize: 13, fontWeight: '800', fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
+  skillVersion: { color: '#475569', fontSize: 10, fontWeight: '700' },
 
   // Danger
   dangerBtn: {
