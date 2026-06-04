@@ -666,10 +666,23 @@ wire dead code. Small diffs, immediate user-visible improvement.
   retrieval query against memory, `SKILL.md` tags, and marketplace
   `capabilityFlags`. Highest-leverage recall change — makes the four systems
   collaborate.
-- **P4.3 — Turn "no pipeline match" into a gap-fill prompt.**
-  `userTaskPipelines.ts:1762`: when the best match is `<0.5` or the
-  `direct_answer` fallback, surface the top-3 candidate pipelines + their
-  `executionRequirements` as a structured clarification/recall trigger.
+- **P4.3 — Turn "no pipeline match" into a gap-fill prompt. ✅ SHIPPED 2026-06-04.**
+  `buildUserTaskPipelineDecision` now sets a `gapFill` field when the best match
+  is the `direct_answer` fallback (true no-match) or a low-confidence (`<0.5`)
+  non-question match: it carries the top-3 candidate pipelines + their
+  `executionRequirements`, a `suggestedClarification`, and a `recallHint`
+  (recall memory/skills/integrations before guessing). Surfaced in
+  `buildUserTaskPipelinePromptBlock` (live SwanBot/OpenSwan grounding) so the
+  agent recalls/clarifies the approach on uncertain **actions** before
+  committing. Deliberately **additive, not a hard gate** — `needsClarification`
+  is unchanged, and a clean-question guard (`isCleanQuestion`) keeps plain
+  questions ("what is X") answering directly (forcing clarification on every
+  unmatched question would be wrong). This complements the existing
+  ambiguity-only `needsClarification` (which fires on two close, risky matches).
+  Verified: typecheck 0; `smoke:user-task-pipelines` (gap-fill present on
+  fallback/weak, absent on clean-question/confident-match, prompt surfaces
+  candidates + recall trigger) + `openswan-task-planner`/`chat-planner`/
+  `swanbot-v2-delegation` suites green.
 
 ---
 

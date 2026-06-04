@@ -123,6 +123,33 @@ assertPromptIncludes('Make changes in InDesign for a marketing banner with diffe
 assertPromptIncludes('Open Photoshop and edit this image after I approve desktop control', ['Recommended tools:', 'desktop.photoshop_layer_inventory', 'desktop.photoshop_set_layer_state']);
 assertPromptIncludes('Open Premiere Pro and export this sequence after approval', ['Adobe Creative Cloud App Automation', 'agent.build_app_capability']);
 
+// ── P4.3: no/weak pipeline match → gap-fill (candidates + recall/clarify) ──────
+function assertGapFill(input: string, expect: 'present' | 'absent', opts: { reasonIncludes?: string; minCandidates?: number } = {}) {
+  const decision = buildUserTaskPipelineDecision(input, { limit: 5, includeFallback: true });
+  const gap = decision?.gapFill || null;
+  if (expect === 'absent') {
+    if (gap) { fail(`${input} expected no gapFill, got "${gap.reason}"`); return; }
+    pass(`gapFill absent: ${input}`);
+    return;
+  }
+  if (!gap) { fail(`${input} expected gapFill present (primary=${decision?.primary.id}, conf=${decision?.confidence})`); return; }
+  if (opts.reasonIncludes && !gap.reason.includes(opts.reasonIncludes)) { fail(`${input} gapFill reason missing "${opts.reasonIncludes}": ${gap.reason}`); return; }
+  if (opts.minCandidates !== undefined && gap.candidates.length < opts.minCandidates) { fail(`${input} gapFill expected >=${opts.minCandidates} candidates, got ${gap.candidates.length}`); return; }
+  if (!gap.recallHint || !gap.suggestedClarification) { fail(`${input} gapFill missing recall/clarification trigger`); return; }
+  pass(`gapFill present: ${input}`);
+}
+
+// Plain questions answer directly — no gap-fill noise.
+assertGapFill('What is the capital of France?', 'absent');
+// A confident pipeline match needs no gap-fill.
+assertGapFill('Set up a daily cron job to research AI news every morning', 'absent');
+// A true no-match (fallback) surfaces the gap-fill trigger with no candidates.
+assertGapFill('Frobnicate the gadget per the usual arrangement', 'present', { reasonIncludes: 'No task pipeline matched' });
+// A weak, non-question actionable request surfaces candidate approaches.
+assertGapFill('Make it nicer for me', 'present', { minCandidates: 1 });
+// The prompt block surfaces the candidates + recall/clarify trigger.
+assertPromptIncludes('Make it nicer for me', ['Approach confidence is low', 'Gap-fill:', 'Recall first:']);
+
 if (failures > 0) {
   console.error(`\n${failures} user task pipeline smoke failure(s)`);
   process.exit(1);

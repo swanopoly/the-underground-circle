@@ -129,6 +129,30 @@ export type UserTaskPipelineExecutionPattern =
   | 'parallel'
   | 'human_review';
 
+export interface UserTaskPipelineGapFillCandidate {
+  id: UserTaskPipelineId;
+  title: string;
+  category: UserTaskPipelineCategory;
+  confidence: number;
+  executionRequirements: string[];
+}
+
+/**
+ * Surfaced when no pipeline matched confidently (the `direct_answer` fallback,
+ * or a low-confidence non-question best match). Instead of silently guessing,
+ * the runbook offers the closest candidate approaches + their requirements and a
+ * recall/clarify trigger — so the agent recalls memory/skills/integrations and,
+ * if the request is an action, confirms the approach before committing. This is
+ * a grounding signal, not a hard gate: plain questions are still answered
+ * directly (`needsClarification` is left unchanged).
+ */
+export interface UserTaskPipelineGapFill {
+  reason: string;
+  candidates: UserTaskPipelineGapFillCandidate[];
+  suggestedClarification: string;
+  recallHint: string;
+}
+
 export interface UserTaskPipelineDecision {
   primary: UserTaskPipelineSummary;
   supporting: UserTaskPipelineSummary[];
@@ -137,6 +161,7 @@ export interface UserTaskPipelineDecision {
   confidence: number;
   needsClarification: boolean;
   clarificationReason: string | null;
+  gapFill?: UserTaskPipelineGapFill | null;
   orchestrationSteps: string[];
   executionRequirements: string[];
   approvalTriggers: string[];
@@ -1729,6 +1754,41 @@ function chooseExecutionPattern(items: UserTaskPipelineSummary[], ambiguous: boo
   return 'sequential';
 }
 
+function isCleanQuestion(message: string): boolean {
+  return /\b(what is|what are|what's|who is|who are|why|how do(?:es)?|how can|how to|explain|define|meaning of|tell me about|difference between)\b/i.test(String(message || ''));
+}
+
+function buildPipelineGapFill(
+  message: string,
+  matches: UserTaskPipelineMatch[],
+  isFallback: boolean,
+): UserTaskPipelineGapFill {
+  const real = matches.filter((match) => !match.reasons.includes('fallback'));
+  const ranked = (real.length > 0
+    ? real
+    : rankUserTaskPipelines(message, { limit: 3, includeFallback: false })
+  ).slice(0, 3);
+  const candidates: UserTaskPipelineGapFillCandidate[] = ranked.map((match) => {
+    const summary = summarizeUserTaskPipelineMatch(match);
+    return {
+      id: summary.id,
+      title: summary.title,
+      category: summary.category,
+      confidence: summary.confidence,
+      executionRequirements: summary.executionRequirements.slice(0, 3),
+    };
+  });
+  const titles = candidates.map((candidate) => candidate.title);
+  const reason = isFallback
+    ? 'No task pipeline matched this request confidently.'
+    : `The best pipeline match is low-confidence; the request could map to ${titles.join(', ') || 'more than one approach'}.`;
+  const suggestedClarification = titles.length > 0
+    ? `If this needs action, confirm the goal/approach (${titles.join(' / ')}) and target surface before committing; if it is a plain question, answer directly.`
+    : 'If this needs action, ask for the concrete goal, target surface, and any required access before committing; if it is a plain question, answer directly.';
+  const recallHint = 'Recall relevant user memory, circle skills, and connected integrations to fill the gap first; only ask the user for what recall cannot supply.';
+  return { reason, candidates, suggestedClarification, recallHint };
+}
+
 export function buildUserTaskPipelineDecision(
   message: string,
   opts: { limit?: number; includeFallback?: boolean } = {},
@@ -1760,6 +1820,12 @@ export function buildUserTaskPipelineDecision(
   const aggregateRisk = maxRisk(all);
   const confidence = Number(Math.max(0.35, Math.min(0.98, primaryMatch.confidence - (ambiguous ? 0.08 : 0))).toFixed(2));
   const needsClarification = ambiguous && aggregateRisk !== 'safe';
+  // P4.3: no/weak pipeline match → surface candidate approaches + a recall/clarify
+  // trigger instead of silently guessing. Plain questions still answer directly.
+  const isFallback = primaryMatch.reasons.includes('fallback');
+  const gapFill = (isFallback || (primaryMatch.confidence < 0.5 && !isCleanQuestion(message)))
+    ? buildPipelineGapFill(message, matches, isFallback)
+    : null;
   return {
     primary,
     supporting,
@@ -1770,6 +1836,7 @@ export function buildUserTaskPipelineDecision(
     clarificationReason: needsClarification
       ? `The request matches multiple action surfaces: ${all.map((item) => item.title).join(', ')}.`
       : null,
+    gapFill,
     orchestrationSteps: buildOrchestrationSteps(primary, supporting),
     approvalTriggers: uniqueStrings(all.flatMap((item) => item.approvalTriggers)),
     persistenceTargets: uniqueStrings(all.flatMap((item) => item.persistenceTargets)),
@@ -1802,6 +1869,16 @@ export function buildUserTaskPipelinePromptBlock(message: string, opts: { limit?
   lines.push(`Complete when: ${decision.primary.completionCriteria.join(' ')}`);
   if (decision.approvalTriggers.length) lines.push(`Approval triggers: ${decision.approvalTriggers.join('; ')}`);
   if (decision.needsClarification) lines.push(`Clarify before acting: ${decision.clarificationReason}`);
+  if (decision.gapFill) {
+    lines.push(`Approach confidence is low: ${decision.gapFill.reason}`);
+    if (decision.gapFill.candidates.length > 0) {
+      lines.push(`Candidate approaches: ${decision.gapFill.candidates.map((candidate) => `${candidate.title} (${candidate.id}, conf ${candidate.confidence.toFixed(2)})`).join(' | ')}`);
+      const reqs = uniqueStrings(decision.gapFill.candidates.flatMap((candidate) => candidate.executionRequirements)).slice(0, 5);
+      if (reqs.length > 0) lines.push(`Candidate requirements: ${reqs.join('; ')}`);
+    }
+    lines.push(`Gap-fill: ${decision.gapFill.suggestedClarification}`);
+    lines.push(`Recall first: ${decision.gapFill.recallHint}`);
+  }
   lines.push('Use this pipeline decision as the operating runbook unless the user clearly asks for a different surface.');
   return lines.join('\n');
 }
