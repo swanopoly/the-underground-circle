@@ -7,6 +7,11 @@ agent sees the metadata row (name + description + tags) through the relevance-
 ranked skills block and pulls the body on demand with `viewLibrarySkill(name)` /
 the `skill_view` tool — the progressive-disclosure pattern.
 
+**Seeding into a circle:** `node scripts/build-canonical-skills-seed.mjs --circle <circle-uuid>`
+emits idempotent `INSERT … ON CONFLICT (circle_id, name) DO UPDATE` SQL (dollar-quoted
+bodies, `author_id` = the circle's creator) to run in the Supabase SQL editor / psql.
+Re-running refreshes content; reverse with `DELETE FROM circle_skills WHERE circle_id = '<id>' AND name IN (...)`.
+
 Each skill is `skills/<name>/SKILL.md` with YAML frontmatter
 (`name`, `description`, `version`, `tags`) followed by `## Procedure`,
 `## Pitfalls`, and `## Verification` sections. They are validated by
