@@ -2702,6 +2702,7 @@ export async function executeToolUseLoop(opts: {
     return { response: getStrictLocalAiModeMessage('anthropic'), toolEvents: [] };
   }
   const { MAX_TOOL_ROUNDS, getToolDefinitions, dispatchToolDetailed } = await import('./openswanTools/index');
+  const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
   const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode);
   if (tools.length === 0) {
     return { response: '', toolEvents: [] };
@@ -2817,7 +2818,10 @@ export async function executeToolUseLoop(opts: {
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
-        content: dispatched.text,
+        // Enforce observe→act→VERIFY on multi-step app/desktop/browser tasks:
+        // attach a re-observe/verify (or retry-ladder) reminder to mutating
+        // app actions so the model can't silently assume a click/type worked.
+        content: appendAppActionVerificationGate(dispatched.text, block.name, String(dispatched.status)),
       });
     }
 
