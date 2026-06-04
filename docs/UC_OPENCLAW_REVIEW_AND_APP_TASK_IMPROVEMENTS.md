@@ -80,8 +80,11 @@ reliably" gap: guidance exists, enforcement doesn't.
 
 ## 4. Shipped this round — observe→act→VERIFY enforcement gate
 
-`src/lib/appActionVerificationGate.ts` (new) + wired into
-`swanbot.ts:executeToolUseLoop`. Every **state-mutating** app/desktop/browser
+`src/lib/appActionVerificationGate.ts` (new) + wired into **both client tool
+loops**: `swanbot.ts:executeToolUseLoop` (v1) and `executeClientToolCalls` (the
+v2 client-delegated path — where desktop/browser tools actually run, since they
+are `clientOnly` and the edge loop returns them pending for the client to
+execute). Every **state-mutating** app/desktop/browser
 tool result (`click_element`, `set_element_value`, `menu_click`, `type_text`,
 `press_keys`, `click_at`, mouse ops, `launch_app`, `open_url`, `click_role`,
 `fill_field`, `fill_credential_field`, `press_key`) now gets an `[observe-act-verify]`
@@ -105,8 +108,13 @@ flow (additive, low-risk).
 
 ## 5. Recommended next (with the user's go-ahead — these touch the backend loop)
 
-- **Mirror the verify gate into the v2 edge loop** (`swanbot-v2-ai/index.ts` tool
-  dispatch) so server-orchestrated runs get the same enforcement (weak spot #1).
+- ~~Mirror the verify gate into the v2 edge loop~~ — **revised after investigation
+  (2026-06-04):** desktop/browser tools are `clientOnly`, so the v2 edge loop only
+  runs server-only tools and the app-task execution happens client-side in
+  `executeClientToolCalls` — which is **now gated**. Mirroring into the edge
+  function (`swanbot-v2-ai/index.ts`) is low-value for app tasks (and that file is
+  not covered by `npm run typecheck`/smoke), so it's skipped unless server-only
+  tools grow. Both live model-loop app-task paths (v1 + v2 client) are gated.
 - **Structured resume checkpoint on cap** (weak spot #3): when the loop exhausts
   rounds mid-task, emit `{stepsDone, nextStep, freshObservations}` so a
   continuation resumes precisely instead of re-deriving.

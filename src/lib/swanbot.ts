@@ -690,6 +690,7 @@ async function executeClientToolCalls(
 ): Promise<Array<{ tool_use_id: string; content: string; is_error?: boolean }>> {
   if (calls.length === 0) return [];
   const bridge = await import('./desktopBridge');
+  const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
   const out: Array<{ tool_use_id: string; content: string; is_error?: boolean }> = [];
   for (const call of calls) {
     try {
@@ -722,13 +723,23 @@ async function executeClientToolCalls(
       } catch { /* observer failures must never break tool flow */ }
       out.push({
         tool_use_id: call.id,
-        content: JSON.stringify(result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error || 'failed' }),
+        // Observe→act→VERIFY: same in-loop nudge as executeToolUseLoop, now on
+        // the v2 client-delegated path (where desktop/browser tools run).
+        content: appendAppActionVerificationGate(
+          JSON.stringify(result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error || 'failed' }),
+          call.name,
+          result.ok ? 'success' : 'error',
+        ),
         is_error: !result.ok,
       });
     } catch (err: any) {
       out.push({
         tool_use_id: call.id,
-        content: JSON.stringify({ ok: false, error: err?.message || 'client tool dispatch threw' }),
+        content: appendAppActionVerificationGate(
+          JSON.stringify({ ok: false, error: err?.message || 'client tool dispatch threw' }),
+          call.name,
+          'error',
+        ),
         is_error: true,
       });
     }
