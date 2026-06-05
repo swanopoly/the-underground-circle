@@ -125,7 +125,7 @@ exercising a different surface of the pipeline and all validated by
 sections, real tool references, per-skill probes, no path/secret leaks).
 Seedable into a circle's `circle_skills` via `skillLibraryWrite.ts`.
 
-**Tool-loop hardening summary (2026-06-05):** `executeToolUseLoop` now carries four
+**Tool-loop hardening summary (2026-06-05):** `executeToolUseLoop` now carries seven
 reinforcing layers, all `src/lib` + smoke-verified: (1) observe→act→verify gate on
 mutating actions; (2) progress summary + machine-readable resume checkpoint on the
 step cap; (3) **parallel dispatch of all-read-only rounds** (`toolBatchParallelism`);
@@ -138,7 +138,27 @@ pure tool_use round, the final round's results were pushed to history but never
 consumed by any turn, so the model never got to answer. The loop now makes one
 no-tools finalization call to summarize from everything gathered (incl. that last
 round) instead of a generic "I hit my limit" — any error falls back to the limit
-note. Smokes: `tool-batch-parallelism`, `edge-invoke-retry`, `tool-loop-progress`.
+note; (6) **stuck-loop guard** (`toolLoopStuckBreaker`) — a just-failed call whose
+(name+input) signature repeats a prior failure this turn gets a tool_result reminder
+that forbids the identical retry and lists the productive moves (re-observe / escalate
+the ladder / change inputs / stop), so the model can't burn rounds on a deterministic
+failure; the key-order-normalized signature means a changed input (a real fix) is not
+flagged and a first-time failure still gets one legitimate retry; (7) **proactive
+step-budget nudge** (`toolLoopBudget`) — in the final rounds the last tool_result
+carries a "converge now, ~N steps left" reminder so the model finishes + answers
+before truncation rather than relying only on (5)'s after-the-fact summary. Smokes:
+`tool-batch-parallelism`, `edge-invoke-retry`, `tool-loop-progress`,
+`tool-loop-stuck-breaker`, `tool-loop-budget`.
+
+**Verification-runtime hardening (2026-06-05):** `executeOpenSwanVerificationPlan`
+(post-execution proof of code work) now runs its checks concurrently — independent
+read-only typecheck/tests/lint, so the wait is max(check) not sum(check) and results
+stay in plan order — and each check is **fail-closed**: a dispatch that throws
+(edge/network/relay/empty) becomes a `blocked` result instead of rejecting the whole
+batch and discarding the sibling checks that already passed. The pure result core
+(result type, check→tool mapping, summary, blocked-result builder) was extracted to
+`openswanVerificationResult` (no heavy deps) so it's smoke-testable in plain Node;
+the runtime re-exports it so consumers are unchanged. Smoke: `openswan-verification-runtime`.
 
 ## 5. Recommended next (with the user's go-ahead — these touch the backend loop)
 
@@ -162,7 +182,10 @@ note. Smokes: `tool-batch-parallelism`, `edge-invoke-retry`, `tool-loop-progress
   than the model re-reading it from the transcript.
 - **Deterministic retry-with-fallback executor** (weak spot #4): on a failed
   semantic action, auto-try the next surface (menu/shortcut) once with a fresh
-  observation before handing back to the model.
+  observation before handing back to the model. *(Partially addressed 2026-06-05
+  by the §4 stuck-loop guard, which nudges the ladder when a call repeats a prior
+  failure; a fully deterministic executor that tries the next surface itself —
+  without spending a model round-trip — is still open.)*
 - **Completion predicate** (weak spot #5): derive a verifiable success signal per
   task (file_stat exists / a11y value == X / count delta) the loop checks before
   declaring done — turning "model thinks it's done" into "the predicate holds."
