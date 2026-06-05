@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { parseSkillFrontmatter } from '../src/lib/skillFrontmatter';
+import { CANONICAL_SKILLS } from '../src/lib/canonicalSkills.generated';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const skillsDir = join(repoRoot, 'skills');
@@ -93,7 +94,17 @@ for (const skillName of skillNames) {
   assert(!content.includes('/Users/'), `${skillName}: no local path leak`);
   assert(!SECRET_RE.test(content), `${skillName}: no secret-looking content`);
 
+  // The bundled runtime module must stay in sync with the file (drift guard for
+  // the in-app "Add canonical skills" action). Regenerate: npm run build:canonical-skills-bundle
+  const bundled = CANONICAL_SKILLS.find((s) => s.name === parsed.name);
+  assert(bundled, `${skillName}: missing from canonicalSkills.generated.ts — run build:canonical-skills-bundle`);
+  assert.equal(bundled!.content, content, `${skillName}: bundled content drifted from SKILL.md — run build:canonical-skills-bundle`);
+  assert.equal(bundled!.version, parsed.version, `${skillName}: bundled version drifted`);
+  assert.deepEqual(bundled!.tags, parsed.tags || [], `${skillName}: bundled tags drifted`);
+
   console.log(`pass: ${skillName} (v${parsed.version}, ${tools.size} tools, [${(parsed.tags || []).join(', ')}])`);
 }
 
-console.log(`\nAll ${skillNames.length} canonical skill(s) validated.`);
+assert.equal(CANONICAL_SKILLS.length, skillNames.length, 'bundle has an entry per skill (no stale/extra rows)');
+
+console.log(`\nAll ${skillNames.length} canonical skill(s) validated (+ bundle in sync).`);

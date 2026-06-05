@@ -38,6 +38,7 @@ import {
 } from '../../lib/googleCreds';
 import { listLibrarySkills, viewLibrarySkill, type LibrarySkillMetadata } from '../../lib/skillLibrary';
 import { parseSkillFrontmatter } from '../../lib/skillFrontmatter';
+import { canonicalSkillsMissing } from '../../lib/canonicalSkills';
 import { Circle, CheckInFormat } from '../../types';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -102,6 +103,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   const [expandedSkill, setExpandedSkill] = useState<string | null>(null);
   const [skillBodies, setSkillBodies] = useState<Record<string, string>>({});
   const [skillBodyLoading, setSkillBodyLoading] = useState<string | null>(null);
+  const [addingSkills, setAddingSkills] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
   const [sessionMemoryMode, setSessionMemoryMode] = useState<'private' | 'shared'>('private');
@@ -357,6 +359,44 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
     }
   };
 
+  // Seed the bundled canonical skills into this circle's library. Writes through
+  // the logged-in member's session (author_id = currentUserId) so it satisfies
+  // the `authors_write_skills` RLS — no service-role key or SQL needed.
+  const addCanonicalSkills = async () => {
+    if (!isCreator || !currentUserId) return;
+    const missing = canonicalSkillsMissing(librarySkills.map((s) => s.name));
+    if (missing.length === 0) return;
+    const ok = await showConfirm({
+      title: 'Add canonical skills?',
+      message: `Add ${missing.length} starter SKILL.md procedure${missing.length === 1 ? '' : 's'} (${missing.map((s) => s.name).join(', ')}) to this circle's library? Agents will be able to use them.`,
+      confirmLabel: 'Add',
+      cancelLabel: 'Cancel',
+    });
+    if (!ok) return;
+    setAddingSkills(true);
+    try {
+      const rows = missing.map((s) => ({
+        circle_id: circleId,
+        author_id: currentUserId,
+        name: s.name,
+        description: s.description,
+        version: s.version,
+        tags: s.tags,
+        content: s.content,
+      }));
+      const { error } = await supabase.from('circle_skills').upsert(rows, { onConflict: 'circle_id,name' });
+      if (error) {
+        Alert.alert('Could not add skills', error.message || 'Write failed.');
+      } else {
+        const fresh = await listLibrarySkills(circleId, { limit: 50 });
+        setLibrarySkills(fresh);
+      }
+    } catch (e: any) {
+      Alert.alert('Error', e?.message || 'Failed to add canonical skills');
+    }
+    setAddingSkills(false);
+  };
+
   const regenerateInvite = async () => {
     const code = Math.random().toString(36).substring(2, 8).toUpperCase();
     await save({ invite_code: code });
@@ -390,6 +430,7 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   }
 
   const readOnly = !isCreator;
+  const missingCanonical = isCreator ? canonicalSkillsMissing(librarySkills.map((s) => s.name)) : [];
 
   return (
     <View style={styles.container}>
@@ -736,6 +777,19 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
               })}
             </View>
           )}
+          {!librarySkillsLoading && missingCanonical.length > 0 ? (
+            <Pressable
+              onPress={addCanonicalSkills}
+              disabled={addingSkills}
+              style={[styles.smallBtn, { backgroundColor: accentColor, marginTop: 12, alignSelf: 'flex-start' }]}
+            >
+              {addingSkills ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <Text style={styles.smallBtnText}>+ ADD {missingCanonical.length} CANONICAL SKILL{missingCanonical.length === 1 ? '' : 'S'}</Text>
+              )}
+            </Pressable>
+          ) : null}
         </Section>
 
         {/* ─── AI Spend Last 24h — unified view across every agent ─── */}
