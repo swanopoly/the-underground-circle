@@ -76,7 +76,13 @@ reliably" gap: guidance exists, enforcement doesn't.
 6. **Capability buildout round-trips serially** (`computerTaskRuntime.ts`) rather
    than degrading to UI-fallback while the adapter builds.
 7. **Browser DOM snapshot caps node count** — deep SPAs spill to screenshot+coords.
-8. **No intra-step tool parallelism** — independent reads serialize.
+8. **No intra-step tool parallelism** — independent reads serialize. **ADDRESSED
+   2026-06-05:** `executeToolUseLoop` now pre-dispatches a round concurrently when
+   it's entirely read-only/auto with no approval gate (`canParallelizeToolBatch`
+   over each tool's `getToolParallelPolicy`), preserving result order. Any
+   mutation / side effect / approval / gate keeps the round sequential so
+   observe→act→verify ordering is never reordered. Latency win for gather/research
+   rounds. Smoke: `tool-batch-parallelism`.
 
 ## 4. Shipped this round — observe→act→VERIFY enforcement gate
 

@@ -2716,9 +2716,10 @@ export async function executeToolUseLoop(opts: {
   if (shouldBlockExternalAiProvider('anthropic')) {
     return { response: getStrictLocalAiModeMessage('anthropic'), toolEvents: [] };
   }
-  const { MAX_TOOL_ROUNDS, getToolDefinitions, dispatchToolDetailed } = await import('./openswanTools/index');
+  const { MAX_TOOL_ROUNDS, getToolDefinitions, dispatchToolDetailed, getToolParallelPolicy } = await import('./openswanTools/index');
   const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
   const { summarizeToolLoopProgress, buildToolLoopCheckpoint } = await import('./toolLoopProgress');
+  const { canParallelizeToolBatch } = await import('./toolBatchParallelism');
   const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode);
   if (tools.length === 0) {
     return { response: '', toolEvents: [] };
@@ -2799,9 +2800,17 @@ export async function executeToolUseLoop(opts: {
       };
     }
 
-    // Dispatch each tool call (with optional approval gate)
+    // Dispatch each tool call (with optional approval gate). When the whole
+    // round is read-only/auto (no gate, no mutation/side-effect), dispatch it
+    // concurrently — a real latency win for gather/research rounds — while any
+    // mutation or approval keeps the round sequential to preserve ordering.
     const toolResults: Array<{ type: string; tool_use_id: string; content: string }> = [];
-    for (const block of toolUseBlocks) {
+    const batchPolicies = toolUseBlocks.map((b: any) => getToolParallelPolicy(b.name, opts.activePluginIds));
+    const preDispatched = canParallelizeToolBatch(batchPolicies, { hasApprovalGate: !!opts.toolApprovalGate })
+      ? await Promise.all(toolUseBlocks.map((b: any) => dispatchToolDetailed(b.name, b.input || {}, toolCtx)))
+      : null;
+    for (let bi = 0; bi < toolUseBlocks.length; bi++) {
+      const block = toolUseBlocks[bi];
       // Per-step review gate. The room chat's review mode renders an
       // approval prompt and resolves with the user's decision; YOLO/auto
       // mode just doesn't pass a gate so the loop runs as before.
@@ -2829,7 +2838,7 @@ export async function executeToolUseLoop(opts: {
           continue;
         }
       }
-      const dispatched = await dispatchToolDetailed(block.name, block.input || {}, toolCtx);
+      const dispatched = preDispatched ? preDispatched[bi] : await dispatchToolDetailed(block.name, block.input || {}, toolCtx);
       toolEvents.push({ tool: block.name, input: block.input, result: dispatched.text, status: dispatched.status, metadata: dispatched.metadata });
       toolResults.push({
         type: 'tool_result',

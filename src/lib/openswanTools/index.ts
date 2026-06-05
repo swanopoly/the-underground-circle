@@ -57,6 +57,16 @@ export function getToolDefinitions(
   );
 }
 
+/** Minimal read/mutation policy for a tool — used to decide if a round of
+ *  tools can be dispatched concurrently (see toolBatchParallelism). */
+export function getToolParallelPolicy(
+  name: string,
+  activePluginIds?: string[],
+): { mutatesState: boolean; externalSideEffect: boolean; approvalMode: string } {
+  const p = getOpenSwanToolPolicy(name as OpenSwanRuntimeToolName, activePluginIds);
+  return { mutatesState: p.mutatesState, externalSideEffect: p.externalSideEffect, approvalMode: p.approvalMode };
+}
+
 export async function dispatchTool(
   name: string,
   input: Record<string, unknown>,
