@@ -133,7 +133,12 @@ step cap; (3) **parallel dispatch of all-read-only rounds** (`toolBatchParalleli
 the call is idempotent (tools run client-side after), so a cold-start/network blip
 retries instead of aborting a multi-step task; deterministic 4xx/clean errors fail
 fast, and the abort path is now flagged `incomplete` (resumable) rather than a
-dead-end. Smokes: `tool-batch-parallelism`, `edge-invoke-retry`.
+dead-end; (5) **fail-safe finalization at the step cap** — when the cap is hit on a
+pure tool_use round, the final round's results were pushed to history but never
+consumed by any turn, so the model never got to answer. The loop now makes one
+no-tools finalization call to summarize from everything gathered (incl. that last
+round) instead of a generic "I hit my limit" — any error falls back to the limit
+note. Smokes: `tool-batch-parallelism`, `edge-invoke-retry`, `tool-loop-progress`.
 
 ## 5. Recommended next (with the user's go-ahead — these touch the backend loop)
 

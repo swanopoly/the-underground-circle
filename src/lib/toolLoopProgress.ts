@@ -15,6 +15,15 @@ export interface ToolLoopProgressEvent {
   result?: string | null;
 }
 
+/** Concatenate the text blocks of an Anthropic-style content array. */
+export function extractAssistantText(content: unknown): string {
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((b: any) => b?.type === 'text')
+    .map((b: any) => String(b?.text || ''))
+    .join('');
+}
+
 function failed(status: string | null | undefined): boolean {
   return /\b(error|fail|failed|failure|blocked|denied|timeout)\b/i.test(String(status || ''));
 }

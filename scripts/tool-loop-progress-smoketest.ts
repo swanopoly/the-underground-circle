@@ -10,7 +10,15 @@
 
 import assert from 'node:assert/strict';
 
-import { summarizeToolLoopProgress, buildToolLoopCheckpoint } from '../src/lib/toolLoopProgress';
+import { summarizeToolLoopProgress, buildToolLoopCheckpoint, extractAssistantText } from '../src/lib/toolLoopProgress';
+
+// ── extractAssistantText ───────────────────────────────────────────────────
+assert.equal(extractAssistantText([{ type: 'text', text: 'hello ' }, { type: 'text', text: 'world' }]), 'hello world');
+assert.equal(extractAssistantText([{ type: 'text', text: 'a' }, { type: 'tool_use', name: 'x' }, { type: 'text', text: 'b' }]), 'ab', 'ignores tool_use blocks');
+assert.equal(extractAssistantText([]), '');
+assert.equal(extractAssistantText(null), '');
+assert.equal(extractAssistantText('not an array'), '');
+assert.equal(extractAssistantText([{ type: 'tool_use', name: 'x' }]), '', 'pure tool_use round → empty (triggers finalization)');
 
 // Empty / invalid input → empty string (caller filters it out).
 assert.equal(summarizeToolLoopProgress([]), '');

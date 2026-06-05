@@ -2718,7 +2718,7 @@ export async function executeToolUseLoop(opts: {
   }
   const { MAX_TOOL_ROUNDS, getToolDefinitions, dispatchToolDetailed, getToolParallelPolicy } = await import('./openswanTools/index');
   const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
-  const { summarizeToolLoopProgress, buildToolLoopCheckpoint } = await import('./toolLoopProgress');
+  const { summarizeToolLoopProgress, buildToolLoopCheckpoint, extractAssistantText } = await import('./toolLoopProgress');
   const { canParallelizeToolBatch } = await import('./toolBatchParallelism');
   const { isRetryableEdgeFailure, edgeRetryBackoffMs, EDGE_INVOKE_RETRIES } = await import('./edgeInvokeRetry');
   const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode);
@@ -2808,11 +2808,8 @@ export async function executeToolUseLoop(opts: {
 
     if (toolUseBlocks.length === 0 || data.stop_reason !== 'tool_use') {
       // Model gave a final text response (or stop_reason isn't tool_use)
-      const textParts = Array.isArray(content)
-        ? content.filter((b: any) => b.type === 'text').map((b: any) => b.text)
-        : [];
       return {
-        response: textParts.join('') || data.response || '',
+        response: extractAssistantText(content) || data.response || '',
         toolEvents,
         routing: routingInfo,
       };
@@ -2879,15 +2876,36 @@ export async function executeToolUseLoop(opts: {
   // "Tool-use limit reached." string is replaced with an actionable message
   // for the case where the model produced no trailing text.
   const lastAssistant = messages.filter(m => m.role === 'assistant').pop();
-  const lastText = Array.isArray(lastAssistant?.content)
-    ? lastAssistant.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('')
-    : '';
-  // No silent truncation: when we hit the step cap, report which steps actually
-  // ran (✓/✗) so a "continue" turn resumes with context instead of re-deriving.
+  let finalText = extractAssistantText(lastAssistant?.content);
+  // The cap was hit on a pure tool_use round — the final round's results were
+  // pushed to history but no turn ever consumed them, so the model never got to
+  // answer. Give it one no-tools finalization call to summarize from everything
+  // it gathered (incl. that last round), instead of a generic limit message.
+  // Fail-safe: any error falls back to the limit note below.
+  if (!finalText) {
+    try {
+      const finalToken = await getFreshAccessToken();
+      const { data: finalData } = await supabase.functions.invoke('swanbot-ai', {
+        headers: finalToken ? { Authorization: `Bearer ${finalToken}` } : undefined,
+        body: {
+          message: opts.userMessage,
+          circleId: opts.circleId,
+          userId: opts.userId,
+          model: opts.model,
+          tools: [],
+          tool_messages: messages,
+          system_override: opts.systemPrompt,
+        },
+      });
+      finalText = extractAssistantText((finalData as any)?.content) || String((finalData as any)?.response || '');
+    } catch { /* fall back to the limit note */ }
+  }
+  // No silent truncation: report which steps actually ran (✓/✗) so a "continue"
+  // turn resumes with context instead of re-deriving.
   const limitNote = `I reached my tool-step limit for this turn (${maxRounds} steps) before finishing. Tell me to continue and I'll pick up where I left off.`;
   const progress = summarizeToolLoopProgress(toolEvents);
   return {
-    response: [lastText || limitNote, progress].filter(Boolean).join('\n\n'),
+    response: [finalText || limitNote, progress].filter(Boolean).join('\n\n'),
     toolEvents,
     routing: routingInfo,
     incomplete: true,
