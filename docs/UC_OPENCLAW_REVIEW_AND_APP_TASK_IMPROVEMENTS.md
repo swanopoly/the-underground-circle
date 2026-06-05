@@ -125,6 +125,16 @@ exercising a different surface of the pipeline and all validated by
 sections, real tool references, per-skill probes, no path/secret leaks).
 Seedable into a circle's `circle_skills` via `skillLibraryWrite.ts`.
 
+**Tool-loop hardening summary (2026-06-05):** `executeToolUseLoop` now carries four
+reinforcing layers, all `src/lib` + smoke-verified: (1) observe→act→verify gate on
+mutating actions; (2) progress summary + machine-readable resume checkpoint on the
+step cap; (3) **parallel dispatch of all-read-only rounds** (`toolBatchParallelism`);
+(4) **bounded transient retry of the per-round edge invoke** (`edgeInvokeRetry`) —
+the call is idempotent (tools run client-side after), so a cold-start/network blip
+retries instead of aborting a multi-step task; deterministic 4xx/clean errors fail
+fast, and the abort path is now flagged `incomplete` (resumable) rather than a
+dead-end. Smokes: `tool-batch-parallelism`, `edge-invoke-retry`.
+
 ## 5. Recommended next (with the user's go-ahead — these touch the backend loop)
 
 - ~~Mirror the verify gate into the v2 edge loop~~ — **revised after investigation

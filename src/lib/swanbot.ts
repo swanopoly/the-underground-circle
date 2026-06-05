@@ -2720,6 +2720,7 @@ export async function executeToolUseLoop(opts: {
   const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
   const { summarizeToolLoopProgress, buildToolLoopCheckpoint } = await import('./toolLoopProgress');
   const { canParallelizeToolBatch } = await import('./toolBatchParallelism');
+  const { isRetryableEdgeFailure, edgeRetryBackoffMs, EDGE_INVOKE_RETRIES } = await import('./edgeInvokeRetry');
   const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode);
   if (tools.length === 0) {
     return { response: '', toolEvents: [] };
@@ -2755,24 +2756,41 @@ export async function executeToolUseLoop(opts: {
   const maxRounds = Math.max(1, Math.min(MAX_TOOL_ROUNDS, opts.maxToolRounds ?? MAX_TOOL_ROUNDS));
 
   for (let round = 0; round < maxRounds; round++) {
-    // Call supabase edge fn or direct API. Refresh the JWT per-round so long
-    // tool-use loops don't starve across an expiry boundary.
-    const accessToken = await getFreshAccessToken();
-    const { data, error } = await supabase.functions.invoke('swanbot-ai', {
-      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
-      body: {
-        message: opts.userMessage,
-        circleId: opts.circleId,
-        userId: opts.userId,
-        model: opts.model,
-        tools: anthropicTools,
-        tool_messages: messages.length > 1 ? messages : undefined,
-        system_override: opts.systemPrompt,
-      },
-    });
+    // Call the edge fn, retrying transient blips. Refresh the JWT per-round so
+    // long tool-use loops don't starve across an expiry boundary. The invoke is
+    // idempotent (it returns the model's next message; tools run client-side
+    // after), so a bounded retry can never double-execute a tool.
+    let data: any = null;
+    let error: any = null;
+    for (let attempt = 0; attempt <= EDGE_INVOKE_RETRIES; attempt++) {
+      const accessToken = await getFreshAccessToken();
+      ({ data, error } = await supabase.functions.invoke('swanbot-ai', {
+        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+        body: {
+          message: opts.userMessage,
+          circleId: opts.circleId,
+          userId: opts.userId,
+          model: opts.model,
+          tools: anthropicTools,
+          tool_messages: messages.length > 1 ? messages : undefined,
+          system_override: opts.systemPrompt,
+        },
+      }));
+      if (data && !error) break;
+      if (attempt < EDGE_INVOKE_RETRIES && isRetryableEdgeFailure({
+        hasData: !!data,
+        errorName: (error as any)?.name,
+        errorMessage: (error as any)?.message,
+        status: (error as any)?.context?.status ?? (error as any)?.status,
+      })) {
+        await new Promise((r) => setTimeout(r, edgeRetryBackoffMs(attempt)));
+        continue;
+      }
+      break;
+    }
 
     if (error || !data) {
-      return { response: data?.response || 'Tool-use call failed.', toolEvents, routing: routingInfo };
+      return { response: data?.response || 'Tool-use call failed.', toolEvents, routing: routingInfo, incomplete: true };
     }
 
     if (!routingInfo && (data.provider_routed || data.routing_fallback)) {
