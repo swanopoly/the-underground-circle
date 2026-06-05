@@ -36,7 +36,8 @@ import {
   GOOGLE_SERVICE_LABELS,
   type GoogleService,
 } from '../../lib/googleCreds';
-import { listLibrarySkills, type LibrarySkillMetadata } from '../../lib/skillLibrary';
+import { listLibrarySkills, viewLibrarySkill, type LibrarySkillMetadata } from '../../lib/skillLibrary';
+import { parseSkillFrontmatter } from '../../lib/skillFrontmatter';
 import { Circle, CheckInFormat } from '../../types';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -98,6 +99,9 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
   const [copiedId, setCopiedId] = useState(false);
   const [librarySkills, setLibrarySkills] = useState<LibrarySkillMetadata[]>([]);
   const [librarySkillsLoading, setLibrarySkillsLoading] = useState(true);
+  const [expandedSkill, setExpandedSkill] = useState<string | null>(null);
+  const [skillBodies, setSkillBodies] = useState<Record<string, string>>({});
+  const [skillBodyLoading, setSkillBodyLoading] = useState<string | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
   const [sessionMemoryMode, setSessionMemoryMode] = useState<'private' | 'shared'>('private');
@@ -333,6 +337,24 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
     await Clipboard.setStringAsync(circleId);
     setCopiedId(true);
     setTimeout(() => setCopiedId(false), 2000);
+  };
+
+  // Tap a library skill to read its full SKILL.md body (progressive disclosure,
+  // mirroring the agent's viewLibrarySkill). Bodies are fetched once + cached.
+  const toggleSkill = async (name: string) => {
+    if (expandedSkill === name) { setExpandedSkill(null); return; }
+    setExpandedSkill(name);
+    if (skillBodies[name] !== undefined) return;
+    setSkillBodyLoading(name);
+    try {
+      const full = await viewLibrarySkill(circleId, name);
+      const body = full?.content ? parseSkillFrontmatter(full.content).body.trim() : '';
+      setSkillBodies((prev) => ({ ...prev, [name]: body || '(no body)' }));
+    } catch {
+      setSkillBodies((prev) => ({ ...prev, [name]: '(failed to load skill body)' }));
+    } finally {
+      setSkillBodyLoading(null);
+    }
   };
 
   const regenerateInvite = async () => {
@@ -683,24 +705,35 @@ export default function CircleSettingsScreen({ route, navigation }: any) {
             </Text>
           ) : (
             <View style={{ marginTop: 10, gap: 10 }}>
-              {librarySkills.map((s) => (
-                <View key={s.name} style={styles.skillRow}>
-                  <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-                    <Text style={styles.skillName}>{s.name}</Text>
-                    <Text style={styles.skillVersion}>v{s.version}</Text>
-                  </View>
-                  {s.tags?.length > 0 ? (
-                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
-                      {s.tags.slice(0, 6).map((t) => (
-                        <View key={t} style={[styles.typeChip, { paddingVertical: 3, paddingHorizontal: 7, backgroundColor: accentColor + '15', borderColor: accentColor + '40' }]}>
-                          <Text style={[styles.typeChipText, { color: accentColor, fontSize: 9 }]}>{t}</Text>
-                        </View>
-                      ))}
+              {librarySkills.map((s) => {
+                const expanded = expandedSkill === s.name;
+                return (
+                  <Pressable key={s.name} onPress={() => toggleSkill(s.name)} style={styles.skillRow}>
+                    <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 8 }}>
+                      <Text style={styles.skillName}>{s.name}</Text>
+                      <Text style={styles.skillVersion}>v{s.version}</Text>
+                      <Text style={[styles.skillVersion, { marginLeft: 'auto', fontSize: 12 }]}>{expanded ? '▾' : '▸'}</Text>
                     </View>
-                  ) : null}
-                  <Text style={[styles.memoryModeDesc, { marginTop: 5, fontSize: 11 }]} numberOfLines={3}>{s.description}</Text>
-                </View>
-              ))}
+                    {s.tags?.length > 0 ? (
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
+                        {s.tags.slice(0, 6).map((t) => (
+                          <View key={t} style={[styles.typeChip, { paddingVertical: 3, paddingHorizontal: 7, backgroundColor: accentColor + '15', borderColor: accentColor + '40' }]}>
+                            <Text style={[styles.typeChipText, { color: accentColor, fontSize: 9 }]}>{t}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : null}
+                    <Text style={[styles.memoryModeDesc, { marginTop: 5, fontSize: 11 }]} numberOfLines={expanded ? undefined : 3}>{s.description}</Text>
+                    {expanded ? (
+                      skillBodyLoading === s.name ? (
+                        <Text style={[styles.memoryModeDesc, { marginTop: 8, color: '#475569', fontStyle: 'italic' }]}>Loading…</Text>
+                      ) : (
+                        <Text style={styles.skillBody} selectable>{skillBodies[s.name] ?? ''}</Text>
+                      )
+                    ) : null}
+                  </Pressable>
+                );
+              })}
             </View>
           )}
         </Section>
@@ -1502,6 +1535,11 @@ const styles = StyleSheet.create({
   skillRow: { backgroundColor: '#000000', borderWidth: 1, borderColor: '#1a1a1a', borderRadius: 8, padding: 10 },
   skillName: { color: '#e2e8f0', fontSize: 13, fontWeight: '800', fontFamily: Platform.OS === 'web' ? 'monospace' : undefined },
   skillVersion: { color: '#475569', fontSize: 10, fontWeight: '700' },
+  skillBody: {
+    color: '#94a3b8', fontSize: 11, lineHeight: 17, marginTop: 8, paddingTop: 8,
+    borderTopWidth: 1, borderTopColor: '#1a1a1a',
+    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+  },
 
   // Danger
   dangerBtn: {
