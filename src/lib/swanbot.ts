@@ -2722,6 +2722,7 @@ export async function executeToolUseLoop(opts: {
   const { canParallelizeToolBatch } = await import('./toolBatchParallelism');
   const { isRetryableEdgeFailure, edgeRetryBackoffMs, EDGE_INVOKE_RETRIES } = await import('./edgeInvokeRetry');
   const { appendStuckBreaker } = await import('./toolLoopStuckBreaker');
+  const { toolBudgetReminder } = await import('./toolLoopBudget');
   const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode);
   if (tools.length === 0) {
     return { response: '', toolEvents: [] };
@@ -2871,6 +2872,17 @@ export async function executeToolUseLoop(opts: {
         tool_use_id: block.id,
         content: resultContent,
       });
+    }
+
+    // Proactive budget awareness: in the loop's final rounds, nudge the model to
+    // converge (finish the core task + give a final answer) before truncation —
+    // rather than relying only on the after-the-fact fail-safe finalization.
+    // Appended to the last tool_result so it stays inside the tool_result block
+    // contract (no free-floating text block alongside tool results).
+    const budgetNote = toolBudgetReminder(round + 1, maxRounds);
+    if (budgetNote && toolResults.length > 0) {
+      const last = toolResults[toolResults.length - 1];
+      last.content = `${last.content}${budgetNote}`;
     }
 
     // Feed results back for the next round
