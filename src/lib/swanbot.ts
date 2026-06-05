@@ -2723,6 +2723,7 @@ export async function executeToolUseLoop(opts: {
   const { isRetryableEdgeFailure, edgeRetryBackoffMs, EDGE_INVOKE_RETRIES } = await import('./edgeInvokeRetry');
   const { appendStuckBreaker } = await import('./toolLoopStuckBreaker');
   const { toolBudgetReminder } = await import('./toolLoopBudget');
+  const { planDeterministicReobserve, summarizeObservationForRetry } = await import('./deterministicReobserve');
   const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode);
   if (tools.length === 0) {
     return { response: '', toolEvents: [] };
@@ -2867,6 +2868,26 @@ export async function executeToolUseLoop(opts: {
       // against `toolEvents` BEFORE the current event is pushed (prior history).
       resultContent = appendStuckBreaker(resultContent, toolEvents, { tool: block.name, input: block.input, status: String(dispatched.status) });
       toolEvents.push({ tool: block.name, input: block.input, result: dispatched.text, status: dispatched.status, metadata: dispatched.metadata });
+      // Deterministic re-observe: when a UI action fails (and we're not in
+      // per-step review mode — there the model can just request the read as its
+      // next reviewed step), auto-capture fresh ground truth and embed it in the
+      // failed action's result so the model's retry is grounded in current state
+      // without spending a round to ask for the observation. Read-only +
+      // best-effort: any error or empty/failed read adds nothing and falls back
+      // to the stuck-breaker's "re-observe" nudge.
+      if (!opts.toolApprovalGate) {
+        const reobserve = planDeterministicReobserve(block.name, String(dispatched.status));
+        if (reobserve) {
+          try {
+            const obs = await dispatchToolDetailed(reobserve.observationTool, {}, toolCtx);
+            const note = summarizeObservationForRetry(obs?.text, String(obs?.status), { maxChars: 1400 });
+            if (note) {
+              resultContent = `${resultContent}${note}`;
+              toolEvents.push({ tool: reobserve.observationTool, input: {}, result: obs.text, status: obs.status, metadata: { auto_reobserve: true } });
+            }
+          } catch { /* observation is best-effort; never break the loop */ }
+        }
+      }
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,

@@ -51,6 +51,7 @@
     "smoke:tool-loop-stuck-breaker": "npx tsx scripts/tool-loop-stuck-breaker-smoketest.ts",
     "smoke:tool-loop-budget": "npx tsx scripts/tool-loop-budget-smoketest.ts",
     "smoke:app-surface-ladder": "npx tsx scripts/app-surface-ladder-smoketest.ts",
+    "smoke:deterministic-reobserve": "npx tsx scripts/deterministic-reobserve-smoketest.ts",
     "smoke:tool-batch-parallelism": "npx tsx scripts/tool-batch-parallelism-smoketest.ts",
     "smoke:edge-invoke-retry": "npx tsx scripts/edge-invoke-retry-smoketest.ts",
     "smoke:canonical-skills": "npx tsx scripts/canonical-skills-smoketest.ts",

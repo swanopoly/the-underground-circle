@@ -125,7 +125,7 @@ exercising a different surface of the pipeline and all validated by
 sections, real tool references, per-skill probes, no path/secret leaks).
 Seedable into a circle's `circle_skills` via `skillLibraryWrite.ts`.
 
-**Tool-loop hardening summary (2026-06-05):** `executeToolUseLoop` now carries seven
+**Tool-loop hardening summary (2026-06-05):** `executeToolUseLoop` now carries eight
 reinforcing layers, all `src/lib` + smoke-verified: (1) observe→act→verify gate on
 mutating actions; (2) progress summary + machine-readable resume checkpoint on the
 step cap; (3) **parallel dispatch of all-read-only rounds** (`toolBatchParallelism`);
@@ -146,9 +146,18 @@ failure; the key-order-normalized signature means a changed input (a real fix) i
 flagged and a first-time failure still gets one legitimate retry; (7) **proactive
 step-budget nudge** (`toolLoopBudget`) — in the final rounds the last tool_result
 carries a "converge now, ~N steps left" reminder so the model finishes + answers
-before truncation rather than relying only on (5)'s after-the-fact summary. Smokes:
-`tool-batch-parallelism`, `edge-invoke-retry`, `tool-loop-progress`,
-`tool-loop-stuck-breaker`, `tool-loop-budget`.
+before truncation rather than relying only on (5)'s after-the-fact summary;
+(8) **deterministic auto re-observe** (`deterministicReobserve`) — when a UI action
+fails in non-review mode, the loop auto-captures fresh ground truth
+(`desktop.read_a11y_tree`) and embeds a bounded summary in the failed action's
+tool_result, so the retry is grounded in current state without spending a model
+round to request the read. Read-only + best-effort (a missing bridge / failed read
+adds nothing). Auto-*executing* the next action surface is intentionally not done —
+the next surface needs input the loop can't synthesize (menu path / coordinates /
+shortcut), so the model chooses it, now with the observation in hand plus (6)'s
+named-ladder hint. Smokes: `tool-batch-parallelism`, `edge-invoke-retry`,
+`tool-loop-progress`, `tool-loop-stuck-breaker`, `tool-loop-budget`,
+`app-surface-ladder`, `deterministic-reobserve`.
 
 **Verification-runtime hardening (2026-06-05):** `executeOpenSwanVerificationPlan`
 (post-execution proof of code work) now runs its checks concurrently — independent
@@ -180,12 +189,17 @@ the runtime re-exports it so consumers are unchanged. Smoke: `openswan-verificat
   the failed step instead of re-deriving. Smoke: `tool-loop-progress`. Remaining
   (optional): have the continuation turn *auto-consume* the checkpoint rather
   than the model re-reading it from the transcript.
-- **Deterministic retry-with-fallback executor** (weak spot #4): on a failed
-  semantic action, auto-try the next surface (menu/shortcut) once with a fresh
-  observation before handing back to the model. *(Partially addressed 2026-06-05
-  by the §4 stuck-loop guard, which nudges the ladder when a call repeats a prior
-  failure; a fully deterministic executor that tries the next surface itself —
-  without spending a model round-trip — is still open.)*
+- **Deterministic retry-with-fallback executor** (weak spot #4): **ADDRESSED
+  2026-06-05** via deterministic auto re-observe (`deterministicReobserve`, layer
+  (8) above). On a failed UI action in non-review mode, the loop auto-captures
+  fresh ground truth (`desktop.read_a11y_tree`) and embeds a bounded summary in
+  the failed action's tool_result, so the retry is grounded in current state
+  without a model round-trip for the read. Auto-*executing* the next action
+  surface itself is intentionally not done — that surface needs input the loop
+  can't synthesize (menu path / coordinates / shortcut), so the model chooses it,
+  now with the observation in hand plus the §4 named-ladder stuck-breaker. The
+  surface mapping (`appSurfaceLadder`) is the reusable core if a future safe,
+  input-aware auto-executor is ever warranted.
 - **Completion predicate** (weak spot #5): derive a verifiable success signal per
   task (file_stat exists / a11y value == X / count delta) the loop checks before
   declaring done — turning "model thinks it's done" into "the predicate holds."
