@@ -186,9 +186,15 @@ the runtime re-exports it so consumers are unchanged. Smoke: `openswan-verificat
   (ground truth), lastFailure (to retry), resumeHint}`. `openswanSessionRuntime`
   persists it to the run transcript's "Tool-step limit reached" event (`data.checkpoint`),
   so a continuation turn / the UI can resume from the last observation + retry
-  the failed step instead of re-deriving. Smoke: `tool-loop-progress`. Remaining
-  (optional): have the continuation turn *auto-consume* the checkpoint rather
-  than the model re-reading it from the transcript.
+  the failed step instead of re-deriving. Smoke: `tool-loop-progress`. **Auto-consume
+  SHIPPED 2026-06-05** (`toolLoopResume`): `runOpenSwanSessionTurn` scans the
+  transcript for a checkpoint left by the *immediately-preceding* turn
+  (`findPendingResumeCheckpoint`, delimited by the once-per-turn `assistant_response`
+  event, so a task already finished by a later clean turn is never re-resumed) and,
+  when present, appends a compact resume block to the system prompt
+  (`buildResumeContextBlock` — completed-step count, last confirmed observation,
+  failed step to retry, resume hint). It defers to the user's new message if they've
+  moved on. Smoke: `tool-loop-resume`.
 - **Deterministic retry-with-fallback executor** (weak spot #4): **ADDRESSED
   2026-06-05** via deterministic auto re-observe (`deterministicReobserve`, layer
   (8) above). On a failed UI action in non-review mode, the loop auto-captures

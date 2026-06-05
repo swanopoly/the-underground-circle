@@ -13,6 +13,7 @@ import {
 import { appendOpenSwanTranscriptEvent, buildOpenSwanTranscriptKey, upsertOpenSwanTranscriptHeader, type OpenSwanSessionTranscript } from './openswanTranscripts';
 import { executeOpenSwanVerificationPlan, type OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import { getSwanBotStructuredResponse, executeToolUseLoop, buildStreamableSystemPrompt, type SwanBotContext, type SwanBotStructuredArtifact, type SwanBotStructuredResponse } from './swanbot';
+import { findPendingResumeCheckpoint, buildResumeContextBlock } from './toolLoopResume';
 import { delegateToSubagents, planSubagentDelegation, shouldDelegateToSubagents } from './subagentRegistry';
 import { resolveEffectiveDelegationMode, type SessionDelegationMode } from './chatSessionProfile';
 import { buildOpenSwanModeResponseContract, getOpenSwanModePolicy } from './openswanModePolicy';
@@ -986,8 +987,17 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         ].filter(Boolean).join('\n\n'),
       });
 
+      // Auto-resume: if the immediately-preceding turn hit the step cap, pull
+      // its checkpoint forward so this turn continues from the last confirmed
+      // observation + the failed step instead of re-deriving from the transcript.
+      // (The current turn hasn't appended its own assistant_response yet, so the
+      // scan correctly inspects the previous turn.) Defers to the user's new
+      // message if they've moved on — see buildResumeContextBlock.
+      const resumeBlock = buildResumeContextBlock(findPendingResumeCheckpoint(transcript.events));
+      const systemPromptWithResume = resumeBlock ? `${systemPrompt}\n\n${resumeBlock}` : systemPrompt;
+
       const toolLoopResult = await executeToolUseLoop({
-        systemPrompt,
+        systemPrompt: systemPromptWithResume,
         userMessage: prompt,
         model: resolvedModel || 'claude-haiku-4-5',
         circleId: opts.context.circleId!,
