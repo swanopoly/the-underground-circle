@@ -14,6 +14,8 @@
  * same way appActionVerificationGate is: by augmenting tool_result content.
  */
 
+import { formatSurfaceLadderHint } from './appSurfaceLadder';
+
 export interface ToolCallRecord {
   tool: string;
   input?: unknown;
@@ -96,12 +98,18 @@ export function detectStuckRepeat(
 export function stuckBreakerReminder(tool: string, priorFailures: number, lastReason?: string): string {
   const attempts = priorFailures + 1; // prior failures + this one
   const reasonTail = lastReason ? ` (last error: ${lastReason})` : '';
+  // Name the concrete next tools when this is a known UI-action tool; otherwise
+  // fall back to the generic ladder description.
+  const ladderHint = formatSurfaceLadderHint(tool);
+  const escalationLine = ladderHint
+    ? `2. Escalate to a different surface — ${ladderHint}.`
+    : '2. Escalate the surface ladder: semantic → menu → keyboard shortcut → one bounded coordinate action.';
   return [
     '',
     `⚠️ Stuck-loop guard: \`${tool}\` with these exact inputs has now failed ${attempts} time${attempts === 1 ? '' : 's'}${reasonTail}.`,
     'Do NOT call it again unchanged — that will fail the same way. Instead pick one:',
     '1. Re-observe fresh state (read the a11y tree / screenshot / list) — the target may have moved, be named differently, or not exist yet.',
-    '2. Escalate the surface ladder: semantic → menu → keyboard shortcut → one bounded coordinate action.',
+    escalationLine,
     '3. Change the inputs (different selector, label, path, or value) based on what you just observed.',
     '4. If it genuinely cannot be done this way, stop and report the blocker to the user — do not keep retrying.',
   ].join('\n');

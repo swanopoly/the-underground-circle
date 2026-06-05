@@ -79,8 +79,15 @@ const reminder = stuckBreakerReminder('desktop.click_element', 1, 'element not f
 assert(/Stuck-loop guard/i.test(reminder), 'has the guard header');
 assert(reminder.includes('failed 2 times'), 'reports total attempt count (prior + current)');
 assert(reminder.includes('element not found: Export'), 'names the last error');
-assert(/Re-observe/i.test(reminder) && /ladder/i.test(reminder) && /stop and report/i.test(reminder), 'lists the productive alternatives');
+assert(/Re-observe/i.test(reminder) && /stop and report/i.test(reminder), 'lists re-observe + stop alternatives');
+// A known UI-action tool → escalation names the concrete next surfaces.
+assert(reminder.includes('desktop.menu_click') && reminder.includes('desktop.click_at'), 'escalation names the specific next surfaces for click_element');
 assert(/Do NOT call it again unchanged/i.test(reminder), 'forbids the identical retry');
+
+// A non-UI-action tool (no surface ladder) → generic ladder wording.
+const genericReminder = stuckBreakerReminder('desktop.file_stat', 1, 'no such file');
+assert(/Escalate the surface ladder/i.test(genericReminder), 'a non-action tool falls back to the generic ladder line');
+assert(!genericReminder.includes('desktop.menu_click'), 'no fabricated next tool for a non-action tool');
 
 // ── appendStuckBreaker: only augments a repeated failure ─────────────────────
 const base = '{"ok":false,"error":"element not found: Export"}';
