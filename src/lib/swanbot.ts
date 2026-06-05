@@ -2721,6 +2721,7 @@ export async function executeToolUseLoop(opts: {
   const { summarizeToolLoopProgress, buildToolLoopCheckpoint, extractAssistantText } = await import('./toolLoopProgress');
   const { canParallelizeToolBatch } = await import('./toolBatchParallelism');
   const { isRetryableEdgeFailure, edgeRetryBackoffMs, EDGE_INVOKE_RETRIES } = await import('./edgeInvokeRetry');
+  const { appendStuckBreaker } = await import('./toolLoopStuckBreaker');
   const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode);
   if (tools.length === 0) {
     return { response: '', toolEvents: [] };
@@ -2854,14 +2855,21 @@ export async function executeToolUseLoop(opts: {
         }
       }
       const dispatched = preDispatched ? preDispatched[bi] : await dispatchToolDetailed(block.name, block.input || {}, toolCtx);
+      // Enforce observe→act→VERIFY on multi-step app/desktop/browser tasks:
+      // attach a re-observe/verify (or retry-ladder) reminder to mutating app
+      // actions so the model can't silently assume a click/type worked.
+      let resultContent = appendAppActionVerificationGate(dispatched.text, block.name, String(dispatched.status));
+      // Stuck-loop guard: if this exact (name+input) call already failed earlier
+      // this turn and just failed again, nudge the model to break the cycle
+      // (re-observe / escalate the ladder / change inputs / stop) instead of
+      // re-dispatching the identical doomed action until the step cap. Computed
+      // against `toolEvents` BEFORE the current event is pushed (prior history).
+      resultContent = appendStuckBreaker(resultContent, toolEvents, { tool: block.name, input: block.input, status: String(dispatched.status) });
       toolEvents.push({ tool: block.name, input: block.input, result: dispatched.text, status: dispatched.status, metadata: dispatched.metadata });
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
-        // Enforce observe→act→VERIFY on multi-step app/desktop/browser tasks:
-        // attach a re-observe/verify (or retry-ladder) reminder to mutating
-        // app actions so the model can't silently assume a click/type worked.
-        content: appendAppActionVerificationGate(dispatched.text, block.name, String(dispatched.status)),
+        content: resultContent,
       });
     }
 
