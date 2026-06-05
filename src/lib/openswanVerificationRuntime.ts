@@ -1,19 +1,19 @@
 import type { OpenSwanExecutionContract, OpenSwanExecutionStatus } from './openswanExecution';
-import type { OpenSwanTaskPlan, OpenSwanToolName, OpenSwanVerificationCheck } from './openswanTaskPlanner';
+import type { OpenSwanTaskPlan, OpenSwanVerificationCheck } from './openswanTaskPlanner';
 import { executeOpenSwanTool, type OpenSwanToolEvent } from './openswanToolRuntime';
+import {
+  buildBlockedVerificationResult,
+  getToolNameForCheck,
+  summarizeVerificationCheck,
+  type OpenSwanVerificationResult,
+} from './openswanVerificationResult';
 
-export type OpenSwanVerificationResult = {
-  check: OpenSwanVerificationCheck;
-  status: OpenSwanExecutionStatus;
-  execution: OpenSwanExecutionContract;
-  ok: boolean;
-  executed: boolean;
-  summary: string;
-  command?: string;
-  stdout?: string;
-  stderr?: string;
-  error?: string;
-};
+// The result type and the pure helpers (check→tool mapping, summary,
+// fail-closed blocked builder) live in openswanVerificationResult — it has no
+// heavy deps, so it's smoke-testable in plain Node. Re-exported here so existing
+// consumers keep importing them from the runtime module.
+export { buildBlockedVerificationResult };
+export type { OpenSwanVerificationResult };
 
 type VerificationCallbacks = {
   onToolEvent?: (event: OpenSwanToolEvent) => void;
@@ -28,44 +28,18 @@ type VerificationToolExecutionResult = {
   error?: string;
 };
 
-function getToolNameForCheck(check: OpenSwanVerificationCheck): OpenSwanToolName {
-  if (check.kind === 'typecheck') return 'verification.typecheck';
-  if (check.kind === 'tests') return 'verification.tests';
-  if (check.kind === 'lint') return 'verification.lint';
-  return 'verification.preview';
-}
-
-function summarize(check: OpenSwanVerificationCheck, result: {
-  status: OpenSwanExecutionStatus;
-  command?: string;
-  error?: string;
-}): string {
-  if (result.status === 'passed') {
-    return `${check.label}: passed${result.command ? ` via \`${result.command}\`` : ''}`;
-  }
-  if (result.status === 'failed') {
-    return `${check.label}: failed${result.error ? ` (${result.error})` : ''}`;
-  }
-  if (result.status === 'blocked') {
-    return `${check.label}: blocked${result.error ? ` (${result.error})` : ''}`;
-  }
-  if (result.status === 'manual_required') {
-    return `${check.label}: manual review required`;
-  }
-  return `${check.label}: planned`;
-}
-
 export async function executeOpenSwanVerificationPlan(
   taskPlan: OpenSwanTaskPlan,
   callbacks: VerificationCallbacks = {},
 ): Promise<OpenSwanVerificationResult[]> {
-  const results: OpenSwanVerificationResult[] = [];
-
-  for (const check of taskPlan.verification) {
-    results.push(await executeOpenSwanVerificationCheck(check, callbacks));
-  }
-
-  return results;
+  // Verification checks (typecheck/tests/lint) are independent, read-only
+  // analysis commands, and manual/planned checks resolve instantly — so run the
+  // round concurrently. The post-execution wait becomes max(check) instead of
+  // sum(check); results stay in plan order (Promise.all preserves it). This is
+  // correctness-safe: no check mutates state or depends on another's result.
+  return Promise.all(
+    taskPlan.verification.map((check) => executeOpenSwanVerificationCheck(check, callbacks)),
+  );
 }
 
 export async function executeOpenSwanVerificationCheck(
@@ -79,7 +53,7 @@ export async function executeOpenSwanVerificationCheck(
     callbacks.onToolEvent?.({
       tool,
       status,
-      summary: summarize(check, { status }),
+      summary: summarizeVerificationCheck(check, { status }),
     });
     return {
       check,
@@ -87,7 +61,7 @@ export async function executeOpenSwanVerificationCheck(
       execution: {
         status,
         mode: status === 'manual_required' ? 'manual' : 'informational',
-        summary: summarize(check, { status }),
+        summary: summarizeVerificationCheck(check, { status }),
         checkId: check.id,
         checkLabel: check.label,
         executed: false,
@@ -95,7 +69,7 @@ export async function executeOpenSwanVerificationCheck(
       },
       ok: status !== 'manual_required',
       executed: false,
-      summary: summarize(check, { status }),
+      summary: summarizeVerificationCheck(check, { status }),
     };
   }
 
@@ -104,7 +78,20 @@ export async function executeOpenSwanVerificationCheck(
     status: 'running',
     summary: `Running ${check.label}`,
   });
-  const result = await executeOpenSwanTool(tool, {}) as VerificationToolExecutionResult;
+  let result: VerificationToolExecutionResult;
+  try {
+    result = await executeOpenSwanTool(tool, {}) as VerificationToolExecutionResult;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const blocked = buildBlockedVerificationResult(check, message);
+    callbacks.onToolEvent?.({
+      tool,
+      status: 'blocked',
+      summary: blocked.summary,
+      metadata: { execution: blocked.execution },
+    });
+    return blocked;
+  }
   const status: OpenSwanExecutionStatus = !result.executed
     ? 'blocked'
     : result.ok
@@ -113,13 +100,13 @@ export async function executeOpenSwanVerificationCheck(
   callbacks.onToolEvent?.({
     tool,
     status,
-    summary: summarize(check, { status, command: result.command, error: result.error }),
+    summary: summarizeVerificationCheck(check, { status, command: result.command, error: result.error }),
     command: result.command,
     metadata: {
       execution: {
         status,
         mode: status === 'blocked' ? 'blocked' : 'automatic',
-        summary: summarize(check, { status, command: result.command, error: result.error }),
+        summary: summarizeVerificationCheck(check, { status, command: result.command, error: result.error }),
         toolName: tool,
         checkId: check.id,
         checkLabel: check.label,
@@ -135,7 +122,7 @@ export async function executeOpenSwanVerificationCheck(
     execution: {
       status,
       mode: status === 'blocked' ? 'blocked' : 'automatic',
-      summary: summarize(check, { status, command: result.command, error: result.error }),
+      summary: summarizeVerificationCheck(check, { status, command: result.command, error: result.error }),
       toolName: tool,
       checkId: check.id,
       checkLabel: check.label,
@@ -145,7 +132,7 @@ export async function executeOpenSwanVerificationCheck(
     },
     ok: status === 'passed',
     executed: result.executed,
-    summary: summarize(check, { status, command: result.command, error: result.error }),
+    summary: summarizeVerificationCheck(check, { status, command: result.command, error: result.error }),
     command: result.command,
     stdout: result.stdout,
     stderr: result.stderr,

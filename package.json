@@ -94,6 +94,7 @@
     "smoke:swanbot-openswan-readiness": "npx tsx scripts/swanbot-openswan-readiness-smoketest.ts",
     "smoke:run-approvals": "npx tsx scripts/run-approvals-smoketest.ts",
     "smoke:openswan-runtime-approval": "npx tsx scripts/openswan-runtime-approval-smoketest.ts",
+    "smoke:openswan-verification-runtime": "npx tsx scripts/openswan-verification-runtime-smoketest.ts",
     "smoke:desktop-diag": "npx tsx scripts/desktop-diag-smoketest.ts",
     "smoke:a11y-tree": "npx tsx scripts/a11y-tree-smoketest.ts",
     "smoke:browser-bridge": "npx tsx scripts/browser-bridge-smoketest.ts",
