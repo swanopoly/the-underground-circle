@@ -148,14 +148,16 @@ step-budget nudge** (`toolLoopBudget`) — in the final rounds the last tool_res
 carries a "converge now, ~N steps left" reminder so the model finishes + answers
 before truncation rather than relying only on (5)'s after-the-fact summary;
 (8) **deterministic auto re-observe** (`deterministicReobserve`) — when a UI action
-fails in non-review mode, the loop auto-captures fresh ground truth
-(`desktop.read_a11y_tree`) and embeds a bounded summary in the failed action's
-tool_result, so the retry is grounded in current state without spending a model
-round to request the read. Read-only + best-effort (a missing bridge / failed read
-adds nothing). Auto-*executing* the next action surface is intentionally not done —
-the next surface needs input the loop can't synthesize (menu path / coordinates /
-shortcut), so the model chooses it, now with the observation in hand plus (6)'s
-named-ladder hint; (9) **completion proof-check** (`proofCoverage`) — the loop-level
+fails in non-review mode, the loop auto-captures fresh ground truth per surface
+(`desktop.read_a11y_tree` for desktop, `browser.dom_snapshot` for browser) and embeds
+a bounded summary in the failed action's tool_result, so the retry is grounded in
+current state without spending a model round to request the read. Read-only +
+best-effort (a missing bridge / failed read adds nothing). Auto-*executing* the next
+action surface is intentionally not done — the next surface needs input the loop
+can't synthesize (menu path / coordinates / shortcut), so the model chooses it, now
+with the observation in hand plus (6)'s named-ladder hint (which spans desktop AND
+browser: the browser ladder is thinner — no coordinate click exists, so it centers
+on keyboard nav + re-reading the DOM to correct the locator); (9) **completion proof-check** (`proofCoverage`) — the loop-level
 executable enforcement of the evidence contract's proofAfter intent: if a turn made
 a successful GUI app mutation but never captured proof of the result (refreshed
 read / screenshot / inventory / document status / export), the model isn't allowed

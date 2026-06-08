@@ -28,6 +28,11 @@ assert.equal(planDeterministicReobserve('desktop.read_a11y_tree', 'error'), null
 assert.equal(planDeterministicReobserve('desktop.file_stat', 'error'), null, 'a failed file op is not a UI action');
 assert.equal(planDeterministicReobserve('desktop.screenshot', 'failed'), null, 'observation tools have no ladder');
 
+// Browser actions re-observe via the DOM snapshot (not the a11y tree).
+assert.equal(planDeterministicReobserve('browser.click_role', 'error')?.observationTool, 'browser.dom_snapshot', 'failed browser click → DOM snapshot');
+assert.equal(planDeterministicReobserve('browser.fill_field', 'failed')?.observationTool, 'browser.dom_snapshot', 'failed browser fill → DOM snapshot');
+assert.equal(planDeterministicReobserve('browser.dom_snapshot', 'error'), null, 'a failed browser read is not a UI action');
+
 // ── summarizeObservationForRetry ─────────────────────────────────────────────
 // Extracts the a11y `data.text` and frames it for the retry.
 const note = summarizeObservationForRetry('{"ok":true,"data":{"app":"Photoshop","text":"File\\nEdit\\nImage\\nLayer\\nExport As…"}}', 'success');

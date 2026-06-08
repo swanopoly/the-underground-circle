@@ -45,11 +45,37 @@ const LADDER: Record<string, SurfaceLadderStep[]> = {
   'desktop.click_at': [
     { tool: 'desktop.read_a11y_tree', why: 're-observe, then prefer a semantic desktop.click_element over raw coordinates' },
   ],
+
+  // Browser is a thinner surface set: there is no coordinate click (click_role is
+  // the only click), so recovery centers on re-reading the DOM and correcting the
+  // locator, with keyboard navigation as the cross-cutting fallback.
+  'browser.click_role': [
+    { tool: 'browser.press_key', why: 'keyboard-navigate — Tab to the control, then Enter/Space' },
+    { tool: 'browser.dom_snapshot', why: 're-read the DOM and retry click_role with the corrected role/name' },
+  ],
+  'browser.fill_field': [
+    { tool: 'browser.click_role', why: 'focus the field by role/label first' },
+    { tool: 'browser.press_key', why: 'then type into the focused field via keyboard' },
+  ],
+  'browser.select_option': [
+    { tool: 'browser.click_role', why: 'open the control by role first' },
+    { tool: 'browser.dom_snapshot', why: 're-read the option values and retry with an exact match' },
+  ],
 };
 
 /** The ordered next surfaces to try for a failed action tool, or null. */
 export function nextSurfaceForFailedAction(toolName: string): SurfaceLadderStep[] | null {
   return LADDER[toolName] ?? null;
+}
+
+/**
+ * The read tool that refreshes ground truth for a failed UI action, per surface:
+ * the a11y tree for desktop, the DOM snapshot for browser. Null when the tool
+ * isn't a known UI action (so there's no ladder / no re-observe to do).
+ */
+export function observationToolForFailedAction(toolName: string): string | null {
+  if (!nextSurfaceForFailedAction(toolName)) return null;
+  return String(toolName || '').startsWith('browser.') ? 'browser.dom_snapshot' : 'desktop.read_a11y_tree';
 }
 
 /**

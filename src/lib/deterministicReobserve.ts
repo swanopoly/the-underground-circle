@@ -13,16 +13,13 @@
  * less. So the deterministic layer guarantees the observation; the model still
  * chooses the next action surface (guided by the named-ladder stuck-breaker).
  *
+ * Works per surface: a failed desktop action re-reads the a11y tree, a failed
+ * browser action re-reads the DOM snapshot (see observationToolForFailedAction).
  * Read-only, so it needs no approval and is gated to non-review mode by the
  * caller. Pure + side-effect free → smoke testable.
  */
 
-import { nextSurfaceForFailedAction } from './appSurfaceLadder';
-
-// The read that refreshes ground truth for a desktop UI retry. The a11y tree is
-// the semantic source of truth (element labels/roles), which is exactly what a
-// failed semantic action needs to find the right target next.
-const UI_ACTION_OBSERVATION = 'desktop.read_a11y_tree';
+import { observationToolForFailedAction } from './appSurfaceLadder';
 
 function isFailureStatus(status: string | null | undefined): boolean {
   return /\b(error|fail|failed|failure|blocked|denied|timeout)\b/i.test(String(status || ''));
@@ -43,8 +40,11 @@ export function planDeterministicReobserve(
   status: string | null | undefined,
 ): ReobservePlan | null {
   if (!isFailureStatus(status)) return null;
-  if (!nextSurfaceForFailedAction(toolName)) return null;
-  return { observationTool: UI_ACTION_OBSERVATION };
+  // Per-surface: a11y tree for desktop, DOM snapshot for browser; null for
+  // non-UI-action tools (they have no ladder, so nothing to re-observe).
+  const observationTool = observationToolForFailedAction(toolName);
+  if (!observationTool) return null;
+  return { observationTool };
 }
 
 /**
