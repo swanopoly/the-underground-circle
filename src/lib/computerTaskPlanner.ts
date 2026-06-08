@@ -304,6 +304,10 @@ export function planComputerTaskPreview(task: string): ComputerTaskPlanPreview {
     /\b(extract|scrape|collect|gather|capture|export|pull)\b.*\b(from|on)\b.*\b(https?:\/\/|www\.|[a-z0-9.-]+\.[a-z]{2,})\b/i,
     /\b(fill|complete|submit|populate)\b.*\b(form|survey|application|registration|checkout)\b/i,
     /\bstagehand\b.*\b(act|extract|click|fill|navigate|form|website|page)\b/i,
+    // A navigation verb pointed at a real domain (known web TLD, so file
+    // extensions / "node.js" don't match) is a clear browser signal even with no
+    // "website/page" noun: "go to example.com", "visit acme.io/contact".
+    /\b(?:go ?to|goto|visit|browse|navigate to|head to|pull up|load|open)\s+(?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9-]*\.(?:com|org|net|io|co|ai|app|dev|gov|edu|info|biz|xyz|shop|store|me|us|uk|ca)\b/i,
   ]) || appResearch;
 
   const file = includesAny(text, [

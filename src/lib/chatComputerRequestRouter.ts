@@ -143,7 +143,11 @@ function isPureCreativeGeneration(message: string): boolean {
 
 function isPlainBuildDiscoveryRequest(message: string): boolean {
   if (!/\b(build|landing page|website|site|web app|page)\b/i.test(message)) return false;
-  return !/\b(browser|desktop|computer|app|application|window|file|folder|shopify|wordpress|webflow|wix|squarespace|open|launch|click|type|press|fill|upload|download|export|use computer)\b/i.test(message);
+  // Rescue browser-operation phrasings from being mistaken for "build a page"
+  // chit-chat: operating a page (book/reserve/log in/navigate/scrape …) is a
+  // browser task, not a build request. The added verbs are chosen to not
+  // substring-collide with build nouns ("booking page", "navigation menu").
+  return !/\b(browser|desktop|computer|app|application|window|file|folder|shopify|wordpress|webflow|wix|squarespace|open|launch|click|type|press|fill|upload|download|export|use computer|book|reserve|purchase|navigate|scrape|visit|go ?to|log ?in|sign ?in)\b/i.test(message);
 }
 
 function isSimpleWordpressConversationalIntent(message: string, pipeline?: UserTaskPipelineSummary | null): boolean {

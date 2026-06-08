@@ -194,6 +194,18 @@ vendor-qualified ("microsoft word"), so "save your words" / "in other words" / "
 logic" / "in the mail" still stay in plain chat. Recall + precision both locked into
 `smoke:chat-computer-request-router`.
 
+Probing browser/file routing the same way: file + hybrid routing were already
+solid, but two browser gaps surfaced. (1) A navigation verb pointed at a bare
+domain ("go to example.com", "visit acme.io/contact") missed — the browser
+matcher required a "website/page" noun. Added a nav-verb + known-web-TLD pattern
+(TLD list excludes file extensions, so "node.js" / "file.md" don't match).
+(2) Operating a *page* with a non-whitelisted verb ("Book a table on the OpenTable
+page") was wrongly swallowed by `isPlainBuildDiscoveryRequest` (bare "page" + no
+rescue verb → treated as "build a page" chit-chat). Added browser-op verbs
+(book/reserve/navigate/scrape/log in/…) to that guard's rescue set, chosen to not
+substring-collide with build nouns — "build a booking page" / "design a navigation
+menu" still correctly stay in plain chat. All locked into the router smoke.
+
 ## 5. Recommended next (with the user's go-ahead — these touch the backend loop)
 
 - ~~Mirror the verify gate into the v2 edge loop~~ — **revised after investigation

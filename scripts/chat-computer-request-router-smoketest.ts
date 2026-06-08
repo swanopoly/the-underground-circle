@@ -298,12 +298,19 @@ if (!abletonRoute?.notes.some((note) => note.includes('for file/save/export work
 // verb. These previously fell through to plain chat and lost the evidence
 // contract.
 for (const recallCase of [
+  // desktop apps named behind an operative prefix (no "app" suffix / verb)
   'In Premiere Pro, trim the first clip and export the timeline',
   'Edit the title slide in PowerPoint and save it',
   'Use DaVinci Resolve to color-grade the clip',
   'In GIMP, remove the background from this photo',
   'Use OBS to start recording the screen',
   'In Microsoft Word, accept all tracked changes and save it',
+  // browser: a navigation verb pointed at a real domain (no "website" noun)
+  'Go to example.com and download the latest invoice',
+  'visit acme.io/contact and submit the form',
+  // browser: operating a "page" with a browser-op verb (not build-discovery)
+  'Book a table for two on the OpenTable page',
+  'reserve a table on the booking page',
 ]) {
   if (buildChatComputerRequestRoute(recallCase)) {
     pass(`recall: "${recallCase.slice(0, 40)}…" routes into the computer path`);
@@ -313,8 +320,10 @@ for (const recallCase of [
 }
 
 // ── Precision ─────────────────────────────────────────────────────────────────
-// Prose that merely contains an app-like substring (word/mail/notes/logic), or
-// an operative verb with no named app, must NOT route into the computer path.
+// Prose that merely contains an app-like substring (word/mail/notes/logic), an
+// operative verb with no named app, or a plain "build a page" request must NOT
+// route into the computer path. The build-noun controls (booking/navigation)
+// guard the substring choices in the new browser-op rescue verbs.
 for (const precisionCase of [
   'save your words of wisdom for later',
   'edit the wording of this paragraph',
@@ -323,6 +332,12 @@ for (const precisionCase of [
   'use logic to solve this puzzle',
   'it arrived in the mail yesterday',
   'take notes on this meeting',
+  // build-discovery + substring-collision controls
+  'build me a landing page for my bakery',
+  'build a booking page for my salon',
+  'design a navigation menu for the site',
+  'how does node.js work',
+  'go to sleep early tonight',
 ]) {
   if (buildChatComputerRequestRoute(precisionCase)) {
     fail(`precision: "${precisionCase}" should NOT route into the computer path`);
