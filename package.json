@@ -126,6 +126,7 @@
     "smoke:computer-grant-gate": "npx tsx scripts/computer-grant-gate-smoketest.ts",
     "smoke:office-roster-grouping": "npx tsx scripts/office-roster-grouping-smoketest.ts",
     "smoke:office-bridge-readiness": "npx tsx scripts/office-bridge-readiness-smoketest.ts",
+    "smoke:office-validation": "npx tsx scripts/office-validation-smoketest.ts",
     "smoke:cross-provider-router": "npx tsx scripts/cross-provider-router-smoketest.ts",
     "smoke:web-search-auto-detect": "npx tsx scripts/web-search-auto-detect-smoketest.ts",
     "smoke:fallback-chain": "npx tsx scripts/fallback-chain-smoketest.ts",

@@ -10,12 +10,19 @@ const DANGEROUS_PATTERNS = [
 
 export function sanitizeOfficeText(text: string, maxLength: number = 200): string {
   if (!text || typeof text !== 'string') return '';
-  // Strip HTML tags
-  let clean = text.replace(/<[^>]*>/g, '');
-  // Check for dangerous patterns
-  for (const pattern of DANGEROUS_PATTERNS) {
-    if (pattern.test(clean)) clean = clean.replace(pattern, '');
-  }
+  let clean = text;
+  // Strip HTML tags and dangerous substrings repeatedly until stable. A single
+  // non-global pass left later occurrences ("javascript:javascript:") behind and
+  // couldn't catch patterns re-formed by an earlier removal ("<scr<script>ipt>").
+  // Each pass only deletes, so `clean` strictly shrinks until nothing matches.
+  let prev: string;
+  do {
+    prev = clean;
+    clean = clean.replace(/<[^>]*>/g, '');
+    for (const pattern of DANGEROUS_PATTERNS) {
+      clean = clean.replace(new RegExp(pattern.source, 'gi'), '');
+    }
+  } while (clean !== prev);
   // Trim and limit length
   return clean.trim().slice(0, maxLength);
 }
@@ -72,7 +79,14 @@ export function validateOfficeLayout(layout: any): LayoutValidationResult {
   const errors: string[] = [];
   if (!layout) return { valid: true, errors: [], sanitizedLayout: layout };
 
-  const json = JSON.stringify(layout);
+  // Validation of untrusted input must never throw — JSON.stringify throws on a
+  // circular/non-serializable layout, so fail closed instead.
+  let json: string;
+  try {
+    json = JSON.stringify(layout);
+  } catch {
+    return { valid: false, errors: ['Layout is not serializable'] };
+  }
   if (json.length > MAX_LAYOUT_SIZE) {
     errors.push(`Layout too large (${Math.round(json.length / 1024)}KB, max ${MAX_LAYOUT_SIZE / 1024}KB)`);
     return { valid: false, errors };
@@ -83,18 +97,22 @@ export function validateOfficeLayout(layout: any): LayoutValidationResult {
       errors.push(`Too many floors (${layout.floors.length}, max ${MAX_FLOORS})`);
     }
     for (const floor of layout.floors) {
+      // A null/non-object floor would crash on property access — skip it safely.
+      if (!floor || typeof floor !== 'object') continue;
       if (floor.furniture && Array.isArray(floor.furniture)) {
         if (floor.furniture.length > MAX_FURNITURE_PER_FLOOR) {
           errors.push(`Too many furniture items on floor "${floor.name || 'unnamed'}" (${floor.furniture.length}, max ${MAX_FURNITURE_PER_FLOOR})`);
         }
         // Sanitize text fields on each furniture item
         for (const item of floor.furniture) {
+          // A null/non-object item would crash on property access — skip it.
+          if (!item || typeof item !== 'object') continue;
           if (item.label) item.label = sanitizeOfficeText(item.label, 40);
           if (item.noteText) item.noteText = sanitizeOfficeText(item.noteText, 500);
           if (item.petName) item.petName = sanitizeOfficeText(item.petName, 20);
           if (item.fortuneText) item.fortuneText = sanitizeOfficeText(item.fortuneText, 200);
           if (item.nftName) item.nftName = sanitizeOfficeText(item.nftName, 60);
-          if (item.nftImageUrl && item.nftImageUrl.startsWith('data:')) {
+          if (typeof item.nftImageUrl === 'string' && item.nftImageUrl.startsWith('data:')) {
             const imgResult = validateBase64Image(item.nftImageUrl);
             if (!imgResult.valid) item.nftImageUrl = null;
           }
