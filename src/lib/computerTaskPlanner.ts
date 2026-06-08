@@ -49,6 +49,48 @@ function looksLikeUnfamiliarAppControl(task: string): boolean {
   );
 }
 
+// Curated, word-boundary desktop-app names for operativeKnownAppReference. Only
+// unambiguous names are listed: any that doubles as a common word ("word",
+// "pages", "mail", "notes", "logic", "terminal", "maya", "sketch") is omitted or
+// vendor-qualified ("microsoft word"), so it can't false-match prose even behind
+// an operative prefix.
+const OPERATIVE_KNOWN_APP_RE = new RegExp(
+  '\\b(?:in|on|with|using|inside|within|via|open|launch|use|run|control|automate|drive|switch\\s+to)\\s+' +
+    '(?:the\\s+|my\\s+|adobe\\s+|apple\\s+)?(?:' +
+    [
+      // Adobe / creative / media
+      'photoshop', 'illustrator', 'indesign', 'premiere(?:\\s+pro)?', 'after\\s+effects',
+      'lightroom', 'acrobat', 'audition', 'media\\s+encoder', 'davinci\\s+resolve',
+      'final\\s+cut(?:\\s+pro)?', 'logic\\s+pro', 'garageband', 'imovie',
+      'blender', 'cinema\\s*4d', 'gimp', 'inkscape',
+      'affinity(?:\\s+(?:photo|designer|publisher))?', 'figma', 'canva',
+      'obs(?:\\s+studio)?', 'handbrake',
+      // Office / productivity (ambiguous bare names are vendor-qualified)
+      'powerpoint', 'excel', 'keynote', 'outlook', 'onenote',
+      'microsoft\\s+word', 'ms\\s+word', 'google\\s+(?:docs|sheets|slides|drive)',
+      // CAD / engineering / audio production
+      'autocad', 'solidworks', 'fusion\\s*360', 'revit', 'sketchup',
+      'ableton', 'pro\\s+tools', 'fl\\s+studio', 'cubase',
+      // dev / collaboration / desktop
+      'notion', 'slack', 'discord', 'obsidian', 'xcode', 'finder',
+    ].join('|') +
+    ')\\b',
+  'i',
+);
+
+/**
+ * High-precision "operating a named app" signal: an operative prefix
+ * (in/with/using/open/launch/use/…) immediately followed by a curated,
+ * word-boundary desktop-app name (multi-word aware). Catches "in PowerPoint",
+ * "using DaVinci Resolve", "with GIMP", "in Microsoft Word" — which the
+ * verb-gated path misses — while the curated word-boundary list keeps "in the
+ * mail" / "in other words" / "use logic" from false-matching. Complements
+ * appControlVerb (which needs a verb but matches a much broader, riskier list).
+ */
+export function operativeKnownAppReference(task: string): boolean {
+  return OPERATIVE_KNOWN_APP_RE.test(String(task || ''));
+}
+
 function deterministicSequenceCapabilities(sequence: LocalComputerAwarenessIntent[]): ComputerCapabilityId[] {
   const capabilities = new Set<ComputerCapabilityId>();
   const fileReadKinds = new Set([
@@ -335,7 +377,7 @@ export function planComputerTaskPreview(task: string): ComputerTaskPlanPreview {
     'mouse_drag',
     'mouse_scroll',
   ].includes(localComputerIntent.kind || '');
-  const app = localDesktopAction || looksLikeUnfamiliarAppControl(task) || (explicitAppName && appControlVerb) || matchesAny(text, [
+  const app = localDesktopAction || looksLikeUnfamiliarAppControl(task) || operativeKnownAppReference(text) || (explicitAppName && appControlVerb) || matchesAny(text, [
     // Keep a focused regex for the "open X" form since it's the most common
     // phrasing. The full app list is covered by `explicitAppName +
     // appControlVerb` above; this regex is the fallback for bare "open X"

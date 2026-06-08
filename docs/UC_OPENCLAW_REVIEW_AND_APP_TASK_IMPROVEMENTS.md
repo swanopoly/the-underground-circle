@@ -179,6 +179,21 @@ batch and discarding the sibling checks that already passed. The pure result cor
 `openswanVerificationResult` (no heavy deps) so it's smoke-testable in plain Node;
 the runtime re-exports it so consumers are unchanged. Smoke: `openswan-verification-runtime`.
 
+**Routing recall into the hardened path (2026-06-08):** the hardened loop applies
+to every turn, but the *evidence contract* (observe/proof/approval guidance) only
+attaches when `buildChatComputerRequestRoute` classifies the request as a computer
+task. Empirical probing found common apps named without an "app" suffix or a
+whitelisted verb fell through to plain chat and lost the contract — "in PowerPoint",
+"in Premiere Pro", "using DaVinci Resolve", "with GIMP", "use OBS", "in Microsoft
+Word". Added `operativeKnownAppReference` (`computerTaskPlanner`): an operative
+prefix (in/with/using/open/launch/use/…) + a **curated, word-boundary, multi-word**
+app name → `app_task`, which both opens the route gate and resolves
+kind=desktop_app. The list is curated for precision — ambiguous common-word names
+("word", "mail", "notes", "pages", "logic", "terminal") are omitted or
+vendor-qualified ("microsoft word"), so "save your words" / "in other words" / "use
+logic" / "in the mail" still stay in plain chat. Recall + precision both locked into
+`smoke:chat-computer-request-router`.
+
 ## 5. Recommended next (with the user's go-ahead — these touch the backend loop)
 
 - ~~Mirror the verify gate into the v2 edge loop~~ — **revised after investigation

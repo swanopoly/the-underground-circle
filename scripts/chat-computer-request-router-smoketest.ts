@@ -292,6 +292,45 @@ if (!abletonRoute?.notes.some((note) => note.includes('for file/save/export work
   pass('unfamiliar app route notes preserve the task-family label');
 }
 
+// ── Operative known-app routing (recall) ─────────────────────────────────────
+// Common apps named behind an operative prefix (in/using/with/open/use) now
+// route into the computer path even without an "app" suffix or a whitelisted
+// verb. These previously fell through to plain chat and lost the evidence
+// contract.
+for (const recallCase of [
+  'In Premiere Pro, trim the first clip and export the timeline',
+  'Edit the title slide in PowerPoint and save it',
+  'Use DaVinci Resolve to color-grade the clip',
+  'In GIMP, remove the background from this photo',
+  'Use OBS to start recording the screen',
+  'In Microsoft Word, accept all tracked changes and save it',
+]) {
+  if (buildChatComputerRequestRoute(recallCase)) {
+    pass(`recall: "${recallCase.slice(0, 40)}…" routes into the computer path`);
+  } else {
+    fail(`recall: "${recallCase}" should route into the computer path (lost the evidence contract)`);
+  }
+}
+
+// ── Precision ─────────────────────────────────────────────────────────────────
+// Prose that merely contains an app-like substring (word/mail/notes/logic), or
+// an operative verb with no named app, must NOT route into the computer path.
+for (const precisionCase of [
+  'save your words of wisdom for later',
+  'edit the wording of this paragraph',
+  'in other words, explain it more simply',
+  'i want to go home and relax',
+  'use logic to solve this puzzle',
+  'it arrived in the mail yesterday',
+  'take notes on this meeting',
+]) {
+  if (buildChatComputerRequestRoute(precisionCase)) {
+    fail(`precision: "${precisionCase}" should NOT route into the computer path`);
+  } else {
+    pass(`precision: "${precisionCase.slice(0, 40)}…" stays in plain chat`);
+  }
+}
+
 if (failures > 0) {
   console.error(`\n${failures} chat computer request route smoke failure(s)`);
   process.exit(1);
