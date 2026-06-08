@@ -125,7 +125,7 @@ exercising a different surface of the pipeline and all validated by
 sections, real tool references, per-skill probes, no path/secret leaks).
 Seedable into a circle's `circle_skills` via `skillLibraryWrite.ts`.
 
-**Tool-loop hardening summary (2026-06-05):** `executeToolUseLoop` now carries eight
+**Tool-loop hardening summary (2026-06-05):** `executeToolUseLoop` now carries nine
 reinforcing layers, all `src/lib` + smoke-verified: (1) observe→act→verify gate on
 mutating actions; (2) progress summary + machine-readable resume checkpoint on the
 step cap; (3) **parallel dispatch of all-read-only rounds** (`toolBatchParallelism`);
@@ -155,9 +155,17 @@ round to request the read. Read-only + best-effort (a missing bridge / failed re
 adds nothing). Auto-*executing* the next action surface is intentionally not done —
 the next surface needs input the loop can't synthesize (menu path / coordinates /
 shortcut), so the model chooses it, now with the observation in hand plus (6)'s
-named-ladder hint. Smokes: `tool-batch-parallelism`, `edge-invoke-retry`,
-`tool-loop-progress`, `tool-loop-stuck-breaker`, `tool-loop-budget`,
-`app-surface-ladder`, `deterministic-reobserve`.
+named-ladder hint; (9) **completion proof-check** (`proofCoverage`) — the loop-level
+executable enforcement of the evidence contract's proofAfter intent: if a turn made
+a successful GUI app mutation but never captured proof of the result (refreshed
+read / screenshot / inventory / document status / export), the model isn't allowed
+to declare "done" — it gets exactly one more round to capture proof, then the turn
+terminates regardless (bounded, never an infinite block). Self-gating (a read-only
+or plain turn requires no proof) and scoped to GUI mutations — design-app scripted
+mutators keep their own proof pipeline (`designAppExecutionPipeline`). Smokes:
+`tool-batch-parallelism`, `edge-invoke-retry`, `tool-loop-progress`,
+`tool-loop-stuck-breaker`, `tool-loop-budget`, `app-surface-ladder`,
+`deterministic-reobserve`, `proof-coverage`.
 
 **Verification-runtime hardening (2026-06-05):** `executeOpenSwanVerificationPlan`
 (post-execution proof of code work) now runs its checks concurrently — independent
@@ -206,9 +214,18 @@ the runtime re-exports it so consumers are unchanged. Smoke: `openswan-verificat
   now with the observation in hand plus the §4 named-ladder stuck-breaker. The
   surface mapping (`appSurfaceLadder`) is the reusable core if a future safe,
   input-aware auto-executor is ever warranted.
-- **Completion predicate** (weak spot #5): derive a verifiable success signal per
-  task (file_stat exists / a11y value == X / count delta) the loop checks before
-  declaring done — turning "model thinks it's done" into "the predicate holds."
+- **Completion predicate** (weak spot #5): **ADDRESSED 2026-06-08** via the
+  completion proof-check (`proofCoverage`, layer (9) above) — the loop-level
+  executable form of "don't declare done until proof exists." When a turn made a
+  successful GUI mutation with no proof captured after it, the model gets one
+  bounded round to capture proof before the turn can finish, turning "model thinks
+  it's done" into "proof of the change is on record." Reuses the shared
+  `isAppMutatingTool` / `isObservationTool` / `isFailedStatus` classifiers so
+  "mutating" and "observation" mean one thing across the loop. Remaining (optional,
+  not built — would overlap the evidence contract / design pipeline): fully typed
+  per-task predicates (e.g. "a11y value == X", "count delta == N") computed from
+  the task spec; today the contract states those as guidance and the model
+  verifies them, which is sufficient and avoids a parallel predicate engine.
 
 ## Sources
 

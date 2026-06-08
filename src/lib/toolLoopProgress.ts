@@ -24,7 +24,8 @@ export function extractAssistantText(content: unknown): string {
     .join('');
 }
 
-function failed(status: string | null | undefined): boolean {
+/** True when a tool/check status string denotes a failure (error/fail/blocked/etc). */
+export function isFailedStatus(status: string | null | undefined): boolean {
   return /\b(error|fail|failed|failure|blocked|denied|timeout)\b/i.test(String(status || ''));
 }
 
@@ -50,7 +51,7 @@ export function summarizeToolLoopProgress(
   const maxItems = Math.max(1, opts.maxItems ?? 12);
   const shown = events.slice(0, maxItems);
   const lines = shown.map((event) => {
-    const isFail = failed(event.status);
+    const isFail = isFailedStatus(event.status);
     const reason = isFail ? shortReason(event.result) : '';
     return `- ${isFail ? '✗' : '✓'} ${event.tool || 'tool'}${reason ? ` — ${reason}` : ''}`;
   });
@@ -61,7 +62,17 @@ export function summarizeToolLoopProgress(
 
 // Observation/read tools — their last successful result is the ground truth a
 // resume should start from (so it doesn't re-derive blindly).
-const OBSERVATION_TOOL_RE = /\b(read_a11y_tree|screenshot|dom_snapshot|window_state|list_running_apps|wait_for_app|screen_size|file_stat|file_search|verification_state|document_status|layer_inventory|text_inventory|link_inventory)\b/i;
+// No \b anchors: design-app reads are prefixed (e.g. photoshop_document_status),
+// and `_` is a word char so \bdocument_status\b would miss them. These tokens are
+// specific enough that substring matching has no realistic false positives.
+const OBSERVATION_TOOL_RE = /(read_a11y_tree|screenshot|dom_snapshot|window_state|list_running_apps|wait_for_app|screen_size|file_stat|file_search|verification_state|document_status|layer_inventory|text_inventory|link_inventory)/i;
+
+/** True for read/observation tools whose result is ground truth (a11y tree,
+ *  screenshot, inventory, document status, file stat, …). Shared so proof-coverage
+ *  and checkpoint logic agree on what counts as an observation. */
+export function isObservationTool(name: string | null | undefined): boolean {
+  return OBSERVATION_TOOL_RE.test(String(name || ''));
+}
 
 export interface ToolLoopCheckpointStep {
   tool: string;
@@ -91,7 +102,7 @@ export function buildToolLoopCheckpoint(
   const list = Array.isArray(events) ? events : [];
   const maxSteps = Math.max(1, opts.maxSteps ?? 12);
   const completedSteps: ToolLoopCheckpointStep[] = list.slice(-maxSteps).map((event) => {
-    const ok = !failed(event.status);
+    const ok = !isFailedStatus(event.status);
     const step: ToolLoopCheckpointStep = { tool: event.tool || 'tool', ok };
     if (!ok) step.reason = shortReason(event.result);
     return step;
@@ -101,8 +112,8 @@ export function buildToolLoopCheckpoint(
   let lastFailure: ToolLoopCheckpointStep | null = null;
   for (let i = list.length - 1; i >= 0; i--) {
     const event = list[i];
-    const isFail = failed(event.status);
-    if (!lastObservation && !isFail && OBSERVATION_TOOL_RE.test(String(event.tool || ''))) {
+    const isFail = isFailedStatus(event.status);
+    if (!lastObservation && !isFail && isObservationTool(event.tool)) {
       lastObservation = { tool: event.tool || 'observation', summary: shortReason(event.result) || '(captured)' };
     }
     if (!lastFailure && isFail) {

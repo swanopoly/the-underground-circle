@@ -2724,6 +2724,7 @@ export async function executeToolUseLoop(opts: {
   const { appendStuckBreaker } = await import('./toolLoopStuckBreaker');
   const { toolBudgetReminder } = await import('./toolLoopBudget');
   const { planDeterministicReobserve, summarizeObservationForRetry } = await import('./deterministicReobserve');
+  const { assessProofCoverage, proofCoverageNudge } = await import('./proofCoverage');
   const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode);
   if (tools.length === 0) {
     return { response: '', toolEvents: [] };
@@ -2757,6 +2758,8 @@ export async function executeToolUseLoop(opts: {
   let routingInfo: SwanBotStructuredResponse['routing'] | undefined;
 
   const maxRounds = Math.max(1, Math.min(MAX_TOOL_ROUNDS, opts.maxToolRounds ?? MAX_TOOL_ROUNDS));
+  // Completion proof-check fires at most once per turn (see the done-branch).
+  let proofNudged = false;
 
   for (let round = 0; round < maxRounds; round++) {
     // Call the edge fn, retrying transient blips. Refresh the JWT per-round so
@@ -2810,6 +2813,22 @@ export async function executeToolUseLoop(opts: {
       : [];
 
     if (toolUseBlocks.length === 0 || data.stop_reason !== 'tool_use') {
+      // Completion proof-check: if this turn mutated an app but never captured
+      // proof of the result, don't accept "done" yet — give the model exactly
+      // one more round to capture proof (screenshot / refreshed read / export).
+      // This is the loop-level enforcement of the evidence contract's proofAfter
+      // intent. Bounded to a single nudge (proofNudged) so a model that truly
+      // can't produce proof still terminates, and skipped on the last possible
+      // round where there'd be no room to act on it.
+      if (!proofNudged && round < maxRounds - 1) {
+        const coverage = assessProofCoverage(toolEvents);
+        if (coverage.missingProof) {
+          proofNudged = true;
+          messages.push({ role: 'assistant', content });
+          messages.push({ role: 'user', content: proofCoverageNudge(coverage) });
+          continue;
+        }
+      }
       // Model gave a final text response (or stop_reason isn't tool_use)
       return {
         response: extractAssistantText(content) || data.response || '',

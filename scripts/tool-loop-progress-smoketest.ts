@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 
-import { summarizeToolLoopProgress, buildToolLoopCheckpoint, extractAssistantText } from '../src/lib/toolLoopProgress';
+import { summarizeToolLoopProgress, buildToolLoopCheckpoint, extractAssistantText, isObservationTool, isFailedStatus } from '../src/lib/toolLoopProgress';
 
 // ── extractAssistantText ───────────────────────────────────────────────────
 assert.equal(extractAssistantText([{ type: 'text', text: 'hello ' }, { type: 'text', text: 'world' }]), 'hello world');
@@ -87,5 +87,12 @@ const manyCp = buildToolLoopCheckpoint(
 );
 assert.equal(manyCp.stepCount, 30, 'stepCount reflects the true total');
 assert.equal(manyCp.completedSteps.length, 8, 'completedSteps is bounded to maxSteps');
+
+// ── Shared predicates (reused by proof-coverage / checkpoint logic) ──────────
+assert(isObservationTool('desktop.read_a11y_tree') && isObservationTool('desktop.screenshot'), 'observation tools recognized');
+assert(isObservationTool('desktop.photoshop_document_status'), 'document_status is an observation');
+assert(!isObservationTool('desktop.click_element'), 'a mutation is not an observation');
+assert(isFailedStatus('error') && isFailedStatus('blocked') && isFailedStatus('timeout'), 'failure statuses recognized');
+assert(!isFailedStatus('success') && !isFailedStatus(''), 'success/empty are not failures');
 
 console.log('All tool loop progress smoke cases passed.');
