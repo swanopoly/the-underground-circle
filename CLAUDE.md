@@ -131,6 +131,11 @@ agent id `default::blackswan` should not be renamed without a migration plan.
 
 ## Computer Use
 
+For the end-to-end app/browser/desktop task pipeline (route -> contract -> loop
+-> resume -> verify), the nine tool-loop reliability layers, cross-surface
+parity, and the rules for extending it, see
+`docs/UC_APP_TASK_RELIABILITY_ARCHITECTURE.md`.
+
 Browser computer use is split into:
 
 - planning and preview in `src/lib/computerUse.ts`
