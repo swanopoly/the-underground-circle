@@ -96,14 +96,26 @@ export function assessProofCoverage(
  * proof step is the last thing needed.
  */
 export function proofCoverageNudge(assessment: ProofCoverageAssessment): string {
-  const tail = assessment.lastMutationTool ? ` (last change: \`${assessment.lastMutationTool}\`)` : '';
+  const tool = assessment.lastMutationTool || '';
+  const tail = tool ? ` (last change: \`${tool}\`)` : '';
+  // Surface-aware proof options: a browser mutation is proven by re-reading the
+  // DOM / verification state / screenshot, not by desktop reads or design exports.
+  const proofOptions = tool.startsWith('browser.')
+    ? [
+        '- re-read the page (`browser.dom_snapshot`) and confirm the change is present, or',
+        '- check the success/verification state (`browser.verification_state`), or',
+        '- take a screenshot of the result (`browser.screenshot`).',
+      ]
+    : [
+        '- re-read the relevant state (a11y tree / refreshed inventory / document status), or',
+        '- take a screenshot of the result, or',
+        '- export/save the artifact and confirm the file exists (file_stat).',
+      ];
   return [
     '',
     `⚠️ Before finishing: you changed app state${tail} but haven't captured proof the change took effect.`,
     'Capture proof now, then give your final answer:',
-    '- re-read the relevant state (a11y tree / refreshed inventory / document status), or',
-    '- take a screenshot of the result, or',
-    '- export/save the artifact and confirm the file exists (file_stat).',
+    ...proofOptions,
     'This is the last step — one proof action, then summarize what you did and the proof of it.',
   ].join('\n');
 }

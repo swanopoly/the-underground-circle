@@ -63,6 +63,13 @@ assert.equal(reMutated.missingProof, true, 'a mutation after the last proof re-o
 const nudge = proofCoverageNudge(noProof);
 assert(/captured proof|capture proof/i.test(nudge), 'asks for proof');
 assert(nudge.includes('desktop.click_element'), 'names the last change');
-assert(/screenshot|a11y|file_stat|inventory/i.test(nudge), 'lists concrete proof actions');
+assert(/screenshot|a11y|file_stat|inventory/i.test(nudge), 'lists concrete desktop proof actions');
+
+// A browser mutation gets browser-appropriate proof suggestions, not desktop ones.
+const browserAssessment = assessProofCoverage([ok('browser.fill_field')]);
+assert.equal(browserAssessment.missingProof, true, 'browser fill with no proof is flagged');
+const browserNudge = proofCoverageNudge(browserAssessment);
+assert(browserNudge.includes('browser.dom_snapshot'), 'browser nudge suggests re-reading the DOM');
+assert(!/file_stat|document status/i.test(browserNudge), 'browser nudge omits desktop/design-only proof');
 
 console.log('All proof coverage smoke cases passed.');
