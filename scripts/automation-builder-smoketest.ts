@@ -7,6 +7,7 @@
  */
 import {
   parseAutomationRequest,
+  parseComputerTaskSchedule,
   looksLikeAutomationRequest,
 } from '../src/lib/automationChatParser';
 
@@ -154,6 +155,49 @@ for (const neg of negatives) {
   const p = parseAutomationRequest(neg);
   if (p === null) ok(`"${neg.slice(0, 30)}..." → null`);
   else fail(`"${neg}" should NOT parse but did`, p);
+}
+
+// ─── parseComputerTaskSchedule (D7b) ─────────────────────────────────────
+
+console.log('\nparseComputerTaskSchedule');
+
+{
+  const task = 'log into portal.acme.com, download the latest invoices, and rename them by date';
+
+  // Day + time phrase → weekly cron, verbatim task prompt, chat output.
+  const friday = parseComputerTaskSchedule({ task, schedulePhrase: 'friday at 9am', taskLabel: 'Invoice download' });
+  if (!friday) fail('schedule: friday phrase should parse', null);
+  else {
+    if (friday.triggerType !== 'schedule' || !friday.cronExpression) fail('schedule: friday → cron schedule', friday);
+    else if (!/\* \* 5$/.test(friday.cronExpression)) fail('schedule: friday → dow 5', friday.cronExpression);
+    else ok(`friday at 9am → ${friday.cronExpression}`);
+    if (!friday.prompt.includes(task)) fail('schedule: prompt carries task verbatim', friday.prompt);
+    else ok('prompt carries the exact task text');
+    if (friday.name !== 'Run: Invoice download') fail('schedule: name from label', friday.name);
+    else ok('name derived from task label');
+    if (friday.outputTarget !== 'chat') fail('schedule: reports into chat', friday.outputTarget);
+    else ok('output target is chat');
+  }
+
+  // "every friday..." with redundant "every" from the user → still parses.
+  const everyPrefixed = parseComputerTaskSchedule({ task, schedulePhrase: 'every friday at 9am' });
+  if (!everyPrefixed) fail('schedule: redundant "every" prefix tolerated', null);
+  else ok('redundant "every" prefix tolerated');
+
+  // Plain cadence word → m2 grammar.
+  const weekly = parseComputerTaskSchedule({ task, schedulePhrase: 'weekly' });
+  if (!weekly || weekly.cronExpression !== '0 9 * * 1') fail('schedule: weekly → monday 9am cron', weekly?.cronExpression);
+  else ok('weekly → 0 9 * * 1');
+
+  // Garbage cadence → null (UI shows guidance instead of filing junk).
+  if (parseComputerTaskSchedule({ task, schedulePhrase: 'whenever vibes are good' }) !== null) {
+    fail('schedule: unparseable cadence → null', null);
+  } else ok('unparseable cadence → null');
+
+  // Empty task → null.
+  if (parseComputerTaskSchedule({ task: '', schedulePhrase: 'weekly' }) !== null) {
+    fail('schedule: empty task → null', null);
+  } else ok('empty task → null');
 }
 
 console.log('\n' + (failures > 0 ? `FAILED — ${failures} assertion(s)` : 'PASSED — all assertions ok'));

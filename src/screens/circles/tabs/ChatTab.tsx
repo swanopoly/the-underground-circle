@@ -210,6 +210,7 @@ import {
 } from '../../../lib/localComputerAwarenessIntent';
 import type { PredictiveChatCommand } from '../../../lib/predictiveChatCommands';
 import { dispatchChatAutomationPlan } from '../../../lib/runChatAutomationPlan';
+import { createChatTransportHandlers } from '../../../lib/chatTransportHandlers';
 import { attachPlanDecisionToRun } from '../../../lib/runChatAutomationPlanObserver';
 import { deriveChatActivityFlags, shapePersistedChatMessage } from '../../../lib/chatMessageShape';
 import {
@@ -332,7 +333,7 @@ import {
   planBusinessModelForComputerTask,
 } from '../../../lib/businessModelProfiles';
 import { deriveGrantedScopesFromBrowserPermission, grantComputerTaskScopes, loadComputerTaskGrantIds } from '../../../lib/computerTaskGrantMemory';
-import { buildComputerTaskStateSteps, clearComputerTaskState, compactComputerTaskCheckpointRecovery, compactComputerTaskComplexityPlan, loadComputerTaskState, markComputerTaskCheckpointRecoveryObserved, saveComputerTaskState, type ComputerTaskCapabilityBuildout, type ComputerTaskCheckpointEvidenceObservation, type ComputerTaskStateCheckpointRecovery, type ComputerTaskStateComplexity, type ComputerTaskStateGrounding, type ComputerTaskStateRecord } from '../../../lib/computerTaskState';
+import { buildComputerTaskChecklistCard, buildComputerTaskStateSteps, clearComputerTaskState, compactComputerTaskCheckpointRecovery, compactComputerTaskComplexityPlan, loadComputerTaskState, markComputerTaskCheckpointRecoveryObserved, saveComputerTaskState, type ComputerTaskCapabilityBuildout, type ComputerTaskCheckpointEvidenceObservation, type ComputerTaskStateCheckpointRecovery, type ComputerTaskStateComplexity, type ComputerTaskStateGrounding, type ComputerTaskStateRecord } from '../../../lib/computerTaskState';
 import {
   buildAgentAppCapabilityBuildoutStateHints,
   formatAgentAppCapabilityBuildoutForUser,
@@ -6468,41 +6469,124 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       // guessing or fabricating a placeholder. Recall context first (memory +
       // recent thread) so the question is informed, then post it as a bot
       // message (mirrors the Photoshop/InDesign clarification UX above).
+      //
+      // C1 (Phase 1b) cutover #1: this intent now runs through the unified
+      // executor (`createChatTransportHandlers` → `dispatchChatAutomationPlan`)
+      // instead of an ad-hoc inline branch. `ask_clarification` is plan-safe and
+      // approval-free, so behavior is identical — but it now shares the single
+      // plan-mode / approval / observer pipeline with every other kind. The dep
+      // below is the former inline body verbatim.
       if (plan.execution.kind === 'ask_clarification' && plan.execution.clarification && !resolvingClarificationRef.current) {
-        const clarification = plan.execution.clarification;
-        const recentMessages = messages.slice(-6).map((m) => m.content).filter(Boolean);
-        const fill = await recallForClarification({
-          circleId,
-          userId: currentUserId || '',
-          message: content,
-          recentMessages,
-          gap: { missingParams: clarification.missingParams },
-        });
-        const lines = [clarification.question];
-        if (fill.contextNote) lines.push('', fill.contextNote);
-        // Examples render as tappable chips (QuickReplyChips) rather than inline
-        // text — one tap sends the answer, which the pending-clarification resume
-        // path reconstructs into the completed task.
-        addBotMessage(lines.join('\n'), undefined, {
-          localOnly: true,
-          quickReplies: clarification.examples,
-          source: {
-            actor: 'OpenSwan',
-            surface: 'main_chat_clarification',
-            selectedModel,
-            effectiveModel: 'deterministic-clarification',
+        const clarificationHandlers = createChatTransportHandlers({
+          ask_clarification: async (dispatchedPlan) => {
+            const clarification = dispatchedPlan.execution.clarification!;
+            const recentMessages = messages.slice(-6).map((m) => m.content).filter(Boolean);
+            const fill = await recallForClarification({
+              circleId,
+              userId: currentUserId || '',
+              message: content,
+              recentMessages,
+              gap: { missingParams: clarification.missingParams },
+            });
+            const lines = [clarification.question];
+            if (fill.contextNote) lines.push('', fill.contextNote);
+            // Examples render as tappable chips (QuickReplyChips) rather than inline
+            // text — one tap sends the answer, which the pending-clarification resume
+            // path reconstructs into the completed task.
+            addBotMessage(lines.join('\n'), undefined, {
+              localOnly: true,
+              quickReplies: clarification.examples,
+              source: {
+                actor: 'OpenSwan',
+                surface: 'main_chat_clarification',
+                selectedModel,
+                effectiveModel: 'deterministic-clarification',
+              },
+            });
+            // Remember what we asked so the user's next reply completes the task
+            // instead of being routed from scratch (see the resume block above).
+            pendingClarificationRef.current.set(activeThreadId || 'main', {
+              originalMessage: content,
+              pendingIntent: clarification.pendingIntent || null,
+              missingParams: clarification.missingParams,
+              askedAt: Date.now(),
+            });
+            setBotTyping(false);
+            return { status: 'needs_input' };
           },
         });
-        // Remember what we asked so the user's next reply completes the task
-        // instead of being routed from scratch (see the resume block above).
-        pendingClarificationRef.current.set(activeThreadId || 'main', {
-          originalMessage: content,
-          pendingIntent: clarification.pendingIntent || null,
-          missingParams: clarification.missingParams,
-          askedAt: Date.now(),
+        const outcome = await dispatchChatAutomationPlan(plan, {
+          handlers: clarificationHandlers,
+          ctx: {
+            circleId,
+            userId: currentUserId || '',
+            threadId: activeThreadId || undefined,
+            model: selectedModel,
+            chatMode: planActMode,
+          },
+          onOutcome: attachPlanDecisionToRun,
         });
-        setBotTyping(false);
-        return;
+        // Handled (asked the question, or refused by the plan-mode gate) →
+        // stop here. Only an unexpected `skipped` (no handler) falls through to
+        // the legacy path, preserving the old safety net.
+        if (outcome.status !== 'skipped') return;
+      }
+
+      // C1 (Phase 1b) cutover #2: the memory family of conversational intents
+      // (remember / forget / show_memories) now executes through the unified
+      // executor using the planner's already-detected intent — removing the
+      // double-classification where the legacy `conversationalRouter` below
+      // re-ran its own detector. Scoped to memory intents for a narrow blast
+      // radius; every other conversational intent still falls through to the
+      // legacy router unchanged. The dep body is a faithful copy of the legacy
+      // block, so behavior is preserved (same executor, same workbench/render).
+      if (plan.intent.kind === 'conversational_action' && plan.execution.kind === 'run_command_handler') {
+        const memoryConversationalHandlers = createChatTransportHandlers({
+          run_command_handler: async (dispatchedPlan) => {
+            if (dispatchedPlan.intent.kind !== 'conversational_action') return { handled: false };
+            const intent = dispatchedPlan.intent.intent;
+            if (intent.type !== 'remember' && intent.type !== 'forget' && intent.type !== 'show_memories') {
+              return { handled: false };
+            }
+            const { executeConversationalIntent } = await import('../../../lib/conversationalRouter');
+            const shouldShowWorkbench = isCodingGenerationRequest(content, sessionProfile)
+              || currentAttachments.some((attachment) => attachment.isFigma)
+              || !!figmaPromptContext;
+            if (shouldShowWorkbench) {
+              startCodingWorkbench([content, buildAttachmentPromptContext(currentAttachments), figmaPromptContext].filter(Boolean).join('\n\n'));
+            }
+            setBotTyping(true);
+            const result = await executeConversationalIntent(intent, {
+              circleId, userId: currentUserId || '', userName: currentUserName,
+              fullMessage: content, attachments: currentAttachments as any,
+            });
+            setBotTyping(false);
+            if (shouldShowWorkbench) stopCodingWorkbench();
+            if (result?.handled) {
+              if (result.message === '__SHOW_MEMORIES__') {
+                setShowMemoryViewer(true);
+              } else {
+                addBotMessage(result.message, result.artifacts as any);
+              }
+              return { status: 'completed' };
+            }
+            return { handled: false };
+          },
+        });
+        const memoryOutcome = await dispatchChatAutomationPlan(plan, {
+          handlers: memoryConversationalHandlers,
+          ctx: {
+            circleId,
+            userId: currentUserId || '',
+            threadId: activeThreadId || undefined,
+            model: selectedModel,
+            chatMode: planActMode,
+          },
+          onOutcome: attachPlanDecisionToRun,
+        });
+        // Only fall through to the legacy conversationalRouter when this
+        // handler declined (non-memory intent, or executor didn't handle).
+        if (memoryOutcome.status !== 'skipped') return;
       }
     }
 
@@ -9401,7 +9485,40 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             }}
             scrollEventThrottle={16}
           />
-          
+
+          {(() => {
+            // D6: persisted needs-you strip. Derived from the durable task
+            // record (survives reload), so a task paused on MFA/approval is
+            // visible the moment the user returns — tap opens the console
+            // where the question/approval can be answered.
+            const checklist = buildComputerTaskChecklistCard(computerTaskState);
+            if (!checklist || !checklist.active || checklist.needsYou.length === 0) return null;
+            const first = checklist.needsYou[0];
+            const prefix = first.kind === 'question' ? 'Needs your answer' : first.kind === 'approval' ? 'Needs your approval' : 'Blocked';
+            return (
+              <Pressable
+                onPress={() => setShowComputerUseConsole(true)}
+                style={{
+                  marginHorizontal: 12,
+                  marginBottom: 6,
+                  paddingVertical: 8,
+                  paddingHorizontal: 12,
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: '#e8b33955',
+                  backgroundColor: '#e8b33914',
+                }}
+              >
+                <Text style={{ color: '#e8b339', fontSize: 12, fontWeight: '700' }} numberOfLines={1}>
+                  ⚑ {checklist.title} — {prefix}
+                </Text>
+                <Text style={{ color: '#cfcfcf', fontSize: 12, marginTop: 2 }} numberOfLines={2}>
+                  {first.label}{checklist.needsYou.length > 1 ? `  (+${checklist.needsYou.length - 1} more)` : ''} — tap to open
+                </Text>
+              </Pressable>
+            );
+          })()}
+
           {/* Quick actions moved to composer dropdown */}
         </>
           </View>
@@ -10140,6 +10257,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           taskState={computerTaskState}
           onClose={() => setShowComputerUseConsole(false)}
           onSubmit={runComputerUseTaskFromConsole}
+          userId={currentUserId}
         />
       )}
 

@@ -12,6 +12,10 @@
 import { useCallback, useRef, useState } from 'react';
 import { startComputerUseAgent, type AgentHandle } from './computerUseAgent';
 import { resolveComputerUseCreds } from './computerUseCreds';
+import {
+  recordComputerTaskPendingQuestion,
+  resolveComputerTaskPendingQuestionState,
+} from './computerTaskState';
 import type { LiveAction, LiveScreenshot } from '../components/ComputerUseLiveCard';
 
 export type TaskStatus = 'idle' | 'starting' | 'running' | 'done' | 'error';
@@ -86,9 +90,41 @@ const EMPTY_STATE: ComputerUseTaskState = {
   errorMessage: null,
 };
 
-export function useComputerUseTask(circleId: string, userId?: string) {
+export function useComputerUseTask(circleId: string, userId?: string, threadId?: string | null) {
   const [state, setState] = useState<ComputerUseTaskState>(EMPTY_STATE);
   const handleRef = useRef<AgentHandle | null>(null);
+  // Mirrors the live pendingConfirmation id so terminal callbacks can
+  // expire the persisted copy without reading React state.
+  const pendingQuestionIdRef = useRef<string | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  const runIdRef = useRef<string | null>(null);
+
+  // D2: mid-task questions survive reload — mirror confirmation lifecycle
+  // onto the durable computerTaskState record. All writes are
+  // fire-and-forget; persistence must never block or break the live loop.
+  const persistQuestionAsked = useCallback((info: PendingConfirmation, ids: { sessionId: string | null; runId: string | null }) => {
+    const id = info.id || `q_${info.askedAt}`;
+    pendingQuestionIdRef.current = id;
+    void recordComputerTaskPendingQuestion(circleId, threadId, {
+      id,
+      question: info.question,
+      options: info.options,
+      context: info.context,
+      askedAt: new Date(info.askedAt).toISOString(),
+      sessionId: ids.sessionId,
+      runId: ids.runId,
+      status: 'pending',
+      answer: null,
+      resolvedAt: null,
+    });
+  }, [circleId, threadId]);
+
+  const persistQuestionResolved = useCallback((answer: string | null) => {
+    const id = pendingQuestionIdRef.current;
+    pendingQuestionIdRef.current = null;
+    if (!id) return;
+    void resolveComputerTaskPendingQuestionState(circleId, threadId, id, answer);
+  }, [circleId, threadId]);
 
   const run = useCallback(async (
     task: string,
@@ -112,9 +148,11 @@ export function useComputerUseTask(circleId: string, userId?: string) {
       sessionId: options?.sessionId,
       browserbase: credsResult.creds.browserbase,
       onRunStarted: ({ runId }) => {
+        runIdRef.current = runId;
         setState((prev) => ({ ...prev, runId }));
       },
       onSessionStarted: ({ sessionId, liveUrl }) => {
+        sessionIdRef.current = sessionId;
         setState((prev) => ({ ...prev, status: 'running', sessionId, liveUrl }));
       },
       onAction: (info) => {
@@ -128,18 +166,39 @@ export function useComputerUseTask(circleId: string, userId?: string) {
         setState((prev) => ({ ...prev, reasoning: [...prev.reasoning, text] }));
       },
       onConfirmationRequired: (info) => {
-        setState((prev) => ({
-          ...prev,
-          pendingConfirmation: { ...info, askedAt: Date.now() },
-        }));
+        const pending: PendingConfirmation = { ...info, askedAt: Date.now() };
+        persistQuestionAsked(pending, { sessionId: sessionIdRef.current, runId: runIdRef.current });
+        setState((prev) => ({ ...prev, pendingConfirmation: pending }));
       },
       onConfirmationResolved: () => {
+        persistQuestionResolved('resolved in session');
         setState((prev) => ({ ...prev, pendingConfirmation: null }));
       },
       onUsage: (info) => {
         setState((prev) => ({ ...prev, usage: info }));
       },
+      onPartialResult: ({ summary, iterations, runId }) => {
+        // D8: a bounded stop (timeout/budget/stall) hands back the progress
+        // made so far. Populate `result` with the partial summary so the
+        // card shows what WAS done; the matching onError that follows sets
+        // the error status + message.
+        setState((prev) => ({
+          ...prev,
+          runId: runId || prev.runId,
+          result: prev.result || {
+            summary,
+            iterations,
+            tokens: {
+              input: prev.usage?.inputTokens || 0,
+              output: prev.usage?.outputTokens || 0,
+            },
+            findings: null,
+            extractedData: null,
+          },
+        }));
+      },
       onResult: ({ summary, iterations, tokens, findings, extractedData, runId }) => {
+        persistQuestionResolved(null); // task finished — expire any open question
         setState((prev) => ({
           ...prev,
           status: 'done',
@@ -149,6 +208,7 @@ export function useComputerUseTask(circleId: string, userId?: string) {
         handleRef.current = null;
       },
       onError: (msg) => {
+        persistQuestionResolved(null); // task errored — expire any open question
         setState((prev) => ({ ...prev, status: 'error', errorMessage: msg }));
         handleRef.current = null;
       },
@@ -161,10 +221,11 @@ export function useComputerUseTask(circleId: string, userId?: string) {
       try { handleRef.current.cancel(); } catch {}
       handleRef.current = null;
     }
+    persistQuestionResolved(null); // cancelled — expire any open question
     setState((prev) => prev.status === 'running' || prev.status === 'starting'
       ? { ...prev, status: 'error', errorMessage: 'Cancelled by user.' }
       : prev);
-  }, []);
+  }, [persistQuestionResolved]);
 
   const reset = useCallback(() => {
     cancel();

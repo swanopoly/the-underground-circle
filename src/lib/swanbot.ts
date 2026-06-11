@@ -6,7 +6,9 @@
  */
 
 import { supabase } from './supabase';
-import { getFreshAccessToken } from './authSession';
+import { getFreshAccessToken, safeGetUser } from './authSession';
+import { runWithTransientRetry, isRetryableInvokeError, type RetryAttemptResult } from './swanbotV2Retry';
+import { findAliasKey } from './crossProviderRouter';
 import type { PromptMemoryReference } from './memoryService';
 import type { ToolLoopCheckpoint } from './toolLoopProgress';
 import { buildSpiritWikiKnowledgeBundle, buildWikiKnowledgeBundle, buildWikiSearchResponse } from './wikiData';
@@ -277,6 +279,65 @@ export async function restoreHistoryFromBond(bondId: string, circleId: string): 
  * Save a session summary + extract durable memories from the conversation.
  * Called on page unload / session end.
  */
+
+// ─── Memory-extraction rate limiting (S2) ───────────────────────────────────
+// autoExtractAndSave is an LLM call. saveSessionToMemory can fire many times
+// per session (page unload, tab blur, route change, manual save), so without
+// a guard the same conversation gets re-extracted repeatedly and burns tokens.
+// Gate: skip when the conversation content is unchanged since the last run
+// (content hash), or when the last run for this (circle,user) was inside the
+// cooldown window. New content past the cooldown still extracts.
+const MEMORY_EXTRACTION_COOLDOWN_MS = 60 * 60 * 1000; // 1h
+const memoryExtractionGuard = new Map<string, { hash: string; at: number }>();
+
+function hashHistoryForExtraction(history: ConversationMessage[]): string {
+  // Cheap djb2 over role+text — enough to detect "nothing new since last run".
+  let h = 5381;
+  for (const m of history) {
+    const s = `${m.role}:${m.text}`;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return `${history.length}:${(h >>> 0).toString(36)}`;
+}
+
+function memoryExtractionGuardKey(circleId: string, userId: string): string {
+  return `${circleId}::${userId}`;
+}
+
+function readMemoryExtractionMark(key: string): { hash: string; at: number } | null {
+  const mem = memoryExtractionGuard.get(key);
+  if (mem) return mem;
+  try {
+    const raw = globalThis?.localStorage?.getItem(`uc_mem_extract_${key}`);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { hash: string; at: number };
+      if (parsed && typeof parsed.hash === 'string' && typeof parsed.at === 'number') {
+        memoryExtractionGuard.set(key, parsed);
+        return parsed;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function shouldRunMemoryExtraction(circleId: string, userId: string, history: ConversationMessage[]): boolean {
+  const key = memoryExtractionGuardKey(circleId, userId);
+  const prev = readMemoryExtractionMark(key);
+  if (!prev) return true;
+  const hash = hashHistoryForExtraction(history);
+  if (prev.hash === hash) return false; // nothing new since last extraction
+  return Date.now() - prev.at >= MEMORY_EXTRACTION_COOLDOWN_MS;
+}
+
+function markMemoryExtractionRun(circleId: string, userId: string, history: ConversationMessage[]): void {
+  const key = memoryExtractionGuardKey(circleId, userId);
+  const mark = { hash: hashHistoryForExtraction(history), at: Date.now() };
+  memoryExtractionGuard.set(key, mark);
+  try {
+    globalThis?.localStorage?.setItem(`uc_mem_extract_${key}`, JSON.stringify(mark));
+  } catch {}
+}
+
 export async function saveSessionToMemory(circleId: string, userId: string): Promise<void> {
   const history = getHistory(circleId);
   if (history.length < 2) return;
@@ -348,12 +409,17 @@ export async function saveSessionToMemory(circleId: string, userId: string): Pro
     }
   } catch {}
 
-  // 2. Extract durable memories from the conversation (LLM-powered)
-  // Only run if enough messages to be meaningful
-  if (history.length >= 4) {
+  // 2. Extract durable memories from the conversation (LLM-powered).
+  // Only run if enough messages to be meaningful, AND gate it: this is an
+  // LLM call that previously fired on every saveSessionToMemory (unload,
+  // blur, route change…), so identical or near-back-to-back invocations
+  // would silently rack up token spend. shouldRunMemoryExtraction dedups by
+  // content hash and enforces a per-(circle,user) cooldown.
+  if (history.length >= 4 && shouldRunMemoryExtraction(circleId, userId, history)) {
     try {
       const { autoExtractAndSave } = await import('./agentMemory');
       await autoExtractAndSave(circleId, userId, history);
+      markMemoryExtractionRun(circleId, userId, history);
     } catch {}
   }
 
@@ -435,7 +501,11 @@ export async function getLastSessionContext(circleId: string, userId?: string): 
       parts.push(`## Persistent Knowledge\n${lines.join('\n')}`);
     }
 
-    return parts.length > 0 ? parts.join('\n\n') : '';
+    if (parts.length === 0) return '';
+    // Session summaries, bridge context, and durable memories are all
+    // member/agent/model-authored — untrusted (rule 5). Fence the whole
+    // block so embedded directives read as data, not instructions.
+    return `<untrusted_quoted>\n${parts.join('\n\n')}\n</untrusted_quoted>`;
   } catch {
     return '';
   }
@@ -469,13 +539,13 @@ export async function resetAgentMind(circleId: string): Promise<{ cleared: numbe
 
   // Clear user-scope memories for this circle
   try {
-    const { data: userData } = await supabase.auth.getUser().catch(() => ({ data: null as any }));
-    if (userData?.user) {
+    const { value: authedUser } = await safeGetUser();
+    if (authedUser) {
       const { data } = await supabase
         .from('memory_entries')
         .delete()
         .eq('circle_id', circleId)
-        .eq('user_id', userData.user.id)
+        .eq('user_id', authedUser.id)
         .eq('scope', 'user')
         .select('id');
       cleared += data?.length || 0;
@@ -664,23 +734,45 @@ type V2Response =
       response?: string;
     };
 
-async function invokeSwanbotV2(
+// One invoke attempt, classified for retry. Returns a discriminated
+// outcome so `invokeSwanbotV2` can retry transient failures (S4): a 429 /
+// 5xx / network blip on a CONTINUATION call would otherwise discard the
+// whole in-flight turn (server work + already-executed client tools).
+async function invokeSwanbotV2Once(
   accessToken: string,
   body: Record<string, unknown>,
-): Promise<V2Response | null> {
+): Promise<RetryAttemptResult<V2Response>> {
   const { data, error } = await supabase.functions.invoke('swanbot-v2-ai', {
     headers: { Authorization: `Bearer ${accessToken}` },
     body,
   });
   if (error) {
-    console.warn('[SwanBot/v2] invoke error:', error?.message || String(error));
-    return null;
+    const retryable = isRetryableInvokeError(error);
+    console.warn(
+      `[SwanBot/v2] invoke error${retryable ? ' (retryable)' : ''}:`,
+      (error as any)?.message || String(error),
+    );
+    return { ok: false, retryable };
   }
   if (data?.error) {
+    // The function ran and chose to error — retrying won't change the result.
     console.warn('[SwanBot/v2] edge returned error:', data.error);
-    return null;
+    return { ok: false, retryable: false };
   }
-  return (data || null) as V2Response | null;
+  if (!data) return { ok: false, retryable: false };
+  return { ok: true, value: data as V2Response };
+}
+
+async function invokeSwanbotV2(
+  accessToken: string,
+  body: Record<string, unknown>,
+): Promise<V2Response | null> {
+  return runWithTransientRetry((_tryIndex) => invokeSwanbotV2Once(accessToken, body), {
+    maxRetries: 2,
+    baseDelayMs: 400,
+    onRetry: ({ attempt, delayMs }) =>
+      console.warn(`[SwanBot/v2] transient invoke failure — retry ${attempt} in ${delayMs}ms`),
+  });
 }
 
 // Dispatch client-delegated tool calls against the local bridge. Every
@@ -1430,31 +1522,38 @@ async function callSwanBotAI(
     if (!accessToken) {
       return null;
     }
-    const { data, error } = await supabase.functions.invoke('swanbot-ai', {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      body: {
-        message,
-        circleId,
-        userId,
-        discordContext,
-        wikiContext,
-        conversationMessages,
-        model: model || undefined,
-        maxTokens,
-        thinkingLevel,
-        // High-priority behavior directive prepended to the frozen system
-        // prompt on the server. Used by the conversational build
-        // orchestrator to enforce the ask-questions-first protocol.
-        ...(systemDirective ? { systemDirective } : {}),
-      },
-    });
-    if (error) {
-      const message = error?.message || String(error);
-      if (!/401|non-2xx/i.test(message)) {
-        console.warn('[SwanBot] Edge function error:', message);
+    // R5: v1 is still the primary tier, but before this it collapsed on any
+    // one-off 429/5xx/network blip. Reuse S4's bounded-backoff wrapper around
+    // the invoke only. An error BODY means the edge ran — terminal, no retry.
+    const data = await runWithTransientRetry<any>(async (): Promise<RetryAttemptResult<any>> => {
+      const { data: invokeData, error } = await supabase.functions.invoke('swanbot-ai', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        body: {
+          message,
+          circleId,
+          userId,
+          discordContext,
+          wikiContext,
+          conversationMessages,
+          model: model || undefined,
+          maxTokens,
+          thinkingLevel,
+          // High-priority behavior directive prepended to the frozen system
+          // prompt on the server. Used by the conversational build
+          // orchestrator to enforce the ask-questions-first protocol.
+          ...(systemDirective ? { systemDirective } : {}),
+        },
+      });
+      if (error) {
+        const message = error?.message || String(error);
+        if (!/401|non-2xx/i.test(message)) {
+          console.warn('[SwanBot] Edge function error:', message);
+        }
+        return { ok: false, retryable: isRetryableInvokeError(error) };
       }
-      return null;
-    }
+      return { ok: true, value: invokeData };
+    });
+    if (data == null) return null;
     if (data?.error) {
       console.warn('[SwanBot] Edge function returned error:', data.error);
       return null;
@@ -1518,100 +1617,9 @@ async function callSwanBotAIStructured(
   }
 }
 
-// ─── Gemini Fallback ─────────────────────────────────────────────────────────
-
-const GEMINI_API_KEY = process.env.EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS === 'true'
-  ? process.env.EXPO_PUBLIC_GEMINI_API_KEY || ''
-  : '';
-const GEMINI_MODEL = 'gemini-2.5-flash';
-
-async function callGemini(
-  message: string,
-  context: SwanBotContext,
-  circleData: CircleContextData
-): Promise<string | null> {
-  if (shouldBlockExternalAiProvider('gemini')) return null;
-  try {
-    // Try DB-driven prompt first (Langfuse-style), fall back to hard-coded
-    let systemPrompt: string;
-    try {
-      const { getPrompt } = await import('./promptManager');
-      const name = context.userName || 'fam';
-      const streakInfo = circleData.userProfile
-        ? `${name}'s current streak: ${circleData.userProfile.current_streak || 0} days (longest: ${circleData.userProfile.longest_streak || 0})`
-        : '';
-      const memberList = circleData.members.length > 0
-        ? `Circle members: ${circleData.members.map((m: any) => `${m.display_name || m.username} (${m.current_streak || 0}-day streak)`).join(', ')}`
-        : '';
-      const checkInInfo = circleData.todayCheckIns.length > 0
-        ? `Checked in today: ${circleData.todayCheckIns.map((c: any) => c.user?.display_name || c.user?.username).join(', ')} (${circleData.todayCheckIns.length}/${circleData.members.length})`
-        : `Nobody has checked in yet today (0/${circleData.members.length})`;
-      const taskInfo = circleData.stats
-        ? `Tasks - Open: ${circleData.stats.openTasks}, In Progress: ${circleData.stats.inProgress}, Done: ${circleData.stats.done}`
-        : '';
-      const dbPrompt = await getPrompt('blackswan-system', 'production', {
-        userName: name, streakInfo, memberList, checkInInfo, taskInfo,
-        discordContext: context.discordContext || '',
-      }, context.circleId);
-      systemPrompt = dbPrompt?.content || await buildSystemPromptAsync(context, circleData, message);
-    } catch {
-      systemPrompt = await buildSystemPromptAsync(context, circleData, message);
-    }
-    const history = context.circleId ? getHistory(context.circleId) : [];
-
-    const contents: any[] = [];
-
-    // Add conversation history
-    for (const msg of history.slice(-10)) {
-      contents.push({
-        role: msg.role === 'user' ? 'user' : 'model',
-        parts: [{ text: msg.text }],
-      });
-    }
-
-    // Add current message
-    contents.push({
-      role: 'user',
-      parts: [{ text: message }],
-    });
-
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemPrompt }] },
-          contents,
-          generationConfig: {
-            temperature: 0.8,
-            topP: 0.95,
-            maxOutputTokens: 8192,
-            thinkingConfig: { thinkingBudget: 8192 },
-          },
-          safetySettings: [
-            { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-            { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
-            { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-          ],
-        }),
-      }
-    );
-
-    if (!response.ok) {
-      console.warn('Gemini API error:', response.status);
-      return null;
-    }
-
-    const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    return text || null;
-  } catch (err) {
-    console.warn('Gemini fallback failed:', err);
-    return null;
-  }
-}
+// Tier 3 (Gemini fallback) routes through `callLlmProxy('google_ai', …)` for
+// central pricing/cache/telemetry (Rule #11, S3). The old direct platform-key
+// `callGemini` REST path was deleted 2026-06-10 (R3) — do not re-add it.
 
 async function buildSystemPromptAsync(
   context: SwanBotContext,
@@ -1851,7 +1859,9 @@ async function buildSystemPromptAsync(
         const missions = await getMissions(context.circleId);
         const activeMissions = missions.filter(m => m.status === 'active');
         if (activeMissions.length > 0) {
-          const missionLines: string[] = ['## Active Missions'];
+          // Mission/task titles are member-authored — untrusted (rule 5).
+          // Fence the data lines; our guidance line stays outside the fence.
+          const missionLines: string[] = [];
           for (const m of activeMissions.slice(0, 5)) {
             const tasks = await getMissionTasks(m.id);
             const progress = missionProgress(tasks);
@@ -1864,9 +1874,14 @@ async function buildSystemPromptAsync(
               missionLines.push(`  Blocked: ${blocked.map(t => t.title).join(', ')}`);
             }
           }
-          missionLines.push('');
-          missionLines.push('When users ask about missions or progress, reference this data. Nudge on overdue missions. Celebrate completed ones.');
-          extras.push(missionLines.join('\n'));
+          extras.push([
+            '## Active Missions',
+            '<untrusted_quoted>',
+            missionLines.join('\n'),
+            '</untrusted_quoted>',
+            '',
+            'When users ask about missions or progress, reference this data. Nudge on overdue missions. Celebrate completed ones.',
+          ].join('\n'));
         }
       }
     } catch (e) { console.warn('[SwanBot] Mission loading failed:', e); }
@@ -2537,20 +2552,39 @@ export async function getSwanBotResponse(
   // selected. BYOK `google_ai/...` models are handled by llm-proxy above; if
   // that path fails, do not spend a platform Gemini key as a surprise fallback.
   if (isLegacyDirectGeminiModel(enrichedContext.model)) {
+    // S3: route through llm-proxy (provider `google_ai`, BYOK) so the Gemini
+    // fallback shares central pricing, cache accounting, and telemetry
+    // (Rule #11) instead of a direct platform-key call to the Gemini REST
+    // API. This also honors the documented intent of not spending a surprise
+    // platform key — if no `google_ai` key is configured, llm-proxy returns
+    // nothing and we surface that as an actionable blocker.
     try {
-      if (shouldBlockExternalAiProvider('gemini')) {
-        throw new Error(getStrictLocalAiModeMessage('gemini'));
+      if (shouldBlockExternalAiProvider('google_ai')) {
+        throw new Error(getStrictLocalAiModeMessage('google_ai'));
       }
-      console.log('[SwanBot] Tier 3: Trying Gemini fallback...');
+      console.log('[SwanBot] Tier 3: Trying Gemini via llm-proxy (google_ai)...');
       const circleData = await getCircleContextData(enrichedContext);
-      const geminiResponse = await callGemini(cleaned, enrichedContext, circleData);
+      const systemPrompt = await buildSystemPromptAsync(enrichedContext, circleData, cleaned);
+      const history = enrichedContext.circleId ? getHistory(enrichedContext.circleId) : [];
+      const proxyMessages = [
+        { role: 'system' as const, content: systemPrompt },
+        ...history.slice(-10).map(h => ({
+          role: (h.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+          content: h.text,
+        })),
+        { role: 'user' as const, content: cleaned },
+      ];
+      // Normalize the picked legacy id (e.g. `gemini-pro`, `gemini-1.5-flash`)
+      // to a current google_ai model via the shared, tested alias resolver.
+      const geminiModel = findAliasKey(enrichedContext.model || '') || 'gemini-2.5-flash';
+      const geminiResponse = await callLlmProxy('google_ai', geminiModel, proxyMessages, enrichedContext.circleId);
       if (geminiResponse) {
-        console.log('[SwanBot] Tier 3: Got response from Gemini');
+        console.log('[SwanBot] Tier 3: Got response from Gemini via llm-proxy');
         if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', geminiResponse);
         return geminiResponse;
       }
-      console.warn('[SwanBot] Tier 3: Gemini returned null');
-      lastFailureReason = 'the Gemini fallback returned nothing';
+      console.warn('[SwanBot] Tier 3: Gemini via llm-proxy returned null');
+      lastFailureReason = 'the Gemini fallback returned nothing — add a Google AI (google_ai) provider key in Marketplace';
     } catch (err) {
       console.warn('[SwanBot] Tier 3: Gemini error:', err);
       lastFailureReason = `the Gemini fallback errored: ${err instanceof Error ? err.message : String(err)}`;

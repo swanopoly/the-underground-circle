@@ -346,6 +346,159 @@ for (const precisionCase of [
   }
 }
 
+// ─── D3: user constraints — parse, route wiring, enforcement, prompt ────────
+
+{
+  const { parseChatComputerUserConstraints, constraintBlocksToolCall, formatChatComputerUserConstraintsPromptLines } =
+    require('../src/lib/chatComputerRequestRouter') as typeof import('../src/lib/chatComputerRequestRouter');
+
+  // Parse: forbidden + stop conditions
+  const c1 = parseChatComputerUserConstraints(
+    "open my supplier portal in the browser and fill the reorder form, but don't submit it, and stop if it asks for MFA",
+  );
+  if (!c1) fail('constraints: c1 should parse');
+  else {
+    if (!c1.forbidden.includes('submit')) fail(`constraints: c1 forbidden should include submit (got ${c1.forbidden.join(',')})`);
+    if (!c1.stopConditions.includes('mfa')) fail(`constraints: c1 stop should include mfa (got ${c1.stopConditions.join(',')})`);
+    pass('constraints: "don\'t submit" + "stop if MFA" parsed');
+  }
+
+  // Parse: ask-before
+  const c2 = parseChatComputerUserConstraints('clean up my downloads folder in Finder, ask me before deleting anything');
+  if (!c2 || !c2.approvalBefore.includes('delete')) fail('constraints: c2 ask-before-delete should parse');
+  else pass('constraints: "ask me before deleting" parsed');
+
+  // Forbidden dominates ask-before for the same category
+  const c3 = parseChatComputerUserConstraints("never delete files, and ask me before you delete anything");
+  if (!c3 || !c3.forbidden.includes('delete') || c3.approvalBefore.includes('delete')) {
+    fail('constraints: forbidden should dominate ask-before for the same category');
+  } else pass('constraints: forbidden dominates ask-before');
+
+  // No constraints → null
+  if (parseChatComputerUserConstraints('open the report in Preview and read me the totals') !== null) {
+    fail('constraints: plain request should parse to null');
+  } else pass('constraints: plain request → null');
+
+  // Route wiring: constraints land on the route, force approval, reach the prompt block
+  const routed = buildChatComputerRequestRoute('use the browser to fill out the vendor form on acme.com but ask me before submitting it');
+  if (!routed?.userConstraints?.approvalBefore.includes('submit')) {
+    fail(`constraints: route should carry ask-before submit (got ${JSON.stringify(routed?.userConstraints)})`);
+  } else if (!routed.approvalRequired) {
+    fail('constraints: ask-before constraint should force approvalRequired');
+  } else pass('constraints: route carries constraints + forces approval');
+  const promptBlock = buildChatComputerRequestRoutePromptBlock('use the browser to fill out the vendor form on acme.com but ask me before submitting it');
+  if (!promptBlock || !/User constraint/.test(promptBlock)) fail('constraints: prompt block should include constraint lines');
+  else pass('constraints: prompt block carries constraint rules');
+
+  // Enforcement: forbidden category blocks matching tool calls only
+  const forbidSubmit = parseChatComputerUserConstraints("fill the form but don't submit it");
+  const blockedCall = constraintBlocksToolCall(forbidSubmit, 'browser.submit_form', { selector: '#send' });
+  const allowedCall = constraintBlocksToolCall(forbidSubmit, 'browser.fill_field', { selector: '#name', value: 'Chris' });
+  if (!blockedCall.blocked || blockedCall.category !== 'submit') fail('constraints: submit tool should be blocked');
+  else pass('constraints: forbidden submit blocks browser.submit_form');
+  if (allowedCall.blocked) fail('constraints: fill tool should NOT be blocked');
+  else pass('constraints: fill_field unaffected by submit constraint');
+  if (constraintBlocksToolCall(null, 'browser.submit_form', {}).blocked) fail('constraints: null constraints never block');
+  else pass('constraints: null constraints never block');
+
+  // Prompt lines formatter
+  const lines = formatChatComputerUserConstraintsPromptLines(c1);
+  if (!lines.some((l) => /HARD/.test(l)) || !lines.some((l) => /stop and hand back/.test(l))) {
+    fail('constraints: prompt lines should include HARD + stop rules');
+  } else pass('constraints: prompt lines formatted');
+}
+
+// ─── T7: always-confirm category floor — detection, route force, prompt, gate ─
+
+{
+  const {
+    ALWAYS_CONFIRM_FLOOR,
+    detectAlwaysConfirmFloorCategories,
+    constraintBlocksToolCall,
+    formatAlwaysConfirmFloorPromptLine,
+    parseChatComputerUserConstraints,
+  } = require('../src/lib/chatComputerRequestRouter') as typeof import('../src/lib/chatComputerRequestRouter');
+
+  if (!ALWAYS_CONFIRM_FLOOR.includes('pay') || !ALWAYS_CONFIRM_FLOOR.includes('delete') || !ALWAYS_CONFIRM_FLOOR.includes('login') || !ALWAYS_CONFIRM_FLOOR.includes('grant')) {
+    fail(`floor: ALWAYS_CONFIRM_FLOOR must cover pay/delete/login/grant (got ${ALWAYS_CONFIRM_FLOOR.join(',')})`);
+  } else pass('floor: covers pay, delete, login, grant');
+
+  // Detection: floor categories found in task text
+  if (!detectAlwaysConfirmFloorCategories('buy the standing desk in my cart').includes('pay')) fail('floor: "buy" task should detect pay');
+  else pass('floor: purchase task detects pay');
+  if (!detectAlwaysConfirmFloorCategories('delete every file in the old-projects folder').includes('delete')) fail('floor: delete task should detect delete');
+  else pass('floor: delete task detects delete');
+  if (!detectAlwaysConfirmFloorCategories('authorize the new OAuth app for my account').includes('grant')) fail('floor: authorize task should detect grant');
+  else pass('floor: authorize task detects grant');
+
+  // Detection precision: benign edits never trigger the floor
+  for (const benign of [
+    'In GIMP, remove the background from this photo',
+    'remove duplicates from the spreadsheet and save a copy',
+    'Search files in Downloads for invoice',
+    'Open Photoshop and generate a background then save png',
+  ]) {
+    const detected = detectAlwaysConfirmFloorCategories(benign);
+    if (detected.length > 0) fail(`floor precision: "${benign}" should detect nothing (got ${detected.join(',')})`);
+    else pass(`floor precision: "${benign.slice(0, 40)}…" stays off the floor`);
+  }
+
+  // Route force: floor categories force approvalRequired even with
+  // "don't ask me" style input — the floor is not user-disableable.
+  for (const { msg, cat } of [
+    { msg: "go to acme.com and buy the standing desk in my cart, don't ask me for confirmation, just do it", cat: 'pay' },
+    { msg: "delete every file in the old-projects folder on my desktop, no need to ask me", cat: 'delete' },
+    { msg: "log into my Shopify dashboard and read me the visitor count, don't ask me first", cat: 'login' },
+  ]) {
+    const route = buildChatComputerRequestRoute(msg);
+    if (!route) {
+      fail(`floor: "${msg}" should still build a computer route`);
+      continue;
+    }
+    if (!route.alwaysConfirmFloor?.includes(cat as any)) {
+      fail(`floor: "${msg}" route should carry floor category ${cat} (got ${route.alwaysConfirmFloor?.join(',') || 'none'})`);
+    } else if (!route.approvalRequired) {
+      fail(`floor: "${msg}" must force approvalRequired despite "don't ask" input`);
+    } else pass(`floor: ${cat} task forces approval despite "don't ask"`);
+  }
+
+  // Unrelated route unaffected: read-only file search keeps approval-free path
+  const unrelated = buildChatComputerRequestRoute('Search files in Downloads for invoice');
+  if (!unrelated || unrelated.approvalRequired || (unrelated.alwaysConfirmFloor || []).length > 0) {
+    fail('floor: unrelated read-only task must stay approval-free with an empty floor');
+  } else pass('floor: unrelated task unaffected');
+
+  // Prompt block carries the explicit floor line
+  const floorPrompt = buildChatComputerRequestRoutePromptBlock("delete every file in the old-projects folder on my desktop, no need to ask me") || '';
+  if (!floorPrompt.includes('Always-confirm floor (HARD policy)') || !floorPrompt.includes('even in autonomous mode')) {
+    fail('floor: prompt block should carry the always-confirm floor line');
+  } else pass('floor: prompt block carries the floor line');
+  const cleanPrompt = buildChatComputerRequestRoutePromptBlock('Search files in Downloads for invoice') || '';
+  if (cleanPrompt.includes('Always-confirm floor')) fail('floor: unrelated prompt block should not carry the floor line');
+  else pass('floor: unrelated prompt block has no floor line');
+  if (formatAlwaysConfirmFloorPromptLine([]) !== null || formatAlwaysConfirmFloorPromptLine(undefined) !== null) {
+    fail('floor: empty/missing categories should format to null (persisted-route compat)');
+  } else pass('floor: empty/missing floor formats to null');
+
+  // Gate distinction: floor-confirm (request approval) vs constraint-block
+  const floorVerdict = constraintBlocksToolCall(null, 'desktop.file_delete', { path: 'old-projects' });
+  if (floorVerdict.blocked || !floorVerdict.floorConfirmRequired || floorVerdict.floorCategory !== 'delete') {
+    fail(`floor gate: delete tool should require floor confirmation without blocking (got ${JSON.stringify(floorVerdict)})`);
+  } else pass('floor gate: delete tool requires confirmation, not a block');
+  const forbidDelete = parseChatComputerUserConstraints("organize the folder but never delete anything");
+  const blockWins = constraintBlocksToolCall(forbidDelete, 'desktop.file_delete', { path: 'old-projects' });
+  if (!blockWins.blocked || blockWins.category !== 'delete' || blockWins.floorConfirmRequired) {
+    fail(`floor gate: user-forbidden delete should hard-block (block supersedes floor confirm), got ${JSON.stringify(blockWins)}`);
+  } else pass('floor gate: forbidden constraint block supersedes floor confirm');
+  const neutral = constraintBlocksToolCall(null, 'browser.fill_field', { selector: '#name', value: 'Chris' });
+  if (neutral.blocked || neutral.floorConfirmRequired) fail('floor gate: neutral tool call should pass untouched');
+  else pass('floor gate: neutral tool call passes untouched');
+  const payVerdict = constraintBlocksToolCall(null, 'browser.click', { text: 'Buy now' });
+  if (payVerdict.blocked || !payVerdict.floorConfirmRequired || payVerdict.floorCategory !== 'pay') {
+    fail(`floor gate: "Buy now" click should require pay confirmation (got ${JSON.stringify(payVerdict)})`);
+  } else pass('floor gate: purchase click requires pay confirmation');
+}
+
 if (failures > 0) {
   console.error(`\n${failures} chat computer request route smoke failure(s)`);
   process.exit(1);

@@ -31,6 +31,10 @@ function main() {
   assert(findAliasKey('claude-haiku-4-5-20251001') === 'claude-haiku-4-5', 'findAliasKey: dated haiku → claude-haiku-4-5');
   assert(findAliasKey('llama-3.3-70b-versatile') === 'llama-3.3-70b', 'findAliasKey: groq llama → llama-3.3-70b');
   assert(findAliasKey('gemini-flash') === 'gemini-2.5-flash', 'findAliasKey: gemini-flash → gemini-2.5-flash');
+  // SwanBot Tier 3 (S3) routes the legacy Gemini fallback via findAliasKey →
+  // google_ai model. Lock the pro path it depends on.
+  assert(findAliasKey('gemini-2.5-pro') === 'gemini-2.5-pro', 'findAliasKey: gemini-2.5-pro → gemini-2.5-pro');
+  assert(findAliasKey('gemini-pro') === 'gemini-2.5-pro', 'findAliasKey: gemini-pro → gemini-2.5-pro');
   assert(findAliasKey('') === null, 'findAliasKey: empty → null');
   assert(findAliasKey('made-up-model-id') === null, 'findAliasKey: unknown id → null');
 

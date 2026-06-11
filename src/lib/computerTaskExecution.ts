@@ -17,7 +17,9 @@ import {
 import { buildComputerTaskDispatchPrefix } from './computerTaskDispatch';
 import {
   buildComputerTaskComplexityPlan,
+  validateComputerTaskStageSurfaces,
   type ComputerTaskComplexityPlan,
+  type ComputerTaskStagePreflightBlocker,
 } from './computerTaskComplexityPlan';
 import { buildComputerTaskGrantPlan, type ComputerTaskGrantPlan } from './computerTaskGrants';
 import {
@@ -45,6 +47,9 @@ export interface ComputerTaskExecutionEnvelope {
   computerAppGroundingNextStep: ComputerAppGroundingNextStep | null;
   computerAppGroundingTrace: ComputerAppGroundingTrace | null;
   complexityPlan: ComputerTaskComplexityPlan;
+  /** Staged pre-flight blockers (D4) — surfaces a later stage needs that
+   *  are unavailable NOW, so the task fails at launch, not at step 9. */
+  stagePreflightBlockers: ComputerTaskStagePreflightBlocker[];
   businessModelPlan?: BusinessModelTaskPlan | null;
 }
 
@@ -102,6 +107,20 @@ export function prepareComputerTaskExecution(args: {
     task: args.task,
     preview,
   });
+  const stagePreflightBlockers = validateComputerTaskStageSurfaces(complexityPlan.stages, args.audit);
+  // A stage whose surface is unavailable makes the WHOLE task not ready —
+  // running earlier stages would do work the task cannot finish.
+  const stagedReadiness = stagePreflightBlockers.length > 0
+    ? {
+        ready: false,
+        missing: Array.from(new Set([
+          ...readiness.missing,
+          ...stagePreflightBlockers.flatMap((blocker) => blocker.missing),
+        ])),
+        summary: stagePreflightBlockers[0].message
+          + (stagePreflightBlockers.length > 1 ? ` (+${stagePreflightBlockers.length - 1} more stage blocker(s))` : ''),
+      }
+    : readiness;
   const grants = buildComputerTaskGrantPlan({
     task: args.task,
     preview,
@@ -111,11 +130,11 @@ export function prepareComputerTaskExecution(args: {
 
   return {
     preview,
-    readiness,
+    readiness: stagedReadiness,
     dispatchPrefix: buildComputerTaskDispatchPrefix({
       task: args.task,
       preview,
-      readiness,
+      readiness: stagedReadiness,
       audit: args.audit,
       grants,
       preflight,
@@ -136,6 +155,7 @@ export function prepareComputerTaskExecution(args: {
     computerAppGroundingNextStep,
     computerAppGroundingTrace,
     complexityPlan,
+    stagePreflightBlockers,
     businessModelPlan: args.businessModelPlan,
   };
 }

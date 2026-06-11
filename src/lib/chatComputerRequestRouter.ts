@@ -44,6 +44,40 @@ export type ChatComputerRequestRouteKind =
   | 'hybrid'
   | 'agent_buildout';
 
+/**
+ * User-stated constraints parsed from the request (D3). These are hard
+ * guardrails the user expressed in natural language — "don't submit the
+ * form", "ask me before deleting anything", "stop if it needs MFA" — that
+ * previously were silently ignored. They are injected into the prompt as
+ * rules AND enforceable pre-dispatch via `constraintBlocksToolCall` (the
+ * R11 tool approval gate). Categories are small and verb-anchored on
+ * purpose: a missed constraint phrasing degrades to prompt-only guidance,
+ * never to a wrong block.
+ */
+export type ChatComputerConstraintCategory =
+  | 'submit'
+  | 'send'
+  | 'publish'
+  | 'pay'
+  | 'delete'
+  | 'download'
+  | 'upload'
+  | 'save'
+  | 'login'
+  /** Account/authorization grants — OAuth consent, "authorize", linking accounts (T7). */
+  | 'grant';
+
+export interface ChatComputerUserConstraints {
+  /** Action categories the user prohibited outright ("don't submit"). */
+  forbidden: ChatComputerConstraintCategory[];
+  /** Categories requiring a fresh per-step ask ("ask me before deleting"). */
+  approvalBefore: ChatComputerConstraintCategory[];
+  /** Conditions that must stop the task and hand back ("stop if MFA"). */
+  stopConditions: string[];
+  /** The user phrasings that produced the constraints, for display/audit. */
+  sourcePhrases: string[];
+}
+
 export interface ChatComputerRequestRoute {
   kind: ChatComputerRequestRouteKind;
   executionKind: 'run_computer_task';
@@ -65,6 +99,13 @@ export interface ChatComputerRequestRoute {
   recommendedTools: string[];
   completionProof: string[];
   evidenceContract?: ComputerTaskEvidenceContract | null;
+  userConstraints: ChatComputerUserConstraints | null;
+  /**
+   * T7: always-confirm floor categories detected in this task. When
+   * non-empty, `approvalRequired` is forced true and the prompt block carries
+   * the floor rule. Optional so routes persisted before T7 keep parsing.
+   */
+  alwaysConfirmFloor?: ChatComputerConstraintCategory[];
   notes: string[];
 }
 
@@ -131,6 +172,208 @@ function hasMutationIntent(message: string): boolean {
 
 function hasExplicitApprovalIntent(message: string): boolean {
   return /\b(after i approve|after approval|with approval|ask me before|once i approve|before you (?:send|submit|publish|save|export|delete|overwrite|run)|require approval)\b/i.test(message);
+}
+
+// ─── User constraints (D3) ──────────────────────────────────────────────────
+
+/**
+ * Verb anchors per constraint category. Used both for parsing the user's
+ * sentence and for matching tool calls at enforcement time. Word-boundary
+ * regexes — a category never matches on substrings ("resend" ≠ "send" is
+ * NOT guaranteed by \b, so the riskier verbs list their safe variants).
+ */
+const CONSTRAINT_CATEGORY_VERBS: Record<ChatComputerConstraintCategory, RegExp> = {
+  submit: /\b(submit|submitting)\b/i,
+  send: /\b(send|sending|email|emailing|message|messaging)\b/i,
+  publish: /\b(publish|publishing|post|posting|go live)\b/i,
+  pay: /\b(pay|paying|purchase|purchasing|buy|buying|checkout|charge|charging)\b/i,
+  delete: /\b(delete|deleting|remove|removing|erase|erasing|wipe|wiping|trash|trashing)\b/i,
+  download: /\b(download|downloading)\b/i,
+  upload: /\b(upload|uploading|attach|attaching)\b/i,
+  save: /\b(save|saving|overwrite|overwriting|export|exporting)\b/i,
+  login: /\b(log ?in(?:to)?|sign ?in(?:to)?|authenticate|enter (?:my )?(?:password|credentials))\b/i,
+  grant: /\b(authorize|authorizing|grant(?:ing)?\s+(?:access|permission|consent)|connect (?:my |the |your )?account|link (?:my |the |your )?account|oauth)\b/i,
+};
+
+const CONSTRAINT_CATEGORIES = Object.keys(CONSTRAINT_CATEGORY_VERBS) as ChatComputerConstraintCategory[];
+
+function categoriesInText(text: string): ChatComputerConstraintCategory[] {
+  return CONSTRAINT_CATEGORIES.filter((category) => CONSTRAINT_CATEGORY_VERBS[category].test(text));
+}
+
+/**
+ * Parse user-stated constraints from the request. Pure; returns null when
+ * nothing constraint-shaped is present so callers can skip the field
+ * cheaply. Patterns are deliberately conservative: each must name a
+ * prohibition/ask/stop AND a recognized action verb within a short window.
+ */
+export function parseChatComputerUserConstraints(message: string): ChatComputerUserConstraints | null {
+  const text = String(message || '');
+  if (!text.trim()) return null;
+
+  const forbidden = new Set<ChatComputerConstraintCategory>();
+  const approvalBefore = new Set<ChatComputerConstraintCategory>();
+  const stopConditions = new Set<string>();
+  const sourcePhrases = new Set<string>();
+
+  const capture = (re: RegExp, into: Set<ChatComputerConstraintCategory>) => {
+    for (const match of text.matchAll(re)) {
+      const phrase = match[0];
+      const cats = categoriesInText(phrase);
+      if (cats.length === 0) continue;
+      cats.forEach((c) => into.add(c));
+      sourcePhrases.add(phrase.trim());
+    }
+  };
+
+  // "don't submit", "do not send the email", "never delete", "without saving"
+  capture(/\b(?:don'?t|do not|never)\s+(?:\w+\s+){0,4}?\w+(?:\s+\w+){0,5}/gi, forbidden);
+  capture(/\bwithout\s+(?:\w+ing)(?:\s+\w+){0,4}/gi, forbidden);
+  // "ask (me) before deleting", "check with me before you publish",
+  // "get my approval before sending"
+  capture(/\b(?:ask(?: me)?|check with me|get my approval|confirm with me)\s+(?:first\s+)?before\s+(?:you\s+)?(?:\w+\s+){0,4}?\w+/gi, approvalBefore);
+
+  // "stop if you hit MFA", "stop if it asks for a captcha/login/password",
+  // "pause if anything looks wrong"
+  for (const match of text.matchAll(/\b(?:stop|pause|halt)\s+(?:and ask\s+)?if\s+(?:you\s+|it\s+|anything\s+)?(?:\w+\s+){0,5}?(mfa|2fa|two[- ]factor|captcha|log ?in|password|credentials?|error|looks wrong|unexpected)\b/gi)) {
+    stopConditions.add(match[1].toLowerCase().replace(/\s+/g, ' '));
+    sourcePhrases.add(match[0].trim());
+  }
+
+  // A category the user explicitly forbade dominates a per-step ask.
+  for (const c of forbidden) approvalBefore.delete(c);
+
+  if (forbidden.size === 0 && approvalBefore.size === 0 && stopConditions.size === 0) return null;
+  return {
+    forbidden: Array.from(forbidden),
+    approvalBefore: Array.from(approvalBefore),
+    stopConditions: Array.from(stopConditions),
+    sourcePhrases: Array.from(sourcePhrases).slice(0, 6),
+  };
+}
+
+// ─── Always-confirm category floor (T7) ─────────────────────────────────────
+
+/**
+ * Hard always-confirm category floor (T7). Tasks that involve these action
+ * categories ALWAYS require explicit user confirmation before the sensitive
+ * step — regardless of autonomy mode, sticky grants, constraint parsing, or
+ * user-stated "don't ask me" instructions. Pattern validated against Claude
+ * in Chrome's shipped permission model (TOOLTREE_DESKTOP_RESEARCH §2.6):
+ * purchases/financial transactions, permanent deletions, credential entry,
+ * and account/authorization grants are never auto-approved. The floor is
+ * policy, not preference: it is not user-disableable. A missed detection
+ * degrades to current behavior; a match adds an ask, never a hard block.
+ */
+export const ALWAYS_CONFIRM_FLOOR: readonly ChatComputerConstraintCategory[] = ['pay', 'delete', 'login', 'grant'];
+
+/**
+ * Verb anchors for detecting floor categories in raw task text and tool
+ * calls. Reuses the D3 category anchors except where they would over-trigger
+ * on full task prose: bare "remove"/"trash" (benign edits like "remove the
+ * background") do not count as permanent destruction — only
+ * delete/erase/wipe/permanently-remove do.
+ */
+const FLOOR_CATEGORY_VERBS: Partial<Record<ChatComputerConstraintCategory, RegExp>> = {
+  pay: CONSTRAINT_CATEGORY_VERBS.pay,
+  delete: /\b(delete|deleting|erase|erasing|wipe|wiping|permanently remove|remove permanently)\b/i,
+  login: CONSTRAINT_CATEGORY_VERBS.login,
+  grant: CONSTRAINT_CATEGORY_VERBS.grant,
+};
+
+/**
+ * Detect floor categories present in the task text. Pure and conservative
+ * (verb-anchored, same posture as D3): unrelated tasks return []. Used at
+ * route-build time to force `approvalRequired` and inject the floor prompt
+ * line.
+ */
+export function detectAlwaysConfirmFloorCategories(text: string): ChatComputerConstraintCategory[] {
+  const value = String(text || '');
+  if (!value.trim()) return [];
+  return ALWAYS_CONFIRM_FLOOR.filter((category) => FLOOR_CATEGORY_VERBS[category]?.test(value));
+}
+
+/** Compact prompt line for the floor — injected as a non-negotiable rule. */
+export function formatAlwaysConfirmFloorPromptLine(
+  categories: ChatComputerConstraintCategory[] | null | undefined,
+): string | null {
+  if (!categories || categories.length === 0) return null;
+  return `Always-confirm floor (HARD policy): ${categories.join(', ')} actions require explicit user confirmation even in autonomous mode — no autonomy setting, sticky grant, or user instruction ("don't ask me") disables this. Stop and ask before each such action.`;
+}
+
+/**
+ * Enforcement backstop for the pre-dispatch tool approval gate (R11).
+ * Returns a block verdict when a tool call clearly matches a FORBIDDEN
+ * category — matching on the tool name plus a bounded slice of its
+ * stringified input. Conservative by design: prompt rules are the primary
+ * defense; this only hard-stops unambiguous matches so a fuzzy match can
+ * never block legitimate work.
+ *
+ * T7: independently of user constraints (even when `constraints` is null),
+ * a call matching an ALWAYS_CONFIRM_FLOOR category returns
+ * `floorConfirmRequired: true` with `blocked: false` — the gate should
+ * request fresh user confirmation, not hard-block. A forbidden-constraint
+ * block takes precedence over a floor confirm for the same call.
+ */
+export interface ChatComputerToolCallConstraintVerdict {
+  blocked: boolean;
+  category?: ChatComputerConstraintCategory;
+  reason?: string;
+  /** T7 floor: request explicit user confirmation before dispatching this call. */
+  floorConfirmRequired?: boolean;
+  floorCategory?: ChatComputerConstraintCategory;
+}
+
+export function constraintBlocksToolCall(
+  constraints: ChatComputerUserConstraints | null | undefined,
+  toolName: string,
+  input: unknown,
+): ChatComputerToolCallConstraintVerdict {
+  // Tool names use ./_/- separators ("browser.submit_form") which are word
+  // chars to \b — normalize to spaces so verb anchors match name segments.
+  const name = String(toolName || '').replace(/[._-]+/g, ' ');
+  let inputSlice = '';
+  try { inputSlice = JSON.stringify(input ?? {}).slice(0, 600); } catch { inputSlice = ''; }
+  for (const category of constraints?.forbidden || []) {
+    const verbs = CONSTRAINT_CATEGORY_VERBS[category];
+    if (verbs.test(name) || verbs.test(inputSlice)) {
+      return {
+        blocked: true,
+        category,
+        reason: `The user forbade "${category}" actions for this task. Stop and report instead of performing it.`,
+      };
+    }
+  }
+  for (const category of ALWAYS_CONFIRM_FLOOR) {
+    const verbs = FLOOR_CATEGORY_VERBS[category];
+    if (verbs && (verbs.test(name) || verbs.test(inputSlice))) {
+      return {
+        blocked: false,
+        floorConfirmRequired: true,
+        floorCategory: category,
+        reason: `Always-confirm floor: "${category}" actions require explicit user confirmation before this call runs, in every autonomy mode.`,
+      };
+    }
+  }
+  return { blocked: false };
+}
+
+/** Compact prompt lines for the constraints — injected as hard rules. */
+export function formatChatComputerUserConstraintsPromptLines(
+  constraints: ChatComputerUserConstraints | null | undefined,
+): string[] {
+  if (!constraints) return [];
+  const lines: string[] = [];
+  if (constraints.forbidden.length) {
+    lines.push(`User constraint (HARD): never perform ${constraints.forbidden.join(', ')} actions in this task — stop and report instead.`);
+  }
+  if (constraints.approvalBefore.length) {
+    lines.push(`User constraint: ask the user before any ${constraints.approvalBefore.join(', ')} action, even if the route is otherwise approved.`);
+  }
+  if (constraints.stopConditions.length) {
+    lines.push(`User constraint: stop and hand back to the user if the task hits: ${constraints.stopConditions.join(', ')}.`);
+  }
+  return lines;
 }
 
 function isPureCreativeGeneration(message: string): boolean {
@@ -301,9 +544,26 @@ function buildApproval(input: {
   risk: UserTaskPipelineRisk;
   kind: ChatComputerRequestRouteKind;
   strategy: ComputerAppTaskStrategy | null;
+  userConstraints?: ChatComputerUserConstraints | null;
+  alwaysConfirmFloor?: ChatComputerConstraintCategory[];
 }): { required: boolean; reason: string | null } {
   if (input.risk === 'destructive') {
     return { required: true, reason: 'The request includes destructive computer/app actions.' };
+  }
+  // T7 floor: checked before every downgrade path (low-risk exports,
+  // read-only routing, autonomy) so nothing below can return required=false
+  // for a pay/delete/login/grant task. Not user-disableable by design.
+  if (input.alwaysConfirmFloor?.length) {
+    return {
+      required: true,
+      reason: `Always-confirm policy: ${input.alwaysConfirmFloor.join(', ')} actions need explicit user confirmation in every mode.`,
+    };
+  }
+  if (input.userConstraints?.approvalBefore.length) {
+    return {
+      required: true,
+      reason: `The user asked to be checked with before: ${input.userConstraints.approvalBefore.join(', ')}.`,
+    };
   }
   if (input.risk === 'external_side_effect') {
     return { required: true, reason: 'The selected computer/browser path can affect external systems or user files.' };
@@ -406,7 +666,9 @@ export function buildChatComputerRequestRoute(
   const appAutomationRouteDecision = kind === 'local_file' || kind === 'agent_buildout' || strategy?.id === 'agent_asset_acquisition'
     ? null
     : buildAppAutomationRouteDecision(normalized);
-  const approval = buildApproval({ message: normalized, risk, kind, strategy });
+  const userConstraints = parseChatComputerUserConstraints(normalized);
+  const alwaysConfirmFloor = detectAlwaysConfirmFloorCategories(normalized);
+  const approval = buildApproval({ message: normalized, risk, kind, strategy, userConstraints, alwaysConfirmFloor });
   const recommendedTools = uniqueStrings([
     ...(strategy?.recommendedTools || []),
     ...(designPipeline?.requiredToolSequence || []),
@@ -428,6 +690,10 @@ export function buildChatComputerRequestRoute(
   const notes = uniqueStrings([
     `Computer request route: ${bestPath}.`,
     `Preview kind: ${preview.kind}.`,
+    userConstraints
+      ? `User constraints: forbidden=${userConstraints.forbidden.join(',') || 'none'}; ask-before=${userConstraints.approvalBefore.join(',') || 'none'}; stop-on=${userConstraints.stopConditions.join(',') || 'none'}.`
+      : null,
+    alwaysConfirmFloor.length ? `Always-confirm floor: ${alwaysConfirmFloor.join(', ')} (not user-disableable).` : null,
     strategy ? `Strategy: ${strategy.label} (${strategy.id}).` : null,
     appAutomationRouteDecision ? `App route decision: ${appAutomationRouteDecision.status} via ${appAutomationRouteDecision.chosenSurface.label} for ${appAutomationRouteDecision.taskFamily}.` : null,
     designPipeline ? `Design execution phases: ${designPipeline.phases.map((phase) => phase.id).join(' -> ')}.` : null,
@@ -460,6 +726,8 @@ export function buildChatComputerRequestRoute(
     recommendedTools,
     completionProof,
     evidenceContract: null,
+    userConstraints,
+    alwaysConfirmFloor,
     notes,
   };
   route.evidenceContract = buildComputerTaskEvidenceContract(route);
@@ -480,6 +748,8 @@ export function buildChatComputerRequestRoutePromptBlock(message: string): strin
     `Risk: ${route.risk}; approval=${route.approvalRequired ? route.approvalReason || 'required' : 'not required before read-only execution'}`,
     route.selectedPipeline ? `Selected pipeline: ${route.selectedPipeline.title} (${route.selectedPipeline.id})` : null,
     route.appStrategy ? `App/browser strategy: ${route.appStrategy.label} (${route.appStrategy.id})` : null,
+    ...formatChatComputerUserConstraintsPromptLines(route.userConstraints),
+    formatAlwaysConfirmFloorPromptLine(route.alwaysConfirmFloor),
     formatChatComputerTaskAutonomyPromptBlock(route),
     route.appAutomationRouteDecision ? formatAppAutomationRouteDecisionPromptBlock(route.appAutomationRouteDecision) : null,
     route.designExecutionPipeline ? `Design pipeline phases: ${route.designExecutionPipeline.phases.map((phase) => phase.id).join(' -> ')}` : null,

@@ -194,6 +194,390 @@ assert(diagnoseComputerTaskCheckpointFailure({
   complexityPlan: simpleLaunch.complexityPlan,
 }) === null, 'simple task does not emit checkpoint recovery');
 
+// ─── D2: pending-question persistence model ─────────────────────────────────
+
+{
+  const {
+    compactComputerTaskPendingQuestions,
+    upsertComputerTaskPendingQuestion,
+    resolveComputerTaskPendingQuestion,
+    listOpenComputerTaskQuestions,
+  } = require('../src/lib/computerTaskStateModel') as typeof import('../src/lib/computerTaskStateModel');
+
+  const q = (id: string, status: 'pending' | 'answered' | 'expired' = 'pending') => ({
+    id,
+    question: `Question ${id}?`,
+    options: ['yes', 'no'],
+    context: null,
+    askedAt: '2026-06-10T12:00:00.000Z',
+    sessionId: 'sess-1',
+    runId: 'run-1',
+    status,
+    answer: null,
+    resolvedAt: null,
+  });
+
+  // Upsert adds, replaces by id, and bounds the list at 5.
+  let list = upsertComputerTaskPendingQuestion([], q('a'));
+  list = upsertComputerTaskPendingQuestion(list, q('b'));
+  list = upsertComputerTaskPendingQuestion(list, { ...q('a'), question: 'Updated A?' });
+  assert(list.length === 2, 'pendingQ: upsert replaces by id', String(list.length));
+  assert(list.find((item) => item.id === 'a')?.question === 'Updated A?', 'pendingQ: replacement wins');
+  for (const id of ['c', 'd', 'e', 'f', 'g']) list = upsertComputerTaskPendingQuestion(list, q(id));
+  assert(list.length === 5, 'pendingQ: list bounded at 5', String(list.length));
+
+  // Resolve marks answered; null answer marks expired; non-pending untouched.
+  const answered = resolveComputerTaskPendingQuestion([q('a')], 'a', 'yes', '2026-06-10T12:01:00.000Z');
+  assert(answered[0].status === 'answered' && answered[0].answer === 'yes', 'pendingQ: resolve answers');
+  const expired = resolveComputerTaskPendingQuestion([q('a')], 'a', null, '2026-06-10T12:01:00.000Z');
+  assert(expired[0].status === 'expired', 'pendingQ: null answer expires');
+  const untouched = resolveComputerTaskPendingQuestion([q('a', 'answered')], 'a', 'no', '2026-06-10T12:02:00.000Z');
+  assert(untouched[0].answer === null, 'pendingQ: resolved question is immutable');
+
+  // Open-question projection filters to pending only.
+  const open = listOpenComputerTaskQuestions({ pendingQuestions: [q('a'), q('b', 'answered'), q('c', 'expired')] });
+  assert(open.length === 1 && open[0].id === 'a', 'pendingQ: open list filters to pending');
+
+  // Compaction drops malformed entries and bounds strings.
+  const compacted = compactComputerTaskPendingQuestions([
+    { id: '', question: 'no id' },
+    { id: 'ok', question: 'x'.repeat(900), options: ['1', '2', '3', '4', '5', '6', '7', '8'] },
+  ] as any);
+  assert(compacted.length === 1, 'pendingQ: malformed entries dropped');
+  assert(compacted[0].question.length <= 500 && compacted[0].options.length <= 6, 'pendingQ: strings + options bounded');
+}
+
+// ─── D6: checklist card projection ──────────────────────────────────────────
+
+{
+  const {
+    buildComputerTaskChecklistCard,
+    formatComputerTaskChecklistCard,
+  } = require('../src/lib/computerTaskStateModel') as typeof import('../src/lib/computerTaskStateModel');
+
+  const record = {
+    id: 'task-1',
+    circleId: 'c1',
+    threadId: null,
+    task: 'Log into supplier portal and download invoices',
+    taskKind: 'browser_task',
+    taskLabel: 'Supplier invoice download',
+    phase: 'executing' as const,
+    currentStep: 'execute',
+    steps: [
+      { id: 'plan', label: 'Plan task', status: 'completed' as const },
+      { id: 'approval', label: 'Approve access', status: 'completed' as const },
+      { id: 'execute', label: 'Execute task', status: 'active' as const },
+      { id: 'summarize', label: 'Summarize result', status: 'pending' as const },
+    ],
+    blockers: [],
+    nextSteps: [],
+    grantedAccess: [],
+    accessPlan: null,
+    sessionId: 'sess-9',
+    liveUrl: 'https://www.browserbase.com/sessions/sess-9',
+    pendingQuestions: [{
+      id: 'q1',
+      question: 'The portal is asking for an MFA code — can you provide it?',
+      options: [],
+      context: 'Login step',
+      askedAt: '2026-06-10T12:00:00.000Z',
+      sessionId: 'sess-9',
+      runId: 'run-9',
+      status: 'pending' as const,
+      answer: null,
+      resolvedAt: null,
+    }],
+    updatedAt: '2026-06-10T12:00:30.000Z',
+  };
+
+  const card = buildComputerTaskChecklistCard(record);
+  assert(!!card, 'checklist: card built from record');
+  if (card) {
+    assert(card.active === true, 'checklist: executing task is active');
+    assert(card.resumable === true, 'checklist: session present → resumable');
+    assert(card.needsYou.length === 1 && card.needsYou[0].kind === 'question', 'checklist: open question becomes needs-you item');
+    assert(card.needsYou[0].questionId === 'q1', 'checklist: needs-you carries question id');
+    const text = formatComputerTaskChecklistCard(card);
+    assert(text.includes('Needs your answer'), 'checklist: formatter surfaces the question');
+    assert(text.includes('✓ Plan task') && text.includes('▸ Execute task'), 'checklist: step glyphs render');
+    assert(text.includes('Resumable session:'), 'checklist: resumable link rendered');
+  }
+
+  // Completed task: not active, answered questions don't nag, no resume line.
+  const doneCard = buildComputerTaskChecklistCard({
+    ...record,
+    phase: 'completed' as const,
+    pendingQuestions: [{ ...record.pendingQuestions[0], status: 'answered' as const, answer: '123456' }],
+  });
+  assert(!!doneCard && !doneCard.active, 'checklist: completed task inactive');
+  assert(doneCard!.needsYou.length === 0, 'checklist: answered question not in needs-you');
+  assert(!doneCard!.resumable, 'checklist: completed task not resumable');
+  assert(buildComputerTaskChecklistCard(null) === null, 'checklist: null record → null card');
+  assert(formatComputerTaskChecklistCard(null) === '', 'checklist: null card formats empty');
+
+  // Approval phase + blockers both become needs-you items, bounded.
+  const blockedCard = buildComputerTaskChecklistCard({
+    ...record,
+    phase: 'awaiting_approval' as const,
+    blockers: ['Desktop bridge offline'],
+    pendingQuestions: [],
+  });
+  assert(!!blockedCard, 'checklist: blocked card built');
+  if (blockedCard) {
+    const kinds = blockedCard.needsYou.map((n) => n.kind);
+    assert(kinds.includes('approval') && kinds.includes('blocker'), `checklist: approval + blocker surfaced (got ${kinds.join(',')})`);
+  }
+}
+
+// ─── D4: staged multi-surface plan ──────────────────────────────────────────
+
+{
+  const {
+    planComputerTaskStages,
+    buildComputerTaskComplexityPlan,
+    formatComputerTaskComplexityDispatchBlock,
+  } = require('../src/lib/computerTaskComplexityPlan') as typeof import('../src/lib/computerTaskComplexityPlan');
+  const { planComputerTaskPreview } = require('../src/lib/computerTaskPlanner') as typeof import('../src/lib/computerTaskPlanner');
+
+  // Canonical 3-surface task: browser → files → app.
+  const hybridTask = 'log into my supplier portal at portal.acme.com and download the latest invoices, then rename the files by date in my downloads folder, then import them into QuickBooks';
+  const stages = planComputerTaskStages(hybridTask);
+  assert(stages.length === 3, 'stages: 3-surface task yields 3 stages', String(stages.length));
+  if (stages.length === 3) {
+    assert(stages[0].surface === 'browser', 'stages: first is browser', stages[0].surface);
+    assert(stages[1].surface === 'local_files', 'stages: second is files', stages[1].surface);
+    assert(stages[2].surface === 'desktop_app', 'stages: third is app', stages[2].surface);
+    assert(stages[0].ordinal === 1 && stages[2].ordinal === 3, 'stages: ordinals sequential');
+    assert(stages[0].handoff.includes('artifacts'), 'stages: non-final stage has artifact handoff');
+    assert(stages[2].handoff.includes('final proof'), 'stages: final stage hands off to proof');
+  }
+
+  // Single-surface multi-step task → no stages (staging overhead not worth it).
+  const singleSurface = planComputerTaskStages('open amazon.com, search for standing desks, then compare the top 3 results and tell me the cheapest');
+  assert(singleSurface.length === 0, 'stages: single-surface task not staged', String(singleSurface.length));
+
+  // Short/plain tasks → no stages.
+  assert(planComputerTaskStages('open zoom').length === 0, 'stages: trivial task not staged');
+  assert(planComputerTaskStages('').length === 0, 'stages: empty task not staged');
+
+  // Staged tasks are complex by construction + dispatch block carries the contract.
+  const plan = buildComputerTaskComplexityPlan({ task: hybridTask, preview: planComputerTaskPreview(hybridTask) });
+  assert(plan.level === 'complex', 'stages: staged task is complex', plan.level);
+  assert(plan.stages.length === 3, 'stages: plan carries stages');
+  assert(plan.reasons.some((r) => /staged 3-surface/.test(r)), 'stages: reason recorded');
+  assert(plan.visibleNextSteps[0].startsWith('Stage 1:'), 'stages: visible steps show stages', plan.visibleNextSteps[0]);
+  const block = formatComputerTaskComplexityDispatchBlock(plan) || '';
+  assert(block.includes('Staged execution contract'), 'stages: dispatch block has stage contract');
+  assert(block.includes('Stage 1 [browser]'), 'stages: dispatch block names surfaces');
+  assert(block.includes('recovery resumes from the failed stage'), 'stages: dispatch block has resume rule');
+
+  // Compact persistence keeps stages bounded.
+  const { compactComputerTaskComplexityPlan } = require('../src/lib/computerTaskStateModel') as typeof import('../src/lib/computerTaskStateModel');
+  const compacted = compactComputerTaskComplexityPlan(plan);
+  assert(!!compacted?.stages && compacted.stages.length === 3, 'stages: compacted onto state');
+  assert((compacted!.stages![0].goal.length) <= 160, 'stages: compact goal bounded');
+
+  // Non-staged plan persists stages: null (not an empty array — keeps rows lean).
+  const plainPlan = buildComputerTaskComplexityPlan({
+    task: 'log into shopify admin and update the hero banner after I approve',
+    preview: planComputerTaskPreview('log into shopify admin and update the hero banner after I approve'),
+  });
+  const plainCompact = compactComputerTaskComplexityPlan(plainPlan);
+  assert(!plainCompact || plainCompact.stages === null || plainCompact.stages === undefined, 'stages: single-surface persists no stages');
+}
+
+// ─── D4b: stage-aware recovery ──────────────────────────────────────────────
+
+{
+  const { buildComputerTaskComplexityPlan } = require('../src/lib/computerTaskComplexityPlan') as typeof import('../src/lib/computerTaskComplexityPlan');
+  const { diagnoseComputerTaskCheckpointFailure, formatComputerTaskCheckpointRecoveryForPrompt } =
+    require('../src/lib/computerTaskCheckpointRecovery') as typeof import('../src/lib/computerTaskCheckpointRecovery');
+  const { planComputerTaskPreview } = require('../src/lib/computerTaskPlanner') as typeof import('../src/lib/computerTaskPlanner');
+
+  const stagedTask = 'log into my supplier portal at portal.acme.com and download the latest invoices, then rename the files by date in my downloads folder, then import them into QuickBooks';
+  const stagedPlan = buildComputerTaskComplexityPlan({ task: stagedTask, preview: planComputerTaskPreview(stagedTask) });
+
+  // File-stage failure → stage 2 named, stage 1 marked completed.
+  const fileFailure = diagnoseComputerTaskCheckpointFailure({
+    task: stagedTask,
+    failureMessage: 'Could not rename the files — path not found in the downloads folder.',
+    complexityPlan: stagedPlan,
+  });
+  assert(!!fileFailure, 'stage recovery: diagnosis produced');
+  if (fileFailure) {
+    assert(fileFailure.failedStageId === 'stage-2-local_files', 'stage recovery: file failure names stage 2', String(fileFailure.failedStageId));
+    assert((fileFailure.completedStageIds || []).includes('stage-1-browser'), 'stage recovery: stage 1 marked completed');
+    const prompt = formatComputerTaskCheckpointRecoveryForPrompt(fileFailure) || '';
+    assert(prompt.includes('failed stage: stage-2-local_files'), 'stage recovery: prompt names failed stage');
+    assert(prompt.includes('do NOT redo'), 'stage recovery: prompt protects completed stages');
+  }
+
+  // Browser-stage failure (first stage) → no completed stages.
+  const browserFailure = diagnoseComputerTaskCheckpointFailure({
+    task: stagedTask,
+    failureMessage: 'The portal login page showed a CAPTCHA and the browser session could not proceed.',
+    complexityPlan: stagedPlan,
+  });
+  if (browserFailure) {
+    assert(browserFailure.failedStageId === 'stage-1-browser', 'stage recovery: browser failure names stage 1', String(browserFailure.failedStageId));
+    assert((browserFailure.completedStageIds || []).length === 0, 'stage recovery: no completed stages before stage 1');
+  } else {
+    assert(false, 'stage recovery: browser diagnosis produced');
+  }
+
+  // Non-staged task → no stage fields in recovery.
+  const plainTask = 'log into shopify admin and update the hero banner after I approve';
+  const plainPlan = buildComputerTaskComplexityPlan({ task: plainTask, preview: planComputerTaskPreview(plainTask) });
+  const plainFailure = diagnoseComputerTaskCheckpointFailure({
+    task: plainTask,
+    failureMessage: 'Selector for the hero banner was not found.',
+    complexityPlan: plainPlan,
+  });
+  if (plainFailure) {
+    assert(!plainFailure.failedStageId, 'stage recovery: single-surface task has no failed stage');
+    const plainPrompt = formatComputerTaskCheckpointRecoveryForPrompt(plainFailure) || '';
+    assert(!plainPrompt.includes('failed stage:'), 'stage recovery: prompt omits stage lines for unstaged tasks');
+  }
+
+  // Compact persistence carries the stage fields.
+  const { compactComputerTaskCheckpointRecovery } = require('../src/lib/computerTaskStateModel') as typeof import('../src/lib/computerTaskStateModel');
+  if (fileFailure) {
+    const compactRecovery = compactComputerTaskCheckpointRecovery(fileFailure as any);
+    assert(compactRecovery?.failedStageId === 'stage-2-local_files', 'stage recovery: failedStageId persists');
+    assert((compactRecovery?.completedStageIds || []).includes('stage-1-browser'), 'stage recovery: completedStageIds persist');
+  }
+}
+
+// ─── Stage status on the checklist + D7 recipe draft ────────────────────────
+
+{
+  const {
+    buildComputerTaskChecklistCard,
+    formatComputerTaskChecklistCard,
+    buildComputerTaskRecipeDraft,
+  } = require('../src/lib/computerTaskStateModel') as typeof import('../src/lib/computerTaskStateModel');
+
+  const stagedRecord = {
+    id: 'task-2',
+    circleId: 'c1',
+    threadId: null,
+    task: 'log into the portal and download invoices, then rename the files, then import into QuickBooks',
+    taskKind: 'hybrid_task',
+    taskLabel: 'Invoice pipeline',
+    phase: 'blocked' as const,
+    currentStep: null,
+    steps: [],
+    blockers: [],
+    nextSteps: [],
+    grantedAccess: [],
+    accessPlan: null,
+    complexity: {
+      level: 'complex',
+      score: 6,
+      reasons: ['staged 3-surface workflow'],
+      checkpoints: [],
+      stages: [
+        { id: 'stage-1-browser', ordinal: 1, surface: 'browser', goal: 'download invoices from the portal' },
+        { id: 'stage-2-local_files', ordinal: 2, surface: 'local_files', goal: 'rename the files by date' },
+        { id: 'stage-3-desktop_app', ordinal: 3, surface: 'desktop_app', goal: 'import into QuickBooks' },
+      ],
+    },
+    checkpointRecovery: {
+      level: 'complex',
+      complexityScore: 6,
+      failedCheckpointId: 'resolve-files',
+      failedCheckpointLabel: 'Resolve local files',
+      surface: 'local_files',
+      requiresApproval: false,
+      confidence: 'high',
+      reason: 'path not found',
+      safeNextStep: 'resolve the path',
+      remainingCheckpointIds: [],
+      failedStageId: 'stage-2-local_files',
+      completedStageIds: ['stage-1-browser'],
+      retryPolicy: null,
+    },
+    updatedAt: '2026-06-10T13:00:00.000Z',
+  };
+
+  const card = buildComputerTaskChecklistCard(stagedRecord as any);
+  assert(!!card && card.stages.length === 3, 'stage status: card carries stages');
+  if (card) {
+    const byId = Object.fromEntries(card.stages.map((s) => [s.id, s.status]));
+    assert(byId['stage-1-browser'] === 'completed', 'stage status: completed stage marked', byId['stage-1-browser']);
+    assert(byId['stage-2-local_files'] === 'failed', 'stage status: failed stage marked', byId['stage-2-local_files']);
+    assert(byId['stage-3-desktop_app'] === 'pending', 'stage status: later stage pending', byId['stage-3-desktop_app']);
+    const text = formatComputerTaskChecklistCard(card);
+    assert(text.includes('✓ Stage 1') && text.includes('✕ Stage 2') && text.includes('○ Stage 3'), 'stage status: formatter glyphs');
+  }
+
+  // Completed task → all stages completed; recipe draft builds.
+  const doneRecord = { ...stagedRecord, phase: 'completed' as const, checkpointRecovery: null };
+  const doneCard = buildComputerTaskChecklistCard(doneRecord as any);
+  assert(!!doneCard && doneCard.stages.every((s) => s.status === 'completed'), 'stage status: completed task completes all stages');
+
+  const recipe = buildComputerTaskRecipeDraft(doneRecord as any);
+  assert(!!recipe, 'recipe: draft built from completed task');
+  if (recipe) {
+    assert(recipe.name === 'recipe-invoice-pipeline', 'recipe: kebab name', recipe.name);
+    assert(recipe.content.startsWith('---\nname: recipe-invoice-pipeline'), 'recipe: frontmatter present');
+    assert(recipe.content.includes('## Stages'), 'recipe: stages section present');
+    assert(recipe.content.includes('1. [browser] download invoices'), 'recipe: stage steps rendered');
+    assert(recipe.content.includes('Pause for approval'), 'recipe: safety rules included');
+    assert(recipe.tags.includes('recipe') && recipe.tags.includes('browser'), 'recipe: tags include surfaces');
+  }
+
+  // Failed/blocked tasks never produce recipes.
+  assert(buildComputerTaskRecipeDraft(stagedRecord as any) === null, 'recipe: blocked task → null');
+  assert(buildComputerTaskRecipeDraft(null) === null, 'recipe: null record → null');
+}
+
+// ─── Staged pre-flight validation ───────────────────────────────────────────
+
+{
+  const { prepareComputerTaskExecution } = require('../src/lib/computerTaskExecution') as typeof import('../src/lib/computerTaskExecution');
+  const { validateComputerTaskStageSurfaces, planComputerTaskStages } =
+    require('../src/lib/computerTaskComplexityPlan') as typeof import('../src/lib/computerTaskComplexityPlan');
+
+  const stagedTask = 'log into my supplier portal at portal.acme.com and download the latest invoices, then rename the files by date in my downloads folder, then import them into QuickBooks';
+  const stages = planComputerTaskStages(stagedTask);
+
+  // Desktop surface down → stage 3 blocked, named.
+  const blockers = validateComputerTaskStageSurfaces(stages, audit({ desktop_control: 'missing', app_tools: 'missing' }));
+  assert(blockers.length === 1, 'stage preflight: one blocker for down desktop', String(blockers.length));
+  if (blockers.length === 1) {
+    assert(blockers[0].stageId === 'stage-3-desktop_app', 'stage preflight: blocker names stage 3', blockers[0].stageId);
+    assert(/Stage 3 \[desktop app\] cannot run/.test(blockers[0].message), 'stage preflight: message actionable');
+  }
+
+  // Either desktop capability present → no blocker (desktop_control OR app_tools suffices).
+  assert(
+    validateComputerTaskStageSurfaces(stages, audit({ desktop_control: 'missing' })).length === 0,
+    'stage preflight: app_tools alone unblocks the app stage',
+  );
+
+  // Partial never blocks; all-ready never blocks; no audit → no blockers (preflight handles that case).
+  assert(validateComputerTaskStageSurfaces(stages, audit({ browser_automation: 'partial' })).length === 0, 'stage preflight: partial does not block');
+  assert(validateComputerTaskStageSurfaces(stages, audit()).length === 0, 'stage preflight: all-ready has no blockers');
+  assert(validateComputerTaskStageSurfaces(stages, null).length === 0, 'stage preflight: null audit defers to base readiness');
+
+  // Envelope wiring: a blocked stage makes the whole task not ready at launch.
+  const envelope = prepareComputerTaskExecution({
+    task: stagedTask,
+    audit: audit({ desktop_control: 'missing', app_tools: 'missing' }),
+    grantedIds: [],
+  });
+  assert(envelope.stagePreflightBlockers.length === 1, 'stage preflight: envelope carries blockers');
+  assert(envelope.readiness.ready === false, 'stage preflight: blocked stage fails readiness closed');
+  assert(/Stage 3/.test(envelope.readiness.summary), 'stage preflight: readiness summary names the stage', envelope.readiness.summary);
+  assert(envelope.readiness.missing.includes('desktop_control'), 'stage preflight: missing capabilities surfaced');
+
+  // Healthy audit → staged task ready, no blockers.
+  const healthy = prepareComputerTaskExecution({ task: stagedTask, audit: audit(), grantedIds: [] });
+  assert(healthy.stagePreflightBlockers.length === 0, 'stage preflight: healthy audit has no stage blockers');
+}
+
 if (failures > 0) {
   console.error(`\n${failures} computer-task complexity smoke failure(s)`);
   process.exit(1);

@@ -35,6 +35,14 @@ export interface ComputerTaskCheckpointRecoveryContext {
   safeNextStep: string;
   remainingCheckpointIds: string[];
   retryPolicy: ComputerTaskCheckpointRetryPolicy;
+  /**
+   * Stage-aware recovery (D4b). For staged multi-surface tasks: the stage
+   * the failure most likely belongs to, and the stages before it whose
+   * work must NOT be redone — the resume run reuses their artifacts.
+   */
+  failedStageId?: string | null;
+  failedStageGoal?: string | null;
+  completedStageIds?: string[];
 }
 
 export interface ComputerTaskCheckpointFailureInput {
@@ -341,6 +349,68 @@ function buildRetryPolicy(input: ComputerTaskCheckpointFailureInput, candidate: 
   };
 }
 
+// Checkpoint surfaces → stage surfaces. Approval/verification/recovery
+// checkpoints have no owning stage surface; they fall through to keyword
+// matching against stage goals.
+const CHECKPOINT_TO_STAGE_SURFACE: Record<string, string | null> = {
+  browser: 'browser',
+  local_files: 'local_files',
+  desktop: 'desktop_app',
+  app: 'desktop_app',
+  approval: null,
+  verification: null,
+  recovery: null,
+};
+
+function inferFailedStage(
+  input: ComputerTaskCheckpointFailureInput,
+  failedCheckpointSurface: string,
+): { failedStageId: string | null; failedStageGoal: string | null; completedStageIds: string[] } {
+  const stages = (input.complexityPlan?.stages || input.stateComplexity?.stages || [])
+    .filter((stage) => stage && stage.id && stage.goal);
+  if (stages.length < 2) return { failedStageId: null, failedStageGoal: null, completedStageIds: [] };
+
+  const failureText = [input.failureMessage, input.planSummary, input.groundingSummary]
+    .map((value) => clean(value, 600)).join(' ').toLowerCase();
+
+  // 1. Prefer the stage with the MOST goal-keyword hits in the failure
+  //    text (whole-word matches — "download" must not match "downloads",
+  //    which belongs to a different stage's folder goal).
+  const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let bestScore = 0;
+  let matched: (typeof stages)[number] | null = null;
+  for (const stage of stages) {
+    const tokens = Array.from(new Set(
+      String(stage.goal).toLowerCase().split(/[^a-z0-9.]+/).filter((t) => t.length >= 5),
+    ));
+    const score = tokens.reduce((n, token) => (
+      n + (new RegExp(`\\b${escape(token)}\\b`, 'i').test(failureText) ? 1 : 0)
+    ), 0);
+    if (score > bestScore) {
+      bestScore = score;
+      matched = stage;
+    }
+  }
+
+  // 2. Otherwise map the failed checkpoint's surface onto a stage surface.
+  if (!matched) {
+    const stageSurface = CHECKPOINT_TO_STAGE_SURFACE[failedCheckpointSurface] ?? null;
+    if (stageSurface) matched = stages.find((stage) => stage.surface === stageSurface) || null;
+  }
+
+  // 3. Unknown — assume the first stage so recovery never skips work that
+  //    might not have happened (fail toward redoing less-destructive early
+  //    stages rather than wrongly skipping them).
+  if (!matched) matched = stages[0];
+
+  const failedIndex = stages.findIndex((stage) => stage.id === matched!.id);
+  return {
+    failedStageId: matched.id,
+    failedStageGoal: clean(matched.goal, 160),
+    completedStageIds: failedIndex > 0 ? stages.slice(0, failedIndex).map((stage) => stage.id) : [],
+  };
+}
+
 export function diagnoseComputerTaskCheckpointFailure(input: ComputerTaskCheckpointFailureInput): ComputerTaskCheckpointRecoveryContext | null {
   const level = clean(input.complexityPlan?.level || input.stateComplexity?.level || 'simple', 40);
   if (!level || level === 'simple') return null;
@@ -371,6 +441,8 @@ export function diagnoseComputerTaskCheckpointFailure(input: ComputerTaskCheckpo
     ? candidates.slice(failedIndex + 1).map((candidate) => candidate.id)
     : [];
 
+  const stageContext = inferFailedStage(input, best.candidate.surface);
+
   return {
     level,
     complexityScore: Number(input.complexityPlan?.score ?? input.stateComplexity?.score ?? 0),
@@ -383,6 +455,9 @@ export function diagnoseComputerTaskCheckpointFailure(input: ComputerTaskCheckpo
     safeNextStep: best.safeNextStep,
     remainingCheckpointIds: unique(remainingCheckpointIds, 8),
     retryPolicy: buildRetryPolicy(input, best.candidate, best.safeNextStep),
+    failedStageId: stageContext.failedStageId,
+    failedStageGoal: stageContext.failedStageGoal,
+    completedStageIds: stageContext.completedStageIds,
   };
 }
 
@@ -404,5 +479,7 @@ export function formatComputerTaskCheckpointRecoveryForPrompt(context?: Computer
     context.retryPolicy?.stopReason ? `- stop reason: ${context.retryPolicy.stopReason}` : '',
     context.requiresApproval ? '- approval: checkpoint carries side-effect risk; final committing actions still require explicit approval' : '',
     context.remainingCheckpointIds.length ? `- remaining checkpoints: ${context.remainingCheckpointIds.join(', ')}` : '',
+    context.failedStageId ? `- failed stage: ${context.failedStageId}${context.failedStageGoal ? ` ("${context.failedStageGoal}")` : ''} — resume from this stage` : '',
+    context.completedStageIds?.length ? `- completed stages (do NOT redo; reuse their artifacts): ${context.completedStageIds.join(', ')}` : '',
   ].filter(Boolean).join('\n');
 }

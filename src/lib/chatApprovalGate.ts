@@ -74,6 +74,8 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
         deferred: {
           approvalId: '',
           message: `Blocked by circle policy: category \`${category}\` is set to never.`,
+          category: 'blocked_policy',
+          retryable: false,
         },
       };
     }
@@ -101,11 +103,14 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
 
     if (lookupError) {
       // Fail closed: can't verify whether an approval exists, so don't run.
+      // Transient — re-running may succeed once the DB is reachable.
       return {
         pass: false,
         deferred: {
           approvalId: '',
           message: `Approval lookup failed: ${lookupError.message}. Plan not executed.`,
+          category: 'error',
+          retryable: true,
         },
       };
     }
@@ -122,6 +127,8 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
           deferred: {
             approvalId: top.id,
             message: `Waiting on approval \`${String(top.id).slice(0, 8)}\` for ${actionType}.`,
+            category: 'pending',
+            retryable: false,
           },
         };
       }
@@ -131,6 +138,8 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
           deferred: {
             approvalId: top.id,
             message: `Approval \`${String(top.id).slice(0, 8)}\` for ${actionType} was rejected. Retry or adjust the request to propose again.`,
+            category: 'rejected',
+            retryable: false,
           },
         };
       }
@@ -176,6 +185,8 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
         deferred: {
           approvalId: '',
           message: `Could not file approval: ${insertError.message}.`,
+          category: 'error',
+          retryable: true,
         },
       };
     }
@@ -185,6 +196,8 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
       deferred: {
         approvalId: inserted!.id,
         message: `Filed approval \`${inserted!.id.slice(0, 8)}\` for ${actionType} — a circle member must approve before it runs.`,
+        category: 'filed',
+        retryable: false,
       },
     };
   };

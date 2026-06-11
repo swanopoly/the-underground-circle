@@ -332,6 +332,106 @@ function tailRead(filePath) {
   } catch { return []; }
 }
 
+// Extract LIVE subagents (Claude Code Task tool) for a parent session.
+// Claude Code writes each subagent's transcript to
+//   <claudeDir>/<projHash>/<parentSessionId>/subagents/agent-<id>.jsonl
+// We surface only subagents whose file changed within the active window —
+// completed subagents are ephemeral and would otherwise flood Office with
+// dozens of finished ghosts. Each returned object is a `kind: 'subagent'`
+// session the detector already knows how to render and roll up.
+function extractLiveSubagents(projPath, parentSessionId, projHash, parentProjectDir) {
+  const subDir = path.join(projPath, parentSessionId, 'subagents');
+  let files;
+  try { files = fs.readdirSync(subDir); } catch { return []; }
+  const out = [];
+  for (const file of files) {
+    if (!file.endsWith('.jsonl')) continue;
+    const filePath = path.join(subDir, file);
+    let fstat;
+    try { fstat = fs.statSync(filePath); } catch { continue; }
+    const age = Date.now() - fstat.mtimeMs;
+    // Live only — a subagent still writing in the last 2min is running.
+    if (age > ACTIVE_THRESHOLD) continue;
+
+    const entries = tailRead(filePath);
+    if (entries.length === 0) continue;
+
+    const agentId = file.replace(/^agent-/, '').replace(/\.jsonl$/, '');
+    let model = 'unknown', lastActivity = '', taskLabel = '';
+    let totalInput = 0, totalOutput = 0, cachedTokens = 0, newTokens = 0;
+    let currentToolName = '', currentToolFile = '', projectDir = parentProjectDir || '';
+    const recentActions = [];
+    const seenTools = new Set();
+
+    for (const entry of entries) {
+      if (entry.cwd && !projectDir) projectDir = entry.cwd;
+      if (entry.timestamp && (!lastActivity || entry.timestamp > lastActivity)) lastActivity = entry.timestamp;
+
+      // First user message = the Task prompt. Use its first meaningful line
+      // as the subagent's label (strip the common "Repo: …" preamble).
+      if (!taskLabel && (entry.type === 'user' || entry.type === 'human') && entry.message) {
+        const content = entry.message.content;
+        let text = typeof content === 'string' ? content
+          : Array.isArray(content) ? (content.find((c) => c.type === 'text')?.text || '') : '';
+        text = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean)
+          .find((l) => !/^repo:/i.test(l)) || String(text || '').trim();
+        if (text) taskLabel = text.slice(0, 120);
+      }
+
+      if (entry.type === 'assistant' && entry.message) {
+        if (entry.message.model) model = entry.message.model;
+        const usage = entry.message.usage;
+        if (usage) {
+          totalInput += usage.input_tokens || 0;
+          totalOutput += usage.output_tokens || 0;
+          cachedTokens += usage.cache_read_input_tokens || 0;
+          newTokens += (usage.input_tokens || 0) + (usage.cache_creation_input_tokens || 0);
+        }
+        const content = entry.message.content;
+        if (Array.isArray(content)) {
+          for (const c of content) {
+            if (c.type === 'tool_use' && c.name) {
+              if (!seenTools.has(c.name)) { seenTools.add(c.name); recentActions.push(c.name); }
+              currentToolName = c.name;
+              const fp = c.input && (c.input.file_path || c.input.path || c.input.command);
+              currentToolFile = typeof fp === 'string' ? fp.slice(0, 200) : '';
+            }
+          }
+        }
+      }
+    }
+
+    out.push({
+      sessionId: `${parentSessionId}::sub::${agentId}`,
+      projectDir,
+      projectHash: projHash,
+      model,
+      status: age < ACTIVE_THRESHOLD ? 'active' : 'idle',
+      kind: 'subagent',
+      parentSessionId,
+      slug: '',
+      displayName: taskLabel || 'Subagent',
+      task: taskLabel || 'Background task',
+      lastActivity: lastActivity || new Date(fstat.mtimeMs).toISOString(),
+      version: '',
+      totalInputTokens: totalInput,
+      totalOutputTokens: totalOutput,
+      cachedTokens,
+      newTokens,
+      messageCount: entries.length,
+      recentActions: recentActions.slice(-5),
+      subagentCount: 0,
+      lastUserMessage: taskLabel,
+      lastAssistantText: '',
+      recentToolCalls: [],
+      activeFiles: [],
+      currentToolName,
+      currentToolFile,
+    });
+  }
+  return out;
+}
+
 // Full file scan for accurate token totals — runs once per session, caches result
 function fullTokenScan(filePath, sessionId) {
   try {
@@ -533,15 +633,11 @@ function scanDirectory(claudeDir) {
         }
       }
 
-      // Count subagents
-      let subagentCount = 0;
-      const subagentDir = path.join(projPath, sessionId);
-      if (fs.existsSync(subagentDir)) {
-        try {
-          const subFiles = fs.readdirSync(subagentDir);
-          subagentCount = subFiles.filter(f => f.endsWith('.jsonl')).length;
-        } catch {}
-      }
+      // Extract LIVE subagents (Claude Code Task tool). The transcripts live
+      // under <sessionId>/subagents/agent-*.jsonl; only ones still writing
+      // are surfaced so Office shows what the session is delegating right now.
+      const liveSubagents = extractLiveSubagents(projPath, sessionId, projHash, projectDir);
+      const subagentCount = liveSubagents.length;
 
       sessions.push({
         sessionId,
@@ -569,6 +665,9 @@ function scanDirectory(claudeDir) {
         currentToolName,
         currentToolFile,
       });
+      // Push the live subagents right after their parent so the detector's
+      // grouping (parentSessionId) and roll-up label stay correct.
+      for (const sub of liveSubagents) sessions.push(sub);
     }
   }
 

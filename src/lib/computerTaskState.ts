@@ -1,13 +1,20 @@
 import { storage } from './storage';
 import {
+  buildComputerTaskChecklistCard,
   buildComputerTaskStateSteps,
   compactComputerTaskCheckpointRecovery,
   compactComputerTaskCheckpointEvidenceReadiness,
   compactComputerTaskComplexityPlan,
+  compactComputerTaskPendingQuestions,
   evaluateComputerTaskCheckpointEvidenceReadiness,
+  formatComputerTaskChecklistCard,
+  listOpenComputerTaskQuestions,
   markComputerTaskCheckpointRecoveryObserved,
+  resolveComputerTaskPendingQuestion,
+  upsertComputerTaskPendingQuestion,
   type ComputerTaskCapabilityBuildout,
   type ComputerTaskCapabilityBuildoutStatus,
+  type ComputerTaskPendingQuestion,
   type ComputerTaskPhase,
   type ComputerTaskStateCheckpoint,
   type ComputerTaskStateCheckpointRecovery,
@@ -17,12 +24,18 @@ import {
 } from './computerTaskStateModel';
 
 export {
+  buildComputerTaskChecklistCard,
   buildComputerTaskStateSteps,
   compactComputerTaskCheckpointRecovery,
   compactComputerTaskCheckpointEvidenceReadiness,
   compactComputerTaskComplexityPlan,
+  compactComputerTaskPendingQuestions,
   evaluateComputerTaskCheckpointEvidenceReadiness,
+  formatComputerTaskChecklistCard,
+  listOpenComputerTaskQuestions,
   markComputerTaskCheckpointRecoveryObserved,
+  resolveComputerTaskPendingQuestion,
+  upsertComputerTaskPendingQuestion,
 };
 
 export type {
@@ -30,6 +43,10 @@ export type {
   ComputerTaskCapabilityBuildoutStatus,
   ComputerTaskCheckpointEvidenceObservation,
   ComputerTaskCheckpointEvidenceReadiness,
+  ComputerTaskChecklistCard,
+  ComputerTaskChecklistNeedsYouItem,
+  ComputerTaskChecklistStage,
+  ComputerTaskPendingQuestion,
   ComputerTaskPhase,
   ComputerTaskStateCheckpoint,
   ComputerTaskStateCheckpointRecovery,
@@ -129,6 +146,14 @@ function normalizeRecord(raw: string | null): ComputerTaskStateRecord | null {
                   requiresApproval: Boolean(checkpoint?.requiresApproval),
                 })).filter((checkpoint: ComputerTaskStateCheckpoint) => checkpoint.id && checkpoint.label).slice(0, 8)
               : [],
+            stages: Array.isArray(parsed.complexity.stages)
+              ? parsed.complexity.stages.map((stage: any) => ({
+                  id: String(stage?.id || '').slice(0, 60),
+                  ordinal: Number(stage?.ordinal || 0),
+                  surface: String(stage?.surface || '').slice(0, 30),
+                  goal: String(stage?.goal || '').slice(0, 160),
+                })).filter((stage: { id: string; goal: string }) => stage.id && stage.goal).slice(0, 4)
+              : null,
           }
         : null,
       checkpointRecovery: compactComputerTaskCheckpointRecovery(
@@ -145,6 +170,10 @@ function normalizeRecord(raw: string | null): ComputerTaskStateRecord | null {
               safeNextStep: String(parsed.checkpointRecovery.safeNextStep || ''),
               remainingCheckpointIds: Array.isArray(parsed.checkpointRecovery.remainingCheckpointIds)
                 ? parsed.checkpointRecovery.remainingCheckpointIds.map(String).filter(Boolean)
+                : [],
+              failedStageId: parsed.checkpointRecovery.failedStageId ? String(parsed.checkpointRecovery.failedStageId) : null,
+              completedStageIds: Array.isArray(parsed.checkpointRecovery.completedStageIds)
+                ? parsed.checkpointRecovery.completedStageIds.map(String).filter(Boolean)
                 : [],
               retryPolicy: parsed.checkpointRecovery.retryPolicy && typeof parsed.checkpointRecovery.retryPolicy === 'object'
                 ? {
@@ -192,6 +221,7 @@ function normalizeRecord(raw: string | null): ComputerTaskStateRecord | null {
             } as ComputerTaskStateCheckpointRecovery
           : null,
       ),
+      pendingQuestions: compactComputerTaskPendingQuestions(parsed.pendingQuestions),
       updatedAt: String(parsed.updatedAt || nowIso()),
     };
   } catch {
@@ -212,4 +242,43 @@ export async function saveComputerTaskState(record: ComputerTaskStateRecord): Pr
 
 export async function clearComputerTaskState(circleId: string, threadId?: string | null): Promise<void> {
   await storage.removeItem(storageKey(circleId, threadId));
+}
+
+/**
+ * Persist a mid-task user question onto the durable record (D2). No-op
+ * when no record exists yet — a question without a task to resume is not
+ * actionable after reload anyway. Fire-and-forget safe: never throws.
+ */
+export async function recordComputerTaskPendingQuestion(
+  circleId: string,
+  threadId: string | null | undefined,
+  question: ComputerTaskPendingQuestion,
+): Promise<void> {
+  try {
+    const record = await loadComputerTaskState(circleId, threadId);
+    if (!record) return;
+    await saveComputerTaskState({
+      ...record,
+      pendingQuestions: upsertComputerTaskPendingQuestion(record.pendingQuestions, question),
+      updatedAt: nowIso(),
+    });
+  } catch {}
+}
+
+/** Mark a persisted question answered (or expired when `answer` is null). Never throws. */
+export async function resolveComputerTaskPendingQuestionState(
+  circleId: string,
+  threadId: string | null | undefined,
+  questionId: string,
+  answer: string | null,
+): Promise<void> {
+  try {
+    const record = await loadComputerTaskState(circleId, threadId);
+    if (!record?.pendingQuestions?.length) return;
+    await saveComputerTaskState({
+      ...record,
+      pendingQuestions: resolveComputerTaskPendingQuestion(record.pendingQuestions, questionId, answer, nowIso()),
+      updatedAt: nowIso(),
+    });
+  } catch {}
 }

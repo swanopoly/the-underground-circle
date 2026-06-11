@@ -227,6 +227,21 @@ function compactComputerRequestNotice(
     badges: (notice.badges || []).slice(0, mode === 'full' ? 5 : 3).map((value) => truncateText(String(value), 80)),
     proof: (notice.proof || []).slice(0, mode === 'full' ? 3 : 2).map((value) => truncateText(String(value), mode === 'tiny' ? 120 : 220)),
     hiddenReason: notice.hiddenReason ? truncateText(String(notice.hiddenReason), maxDetail) : null,
+    // Plan preview (D1) — persisted only in full mode and bounded hard so
+    // message rows stay small; tiny/minimal drop it (the formatted text the
+    // user saw is already in the message body).
+    planPreview: mode === 'full' && notice.planPreview
+      ? {
+          visibility: notice.planPreview.visibility,
+          target: truncateText(String(notice.planPreview.target || ''), 80),
+          steps: compactStringList(notice.planPreview.steps, 6, 160),
+          surfaces: compactStringList(notice.planPreview.surfaces, 3, 60),
+          approvalGates: compactStringList(notice.planPreview.approvalGates, 3, 160),
+          constraints: compactStringList(notice.planPreview.constraints, 3, 120),
+          proof: compactStringList(notice.planPreview.proof, 3, 160),
+          editHint: truncateText(String(notice.planPreview.editHint || ''), 120),
+        }
+      : null,
   };
 }
 

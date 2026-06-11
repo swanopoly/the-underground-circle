@@ -31,6 +31,10 @@
  *     start at 25; edge-function consumers can lower to 8 for Haiku).
  */
 
+import { compressContextIfOversized } from './agentContextCompression';
+import { partitionParallelSafeBatch } from './toolBatchParallelism';
+import type { ToolParallelPolicy } from './toolBatchParallelism';
+
 export type AgentMessageContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
@@ -63,8 +67,28 @@ export type AgentToolContext = {
 };
 
 export type AgentToolResult =
-  | { ok: true; data: unknown }
-  | { ok: false; error: string };
+  | { ok: true; data: unknown; metadata?: Record<string, unknown> }
+  | { ok: false; error: string; metadata?: Record<string, unknown> };
+
+export type AgentToolApprovalDecision =
+  | { decision: 'approve' }
+  | { decision: 'reject'; reason?: string };
+
+/**
+ * Pre-dispatch approval gate (R11). Runs AFTER the model requests a tool but
+ * BEFORE the handler executes, preserving the fail-closed pre-dispatch
+ * semantics `openswanSessionRuntime`'s legacy loop has (its gate at the
+ * `executeToolUseLoop` boundary). A rejection produces a tool_result that
+ * reads as a POLICY BLOCK — not a transient error — so the model does not
+ * retry the same call. If the gate itself throws, the tool is rejected
+ * (fail closed), never silently approved.
+ */
+export type AgentToolApprovalGate = (req: {
+  toolName: string;
+  toolUseId: string;
+  input: unknown;
+  iteration: number;
+}) => AgentToolApprovalDecision | Promise<AgentToolApprovalDecision>;
 
 export type ProviderTurnResult = {
   /** Stop reason from the model. `end_turn` means the assistant is done. */
@@ -96,12 +120,22 @@ export type AgentProvider = {
 
 export type AgentEvent =
   | { kind: 'turn_start'; iteration: number }
+  | { kind: 'context_compressed'; iteration: number; droppedCount: number; tokensBefore: number; tokensAfter: number }
   | { kind: 'model_delta'; iteration: number; text: string }
   | { kind: 'tool_call_start'; iteration: number; toolName: string; toolUseId: string; input: unknown }
   | { kind: 'tool_call_result'; iteration: number; toolName: string; toolUseId: string; result: AgentToolResult; durationMs: number }
   | { kind: 'turn_end'; iteration: number; stop_reason: ProviderTurnResult['stop_reason']; usage?: ProviderTurnResult['usage'] }
   | { kind: 'final_response'; iteration: number; text: string }
-  | { kind: 'max_iterations_exceeded'; iteration: number };
+  | { kind: 'max_iterations_exceeded'; iteration: number }
+  /**
+   * Fired after each completed tool round (R12), BEFORE the next provider
+   * turn. `messages` is a shallow snapshot of the full history at this
+   * boundary — callers can persist it as a resumable checkpoint (the
+   * legacy `executeToolUseLoop` returned an equivalent via `incomplete` +
+   * checkpoint). Persistence adapters should store counts, not the
+   * messages themselves (they can be large).
+   */
+  | { kind: 'iteration_complete'; iteration: number; messages: AgentMessage[] };
 
 export type AgentRunOptions = {
   initialMessages: AgentMessage[];
@@ -117,6 +151,52 @@ export type AgentRunOptions = {
   onEvent?: (event: AgentEvent) => void;
   /** Cancellation signal — aborts at the next loop boundary. */
   signal?: AbortSignal;
+  /**
+   * Optional pre-dispatch tool approval gate (R11). When provided, every
+   * tool_use is offered to the gate before its handler runs; `reject`
+   * short-circuits the handler with a policy-block tool_result. Omit to
+   * keep existing behavior (all registered tools dispatch).
+   */
+  toolApprovalGate?: AgentToolApprovalGate;
+  /**
+   * Optional per-turn dynamic tool expansion (T2 progressive disclosure).
+   * Re-evaluated at the start of every turn BEFORE the provider call; any
+   * returned definitions whose names are not already registered are merged
+   * into both the advertised tool array and the dispatch registry.
+   * Additions only — initial tools are never removed or overridden, so a
+   * misbehaving resolver can widen but never narrow the tool surface
+   * mid-run (resolver errors are swallowed and the current set is kept).
+   * Omit to keep a static tool set (existing callers are unaffected).
+   */
+  resolveAdditionalTools?: (ctx: { session: Record<string, unknown>; iteration: number }) => AgentToolDefinition[];
+  /**
+   * Optional dependency-aware parallelism (T8/O6). When provided, each
+   * non-interactive tool round is partitioned with
+   * `partitionParallelSafeBatch`: tools whose policies declare disjoint
+   * write/read footprints may dispatch concurrently within a group, while
+   * conflicting/unknown tools become sequential barriers. An unknown tool
+   * (provider returns `null`, or the provider throws) is treated as an
+   * unsafe singleton barrier — fail closed, never reordered. Result blocks
+   * always come back in the original tool_use order. Omit to keep today's
+   * behavior (whole round dispatched via `parallelToolConcurrency`).
+   */
+  toolParallelPolicyProvider?: (toolName: string) => ToolParallelPolicy | null;
+  /**
+   * Optional pre-turn context compression (Phase CA-8a). When provided,
+   * the running message history is summarised before each provider turn
+   * once it crosses the threshold. The `summariser` is injected so this
+   * module stays provider-agnostic — wrap Haiku (or any cheap model) at
+   * the call site. Omit to disable (existing callers are unaffected).
+   */
+  compaction?: {
+    summariser: (messagesToCompress: AgentMessage[]) => Promise<string>;
+    /** Fraction of `maxContextTokens` that triggers compression. Default 0.50. */
+    thresholdRatio?: number;
+    /** Target model's context window. Default 200_000. */
+    maxContextTokens?: number;
+    /** Tail messages preserved verbatim. Default 20. */
+    preserveLast?: number;
+  };
 };
 
 export type AgentRunResult = {
@@ -194,12 +274,19 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     session = {},
     onEvent,
     signal,
+    compaction,
+    toolApprovalGate,
+    resolveAdditionalTools,
+    toolParallelPolicyProvider,
   } = opts;
 
   const emit = (e: AgentEvent) => { try { onEvent?.(e); } catch {} };
 
+  // `advertisedTools` is what the provider sees; it starts as the caller's
+  // tool set and only ever GROWS via `resolveAdditionalTools` (T2).
+  const advertisedTools: AgentToolDefinition[] = [...tools];
   const toolsByName = new Map<string, AgentToolDefinition>();
-  for (const t of tools) toolsByName.set(t.name, t);
+  for (const t of advertisedTools) toolsByName.set(t.name, t);
 
   const messages: AgentMessage[] = [...initialMessages];
   let lastStopReason: ProviderTurnResult['stop_reason'] = 'end_turn';
@@ -211,9 +298,46 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     iteration += 1;
     emit({ kind: 'turn_start', iteration });
 
+    // Per-turn dynamic tool expansion (T2). Merge by name, additions only —
+    // never removes or overrides a tool already advertised. Fail open on
+    // resolver errors: the run continues with the current tool set.
+    if (resolveAdditionalTools) {
+      try {
+        for (const added of resolveAdditionalTools({ session, iteration }) || []) {
+          if (!added?.name || toolsByName.has(added.name)) continue;
+          advertisedTools.push(added);
+          toolsByName.set(added.name, added);
+        }
+      } catch { /* keep the current tool set */ }
+    }
+
+    // Pre-turn context compression. Summarise the oldest half of the
+    // history when it crosses the threshold, preserving the tail and never
+    // splitting a tool_use/tool_result pair. Failures fall back to the
+    // uncompressed history (compressContextIfOversized returns the original).
+    if (compaction) {
+      const compressed = await compressContextIfOversized(messages, {
+        summariser: compaction.summariser,
+        thresholdRatio: compaction.thresholdRatio,
+        maxContextTokens: compaction.maxContextTokens,
+        preserveLast: compaction.preserveLast,
+      });
+      if (compressed.compressed) {
+        messages.length = 0;
+        messages.push(...compressed.messages);
+        emit({
+          kind: 'context_compressed',
+          iteration,
+          droppedCount: compressed.droppedCount,
+          tokensBefore: compressed.tokensBefore,
+          tokensAfter: compressed.tokensAfter,
+        });
+      }
+    }
+
     const turn = await provider.turn({
       messages,
-      tools,
+      tools: advertisedTools,
       onDelta: (text) => emit({ kind: 'model_delta', iteration, text }),
     });
     lastStopReason = turn.stop_reason;
@@ -256,30 +380,89 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
       if (!def) {
         result = { ok: false, error: `Tool "${use.name}" is not registered.` };
       } else {
-        try {
-          result = await def.handler(use.input, ctx);
-        } catch (e) {
-          // Tools SHOULD NOT throw — we still catch to preserve the loop.
-          const message = e instanceof Error ? e.message : String(e);
-          result = { ok: false, error: `Handler threw: ${message}` };
+        // Pre-dispatch approval gate — fail closed: a gate error rejects.
+        let approval: AgentToolApprovalDecision = { decision: 'approve' };
+        if (toolApprovalGate) {
+          try {
+            approval = await toolApprovalGate({
+              toolName: use.name,
+              toolUseId: use.id,
+              input: use.input,
+              iteration,
+            });
+          } catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            approval = { decision: 'reject', reason: `approval gate failed (${message})` };
+          }
+        }
+        if (approval.decision === 'reject') {
+          const reason = approval.reason ? ` Reason: ${approval.reason}` : '';
+          result = {
+            ok: false,
+            error: `Tool "${use.name}" was blocked by policy and did not run.${reason} Do not retry the same call — choose a different approach or ask the user.`,
+          };
+        } else {
+          try {
+            result = await def.handler(use.input, ctx);
+          } catch (e) {
+            // Tools SHOULD NOT throw — we still catch to preserve the loop.
+            const message = e instanceof Error ? e.message : String(e);
+            result = { ok: false, error: `Handler threw: ${message}` };
+          }
         }
       }
       const durationMs = Date.now() - started;
       emit({ kind: 'tool_call_result', iteration, toolName: use.name, toolUseId: use.id, result, durationMs });
+      // Metadata (R14) is a side channel for runtime consumers (design-app
+      // manifest capture, audit ledgers) — it flows through the event above
+      // but is STRIPPED from the model-visible tool_result content so hidden
+      // captures never leak into the conversation.
+      const modelVisible: AgentToolResult = result.ok
+        ? { ok: true, data: result.data }
+        : { ok: false, error: result.error };
       return {
         type: 'tool_result',
         tool_use_id: use.id,
-        content: JSON.stringify(result),
+        content: JSON.stringify(modelVisible),
         is_error: !result.ok,
       };
     };
 
-    const toolResultBlocks = await runWithConcurrency(toolUses, dispatchOne, effectiveConcurrency);
+    // Dependency-aware dispatch (T8/O6): when the caller supplied a policy
+    // provider and the round has no interactive tool, partition the round
+    // into ordered groups — parallel within a group, sequential between.
+    // Unknown tools (null policy / provider throw) fail closed as singleton
+    // barriers. Result blocks are reassembled in original tool_use order so
+    // the follow-up user message is byte-identical to the sequential shape.
+    let toolResultBlocks: AgentMessageContentBlock[];
+    if (toolParallelPolicyProvider && !hasInteractive) {
+      const policies: Array<ToolParallelPolicy | null> = toolUses.map((use) => {
+        try { return toolParallelPolicyProvider(use.name); } catch { return null; }
+      });
+      const groups = partitionParallelSafeBatch(policies, { hasApprovalGate: !!toolApprovalGate });
+      const ordered: AgentMessageContentBlock[] = new Array(toolUses.length);
+      for (const group of groups) {
+        const groupResults = await runWithConcurrency(
+          group.map((idx) => toolUses[idx]),
+          dispatchOne,
+          parallelToolConcurrency,
+        );
+        group.forEach((originalIndex, k) => { ordered[originalIndex] = groupResults[k]; });
+      }
+      toolResultBlocks = ordered;
+    } else {
+      toolResultBlocks = await runWithConcurrency(toolUses, dispatchOne, effectiveConcurrency);
+    }
 
     // Tool results arrive as a single user-role message containing every
     // tool_result block, in the same order the tools were requested — this
     // is how Anthropic's Messages API expects the follow-up to be shaped.
     messages.push({ role: 'user', content: toolResultBlocks });
+
+    // Resumable-checkpoint boundary (R12): the round is complete and the
+    // history is consistent (tool_use/tool_result pairs closed). Snapshot
+    // so later mutation of `messages` doesn't alias into the handler.
+    emit({ kind: 'iteration_complete', iteration, messages: [...messages] });
 
     // Loop re-enters provider.turn() with the updated message history.
   }

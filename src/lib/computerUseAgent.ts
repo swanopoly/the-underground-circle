@@ -87,6 +87,23 @@ export interface ComputerUseAgentOpts {
     }> | null;
     extractedData?: unknown | null;
   }) => void;
+  /**
+   * Fired when the run stops on a bounded limit (timeout, token budget,
+   * cost cap, stall) BEFORE the matching onError. Carries the progress
+   * made so far plus the live session link, so a stopped run hands back
+   * something checkable instead of just an error string (D8).
+   */
+  onPartialResult?: (info: {
+    stopReason: string;
+    message: string;
+    summary: string;
+    progress: Array<{ iter: number; tool: string; detail: string }>;
+    lastReasoning: string | null;
+    iterations: number;
+    sessionId: string;
+    liveUrl: string;
+    runId?: string | null;
+  }) => void;
   onError: (message: string) => void;
 }
 
@@ -171,6 +188,7 @@ export function startComputerUseAgent(opts: ComputerUseAgentOpts): AgentHandle {
             case 'screenshot':              opts.onScreenshot?.(parsed); break;
             case 'reasoning':               opts.onReasoning?.(parsed?.text || ''); break;
             case 'result':                  opts.onResult?.(parsed); break;
+            case 'partial_result':          opts.onPartialResult?.(parsed); break;
             case 'error':                   opts.onError(parsed?.message || 'agent error'); break;
             case 'confirmation_required':   opts.onConfirmationRequired?.(parsed); break;
             case 'confirmation_resolved':   opts.onConfirmationResolved?.(parsed); break;

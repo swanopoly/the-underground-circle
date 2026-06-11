@@ -162,6 +162,55 @@ if (photoshopRoute) {
   }
 }
 
+// ─── D1: plan preview card ──────────────────────────────────────────────────
+
+{
+  const { buildChatComputerTaskPlanPreview, formatChatComputerTaskPlanPreview } =
+    require('../src/lib/chatComputerRequestUx') as typeof import('../src/lib/chatComputerRequestUx');
+
+  // Approval-needing multi-step task → preview visible with ordered steps,
+  // constraints, and proof; formatted output numbers the steps.
+  const route = buildChatComputerRequestRoute(
+    "open the browser, log into my supplier portal at portal.acme.com, fill the reorder form, but don't submit it",
+  );
+  if (!route) fail('plan preview: complicated browser task should route');
+  else {
+    const notice = buildChatComputerRequestUserNotice(route);
+    if (notice.visibility !== 'user') fail('plan preview: approval-needing task should show a notice');
+    if (!notice.planPreview) fail('plan preview: notice should carry a plan preview');
+    else {
+      expect(notice.planPreview.steps.length >= 2, 'plan preview: at least 2 steps');
+      expect(notice.planPreview.constraints.some((c) => /Won't: .*submit/.test(c)), `plan preview: constraint surfaced (got ${JSON.stringify(notice.planPreview.constraints)})`);
+      const formatted = formatChatComputerRequestUserNotice(notice);
+      expect(/\*\*Plan — /.test(formatted), 'plan preview: formatted notice contains plan block');
+      expect(/^1\. /m.test(formatted), 'plan preview: steps are numbered');
+      expect(/Reply with changes/.test(formatted), 'plan preview: edit hint present');
+      pass('plan preview: visible, constrained, numbered, editable');
+    }
+    const summary = summarizeChatComputerRequestUserNotice(route) as { planPreview?: { stepCount?: number } | null };
+    expect(summary.planPreview && (summary.planPreview.stepCount || 0) >= 2, 'plan preview: persisted summary carries compact plan');
+    if (summary.planPreview) pass('plan preview: persisted summary bounded + populated');
+  }
+
+  // Quiet task → preview hidden, formatter returns empty.
+  const quietRoute = buildChatComputerRequestRoute('search my downloads folder for the latest invoice pdf and tell me its name');
+  if (quietRoute) {
+    const quietPreview = buildChatComputerTaskPlanPreview(quietRoute);
+    const quietNotice = buildChatComputerRequestUserNotice(quietRoute);
+    if (quietNotice.visibility === 'hidden') {
+      expect(quietPreview.visibility === 'hidden', 'plan preview: quiet task preview hidden');
+      expect(formatChatComputerTaskPlanPreview(quietPreview) === '', 'plan preview: hidden preview formats to empty');
+      expect(quietNotice.planPreview === null, 'plan preview: quiet notice carries no plan');
+      pass('plan preview: quiet task stays quiet');
+    } else {
+      // Visibility is autonomy-derived; if this read task surfaces a notice the
+      // preview riding it is acceptable — just assert consistency.
+      expect(quietPreview.visibility === 'user', 'plan preview: preview visibility matches notice');
+      pass('plan preview: read task notice/preview visibility consistent');
+    }
+  }
+}
+
 if (failures > 0) {
   console.error(`\n${failures} chat computer request UX smoke failure(s)`);
   process.exit(1);

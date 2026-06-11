@@ -32,6 +32,28 @@ export interface ChatComputerRequestUserNotice {
   badges: string[];
   proof: string[];
   hiddenReason: string | null;
+  planPreview: ChatComputerTaskPlanPreviewCard | null;
+}
+
+/**
+ * User-facing plan preview (D1). The route already computes ordered
+ * solution steps, surfaces, approval gates, and proof requirements — this
+ * surfaces them BEFORE execution so the user can confirm or redirect at the
+ * cheapest possible point, instead of discovering a misunderstanding at
+ * step 8. Rides the same autonomy visibility gate as the notice: quiet
+ * tasks stay quiet; the preview appears exactly when an approval/review
+ * notice would anyway.
+ */
+export interface ChatComputerTaskPlanPreviewCard {
+  visibility: ChatComputerRequestNoticeVisibility;
+  target: string;
+  steps: string[];
+  surfaces: string[];
+  approvalGates: string[];
+  constraints: string[];
+  proof: string[];
+  /** How the user adjusts the plan — reply text, since the plan re-routes on the next message. */
+  editHint: string;
 }
 
 function uniqueCompact(values: Array<string | null | undefined>, max: number): string[] {
@@ -168,6 +190,65 @@ function buildBadges(route: ChatComputerRequestRoute, autonomy: ChatComputerTask
   return uniqueCompact(badges, 5);
 }
 
+function userFacingConstraintLines(route: ChatComputerRequestRoute): string[] {
+  const constraints = route.userConstraints;
+  if (!constraints) return [];
+  const lines: string[] = [];
+  if (constraints.forbidden.length) lines.push(`Won't: ${constraints.forbidden.join(', ')}`);
+  if (constraints.approvalBefore.length) lines.push(`Will ask before: ${constraints.approvalBefore.join(', ')}`);
+  if (constraints.stopConditions.length) lines.push(`Stops and hands back on: ${constraints.stopConditions.join(', ')}`);
+  return lines;
+}
+
+export function buildChatComputerTaskPlanPreview(
+  route: ChatComputerRequestRoute,
+  autonomy?: ChatComputerTaskAutonomy,
+): ChatComputerTaskPlanPreviewCard {
+  const resolvedAutonomy = autonomy ?? buildChatComputerTaskAutonomy(route);
+  const steps = uniqueCompact(
+    route.designExecutionPipeline
+      ? route.designExecutionPipeline.phases.map((phase) => String(phase.id).replace(/_/g, ' '))
+      : route.selectedPipeline?.solutionSteps || [],
+    6,
+  );
+  const surfaces = uniqueCompact(
+    route.surfacePlan
+      ? [route.surfacePlan.primarySurface, ...route.surfacePlan.fallbackSurfaces].map((s) => String(s).replace(/_/g, ' '))
+      : [labelForKind(route.kind)],
+    3,
+  );
+  const approvalGates = uniqueCompact(
+    [
+      route.approvalRequired ? route.approvalReason : null,
+      ...(route.selectedPipeline?.approvalTriggers || []),
+    ],
+    3,
+  );
+  return {
+    visibility: resolvedAutonomy.shouldShowUserNotice ? 'user' : 'hidden',
+    target: targetLabel(route),
+    steps,
+    surfaces,
+    approvalGates,
+    constraints: userFacingConstraintLines(route),
+    proof: uniqueCompact(route.completionProof, 3),
+    editHint: 'Reply with changes to adjust this plan before approving.',
+  };
+}
+
+export function formatChatComputerTaskPlanPreview(preview: ChatComputerTaskPlanPreviewCard): string {
+  if (preview.visibility === 'hidden' || preview.steps.length < 2) return '';
+  const lines = [
+    `**Plan — ${preview.target}**`,
+    ...preview.steps.map((step, i) => `${i + 1}. ${step}`),
+    preview.approvalGates.length ? `I'll pause for approval: ${preview.approvalGates.join('; ')}` : null,
+    ...preview.constraints,
+    preview.proof.length ? `Proof when done: ${preview.proof.join('; ')}` : null,
+    preview.editHint,
+  ].filter((line): line is string => Boolean(line));
+  return lines.join('\n');
+}
+
 export function buildChatComputerRequestUserNotice(route: ChatComputerRequestRoute): ChatComputerRequestUserNotice {
   const autonomy = buildChatComputerTaskAutonomy(route);
   const proof = uniqueCompact(route.completionProof, 3);
@@ -195,6 +276,8 @@ export function buildChatComputerRequestUserNotice(route: ChatComputerRequestRou
       ? 'Ready for review'
       : 'Ready';
 
+  const planPreviewCard = buildChatComputerTaskPlanPreview(route, autonomy);
+
   return {
     visibility: shouldShow ? 'user' : 'hidden',
     tone,
@@ -206,6 +289,7 @@ export function buildChatComputerRequestUserNotice(route: ChatComputerRequestRou
     badges: buildBadges(route, autonomy),
     proof,
     hiddenReason: autonomy.hiddenReason,
+    planPreview: planPreviewCard.visibility === 'user' && planPreviewCard.steps.length >= 2 ? planPreviewCard : null,
   };
 }
 
@@ -213,12 +297,18 @@ export function formatChatComputerRequestUserNotice(notice: ChatComputerRequestU
   if (notice.visibility === 'hidden') return '';
   const primaryUserAction = notice.autonomy.primaryUserAction;
   const firstBlocker = notice.autonomy.userActionBlockers[0] || null;
+  const planBlock = notice.planPreview ? formatChatComputerTaskPlanPreview(notice.planPreview) : '';
+  // Action and blocker lines come BEFORE the plan block: compact consumers
+  // (handoff messages) keep only the leading lines, and the user's next
+  // action must never be displaced by plan detail.
   const lines = [
     notice.summary,
     notice.primaryAction ? `${notice.primaryAction.label}: ${notice.primaryAction.detail}` : null,
     !notice.primaryAction && primaryUserAction ? `Next: ${primaryUserAction}` : null,
     firstBlocker && firstBlocker !== primaryUserAction ? `Blocker: ${firstBlocker}` : null,
-    notice.proof.length ? `Proof: ${notice.proof.join('; ')}` : null,
+    planBlock || null,
+    // Proof folds into the plan block when present — avoid stating it twice.
+    !planBlock && notice.proof.length ? `Proof: ${notice.proof.join('; ')}` : null,
   ].filter((line): line is string => Boolean(line));
   return [`**${notice.title}**`, ...lines].join('\n');
 }
@@ -244,6 +334,16 @@ export function summarizeChatComputerRequestUserNotice(route: ChatComputerReques
     badges: notice.badges,
     proof: notice.proof,
     hiddenReason: notice.hiddenReason,
+    planPreview: notice.planPreview
+      ? {
+          target: notice.planPreview.target,
+          stepCount: notice.planPreview.steps.length,
+          steps: notice.planPreview.steps.slice(0, 6),
+          surfaces: notice.planPreview.surfaces,
+          approvalGateCount: notice.planPreview.approvalGates.length,
+          constraints: notice.planPreview.constraints.slice(0, 3),
+        }
+      : null,
     routeDecision: route.appAutomationRouteDecision
       ? {
           status: route.appAutomationRouteDecision.status,

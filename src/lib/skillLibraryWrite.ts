@@ -30,6 +30,65 @@ type ApprovalRow = {
   applied_at?: string | null;
 };
 
+/**
+ * File a "save this completed computer task as a recipe" proposal (D7).
+ * Same HITL contract as agent-filed skill writes: this only inserts a
+ * pending `agent_approvals` row; a circle member approves before
+ * `applyApprovedSkillAction` writes the skill. The draft comes from
+ * `buildComputerTaskRecipeDraft` (pure, computerTaskStateModel).
+ */
+export async function fileComputerTaskRecipeProposal(args: {
+  circleId: string;
+  userId?: string | null;
+  draft: { name: string; description: string; tags: string[]; content: string };
+  rationale?: string;
+}): Promise<{ ok: true; approvalId: string } | { ok: false; error: string }> {
+  const { circleId, draft } = args;
+  if (!circleId || !draft?.name || !draft?.content) {
+    return { ok: false, error: 'recipe proposal needs circleId, name, and content' };
+  }
+  try {
+    const { data: existing } = await supabase
+      .from('circle_skills')
+      .select('id')
+      .eq('circle_id', circleId)
+      .eq('name', draft.name)
+      .maybeSingle();
+    if (existing) {
+      return { ok: false, error: `A skill named "${draft.name}" already exists — edit it via /skill instead.` };
+    }
+    const { data, error } = await supabase
+      .from('agent_approvals')
+      .insert({
+        circle_id: circleId,
+        session_key: 'default::blackswan',
+        agent_name: 'BlackSwan',
+        action_type: 'skill.create',
+        description: `Save completed computer task as recipe "${draft.name}"${args.rationale ? ` — ${args.rationale.slice(0, 160)}` : ''}`,
+        payload: {
+          action: 'create',
+          circleId,
+          name: draft.name,
+          content: draft.content,
+          description: draft.description,
+          version: '1.0.0',
+          tags: draft.tags,
+          rationale: args.rationale || 'User saved a completed computer task as a reusable recipe.',
+          authorId: args.userId || null,
+        },
+        timeout_seconds: 60 * 60 * 24,
+      })
+      .select('id')
+      .single();
+    if (error || !data?.id) {
+      return { ok: false, error: `proposal insert failed: ${error?.message || 'no id returned'}` };
+    }
+    return { ok: true, approvalId: data.id };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function applyApprovedSkillAction(approvalId: string): Promise<ApplySkillActionResult> {
   const { data: approval, error: loadError } = await supabase
     .from('agent_approvals')

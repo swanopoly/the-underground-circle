@@ -115,6 +115,23 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
         // UI signal, not durable state. Keeping them would 10x the row
         // count for marginal replay value.
         break;
+      case 'context_compressed':
+        void writeEvent('context_compressed', {
+          iteration: event.iteration,
+          dropped_count: event.droppedCount,
+          tokens_before: event.tokensBefore,
+          tokens_after: event.tokensAfter,
+        });
+        break;
+      case 'iteration_complete':
+        // Checkpoint boundary (R12). Store the marker + size only — the
+        // message snapshot itself is for in-process checkpoint consumers,
+        // not the event log (it can be hundreds of KB).
+        void writeEvent('iteration_complete', {
+          iteration: event.iteration,
+          message_count: event.messages.length,
+        });
+        break;
       case 'tool_call_start':
         void writeEvent('tool_call_start', {
           iteration: event.iteration,

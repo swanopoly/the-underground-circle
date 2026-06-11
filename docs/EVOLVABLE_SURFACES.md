@@ -4,7 +4,7 @@
 > allowed to change, and what stays out of bounds.
 >
 > **Authored:** 2026-04-23 · **Cross-linked from:**
-> [`PHASE_CA-8_HERMES_DELTA_PLAN.md`](./PHASE_CA-8_HERMES_DELTA_PLAN.md),
+> [`PHASE_CA-8_AGENT_RUNTIME_DELTA_PLAN.md`](./PHASE_CA-8_AGENT_RUNTIME_DELTA_PLAN.md),
 > [`AGENTS_ROADMAP.md`](./AGENTS_ROADMAP.md).
 
 ## TL;DR
@@ -15,7 +15,7 @@ Regenerate → re-score against `docs/evals/golden.jsonl` → merge only
 if every pinned check still passes.
 
 The gate that unlocks optimization at all: **≥50 curated skills + ≥1K
-persisted runs**, per `HERMES_INTEGRATION_PLAN.md` Phase 5. Until we
+persisted runs**, per `AGENT_RUNTIME_INTEGRATION_PLAN.md` Phase 5. Until we
 clear that, `docs/evals/golden.jsonl` is a regression canary you run
 by hand (or once CA-8g's runner lands, nightly in CI).
 

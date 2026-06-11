@@ -459,7 +459,9 @@ export function formatSoulWisdomBlock(entry: SoulWisdomEntry | null): string {
   const dateStr = entry.generatedAt ? new Date(entry.generatedAt).toISOString().slice(0, 10) : '';
   const sourceSuffix = entry.sourceKind === 'synthesized' ? ' • distilled from active memory' : '';
   const header = `## ${title} wisdom in this circle${dateStr ? ` (updated ${dateStr})` : ''}${sourceSuffix}`;
-  return `${header}\n${entry.body.trim()}`;
+  // Wisdom bodies are distilled from circle memories (member/model-authored)
+  // — untrusted (rule 5). Fence at source so every caller inherits it.
+  return `${header}\n<untrusted_quoted>\n${entry.body.trim()}\n</untrusted_quoted>`;
 }
 
 async function synthesizeSoulWisdomFromMemories(opts: {

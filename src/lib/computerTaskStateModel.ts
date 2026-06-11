@@ -72,6 +72,8 @@ export interface ComputerTaskStateComplexity {
   score: number;
   reasons: string[];
   checkpoints: ComputerTaskStateCheckpoint[];
+  /** Compact D4 stages — present only for multi-surface staged tasks. */
+  stages?: Array<{ id: string; ordinal: number; surface: string; goal: string }> | null;
 }
 
 export interface ComputerTaskStateCheckpointRecovery {
@@ -85,6 +87,9 @@ export interface ComputerTaskStateCheckpointRecovery {
   reason: string;
   safeNextStep: string;
   remainingCheckpointIds: string[];
+  /** D4b stage-aware recovery — which stage failed, which are done. */
+  failedStageId?: string | null;
+  completedStageIds?: string[];
   retryPolicy?: {
     failureFingerprint: string;
     repeatCount: number;
@@ -124,6 +129,27 @@ export interface ComputerTaskCheckpointEvidenceReadiness {
   summary: string;
 }
 
+/**
+ * A question the agent asked mid-task that needs a user answer (D2:
+ * MFA, ambiguity, approval choice). Previously these lived only in React
+ * hook state and were lost on reload — persisting them on the durable
+ * task record makes them survivable and answerable later: the record
+ * carries sessionId/runId so a fresh client can resume the paused
+ * session instead of restarting the task.
+ */
+export interface ComputerTaskPendingQuestion {
+  id: string;
+  question: string;
+  options: string[];
+  context: string | null;
+  askedAt: string;
+  sessionId: string | null;
+  runId: string | null;
+  status: 'pending' | 'answered' | 'expired';
+  answer: string | null;
+  resolvedAt: string | null;
+}
+
 export interface ComputerTaskStateRecord {
   id: string;
   circleId: string;
@@ -146,11 +172,77 @@ export interface ComputerTaskStateRecord {
   capabilityBuildout?: ComputerTaskCapabilityBuildout | null;
   complexity?: ComputerTaskStateComplexity | null;
   checkpointRecovery?: ComputerTaskStateCheckpointRecovery | null;
+  pendingQuestions?: ComputerTaskPendingQuestion[] | null;
   updatedAt: string;
+}
+
+export function compactComputerTaskPendingQuestions(
+  list?: Array<Partial<ComputerTaskPendingQuestion>> | null,
+): ComputerTaskPendingQuestion[] {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((item) => item && String(item.id || '').trim() && String(item.question || '').trim())
+    .map((item): ComputerTaskPendingQuestion => {
+      const status: ComputerTaskPendingQuestion['status'] =
+        item.status === 'answered' || item.status === 'expired' ? item.status : 'pending';
+      return {
+        id: String(item.id).slice(0, 80),
+        question: String(item.question).slice(0, 500),
+        options: Array.isArray(item.options) ? item.options.map(String).filter(Boolean).slice(0, 6) : [],
+        context: item.context ? String(item.context).slice(0, 300) : null,
+        askedAt: String(item.askedAt || ''),
+        sessionId: item.sessionId ? String(item.sessionId).slice(0, 120) : null,
+        runId: item.runId ? String(item.runId).slice(0, 120) : null,
+        status,
+        answer: item.answer ? String(item.answer).slice(0, 500) : null,
+        resolvedAt: item.resolvedAt ? String(item.resolvedAt) : null,
+      };
+    })
+    .slice(0, 5);
+}
+
+/** Add or replace (by id) a pending question. Keeps the list bounded. */
+export function upsertComputerTaskPendingQuestion(
+  list: ComputerTaskPendingQuestion[] | null | undefined,
+  question: ComputerTaskPendingQuestion,
+): ComputerTaskPendingQuestion[] {
+  const compactQuestion = compactComputerTaskPendingQuestions([question])[0];
+  if (!compactQuestion) return compactComputerTaskPendingQuestions(list);
+  const rest = compactComputerTaskPendingQuestions(list).filter((item) => item.id !== compactQuestion.id);
+  return [...rest, compactQuestion].slice(-5);
+}
+
+/** Mark a question answered (or expired when `answer` is null). */
+export function resolveComputerTaskPendingQuestion(
+  list: ComputerTaskPendingQuestion[] | null | undefined,
+  id: string,
+  answer: string | null,
+  resolvedAtIso: string,
+): ComputerTaskPendingQuestion[] {
+  return compactComputerTaskPendingQuestions(list).map((item) => (
+    item.id === id && item.status === 'pending'
+      ? { ...item, status: answer === null ? 'expired' as const : 'answered' as const, answer, resolvedAt: resolvedAtIso }
+      : item
+  ));
+}
+
+/** The questions still waiting on the user — the "needs you" surface. */
+export function listOpenComputerTaskQuestions(
+  record: Pick<ComputerTaskStateRecord, 'pendingQuestions'> | null | undefined,
+): ComputerTaskPendingQuestion[] {
+  return compactComputerTaskPendingQuestions(record?.pendingQuestions).filter((item) => item.status === 'pending');
 }
 
 export function compactComputerTaskComplexityPlan(plan?: ComputerTaskComplexityPlan | null): ComputerTaskStateComplexity | null {
   if (!plan || plan.level === 'simple') return null;
+  const stages = Array.isArray(plan.stages)
+    ? plan.stages.map((stage) => ({
+        id: String(stage.id || '').slice(0, 60),
+        ordinal: Number.isFinite(stage.ordinal) ? stage.ordinal : 0,
+        surface: String(stage.surface || '').slice(0, 30),
+        goal: String(stage.goal || '').slice(0, 160),
+      })).filter((stage) => stage.id && stage.goal).slice(0, 4)
+    : [];
   return {
     level: plan.level,
     score: Number.isFinite(plan.score) ? plan.score : 0,
@@ -161,6 +253,7 @@ export function compactComputerTaskComplexityPlan(plan?: ComputerTaskComplexityP
       surface: checkpoint.surface,
       requiresApproval: checkpoint.requiresApproval,
     })).filter((checkpoint) => checkpoint.id && checkpoint.label).slice(0, 8),
+    stages: stages.length >= 2 ? stages : null,
   };
 }
 
@@ -203,6 +296,10 @@ export function compactComputerTaskCheckpointRecovery(recovery?: ComputerTaskSta
     safeNextStep: String(recovery.safeNextStep || '').slice(0, 500),
     remainingCheckpointIds: Array.isArray(recovery.remainingCheckpointIds)
       ? recovery.remainingCheckpointIds.map(String).filter(Boolean).slice(0, 8)
+      : [],
+    failedStageId: recovery.failedStageId ? String(recovery.failedStageId).slice(0, 60) : null,
+    completedStageIds: Array.isArray(recovery.completedStageIds)
+      ? recovery.completedStageIds.map(String).filter(Boolean).slice(0, 4)
       : [],
     retryPolicy,
   };
@@ -382,6 +479,222 @@ export function markComputerTaskCheckpointRecoveryObserved(
         }
       : null,
   };
+}
+
+// ─── Task checklist projection (D6) ─────────────────────────────────────────
+
+export interface ComputerTaskChecklistNeedsYouItem {
+  kind: 'question' | 'approval' | 'blocker';
+  label: string;
+  detail: string | null;
+  /** Set for kind 'question' — the persisted pending-question id (D2). */
+  questionId: string | null;
+}
+
+export interface ComputerTaskChecklistStage {
+  id: string;
+  ordinal: number;
+  surface: string;
+  goal: string;
+  status: 'completed' | 'failed' | 'pending';
+}
+
+export interface ComputerTaskChecklistCard {
+  title: string;
+  phaseLabel: string;
+  /** True when the task is still going or can be picked back up. */
+  active: boolean;
+  items: ComputerTaskStateStep[];
+  /** D4 stage progress — empty for single-surface tasks. Statuses derive
+   *  from stage-aware recovery (D4b): completed stages must not be redone,
+   *  the failed stage is where resume starts. */
+  stages: ComputerTaskChecklistStage[];
+  /** Everything waiting on the user, most actionable first. */
+  needsYou: ComputerTaskChecklistNeedsYouItem[];
+  /** Browser session is replayable — a fresh client can resume it. */
+  resumable: boolean;
+  liveUrl: string | null;
+  updatedAt: string;
+}
+
+const PHASE_LABELS: Record<ComputerTaskPhase, string> = {
+  planning: 'Planning',
+  awaiting_approval: 'Waiting for your approval',
+  awaiting_capability_approval: 'Waiting for buildout approval',
+  building_capability: 'Building missing capability',
+  executing: 'Working',
+  completed: 'Done',
+  failed: 'Failed',
+  blocked: 'Blocked',
+};
+
+/**
+ * Project the durable task record into the user-facing checklist card —
+ * the "what is it doing / what does it need from me / can I resume it"
+ * surface for chat and Office. Pure; safe for smoke tests and for
+ * rendering after a reload (everything comes from the persisted record,
+ * including D2 pending questions).
+ */
+export function buildComputerTaskChecklistCard(
+  record: ComputerTaskStateRecord | null | undefined,
+): ComputerTaskChecklistCard | null {
+  if (!record || !record.id) return null;
+  const needsYou: ComputerTaskChecklistNeedsYouItem[] = [];
+  for (const question of listOpenComputerTaskQuestions(record)) {
+    needsYou.push({
+      kind: 'question',
+      label: question.question,
+      detail: question.options.length ? `Options: ${question.options.join(' / ')}` : question.context,
+      questionId: question.id,
+    });
+  }
+  if (record.phase === 'awaiting_approval' || record.phase === 'awaiting_capability_approval') {
+    needsYou.push({
+      kind: 'approval',
+      label: PHASE_LABELS[record.phase],
+      detail: record.capabilityBuildout?.message || record.accessPlan || null,
+      questionId: null,
+    });
+  }
+  for (const blocker of record.blockers.slice(0, 3)) {
+    needsYou.push({ kind: 'blocker', label: blocker, detail: null, questionId: null });
+  }
+  const active = record.phase !== 'completed' && record.phase !== 'failed';
+
+  // Stage progress (D4): completed/failed statuses come from stage-aware
+  // recovery; a finished task marks every stage completed; otherwise
+  // stages are pending until a failure pins them down (no live tracking yet).
+  const completedStageIds = new Set(record.checkpointRecovery?.completedStageIds || []);
+  const failedStageId = record.checkpointRecovery?.failedStageId || null;
+  const stages: ComputerTaskChecklistStage[] = (record.complexity?.stages || []).map((stage) => ({
+    id: stage.id,
+    ordinal: stage.ordinal,
+    surface: stage.surface,
+    goal: stage.goal,
+    status: record.phase === 'completed'
+      ? 'completed'
+      : completedStageIds.has(stage.id)
+        ? 'completed'
+        : stage.id === failedStageId
+          ? 'failed'
+          : 'pending',
+  }));
+
+  return {
+    title: record.taskLabel || record.task.slice(0, 80) || 'Computer task',
+    phaseLabel: PHASE_LABELS[record.phase] || String(record.phase),
+    active,
+    items: record.steps.slice(0, 8),
+    stages,
+    needsYou: needsYou.slice(0, 5),
+    resumable: Boolean(record.sessionId) && record.phase !== 'completed',
+    liveUrl: record.liveUrl || null,
+    updatedAt: record.updatedAt,
+  };
+}
+
+const CHECKLIST_GLYPHS: Record<ComputerTaskStepStatus, string> = {
+  completed: '✓',
+  active: '▸',
+  pending: '○',
+  blocked: '✕',
+};
+
+/** Compact chat/console rendering of the checklist card. */
+export function formatComputerTaskChecklistCard(card: ComputerTaskChecklistCard | null): string {
+  if (!card) return '';
+  const lines: string[] = [`**${card.title}** — ${card.phaseLabel}`];
+  for (const item of card.needsYou) {
+    const prefix = item.kind === 'question' ? 'Needs your answer' : item.kind === 'approval' ? 'Needs your approval' : 'Blocked';
+    lines.push(`⚑ ${prefix}: ${item.label}${item.detail ? ` (${item.detail})` : ''}`);
+  }
+  for (const stage of card.stages) {
+    const glyph = stage.status === 'completed' ? '✓' : stage.status === 'failed' ? '✕' : '○';
+    lines.push(`${glyph} Stage ${stage.ordinal} [${stage.surface.replace(/_/g, ' ')}]: ${stage.goal.slice(0, 80)}`);
+  }
+  // Step rows are redundant when stages carry the progress story.
+  if (card.stages.length === 0) {
+    for (const step of card.items) {
+      lines.push(`${CHECKLIST_GLYPHS[step.status] || '○'} ${step.label}`);
+    }
+  }
+  if (card.resumable && card.liveUrl) lines.push(`Resumable session: ${card.liveUrl}`);
+  return lines.join('\n');
+}
+
+// ─── Task → recipe (D7) ─────────────────────────────────────────────────────
+
+export interface ComputerTaskRecipeDraft {
+  name: string;
+  description: string;
+  tags: string[];
+  /** Full SKILL.md content (agentskills.io frontmatter + body). */
+  content: string;
+}
+
+function kebab(value: string): string {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+}
+
+/**
+ * Turn a COMPLETED task record into a reusable SKILL.md recipe draft (D7)
+ * — "that worked, save it so I can run it again". Pure; the caller files
+ * it through the HITL skill-write proposal path (`skillLibraryWrite`), so
+ * a circle member still approves before anything lands in the library.
+ * Returns null unless the task actually completed: failed runs make bad
+ * recipes.
+ */
+export function buildComputerTaskRecipeDraft(
+  record: ComputerTaskStateRecord | null | undefined,
+): ComputerTaskRecipeDraft | null {
+  if (!record || record.phase !== 'completed' || !record.task.trim()) return null;
+  const label = record.taskLabel || record.task.slice(0, 60);
+  const name = `recipe-${kebab(label)}` || 'recipe-computer-task';
+  const description = `Reusable computer-task recipe: ${record.task.slice(0, 160)}`;
+  const stages = record.complexity?.stages || [];
+  const surfaceTags = Array.from(new Set(stages.map((stage) => stage.surface))).slice(0, 3);
+  const tags = ['recipe', 'computer-task', record.taskKind, ...surfaceTags].filter(Boolean).slice(0, 6);
+
+  const body: string[] = [
+    `# ${label}`,
+    '',
+    '## Goal',
+    record.task.slice(0, 500),
+    '',
+  ];
+  if (stages.length >= 2) {
+    body.push('## Stages (complete and verify each before the next)');
+    for (const stage of stages) {
+      body.push(`${stage.ordinal}. [${stage.surface.replace(/_/g, ' ')}] ${stage.goal}`);
+    }
+    body.push('');
+    body.push('Hand off the exact artifacts produced (paths, filenames, URLs, ids) between stages.');
+  } else if (record.steps.length > 0) {
+    body.push('## Steps');
+    for (const step of record.steps) body.push(`- ${step.label}`);
+  }
+  body.push('');
+  body.push('## Rules');
+  body.push('- Observe before acting; verify after each mutation.');
+  body.push('- Pause for approval before any submit, publish, payment, upload, delete, or credential step.');
+  body.push('- Finish with proof (screenshot, file stats, or page state) — never declare done without it.');
+
+  const content = [
+    '---',
+    `name: ${name}`,
+    `description: ${description.replace(/\n/g, ' ')}`,
+    'version: 1.0.0',
+    `tags: [${tags.join(', ')}]`,
+    '---',
+    '',
+    ...body,
+  ].join('\n');
+
+  return { name, description, tags, content };
 }
 
 export function buildComputerTaskStateSteps(args: {

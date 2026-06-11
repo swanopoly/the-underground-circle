@@ -301,6 +301,414 @@ export const WIKI_ARTICLES: WikiArticle[] = [
     ],
   },
   {
+    id: 'all-cancers-research-atlas',
+    title: 'All Cancers Research Atlas',
+    subtitle: 'A source-backed map of major cancer families, common cancer types, and the safest questions to ask before researching care.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['cancer', 'oncology', 'health', 'biotech', 'research', 'taxonomy', 'patient-safety'],
+    content: [
+      {
+        title: 'Educational Boundary',
+        content:
+          'Cancer content in the Wiki is research support, not medical advice. Cancer is not one disease. Care depends on the exact diagnosis, histology, stage, grade, biomarkers, health history, symptoms, goals, and clinician review.',
+        bulletPoints: [
+          'Use this article to organize research and questions',
+          'Do not use it to diagnose symptoms or choose treatment',
+          'Escalate treatment, medication, biopsy, imaging, or urgent symptom questions to qualified clinicians',
+        ],
+      },
+      {
+        title: 'Cancer Families',
+        content:
+          'A useful cancer map starts with tissue and cell origin. Body site alone is not enough because the same organ can contain very different cancer subtypes.',
+        tableData: {
+          headers: ['Family', 'Examples', 'Research Focus'],
+          rows: [
+            ['Carcinomas', 'Breast, lung, colorectal, prostate, pancreas, liver, stomach, bladder, kidney, thyroid, head and neck, cervical, uterine, ovarian', 'Stage, histology, grade, biomarkers, operability, recurrence risk, local versus systemic therapy'],
+            ['Sarcomas', 'Osteosarcoma, Ewing sarcoma, chondrosarcoma, leiomyosarcoma, liposarcoma, angiosarcoma, rhabdomyosarcoma, GIST', 'Expert pathology, imaging before biopsy when possible, margins, subtype-specific systemic therapy, specialty center review'],
+            ['Blood and immune cancers', 'Leukemia, lymphoma, multiple myeloma, MDS, MPN', 'Blood counts, marrow, flow cytometry, cytogenetics, molecular profile, measurable residual disease, transplant or cellular therapy fit'],
+            ['Brain and nervous system', 'Glioblastoma, astrocytoma, oligodendroglioma, ependymoma, medulloblastoma, meningioma, primary CNS lymphoma', 'MRI, surgical pathology, grade, IDH, 1p/19q, MGMT, neurologic function, radiation, trials'],
+            ['Skin cancers', 'Melanoma, basal cell carcinoma, squamous cell carcinoma, Merkel cell carcinoma, cutaneous lymphoma', 'Lesion change, biopsy, depth or local invasion, nodal risk, UV exposure, BRAF/NRAS/KIT in selected melanoma, immunotherapy'],
+            ['Pediatric and rare cancers', 'Neuroblastoma, Wilms tumor, retinoblastoma, hepatoblastoma, adrenal cortical carcinoma, thymic tumors, mesothelioma, ocular melanoma', 'Specialty review, age-specific protocols, rare tumor networks, genetic risk, trials'],
+          ],
+        },
+      },
+      {
+        title: 'Research Questions',
+        content:
+          'Before comparing treatments or papers, capture the basics. Missing stage, subtype, or biomarker data can make a confident answer unsafe.',
+        bulletPoints: [
+          'What is the exact diagnosis, body site, and histology?',
+          'Has pathology been reviewed, especially for rare cancer, sarcoma, lymphoma, or unusual findings?',
+          'What is the stage, grade, risk group, and spread pattern?',
+          'Which biomarkers or inherited risk tests are known, unknown, pending, or not applicable?',
+          'Is the goal cure, control, symptom relief, prevention of recurrence, surveillance, or trial matching?',
+        ],
+      },
+      {
+        title: 'Primary Sources',
+        content:
+          'The full dated report lives at docs/wiki/all-cancers-research-atlas-2026-06-08.md and should be refreshed against official sources before clinical or product-policy use.',
+        bulletPoints: [
+          'NCI Cancer Types: https://www.cancer.gov/types',
+          'NCI Cancer Causes and Prevention: https://www.cancer.gov/about-cancer/causes-prevention',
+          'NCI Cancer Staging: https://www.cancer.gov/about-cancer/diagnosis-staging/staging',
+          'WHO Cancer fact sheet: https://www.who.int/news-room/fact-sheets/detail/cancer',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'cancer-screening-prevention-risk-guide',
+    title: 'Cancer Screening, Prevention, And Risk Guide',
+    subtitle: 'How to separate prevention, screening, symptoms, and diagnostic workups without turning general guidance into medical advice.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['cancer', 'screening', 'prevention', 'risk', 'cdc', 'uspstf', 'health-safety'],
+    content: [
+      {
+        title: 'Keep The Lanes Separate',
+        content:
+          'Prevention lowers risk before cancer develops. Screening looks for cancer or precancer before symptoms. Diagnostic testing investigates symptoms or abnormal screening results. Mixing these lanes creates unsafe answers.',
+        bulletPoints: [
+          'General screening guidance is not a personalized plan',
+          'Symptoms require clinical evaluation, not a screening shortcut',
+          'Risk can change with family history, genetics, prior results, immune status, anatomy, age, and exposures',
+        ],
+      },
+      {
+        title: 'Major Prevention Levers',
+        content:
+          'The strongest prevention content should focus on evidence-backed risk reduction and avoid cure-all claims.',
+        tableData: {
+          headers: ['Lever', 'Why It Matters'],
+          rows: [
+            ['Avoid tobacco and secondhand smoke', 'Tobacco is linked with many cancers, especially lung cancer and several head, neck, bladder, pancreas, kidney, cervix, stomach, liver, colorectal, and blood cancers.'],
+            ['HPV vaccination and screening', 'HPV vaccination lowers risk for HPV-related cancers, while cervical screening still matters for age-eligible people.'],
+            ['Hepatitis B vaccination and hepatitis care', 'Hepatitis B and C can raise liver cancer risk. Vaccination, testing, and treatment can reduce preventable harm.'],
+            ['UV protection', 'UV exposure raises risk for melanoma and nonmelanoma skin cancers.'],
+            ['Alcohol, weight, activity, and nutrition', 'Alcohol, obesity, and inactivity are population-level risk factors for multiple cancers.'],
+            ['Occupational and environmental controls', 'Asbestos, radon, certain chemicals, ionizing radiation, and workplace exposures require practical risk controls.'],
+          ],
+        },
+      },
+      {
+        title: 'Screening Snapshot',
+        content:
+          'Use current guideline sources before giving exact age or interval details. These examples reflect major U.S. screening lanes and should be personalized by a clinician.',
+        bulletPoints: [
+          'Breast: USPSTF recommends biennial mammography for women ages 40 to 74',
+          'Colorectal: USPSTF recommends screening adults ages 45 to 75 with accepted stool, scope, or imaging strategies',
+          'Cervical: screening depends on age, HPV/cytology strategy, cervix status, and prior results',
+          'Lung: USPSTF recommends annual low-dose CT for ages 50 to 80 with a 20 pack-year smoking history who currently smoke or quit within 15 years',
+          'Prostate: PSA screening is an individual decision for ages 55 to 69 and is not routinely recommended at age 70 or older',
+        ],
+      },
+      {
+        title: 'Agent Guardrails',
+        content:
+          'When a prompt asks about cancer prevention or symptoms, the chat should be calm, useful, and bounded.',
+        bulletPoints: [
+          'Do not diagnose from symptoms',
+          'Do not tell users to delay biopsy, imaging, prescribed treatment, or urgent care',
+          'Do link to CDC, USPSTF, NCI, WHO, and clinician review',
+          'Do flag persistent bleeding, unexplained weight loss, new lumps, changing lesions, neurologic symptoms, or severe new symptoms for medical attention',
+        ],
+      },
+      {
+        title: 'Primary Sources',
+        content:
+          'The full dated report lives at docs/wiki/cancer-screening-prevention-and-risk-guide-2026-06-08.md.',
+        bulletPoints: [
+          'CDC Cancer Prevention: https://www.cdc.gov/cancer/prevention/',
+          'CDC Cancer Screening: https://www.cdc.gov/cancer/prevention/screening.html',
+          'USPSTF Cancer Screening Topics: https://www.uspreventiveservicestaskforce.org/uspstf/recommendation-topics/cancer',
+          'NCI Risk Factors: https://www.cancer.gov/about-cancer/causes-prevention/risk',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'cancer-diagnosis-staging-biomarkers-treatment',
+    title: 'Cancer Diagnosis, Staging, Biomarkers, And Treatment',
+    subtitle: 'A practical guide to the oncology evidence loop: pathology, stage, grade, molecular data, treatment families, and proof.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['cancer', 'diagnosis', 'staging', 'biomarkers', 'treatment', 'oncology', 'clinical-trials'],
+    content: [
+      {
+        title: 'Evidence Loop',
+        content:
+          'The safest research path is not cancer name to treatment. It is presentation, diagnostic workup, tissue diagnosis, stage, grade, biomarkers, treatment goal, and verification.',
+        bulletPoints: [
+          'Stage often changes the purpose and sequence of treatment',
+          'Grade and histology can change risk and treatment intensity',
+          'Biomarkers can guide targeted therapy, immunotherapy, inherited-risk counseling, and trial matching',
+        ],
+      },
+      {
+        title: 'Biomarker Map',
+        content:
+          'Biomarkers are context-dependent. A marker that matters in one cancer may be irrelevant in another.',
+        tableData: {
+          headers: ['Type', 'Examples', 'Use'],
+          rows: [
+            ['Blood tumor markers', 'PSA, CA-125, CA 19-9, CEA, AFP, beta-hCG, LDH, thyroglobulin', 'Sometimes useful for monitoring or selected workups, but many are not general screening tests.'],
+            ['Hormone receptors', 'ER, PR, androgen receptor', 'Can guide endocrine or hormone-directed therapy.'],
+            ['Targetable genes and fusions', 'BRCA1/2, KRAS, NRAS, BRAF, EGFR, ALK, ROS1, RET, NTRK, IDH, KIT, PDGFRA', 'Can change therapy options, inherited-risk questions, or trial matching.'],
+            ['Immune and repair markers', 'MSI, mismatch repair, tumor mutational burden, PD-L1', 'Can help identify immunotherapy relevance in selected settings.'],
+            ['Blood cancer markers', 'Flow cytometry, cytogenetics, BCR-ABL, FLT3, NPM1, JAK2, myeloma cytogenetics', 'Can define subtype, prognosis, measurable residual disease, and treatment choices.'],
+          ],
+        },
+      },
+      {
+        title: 'Treatment Families',
+        content:
+          'Treatment families include surgery, radiation, chemotherapy, immunotherapy, targeted therapy, hormone therapy, stem cell transplant, interventional/local therapy, supportive and palliative care, surveillance, and clinical trials.',
+        bulletPoints: [
+          'The same treatment can be curative, adjuvant, palliative, or disease-controlling depending on context',
+          'Supportive and palliative care can run alongside active treatment',
+          'Clinical trials are especially important in rare, advanced, recurrent, or biomarker-defined cancers',
+        ],
+      },
+      {
+        title: 'Source Quality Check',
+        content:
+          'Cancer articles should be checked against their population, endpoint, comparison group, and harms. A cell study, animal study, phase 1 study, randomized trial, guideline, and marketing page do not carry the same weight.',
+        bulletPoints: [
+          'Ask what exact subtype and stage the source covers',
+          'Ask whether outcomes include survival, response, symptoms, toxicity, or quality of life',
+          'Ask whether the finding applies to the user age, biomarkers, prior treatments, and health context',
+        ],
+      },
+      {
+        title: 'Primary Sources',
+        content:
+          'The full dated report lives at docs/wiki/cancer-diagnosis-staging-biomarkers-and-treatment-guide-2026-06-08.md.',
+        bulletPoints: [
+          'NCI Cancer Staging: https://www.cancer.gov/about-cancer/diagnosis-staging/staging',
+          'NCI Tumor Markers: https://www.cancer.gov/about-cancer/diagnosis-staging/diagnosis/tumor-markers-fact-sheet',
+          'NCI Biomarker Testing: https://www.cancer.gov/about-cancer/treatment/types/biomarker-testing-cancer-treatment',
+          'NCI Treatment Types: https://www.cancer.gov/about-cancer/treatment/types',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'cancer-clinical-trials-care-navigation',
+    title: 'Cancer Clinical Trials And Care Navigation',
+    subtitle: 'A records checklist, clinical-trial primer, source hierarchy, and misinformation filter for cancer research tasks.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['cancer', 'clinical-trials', 'care-navigation', 'oncology', 'records', 'misinformation'],
+    content: [
+      {
+        title: 'Records First',
+        content:
+          'Trial matching and treatment research need the same core records: pathology, stage, scans, biomarkers, treatment history, response, side effects, current medications, health conditions, genetics when relevant, and practical constraints.',
+        bulletPoints: [
+          'Do not treat a trial listing as relevant until eligibility is checked',
+          'Capture prior lines of therapy and dates',
+          'Include travel, cost, caregiving, work, and support constraints',
+        ],
+      },
+      {
+        title: 'Trial Concepts',
+        content:
+          'Trials are research studies, not automatic proof that an approach works for a specific person.',
+        tableData: {
+          headers: ['Concept', 'Meaning'],
+          rows: [
+            ['Phase 1', 'Tests safety, dose, and early signals.'],
+            ['Phase 2', 'Tests activity in a more defined group.'],
+            ['Phase 3', 'Compares a new approach against a standard approach in a larger group.'],
+            ['Eligibility', 'Defines who can join based on cancer type, stage, biomarkers, prior treatment, organ function, age, and health.'],
+            ['Endpoint', 'Defines what the study measures, such as safety, response, survival, symptoms, or quality of life.'],
+          ],
+        },
+      },
+      {
+        title: 'Credible Source Hierarchy',
+        content:
+          'The strongest personal guidance comes from the treating oncology team and tumor board. Public sources like NCI, CDC, NIH, WHO, USPSTF, FDA, guidelines, peer-reviewed studies, and trial registries help users prepare questions and compare evidence.',
+        bulletPoints: [
+          'Use news, blogs, social media, and clinic marketing as leads to better sources, not as proof',
+          'Verify trial status and eligibility through official registries and trial teams',
+          'Ask what the standard option is if the user does not enroll',
+        ],
+      },
+      {
+        title: 'Misinformation Filter',
+        content:
+          'Escalate claims that advertise one cure for all cancers, require buying a supplement or secret protocol, rely only on testimonials, tell users to abandon care, or cite cell and animal studies as direct proof of human cure.',
+        bulletPoints: [
+          'Reject cure-all framing',
+          'Reject advice to delay urgent care or prescribed therapy',
+          'Ask for human evidence, comparison groups, harms, endpoints, and independent review',
+        ],
+      },
+      {
+        title: 'Primary Sources',
+        content:
+          'The full dated report lives at docs/wiki/cancer-clinical-trials-and-care-navigation-2026-06-08.md.',
+        bulletPoints: [
+          'NCI Clinical Trials: https://www.cancer.gov/research/participate/clinical-trials',
+          'NCI Find Cancer Clinical Trials: https://www.cancer.gov/research/participate/clinical-trials/search',
+          'ClinicalTrials.gov: https://clinicaltrials.gov/',
+          'NCI Questions to Ask about Treatment: https://www.cancer.gov/about-cancer/treatment/questions',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'cancer-decision-support-self-advocacy',
+    title: 'Cancer Decision Support And Self-Advocacy',
+    subtitle: 'A shared decision-making toolkit for comparing cancer options, preparing appointments, seeking second opinions, and naming personal priorities.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['cancer', 'decision-support', 'self-advocacy', 'shared-decision-making', 'second-opinion', 'questions'],
+    content: [
+      {
+        title: 'Decision Frame',
+        content:
+          'The best cancer decision is the one that fits the evidence, the exact cancer situation, the user values, practical limits, and clinician review. The chat should help users prepare for shared decision-making, not choose treatment for them.',
+        bulletPoints: [
+          'Capture medical facts: cancer type, stage, grade, subtype, biomarkers, and treatment line',
+          'List all reasonable options, including standard care, trials, monitoring, symptom-focused care, or no immediate treatment when appropriate',
+          'Compare benefits, harms, timing, logistics, proof, and follow-up',
+          'Ask what outcome matters most to the user',
+        ],
+      },
+      {
+        title: 'Option Comparison',
+        content:
+          'Every option should be compared across the same fields so users can see tradeoffs instead of only hearing a recommendation.',
+        tableData: {
+          headers: ['Field', 'What To Capture'],
+          rows: [
+            ['Goal', 'Cure, control, symptom relief, recurrence prevention, surveillance, clinical trial, or another goal'],
+            ['Benefit', 'Expected result and how it is measured: response, survival, symptoms, function, quality of life, or recurrence risk'],
+            ['Harms', 'Common side effects, serious risks, late effects, recovery, fertility, cognition, function, appearance, and independence'],
+            ['Logistics', 'Visit schedule, treatment length, travel, caregiver needs, work/school disruption, and monitoring'],
+            ['Cost', 'Coverage, prior authorization, in-network status, out-of-pocket estimate, assistance, and appeal path'],
+            ['Fallback', 'What happens if the option does not work, causes too much toxicity, or the user changes goals'],
+          ],
+        },
+      },
+      {
+        title: 'Questions To Bring',
+        content:
+          'A useful cancer decision aid turns confusion into direct questions for the oncology team.',
+        bulletPoints: [
+          'What information is still missing before we decide?',
+          'How urgent is this decision, and is it safe to wait for biomarkers, scans, fertility planning, or a second opinion?',
+          'What do you recommend and why does it fit my cancer and my goals?',
+          'What are the most common side effects and which symptoms require calling immediately?',
+          'How will this affect work, caregiving, fertility, sex, cognition, mobility, eating, sleep, pain, or independence?',
+          'Is a clinical trial reasonable for me?',
+        ],
+      },
+      {
+        title: 'Second Opinion Signals',
+        content:
+          'Second opinions can be especially valuable for rare, aggressive, advanced, recurrent, uncertain, or high-stakes cancers, and when several reasonable options exist.',
+        bulletPoints: [
+          'Gather pathology, imaging, biomarker, genetic, lab, medication, and treatment-history records',
+          'Ask the second-opinion team the exact question you want answered',
+          'Do not let a second opinion delay urgent care unless the care team says waiting is safe',
+        ],
+      },
+      {
+        title: 'Primary Sources',
+        content:
+          'The full dated toolkit lives at docs/wiki/cancer-decision-support-and-self-advocacy-toolkit-2026-06-08.md.',
+        bulletPoints: [
+          'NCI Shared Decision Making: https://www.cancer.gov/publications/dictionaries/cancer-terms/def/shared-decision-making',
+          'NCI Questions to Ask about Cancer: https://www.cancer.gov/about-cancer/coping/questions',
+          'NCI Questions to Ask about Treatment: https://www.cancer.gov/about-cancer/treatment/questions',
+          'NCI Finding Cancer Care: https://www.cancer.gov/about-cancer/managing-care/finding-cancer-care',
+          'ACS Understanding Treatment Options: https://www.cancer.org/cancer/managing-cancer/making-treatment-decisions/making-decisions.html',
+        ],
+      },
+    ],
+  },
+  {
+    id: 'cancer-quality-life-financial-survivorship',
+    title: 'Cancer Quality Of Life, Financial, And Survivorship Guide',
+    subtitle: 'A whole-person guide to side effects, palliative care, costs, caregiver support, records, and life after treatment.',
+    category: 'health',
+    icon: 'HX',
+    color: '#ef4444',
+    tags: ['cancer', 'quality-of-life', 'financial-toxicity', 'survivorship', 'palliative-care', 'caregiver'],
+    content: [
+      {
+        title: 'Whole-Person Decision Map',
+        content:
+          'Cancer decisions are not only about shrinking tumors. Users also need to understand symptoms, pain, function, mental health, family roles, work, cost, fertility, sexuality, caregiver needs, and life after treatment.',
+        bulletPoints: [
+          'Ask how each option affects daily life, work, caregiving, mobility, cognition, eating, sleep, pain, intimacy, and independence',
+          'Track side effects and practical barriers early',
+          'Treat financial and transportation problems as care issues, not side notes',
+        ],
+      },
+      {
+        title: 'Palliative Care Boundary',
+        content:
+          'Palliative care focuses on symptom relief, side effects, distress, social needs, spiritual concerns, caregiver strain, and practical problems. It can happen alongside cancer-directed treatment.',
+        bulletPoints: [
+          'Consider asking about palliative care for pain, nausea, fatigue, appetite loss, breathlessness, insomnia, neuropathy, distress, advanced disease, or hard tradeoffs',
+          'Palliative care is not the same as giving up',
+          'The chat should explain the concept and suggest questions, not give medication orders',
+        ],
+      },
+      {
+        title: 'Financial Toxicity Questions',
+        content:
+          'Financial toxicity includes medical bills, drug costs, travel, lodging, childcare, lost income, debt, insurance problems, and skipped medication because of cost.',
+        bulletPoints: [
+          'Is the doctor, hospital, imaging center, lab, pharmacy, and treatment in network?',
+          'What prior authorization is needed?',
+          'What are the expected out-of-pocket costs?',
+          'Are there copay, foundation, hospital charity, manufacturer, social-work, travel, lodging, or transportation resources?',
+          'Who helps with insurance denials or appeals?',
+        ],
+      },
+      {
+        title: 'Survivorship And Records',
+        content:
+          'After treatment, users may need a survivorship plan covering follow-up visits, scans, labs, recurrence signs, late effects, primary care responsibilities, vaccines, rehab, mental health, work, and copies of treatment records.',
+        tableData: {
+          headers: ['Record', 'Why It Matters'],
+          rows: [
+            ['Pathology, stage, grade, subtype', 'Anchors future care and second opinions'],
+            ['Surgery, radiation, and systemic therapy summaries', 'Shows what was done, when, and with what dose or regimen'],
+            ['Biomarker and genetic test reports', 'Can guide future treatment, screening, family counseling, or trial matching'],
+            ['Side-effect log', 'Helps the team identify urgent symptoms, patterns, and quality-of-life needs'],
+            ['Insurance approvals, denials, and bills', 'Supports appeals, financial counseling, and cost tracking'],
+          ],
+        },
+      },
+      {
+        title: 'Primary Sources',
+        content:
+          'The full dated guide lives at docs/wiki/cancer-quality-of-life-financial-and-survivorship-guide-2026-06-08.md.',
+        bulletPoints: [
+          'NCI Palliative Care: https://www.cancer.gov/about-cancer/advanced-cancer/care-choices/palliative-care-fact-sheet',
+          'NCI Managing Cancer Costs: https://www.cancer.gov/about-cancer/managing-care/track-care-costs',
+          'NCI Financial Toxicity: https://www.cancer.gov/about-cancer/managing-care/track-care-costs/financial-toxicity-pdq',
+          'NCI Caregiver Support: https://www.cancer.gov/about-cancer/coping/caregiver-support',
+          'NCI Survivorship Questions: https://www.cancer.gov/about-cancer/coping/survivorship/questions',
+        ],
+      },
+    ],
+  },
+  {
     id: 'energy-materials-systems',
     title: 'Energy And Materials Systems',
     subtitle: 'A non-AI knowledge lane for batteries, renewables, manufacturing, materials, and climate technology.',

@@ -31,6 +31,11 @@ import {
   loadSavedTemplates,
   type SavedTemplate,
 } from '../../lib/computerUseUserTemplates';
+import { buildComputerTaskChecklistCard, resolveComputerTaskPendingQuestionState } from '../../lib/computerTaskState';
+import { buildComputerTaskRecipeDraft } from '../../lib/computerTaskStateModel';
+import { fileComputerTaskRecipeProposal } from '../../lib/skillLibraryWrite';
+import { parseComputerTaskSchedule } from '../../lib/automationChatParser';
+import { createAutomationFromProposal } from '../../lib/automationChatBuilder';
 import type { ComputerTaskStateRecord } from '../../lib/computerTaskState';
 
 interface Props {
@@ -43,6 +48,8 @@ interface Props {
   onSubmit: (task: string) => void;
   /** Optional prefill (e.g. re-open after an error to let the user edit). */
   initialTask?: string;
+  /** Current user — recorded as the author on saved recipes (D7). */
+  userId?: string | null;
 }
 
 const CARD_BG = '#0f172a';
@@ -59,12 +66,22 @@ export default function ComputerUseConsole({
   onClose,
   onSubmit,
   initialTask,
+  userId,
 }: Props) {
   const [task, setTask] = useState(initialTask || '');
   const [needsInputTemplate, setNeedsInputTemplate] =
     useState<ComputerUseTemplate | null>(null);
   const [templateQuery, setTemplateQuery] = useState('');
   const [savedTemplates, setSavedTemplates] = useState<SavedTemplate[]>([]);
+  // D2/D6: draft answer for a persisted pending question (survived reload).
+  const [pendingAnswerDraft, setPendingAnswerDraft] = useState('');
+  // D7: save-as-recipe lifecycle for the current completed task.
+  const [recipeStatus, setRecipeStatus] = useState<'idle' | 'filing' | 'filed' | 'error'>('idle');
+  const [recipeMessage, setRecipeMessage] = useState('');
+  // D7b: schedule-this-task ("friday at 9am") for the completed task.
+  const [scheduleDraft, setScheduleDraft] = useState('');
+  const [scheduleStatus, setScheduleStatus] = useState<'idle' | 'creating' | 'created' | 'error'>('idle');
+  const [scheduleMessage, setScheduleMessage] = useState('');
 
   useEffect(() => {
     if (!visible) return;
@@ -72,6 +89,11 @@ export default function ComputerUseConsole({
     setNeedsInputTemplate(null);
     setTemplateQuery('');
     setSavedTemplates(loadSavedTemplates());
+    setRecipeStatus('idle');
+    setRecipeMessage('');
+    setScheduleDraft('');
+    setScheduleStatus('idle');
+    setScheduleMessage('');
   }, [visible, initialTask]);
 
   const trimmed = task.trim();
@@ -171,6 +193,211 @@ export default function ComputerUseConsole({
             <Text style={styles.statusTask} numberOfLines={2}>{taskState.task}</Text>
             {taskState.currentStep ? (
               <Text style={styles.statusMeta}>Current step: {taskState.currentStep}</Text>
+            ) : null}
+            {(() => {
+              // D6: persisted needs-you items (D2 pending questions, approval
+              // waits, blockers) survive reload — surface them first, since
+              // they are the only things the user can act on. An open
+              // question gets an answer box: answering resolves the persisted
+              // question and submits a resume task that carries the original
+              // goal + the answer (the edge follow-up context supplies the
+              // progress already made).
+              const checklist = buildComputerTaskChecklistCard(taskState);
+              if (!checklist || checklist.needsYou.length === 0) return null;
+              const openQuestion = checklist.needsYou.find((item) => item.kind === 'question' && item.questionId) || null;
+              const submitAnswer = () => {
+                const answer = pendingAnswerDraft.trim();
+                if (!answer || !openQuestion?.questionId || !taskState) return;
+                void resolveComputerTaskPendingQuestionState(
+                  taskState.circleId,
+                  taskState.threadId,
+                  openQuestion.questionId,
+                  answer,
+                );
+                setPendingAnswerDraft('');
+                onSubmit(
+                  `Resume this task: "${taskState.task}". `
+                  + `It paused on the question: "${openQuestion.label}" — the user's answer: ${answer}. `
+                  + `Continue from the progress already made; do not redo completed steps.`,
+                );
+              };
+              return (
+                <View style={styles.groundingBox}>
+                  <Text style={[styles.groundingTitle, { color: '#e8b339' }]}>NEEDS YOU</Text>
+                  {checklist.needsYou.slice(0, 3).map((item, index) => (
+                    <Text key={`${item.kind}_${index}`} style={styles.statusMeta} numberOfLines={3}>
+                      {item.kind === 'question' ? '? ' : item.kind === 'approval' ? '! ' : '✕ '}
+                      {item.label}{item.detail ? ` — ${item.detail}` : ''}
+                    </Text>
+                  ))}
+                  {openQuestion ? (
+                    <View style={{ flexDirection: 'row', gap: 8, marginTop: 6, alignItems: 'center' }}>
+                      <TextInput
+                        value={pendingAnswerDraft}
+                        onChangeText={setPendingAnswerDraft}
+                        placeholder="Type your answer…"
+                        placeholderTextColor={MUTED}
+                        style={{
+                          flex: 1,
+                          color: TEXT,
+                          backgroundColor: FIELD_BG,
+                          borderWidth: 1,
+                          borderColor: CARD_BORDER,
+                          borderRadius: 8,
+                          paddingHorizontal: 10,
+                          paddingVertical: 6,
+                          fontSize: 13,
+                        }}
+                        onSubmitEditing={submitAnswer}
+                      />
+                      <Pressable
+                        onPress={submitAnswer}
+                        disabled={!pendingAnswerDraft.trim()}
+                        style={{
+                          paddingHorizontal: 12,
+                          paddingVertical: 7,
+                          borderRadius: 8,
+                          backgroundColor: pendingAnswerDraft.trim() ? '#e8b339' : CARD_BORDER,
+                        }}
+                      >
+                        <Text style={{ color: pendingAnswerDraft.trim() ? '#1a1505' : MUTED, fontSize: 12, fontWeight: '700' }}>
+                          Answer & resume
+                        </Text>
+                      </Pressable>
+                    </View>
+                  ) : checklist.resumable && checklist.liveUrl ? (
+                    <Text style={styles.statusMeta} numberOfLines={1}>
+                      Session is resumable — answer to continue where it paused.
+                    </Text>
+                  ) : null}
+                </View>
+              );
+            })()}
+            {(() => {
+              // D4: per-stage progress for staged multi-surface tasks —
+              // statuses derive from stage-aware recovery (completed stages
+              // are protected from being redone; ✕ marks the resume point).
+              const checklist = buildComputerTaskChecklistCard(taskState);
+              if (!checklist || checklist.stages.length === 0) return null;
+              return (
+                <View style={styles.groundingBox}>
+                  <Text style={styles.groundingTitle}>STAGES</Text>
+                  {checklist.stages.map((stage) => (
+                    <Text key={stage.id} style={styles.statusMeta} numberOfLines={2}>
+                      {stage.status === 'completed' ? '✓' : stage.status === 'failed' ? '✕' : '○'}
+                      {' '}Stage {stage.ordinal} [{stage.surface.replace(/_/g, ' ')}]: {stage.goal}
+                    </Text>
+                  ))}
+                </View>
+              );
+            })()}
+            {taskState.phase === 'completed' ? (
+              <View style={{ marginTop: 8 }}>
+                {recipeStatus === 'filed' || recipeStatus === 'error' ? (
+                  <Text style={[styles.statusMeta, recipeStatus === 'error' ? { color: '#f87171' } : { color: '#4ade80' }]} numberOfLines={2}>
+                    {recipeMessage}
+                  </Text>
+                ) : (
+                  <Pressable
+                    disabled={recipeStatus === 'filing'}
+                    onPress={() => {
+                      const draft = buildComputerTaskRecipeDraft(taskState);
+                      if (!draft) return;
+                      setRecipeStatus('filing');
+                      void fileComputerTaskRecipeProposal({
+                        circleId: taskState.circleId,
+                        userId: userId || null,
+                        draft,
+                      }).then((result) => {
+                        if (result.ok) {
+                          setRecipeStatus('filed');
+                          setRecipeMessage(`Recipe "${draft.name}" filed — a circle member approves it into the skill library.`);
+                        } else {
+                          setRecipeStatus('error');
+                          setRecipeMessage(result.error);
+                        }
+                      });
+                    }}
+                    style={{
+                      alignSelf: 'flex-start',
+                      paddingHorizontal: 12,
+                      paddingVertical: 7,
+                      borderRadius: 8,
+                      borderWidth: 1,
+                      borderColor: accentColor,
+                    }}
+                  >
+                    <Text style={{ color: accentColor, fontSize: 12, fontWeight: '700' }}>
+                      {recipeStatus === 'filing' ? 'Filing recipe…' : 'Save as recipe'}
+                    </Text>
+                  </Pressable>
+                )}
+                {scheduleStatus === 'created' || scheduleStatus === 'error' ? (
+                  <Text style={[styles.statusMeta, { marginTop: 6, color: scheduleStatus === 'error' ? '#f87171' : '#4ade80' }]} numberOfLines={2}>
+                    {scheduleMessage}
+                  </Text>
+                ) : (
+                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 8, alignItems: 'center' }}>
+                    <TextInput
+                      value={scheduleDraft}
+                      onChangeText={setScheduleDraft}
+                      placeholder="Schedule it: e.g. friday at 9am, day at 8am, weekly"
+                      placeholderTextColor={MUTED}
+                      style={{
+                        flex: 1,
+                        color: TEXT,
+                        backgroundColor: FIELD_BG,
+                        borderWidth: 1,
+                        borderColor: CARD_BORDER,
+                        borderRadius: 8,
+                        paddingHorizontal: 10,
+                        paddingVertical: 6,
+                        fontSize: 13,
+                      }}
+                    />
+                    <Pressable
+                      disabled={!scheduleDraft.trim() || scheduleStatus === 'creating' || !userId}
+                      onPress={() => {
+                        const proposal = parseComputerTaskSchedule({
+                          task: taskState.task,
+                          schedulePhrase: scheduleDraft,
+                          taskLabel: taskState.taskLabel,
+                        });
+                        if (!proposal) {
+                          setScheduleStatus('error');
+                          setScheduleMessage('Could not read that cadence — try "friday at 9am", "day at 8am", or "weekly".');
+                          return;
+                        }
+                        setScheduleStatus('creating');
+                        void createAutomationFromProposal({
+                          proposal,
+                          circleId: taskState.circleId,
+                          userId: userId || '',
+                        }).then((automationId) => {
+                          if (automationId) {
+                            setScheduleStatus('created');
+                            setScheduleMessage(`Scheduled — ${proposal.scheduleSummary || 'on schedule'}. Manage it with /automation list.`);
+                          } else {
+                            setScheduleStatus('error');
+                            setScheduleMessage('Could not create the schedule — check circle permissions and try again.');
+                          }
+                        });
+                      }}
+                      style={{
+                        paddingHorizontal: 12,
+                        paddingVertical: 7,
+                        borderRadius: 8,
+                        borderWidth: 1,
+                        borderColor: scheduleDraft.trim() && userId ? accentColor : CARD_BORDER,
+                      }}
+                    >
+                      <Text style={{ color: scheduleDraft.trim() && userId ? accentColor : MUTED, fontSize: 12, fontWeight: '700' }}>
+                        {scheduleStatus === 'creating' ? 'Scheduling…' : 'Schedule'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                )}
+              </View>
             ) : null}
             {taskState.grounding ? (
               <View style={styles.groundingBox}>

@@ -95,18 +95,57 @@ export type ChatTransportHandlers = Partial<
 >;
 
 /**
+ * Why a plan did not pass the approval gate. A bare `pass: false` lumps
+ * together situations the caller must treat differently — waiting on a
+ * human is not the same as a hard denial, and a transient lookup failure
+ * is the only one worth retrying. The category lets the tool loop / UI
+ * decide retry-vs-wait-vs-stop instead of guessing from the message text.
+ *
+ *   pending        — an existing proposal is awaiting a human decision.
+ *   filed          — a NEW proposal was just filed; awaiting a human.
+ *   rejected       — a human rejected it; needs a changed request to re-propose.
+ *   blocked_policy — circle auto-approve policy is set to `never` for this category.
+ *   error          — fail-closed: the gate could not verify/file (transient).
+ */
+export type ApprovalDeferralCategory =
+  | 'pending'
+  | 'filed'
+  | 'rejected'
+  | 'blocked_policy'
+  | 'error';
+
+/** True only for `error` — the sole category where re-running the same
+ *  plan unchanged could succeed (the others are waiting on a human or a
+ *  hard denial). Exported so callers branch on one source of truth. */
+export function isApprovalDeferralRetryable(category: ApprovalDeferralCategory): boolean {
+  return category === 'error';
+}
+
+/**
  * When a plan carries `approval.required = true`, dispatch consults this
  * callback to either: (a) file a pre-approval and return `deferred`, or
  * (b) confirm that an approval already exists and pass through. This
  * keeps the approval policy single-sourced in the caller (typically via
  * `hitlService`) while the dispatch envelope stays uniform.
+ *
+ * `deferred.category` + `deferred.retryable` are optional for backward
+ * compatibility (older inline gates omit them); when present, the
+ * dispatcher surfaces them on the outcome so the loop can branch.
  */
 export type ApprovalGate = (
   plan: ChatAutomationPlan,
   ctx: ChatTransportContext,
 ) => Promise<
   | { pass: true }
-  | { pass: false; deferred: { approvalId: string; message: string } }
+  | {
+      pass: false;
+      deferred: {
+        approvalId: string;
+        message: string;
+        category?: ApprovalDeferralCategory;
+        retryable?: boolean;
+      };
+    }
 >;
 
 /**
@@ -156,12 +195,18 @@ export async function dispatchChatAutomationPlan(
   if (plan.approval.required && opts.approvalGate) {
     const gate = await opts.approvalGate(plan, ctx);
     if (!gate.pass) {
+      // Resolve retryable: explicit flag wins; otherwise derive from the
+      // category; default false (waiting on a human / hard denial).
+      const category = gate.deferred.category;
+      const retryable = gate.deferred.retryable
+        ?? (category ? isApprovalDeferralRetryable(category) : false);
       const outcome: ChatAutomationOutcome = {
         executionKind: 'deferred',
         status: 'deferred',
         message: gate.deferred.message,
         approvalId: gate.deferred.approvalId,
         durationMs: Date.now() - started,
+        ...(category ? { data: { approvalCategory: category, approvalRetryable: retryable } } : {}),
       };
       try { await opts.onOutcome?.(plan, outcome, ctx); } catch {}
       return outcome;

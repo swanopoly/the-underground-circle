@@ -105,6 +105,15 @@ const ASK_USER_TOOL = {
         description:
           "Optional one-line context — what page you're on, what you're about to do.",
       },
+      kind: {
+        type: "string",
+        enum: ["confirm", "human_takeover"],
+        description:
+          "Use 'human_takeover' when the user must DO something in the live session view " +
+          "(2FA code, CAPTCHA, human-only login step) rather than just approve. Takeover " +
+          "asks get a longer wait (5 minutes) and the wait does not count against the " +
+          "task's time budget. Default 'confirm'.",
+      },
     },
     required: ["question"],
   },
@@ -243,6 +252,42 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  // Guided replay (D7c): if this exact task succeeded before (recipes and
+  // schedules re-run verbatim task text), fetch the proven action sequence
+  // so the agent follows it instead of re-exploring. Long window — weekly
+  // schedules must still match. Tolerant of a pre-migration DB (column
+  // missing → query errors → no replay, never a failure).
+  const normalizeTaskForReplay = (value: string) => String(value || "")
+    .toLowerCase()
+    .replace(/^run this computer task exactly as written:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  let replayBlock = "";
+  if (supabase && body.circleId) {
+    try {
+      const since = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000).toISOString();
+      const { data } = await supabase
+        .from("computer_use_runs")
+        .select("task, action_trace, completed_at")
+        .eq("circle_id", body.circleId)
+        .eq("status", "done")
+        .not("action_trace", "is", null)
+        .gte("completed_at", since)
+        .order("completed_at", { ascending: false })
+        .limit(5);
+      const wanted = normalizeTaskForReplay(body.task);
+      const prior = (data || []).find((row: any) =>
+        wanted && normalizeTaskForReplay(row.task) === wanted && Array.isArray(row.action_trace) && row.action_trace.length > 0);
+      if (prior) {
+        const steps = (prior.action_trace as Array<{ tool: string; input: unknown }>)
+          .slice(0, 40)
+          .map((a, i) => `${i + 1}. ${a.tool}(${JSON.stringify(a.input ?? {}).slice(0, 200)})`)
+          .join("\n");
+        replayBlock = `PROVEN ACTION SEQUENCE — this exact task succeeded before (${String(prior.completed_at).slice(0, 10)}). Follow it step by step instead of re-exploring:\n${steps}\n\nReplay rules: before each action, confirm the visible state still matches what the step expects; if it doesn't, STOP following the script at that point and re-ground normally (observe, then act). Approval/confirmation steps still apply — the script never skips an ask_user. Skip exploration the script already answers.`;
+      }
+    } catch { /* replay is an optimization — never block the run */ }
+  }
+
   // Pull the most recent completed run for this circle to inject as
   // follow-up context. Caps the window at 30 minutes so day-old tasks
   // don't bleed into unrelated sessions.
@@ -250,11 +295,15 @@ Deno.serve(async (req: Request) => {
   if (supabase && body.circleId) {
     try {
       const since = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+      // Include stopped-early runs (D8 writes a partial-progress summary on
+      // status "error") so a resume run knows what was already done instead
+      // of restarting blind. Runs without a summary are skipped either way.
       const { data } = await supabase
         .from("computer_use_runs")
-        .select("task, summary, findings")
+        .select("task, summary, findings, status")
         .eq("circle_id", body.circleId)
-        .eq("status", "done")
+        .in("status", ["done", "error"])
+        .not("summary", "is", null)
         .gte("completed_at", since)
         .order("completed_at", { ascending: false })
         .limit(1);
@@ -266,7 +315,10 @@ Deno.serve(async (req: Request) => {
               .map((f: any, i: number) => `${i + 1}. ${f.title || "(untitled)"}${f.url ? ` — ${f.url}` : ""}${f.price ? ` (${f.price})` : ""}`)
               .join("\n")}`
           : "";
-        followUpContext = `Your previous task in this circle:\n"${prev.task}"\n\nWhat you found:\n${String(prev.summary).slice(0, 1200)}${findingsBlurb}\n\nIf the user's new task is a follow-up ("tell me more about #3", "continue", "the cheapest one"), leverage that context. If it's unrelated, ignore it.`;
+        const wasPartial = prev.status === "error";
+        followUpContext = wasPartial
+          ? `Your previous task in this circle stopped early:\n"${prev.task}"\n\nProgress before it stopped:\n${String(prev.summary).slice(0, 1200)}${findingsBlurb}\n\nIf the user's new task is a resume/continue of that work, pick up AFTER the completed actions above — do not redo them. If it's unrelated, ignore it.`
+          : `Your previous task in this circle:\n"${prev.task}"\n\nWhat you found:\n${String(prev.summary).slice(0, 1200)}${findingsBlurb}\n\nIf the user's new task is a follow-up ("tell me more about #3", "continue", "the cheapest one"), leverage that context. If it's unrelated, ignore it.`;
       }
     } catch { /* follow-up context is a nice-to-have; never block the run */ }
   }
@@ -346,13 +398,18 @@ Deno.serve(async (req: Request) => {
       const startTime = Date.now();
       const DEADLINE_MS = 5 * 60 * 1000;
       let credentialFillApprovedUntil = 0;
+      // Time spent paused on ask_user does not count against the work
+      // deadline (D5) — a human fetching a 2FA code should not starve the
+      // agent's 5-minute budget.
+      let confirmationWaitMs = 0;
 
       // Conversation messages for the Claude loop. Prepend follow-up
       // context (from the most recent completed run in this circle) so
       // the agent can thread continuity across tasks without requiring
       // the user to restate history.
-      const userContent = followUpContext
-        ? `${followUpContext}\n\n---\n\nNew task:\n${body.task}`
+      const contextBlocks = [replayBlock, followUpContext].filter(Boolean);
+      const userContent = contextBlocks.length
+        ? `${contextBlocks.join("\n\n---\n\n")}\n\n---\n\nNew task:\n${body.task}`
         : body.task;
       const messages: Array<{ role: string; content: any }> = [
         { role: "user", content: userContent },
@@ -376,12 +433,89 @@ Deno.serve(async (req: Request) => {
           : await openBrowserbaseSession(body.browserbase);
         emit("session_started", { sessionId, liveUrl });
 
+        // ── Partial-results support (D8) ──────────────────────────────
+        // A stopped run must hand back something checkable, not just an
+        // error string. Track a bounded breadcrumb log of completed
+        // actions + the last reasoning snippet; on any bounded stop
+        // (timeout / token budget / cost cap / stall) emit `partial_result`
+        // with the progress so far and the live session link, and persist
+        // the same onto the run row so follow-up context can resume from
+        // what was actually done.
+        const progressLog: Array<{ iter: number; tool: string; detail: string }> = [];
+        let lastReasoning = "";
+        const recordProgress = (iter: number, tool: string, input: unknown) => {
+          let detail = "";
+          try {
+            const i = input as Record<string, unknown>;
+            detail = String(i?.url || i?.selector || i?.text || i?.question || JSON.stringify(i ?? {})).slice(0, 100);
+          } catch { detail = ""; }
+          progressLog.push({ iter, tool, detail });
+          if (progressLog.length > 24) progressLog.shift();
+        };
+
+        // Guided-replay trace (D7c): full tool inputs, REDACTED — any
+        // credential-shaped key is masked at write time so the persisted
+        // trace can never carry a secret. Bounded per action and overall.
+        const SENSITIVE_KEY_RE = /password|secret|token|otp|credential|passcode|pin|cvv|card/i;
+        const redactForTrace = (input: unknown): unknown => {
+          if (!input || typeof input !== "object") {
+            return typeof input === "string" ? input.slice(0, 200) : input;
+          }
+          const out: Record<string, unknown> = {};
+          for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+            if (SENSITIVE_KEY_RE.test(key)) { out[key] = "[redacted]"; continue; }
+            out[key] = typeof value === "string" ? value.slice(0, 200) : value;
+          }
+          return out;
+        };
+        const actionTrace: Array<{ tool: string; input: unknown }> = [];
+        const recordTrace = (tool: string, input: unknown) => {
+          actionTrace.push({ tool, input: redactForTrace(input) });
+          if (actionTrace.length > 40) actionTrace.shift();
+        };
+        const emitPartialResult = async (iter: number, stopReason: string, message: string) => {
+          const recent = progressLog.slice(-12);
+          const progressSummary = recent.length
+            ? `Stopped (${stopReason}) after ${iter} iteration${iter === 1 ? "" : "s"}. Completed actions: ${recent.map((p) => `${p.tool}${p.detail ? ` (${p.detail.slice(0, 60)})` : ""}`).join("; ")}.`
+            : `Stopped (${stopReason}) after ${iter} iteration${iter === 1 ? "" : "s"} with no completed actions.`;
+          if (supabase && runId) {
+            try {
+              await supabase
+                .from("computer_use_runs")
+                .update({
+                  status: "error",
+                  error_message: message.slice(0, 500),
+                  summary: progressSummary.slice(0, 1500),
+                  session_id: sessionId,
+                  live_url: liveUrl,
+                  iterations: iter,
+                  input_tokens: usage.uncachedIn + usage.cacheCreate + usage.cacheRead,
+                  output_tokens: usage.output,
+                  estimated_cost: computeCostUsd(agentModel, usage),
+                  completed_at: new Date().toISOString(),
+                })
+                .eq("id", runId);
+            } catch { /* best-effort */ }
+          }
+          emit("partial_result", {
+            stopReason,
+            message,
+            summary: progressSummary,
+            progress: recent,
+            lastReasoning: lastReasoning.slice(0, 400) || null,
+            iterations: iter,
+            sessionId,
+            liveUrl,
+            runId,
+          });
+        };
+
         // ── Agent loop ────────────────────────────────────────────────
         for (let iter = 0; iter < maxIterations; iter++) {
-          if (Date.now() - startTime > DEADLINE_MS) {
-            emit("error", {
-              message: `Timed out after ${iter} iteration${iter === 1 ? '' : 's'} (5-minute limit). The task is too long for one run — try splitting it, or narrow the scope (e.g. "just the top 3 results").`,
-            });
+          if (Date.now() - startTime - confirmationWaitMs > DEADLINE_MS) {
+            const message = `Timed out after ${iter} iteration${iter === 1 ? '' : 's'} (5-minute limit). The task is too long for one run — try splitting it, or narrow the scope (e.g. "just the top 3 results").`;
+            await emitPartialResult(iter, "timeout", message);
+            emit("error", { message });
             break;
           }
           // Token cap is "new work only" — cache reads don't count because
@@ -389,14 +523,16 @@ Deno.serve(async (req: Request) => {
           // cache creates (these write real new tokens) is the right budget.
           const newWorkTokens = usage.uncachedIn + usage.cacheCreate + usage.output;
           if (newWorkTokens > maxTokensBudget) {
-            emit("error", {
-              message: `Token budget reached: ${newWorkTokens.toLocaleString()} > ${maxTokensBudget.toLocaleString()}. Too much to read this run — narrow the task or break it up.`,
-            });
+            const message = `Token budget reached: ${newWorkTokens.toLocaleString()} > ${maxTokensBudget.toLocaleString()}. Too much to read this run — narrow the task or break it up.`;
+            await emitPartialResult(iter, "token_budget", message);
+            emit("error", { message });
             break;
           }
           const runningCost = computeCostUsd(agentModel, usage);
           if (runningCost > maxCostUsd) {
-            emit("error", { message: `Budget cap reached: $${runningCost.toFixed(4)} > $${maxCostUsd.toFixed(2)}. Raise the cap in circle settings or run a narrower task.` });
+            const message = `Budget cap reached: $${runningCost.toFixed(4)} > $${maxCostUsd.toFixed(2)}. Raise the cap in circle settings or run a narrower task.`;
+            await emitPartialResult(iter, "cost_cap", message);
+            emit("error", { message });
             break;
           }
 
@@ -425,6 +561,7 @@ Deno.serve(async (req: Request) => {
           for (const block of claudeResponse.content) {
             if (block.type === "text" && block.text) {
               emit("reasoning", { text: block.text });
+              lastReasoning = block.text;
             }
           }
 
@@ -469,6 +606,16 @@ Deno.serve(async (req: Request) => {
                   })
                   .eq("id", runId);
               } catch { /* best-effort */ }
+              // Action trace persists separately (D7c) so a pre-migration DB
+              // (column missing) can never break run completion.
+              if (actionTrace.length > 0) {
+                try {
+                  await supabase
+                    .from("computer_use_runs")
+                    .update({ action_trace: actionTrace })
+                    .eq("id", runId);
+                } catch { /* replay trace is an optimization */ }
+              }
             }
             emit("result", {
               summary,
@@ -492,26 +639,43 @@ Deno.serve(async (req: Request) => {
           // Otherwise expect tool_use blocks; execute each and reply.
           const toolUses = claudeResponse.content.filter((b: any) => b.type === "tool_use");
           if (toolUses.length === 0) {
-            emit("error", {
-              message: "Agent stalled — Claude neither finished nor asked for a tool. Try re-running the task; if it repeats, rephrase it more concretely.",
-            });
+            const message = "Agent stalled — Claude neither finished nor asked for a tool. Try re-running the task; if it repeats, rephrase it more concretely.";
+            await emitPartialResult(iter + 1, "stall", message);
+            emit("error", { message });
             break;
           }
 
           const toolResults: Array<{ type: string; tool_use_id: string; content: any }> = [];
           for (const tu of toolUses) {
             emit("action", { tool: tu.name, input: tu.input });
+            recordProgress(iter + 1, tu.name, tu.input);
+            recordTrace(tu.name, tu.input);
             try {
               // Stop-and-confirm: when Claude calls `ask_user`, pause the
               // loop and wait for the client to write a decision. No real
               // browser action fires until the user answers (or times out).
               if (tu.name === "ask_user") {
                 const question = String((tu.input as any)?.question || "Confirm this action?");
+                const isTakeover = (tu.input as any)?.kind === "human_takeover";
                 const options = Array.isArray((tu.input as any)?.options) && (tu.input as any).options.length
                   ? ((tu.input as any).options as string[])
-                  : ["Yes, continue", "No, cancel"];
+                  : isTakeover
+                    ? ["Done, continue", "Cancel the task"]
+                    : ["Yes, continue", "No, cancel"];
                 const ctx = typeof (tu.input as any)?.context === "string" ? (tu.input as any).context : null;
-                const choice = await askUserAndWait(supabase, runId, question, options, ctx, emit);
+                // Takeover asks: the user must act in the live session view
+                // (2FA, CAPTCHA). While the loop is parked here NO tools run
+                // and NO screenshots are captured — whatever the user types
+                // in the live view never enters model context.
+                const takeoverCtx = isTakeover
+                  ? `${ctx ? `${ctx} — ` : ""}Open the live session view to complete this step yourself. Nothing you type there is captured while the agent waits.`
+                  : ctx;
+                const waitStarted = Date.now();
+                const choice = await askUserAndWait(
+                  supabase, runId, question, options, takeoverCtx, emit,
+                  isTakeover ? 300_000 : 120_000,
+                );
+                confirmationWaitMs += Date.now() - waitStarted;
                 if (isAffirmativeChoice(choice) && isCredentialApprovalQuestion(question, ctx)) {
                   credentialFillApprovedUntil = Date.now() + 2 * 60 * 1000;
                 }
@@ -632,13 +796,13 @@ BEHAVIOR
 TASK COMPLETION
 - When you've completed the user's task, write a concise summary (3-8 bullets or 1-3 paragraphs) and STOP. Do NOT emit another tool call.
 - The summary should include concrete findings (prices, links, names, quotes) — not meta-commentary about what you did.
-- If the task can't be completed (blocked by login, paywall, captcha, stale info), explain what stopped you and stop.
+- If the task can't be completed (paywall, stale info, no account exists), explain what stopped you and stop. Login walls, 2FA, and CAPTCHA are NOT dead ends — use the vault or human-takeover flows below first.
 
 BROWSERBASE WORKFLOW PROFILES
 - Web data retrieval: open the source page, wait for dynamic content to render, extract only the requested fields/records, include source URLs when visible, and stop promptly. For list-like results, use the <FINDINGS> block. For table/record/json style output, use <EXTRACTED_DATA> with valid JSON after the human summary.
 - Stagehand-style browser work: break ambiguous UI work into small semantic actions (act/extract-sized steps), then verify with screenshots or visible text before continuing. Use deterministic clicks/typing when the target is obvious; do not overuse AI actions when a simple browser action is safer.
 - Form submission: wait for fields to load, fill text inputs/selects/radios/checkboxes/uploads in sequence, handle dynamic sections after each selection, ask_user before credentials/personal info/payment/final submit, then verify success through visible confirmation text, URL change, or validation errors.
-- Persistent login state: if the task needs an account, use vault-provided credentials through fill_saved_login only after approval and only on allowed origins. If the site needs 2FA, CAPTCHA, or a human-only checkpoint, stop and report it.
+- Persistent login state: if the task needs an account, use vault-provided credentials through fill_saved_login only after approval and only on allowed origins. If the site needs 2FA, CAPTCHA, or a human-only checkpoint, hand over to the user with the human-takeover flow (below) and continue after they finish.
 - Deterministic-first: if the task already contains concrete browser steps (open URL, click named control, fill field, press key, extract visible data), execute that explicit sequence before inventing a new strategy. Use model judgment only for ambiguous targets, missing selectors, summarizing observed data, or recovery after repeated deterministic failure.
 - Creative handoff: if the browser task requires a generated image or visual concept, produce the precise prompt/spec needed for the image tool and return it as an artifact-ready result; do not answer with a generic "I cannot create images" refusal.
 
@@ -648,7 +812,7 @@ SAFETY
 - For saved vault credentials, navigate to the login page, focus the username/email field, call \`ask_user\` for permission to use the saved credential, then call \`fill_saved_login\` with the credential_id plus any grantee/grantee_type from the vault runbook. Never ask the user to paste a password or secret into chat.
 - If the user's task explicitly asked for that exact action ("buy X for $Y"), still call \`ask_user\` once at the commit step to confirm the final details.
 - Never guess credentials. If a site requires login you weren't given, call \`ask_user\` with the question "Log in as who?" and wait for direction.
-- If a site shows a CAPTCHA or 2FA, stop and report via a text summary — do not keep trying.
+- HUMAN TAKEOVER: if a site shows 2FA, a CAPTCHA, or any human-only verification step, do NOT keep trying and do NOT give up. Call \`ask_user\` with kind "human_takeover", a question like "The site is asking for a 2FA code — complete it in the live session view, then choose Done", and wait. After the user chooses "Done, continue", take a fresh screenshot to confirm the checkpoint cleared, then continue the task. If they cancel or time out, summarize progress and stop. Never ask the user to tell you the code or solve the CAPTCHA for you to type — they complete it directly in the live view.
 
 DO NOT
 - Do not use the bash tool for anything — it's not available here. Use the computer tool for everything.
@@ -708,6 +872,7 @@ async function askUserAndWait(
   options: string[],
   context: string | null,
   emit: (event: string, data: unknown) => void,
+  timeoutMs = 120_000,
 ): Promise<string> {
   if (!supabase || !runId) {
     // No persistence available — can't park the decision anywhere.
@@ -717,7 +882,7 @@ async function askUserAndWait(
     return options.find((o) => /^no/i.test(o) || /cancel/i.test(o)) || "No";
   }
 
-  const TIMEOUT_MS = 120_000;
+  const TIMEOUT_MS = timeoutMs;
   const POLL_MS = 500;
 
   let confirmationId: string | null = null;
@@ -766,7 +931,7 @@ async function askUserAndWait(
       .eq("id", confirmationId);
   } catch {}
   emit("confirmation_resolved", { id: confirmationId, choice: "__timeout__" });
-  return "User did not respond within 2 minutes — treating as a No / cancel. Try again and wait for the user.";
+  return `User did not respond within ${Math.round(TIMEOUT_MS / 60_000)} minute(s) — treating as a No / cancel. Try again and wait for the user.`;
 }
 
 function isAffirmativeChoice(choice: string): boolean {

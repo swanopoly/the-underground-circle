@@ -120,6 +120,43 @@ async function runDispatchCases() {
     assertEqual(outcome.status, 'deferred', 'dispatch: deferred when gate denies');
     assertEqual(outcome.approvalId, 'a1', 'dispatch: approvalId passthrough');
     assert(outcome.message === 'pending review', 'dispatch: deferred message passthrough');
+    // Backward-compat: a gate that omits category emits no approvalCategory.
+    assert(outcome.data === undefined || (outcome.data as any).approvalCategory === undefined,
+      'dispatch: no category when gate omits it');
+  }
+
+  // ─── dispatch: deferral category + retryable propagate (C7) ────────────
+  {
+    // A retryable transient error category should surface retryable=true.
+    const errOutcome = await dispatchChatAutomationPlan(
+      makePlan({ approval: { required: true, reason: 'side effect' } }),
+      {
+        handlers: { run_openswan: async () => ({ executionKind: 'run_openswan', status: 'completed', message: 'ran' }) },
+        ctx: baseCtx,
+        approvalGate: async () => ({
+          pass: false,
+          deferred: { approvalId: '', message: 'lookup failed', category: 'error' as const },
+        }),
+      },
+    );
+    assertEqual(errOutcome.status, 'deferred', 'dispatch(C7): error category still defers');
+    assertEqual((errOutcome.data as any)?.approvalCategory, 'error', 'dispatch(C7): error category surfaced');
+    assertEqual((errOutcome.data as any)?.approvalRetryable, true, 'dispatch(C7): error derives retryable=true');
+
+    // A human-decision category (rejected) must NOT be retryable.
+    const rejOutcome = await dispatchChatAutomationPlan(
+      makePlan({ approval: { required: true, reason: 'side effect' } }),
+      {
+        handlers: { run_openswan: async () => ({ executionKind: 'run_openswan', status: 'completed', message: 'ran' }) },
+        ctx: baseCtx,
+        approvalGate: async () => ({
+          pass: false,
+          deferred: { approvalId: 'r1', message: 'rejected by human', category: 'rejected' as const },
+        }),
+      },
+    );
+    assertEqual((rejOutcome.data as any)?.approvalCategory, 'rejected', 'dispatch(C7): rejected category surfaced');
+    assertEqual((rejOutcome.data as any)?.approvalRetryable, false, 'dispatch(C7): rejected derives retryable=false');
   }
 
   // ─── dispatch: pass when approvalGate approves ─────────────────────────

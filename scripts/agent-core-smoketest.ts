@@ -13,6 +13,8 @@
  *   4. Interactive tool forces sequential dispatch (no parallelism).
  *   5. maxIterations guard fires and reports hitMaxIterations: true.
  *   6. Event stream ordering matches expectations.
+ *   7. Dependency-aware tool parallelism (T8/O6) — `toolParallelPolicyProvider`
+ *      partitions a round into ordered groups; absent provider = legacy.
  *
  * Run with: `npx tsx scripts/agent-core-smoketest.ts`
  *
@@ -246,6 +248,270 @@ async function case6_unknownTool() {
   }
 }
 
+// ─── Case 7 — pre-turn compaction fires + emits context_compressed ─────────
+
+async function case7_compactionPreTurn() {
+  // Build an oversized history (many short messages) so the compaction
+  // threshold trips on the first turn. preserveLast=4 keeps the tail; the
+  // injected summariser is deterministic so the assertion is stable.
+  const bulk: AgentMessage[] = [];
+  for (let i = 0; i < 60; i++) {
+    bulk.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: 'x'.repeat(200) });
+  }
+  const events: AgentEvent[] = [];
+  let summariserCalls = 0;
+  const result = await runAgent({
+    initialMessages: bulk,
+    tools: [],
+    provider: scriptedProvider([
+      { stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] },
+    ]),
+    onEvent: (e) => events.push(e),
+    compaction: {
+      // Tiny window so 60×200 chars (~3k tokens) is over 50% of it.
+      maxContextTokens: 2_000,
+      preserveLast: 4,
+      summariser: async () => { summariserCalls += 1; return 'CONDENSED RECAP'; },
+    },
+  });
+  assertEqual(result.text, 'ok', 'case7: final text');
+  assert(summariserCalls === 1, 'case7: summariser invoked once');
+  const compEvent = events.find((e) => e.kind === 'context_compressed');
+  assert(!!compEvent, 'case7: context_compressed event emitted');
+  if (compEvent && compEvent.kind === 'context_compressed') {
+    assert(compEvent.droppedCount > 0, 'case7: dropped messages > 0');
+    assert(compEvent.tokensAfter < compEvent.tokensBefore, 'case7: tokens reduced');
+  }
+}
+
+// ─── Case 8 — pre-dispatch approval gate (R11) ──────────────────────────────
+
+async function case8_toolApprovalGate() {
+  let handlerCalls = 0;
+  const tool: AgentToolDefinition = {
+    name: 'guarded',
+    description: 'gated tool',
+    input_schema: { type: 'object', properties: { n: { type: 'number' } } },
+    async handler(input) {
+      handlerCalls += 1;
+      return { ok: true, data: { n: (input as { n?: number }).n } };
+    },
+  };
+  const useApproved: AgentMessageContentBlock = { type: 'tool_use', id: 'tu_ok',  name: 'guarded', input: { n: 1 } };
+  const useRejected: AgentMessageContentBlock = { type: 'tool_use', id: 'tu_no',  name: 'guarded', input: { n: 2 } };
+  const useGateBoom: AgentMessageContentBlock = { type: 'tool_use', id: 'tu_err', name: 'guarded', input: { n: 3 } };
+
+  const result = await runAgent({
+    initialMessages: [{ role: 'user', content: 'gate test' }],
+    tools: [tool],
+    provider: scriptedProvider([
+      { stop_reason: 'tool_use', content: [useApproved, useRejected, useGateBoom] },
+      { stop_reason: 'end_turn', content: [{ type: 'text', text: 'gated' }] },
+    ]),
+    toolApprovalGate: async ({ toolUseId }) => {
+      if (toolUseId === 'tu_ok') return { decision: 'approve' };
+      if (toolUseId === 'tu_no') return { decision: 'reject', reason: 'circle policy' };
+      throw new Error('gate exploded'); // tu_err — must fail CLOSED (reject)
+    },
+  });
+
+  assertEqual(result.text, 'gated', 'case8: loop completed');
+  assertEqual(handlerCalls, 1, 'case8: only the approved call ran the handler');
+
+  const blocks = result.messages[2].content as AgentMessageContentBlock[];
+  const byId = (id: string) => blocks.find((b) => b.type === 'tool_result' && b.tool_use_id === id);
+  const ok = byId('tu_ok'); const no = byId('tu_no'); const err = byId('tu_err');
+  assert(!!ok && ok.type === 'tool_result' && ok.is_error !== true, 'case8: approved call succeeded');
+  if (no && no.type === 'tool_result') {
+    assertEqual(no.is_error, true, 'case8: rejected call is_error');
+    assert(no.content.includes('blocked by policy'), 'case8: rejection reads as policy block');
+    assert(no.content.includes('circle policy'), 'case8: rejection carries the reason');
+    assert(no.content.includes('Do not retry'), 'case8: rejection tells model not to retry');
+  } else { assert(false, 'case8: rejected tool_result missing'); }
+  if (err && err.type === 'tool_result') {
+    assertEqual(err.is_error, true, 'case8: gate throw fails closed');
+    assert(err.content.includes('approval gate failed'), 'case8: gate failure reason surfaced');
+  } else { assert(false, 'case8: gate-throw tool_result missing'); }
+}
+
+// ─── Case 9 — iteration_complete checkpoint + metadata side channel ─────────
+
+async function case9_checkpointAndMetadata() {
+  const tool: AgentToolDefinition = {
+    name: 'capture',
+    description: 'returns hidden metadata',
+    input_schema: { type: 'object', properties: {} },
+    async handler() {
+      return {
+        ok: true,
+        data: { visible: 'yes' },
+        metadata: { hiddenManifest: 'design-capture-7' },
+      };
+    },
+  };
+  const use: AgentMessageContentBlock = { type: 'tool_use', id: 'tu_meta', name: 'capture', input: {} };
+  const events: AgentEvent[] = [];
+  const result = await runAgent({
+    initialMessages: [{ role: 'user', content: 'capture' }],
+    tools: [tool],
+    provider: scriptedProvider([
+      { stop_reason: 'tool_use', content: [use] },
+      { stop_reason: 'end_turn', content: [{ type: 'text', text: 'done' }] },
+    ]),
+    onEvent: (e) => events.push(e),
+  });
+
+  // R14 — metadata flows through the event…
+  const resultEvent = events.find((e) => e.kind === 'tool_call_result' && e.toolUseId === 'tu_meta');
+  assert(!!resultEvent, 'case9: tool_call_result fired');
+  if (resultEvent && resultEvent.kind === 'tool_call_result' && resultEvent.result.ok) {
+    assertEqual(
+      resultEvent.result.metadata,
+      { hiddenManifest: 'design-capture-7' },
+      'case9: event carries metadata',
+    );
+  }
+  // …but is STRIPPED from the model-visible tool_result content.
+  const toolResult = (result.messages[2].content as AgentMessageContentBlock[])[0];
+  assert(toolResult.type === 'tool_result', 'case9: tool_result emitted');
+  if (toolResult.type === 'tool_result') {
+    assert(!toolResult.content.includes('hiddenManifest'), 'case9: metadata hidden from model');
+    assert(toolResult.content.includes('visible'), 'case9: data still model-visible');
+  }
+
+  // R12 — iteration_complete fired after the round with a consistent snapshot
+  // (user → assistant(tool_use) → user(tool_result) = 3 messages), and the
+  // snapshot does not alias the live history (final history has 4).
+  const checkpoint = events.find((e) => e.kind === 'iteration_complete');
+  assert(!!checkpoint, 'case9: iteration_complete emitted');
+  if (checkpoint && checkpoint.kind === 'iteration_complete') {
+    assertEqual(checkpoint.iteration, 1, 'case9: checkpoint at iteration 1');
+    assertEqual(checkpoint.messages.length, 3, 'case9: snapshot taken at the round boundary');
+    const last = checkpoint.messages[checkpoint.messages.length - 1];
+    const lastBlocks = last.content as AgentMessageContentBlock[];
+    assert(lastBlocks[0]?.type === 'tool_result', 'case9: snapshot ends with closed tool_result pair');
+  }
+  assertEqual(result.messages.length, 4, 'case9: final history unaffected');
+}
+
+// ─── Case 10 — dependency-aware tool parallelism (T8/O6) ───────────────────
+
+async function case10_dependencyAwareParallelism() {
+  // Three auto-approved writers: A writes domain x, B writes domain y,
+  // C writes domain x. With the policy provider, the round must partition
+  // into [A, B] (disjoint → parallel-eligible) then [C] (conflicts with A).
+  const makeWriter = (name: string, order: string[]): AgentToolDefinition => ({
+    name,
+    description: `writer ${name}`,
+    input_schema: { type: 'object', properties: {} },
+    async handler() {
+      order.push(`start:${name}`);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      order.push(`end:${name}`);
+      return { ok: true, data: { name } };
+    },
+  });
+  const policies: Record<string, { mutatesState: boolean; externalSideEffect: boolean; approvalMode: string; mutationTargets: string[] }> = {
+    writeA: { mutatesState: true, externalSideEffect: false, approvalMode: 'auto', mutationTargets: ['x'] },
+    writeB: { mutatesState: true, externalSideEffect: false, approvalMode: 'auto', mutationTargets: ['y'] },
+    writeC: { mutatesState: true, externalSideEffect: false, approvalMode: 'auto', mutationTargets: ['x'] },
+  };
+  const uses: AgentMessageContentBlock[] = [
+    { type: 'tool_use', id: 'tu_a', name: 'writeA', input: {} },
+    { type: 'tool_use', id: 'tu_b', name: 'writeB', input: {} },
+    { type: 'tool_use', id: 'tu_c', name: 'writeC', input: {} },
+  ];
+  const turns = (): ProviderTurnResult[] => ([
+    { stop_reason: 'tool_use', content: uses },
+    { stop_reason: 'end_turn', content: [{ type: 'text', text: 'done' }] },
+  ]);
+
+  // WITH provider: A+B overlap; C starts only after both finished.
+  const orderWith: string[] = [];
+  const resultWith = await runAgent({
+    initialMessages: [{ role: 'user', content: 'write things' }],
+    tools: ['writeA', 'writeB', 'writeC'].map((n) => makeWriter(n, orderWith)),
+    provider: scriptedProvider(turns()),
+    parallelToolConcurrency: 4,
+    toolParallelPolicyProvider: (toolName) => policies[toolName] ?? null,
+  });
+  const idx = (entry: string) => orderWith.indexOf(entry);
+  assert(idx('start:writeB') >= 0 && idx('start:writeB') < idx('end:writeA'),
+    'case10: A and B overlapped (same parallel group)');
+  assert(idx('start:writeC') > idx('end:writeA') && idx('start:writeC') > idx('end:writeB'),
+    'case10: C waited for the whole first group (write-conflict barrier)');
+  // Result blocks must come back in original tool_use order regardless of grouping.
+  const blocksWith = resultWith.messages[2].content as AgentMessageContentBlock[];
+  assertEqual(
+    blocksWith.map((b) => (b.type === 'tool_result' ? b.tool_use_id : b.type)),
+    ['tu_a', 'tu_b', 'tu_c'],
+    'case10: tool_result blocks in original request order',
+  );
+  assert(blocksWith.every((b) => b.type === 'tool_result' && b.is_error !== true),
+    'case10: all three writers succeeded');
+
+  // WITHOUT provider: legacy behavior — the whole round dispatches under
+  // parallelToolConcurrency, so C overlaps the others too.
+  const orderWithout: string[] = [];
+  const resultWithout = await runAgent({
+    initialMessages: [{ role: 'user', content: 'write things' }],
+    tools: ['writeA', 'writeB', 'writeC'].map((n) => makeWriter(n, orderWithout)),
+    provider: scriptedProvider(turns()),
+    parallelToolConcurrency: 4,
+  });
+  const idx2 = (entry: string) => orderWithout.indexOf(entry);
+  assert(idx2('start:writeC') < idx2('end:writeA'),
+    'case10: absent provider keeps legacy full-round parallel dispatch');
+  const blocksWithout = resultWithout.messages[2].content as AgentMessageContentBlock[];
+  assertEqual(
+    blocksWithout.map((b) => (b.type === 'tool_result' ? b.tool_use_id : b.type)),
+    ['tu_a', 'tu_b', 'tu_c'],
+    'case10: legacy path result order unchanged',
+  );
+
+  // WITH provider AND an approval gate: every tool becomes its own group
+  // (sequential), preserving R11's pre-dispatch review semantics.
+  const orderGated: string[] = [];
+  await runAgent({
+    initialMessages: [{ role: 'user', content: 'write things' }],
+    tools: ['writeA', 'writeB', 'writeC'].map((n) => makeWriter(n, orderGated)),
+    provider: scriptedProvider(turns()),
+    parallelToolConcurrency: 4,
+    toolParallelPolicyProvider: (toolName) => policies[toolName] ?? null,
+    toolApprovalGate: () => ({ decision: 'approve' }),
+  });
+  assertEqual(
+    orderGated,
+    ['start:writeA', 'end:writeA', 'start:writeB', 'end:writeB', 'start:writeC', 'end:writeC'],
+    'case10: approval gate forces strict sequential dispatch even with provider',
+  );
+
+  // Unknown tool (provider returns null) is a singleton barrier: B cannot
+  // overlap the unknown tool before it, even though B itself is eligible.
+  const orderUnknown: string[] = [];
+  await runAgent({
+    initialMessages: [{ role: 'user', content: 'write things' }],
+    tools: ['writeA', 'writeB'].map((n) => makeWriter(n, orderUnknown)),
+    provider: scriptedProvider([
+      {
+        stop_reason: 'tool_use',
+        content: [
+          { type: 'tool_use', id: 'tu_a2', name: 'writeA', input: {} },
+          { type: 'tool_use', id: 'tu_b2', name: 'writeB', input: {} },
+        ],
+      },
+      { stop_reason: 'end_turn', content: [{ type: 'text', text: 'done' }] },
+    ]),
+    parallelToolConcurrency: 4,
+    toolParallelPolicyProvider: (toolName) => (toolName === 'writeB' ? policies.writeB : null),
+  });
+  assertEqual(
+    orderUnknown,
+    ['start:writeA', 'end:writeA', 'start:writeB', 'end:writeB'],
+    'case10: null policy makes the tool an unsafe sequential barrier',
+  );
+}
+
 // ─── Run all ────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -256,6 +522,10 @@ async function main() {
     ['case4_interactiveSequential', case4_interactiveSequential],
     ['case5_maxIterations',        case5_maxIterations],
     ['case6_unknownTool',          case6_unknownTool],
+    ['case7_compactionPreTurn',    case7_compactionPreTurn],
+    ['case8_toolApprovalGate',     case8_toolApprovalGate],
+    ['case9_checkpointAndMetadata', case9_checkpointAndMetadata],
+    ['case10_dependencyAwareParallelism', case10_dependencyAwareParallelism],
   ];
   for (const [name, fn] of cases) {
     const before = failures;

@@ -1,8 +1,8 @@
 # Phase CA-8 — Hermes Delta Rollout
 
-**Canonical rollout of the top-10 items from [`HERMES_DELTA_PLAN_2026-04-22.md`](./HERMES_DELTA_PLAN_2026-04-22.md).** Every agent touching UC should read this before starting Hermes-adjacent work so we don't build parallel stacks.
+**Canonical rollout of the top-10 items from [`AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md`](./AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md).** Every agent touching UC should read this before starting Hermes-adjacent work so we don't build parallel stacks.
 
-Cross-referenced from: [`AGENTS_ROADMAP.md`](./AGENTS_ROADMAP.md) · [`HERMES_INTEGRATION_PLAN.md`](./HERMES_INTEGRATION_PLAN.md) · [`CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md`](./CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md) · [`CLINE_RESEARCH_AND_MAPPING_2026-04-22.md`](./CLINE_RESEARCH_AND_MAPPING_2026-04-22.md).
+Cross-referenced from: [`AGENTS_ROADMAP.md`](./AGENTS_ROADMAP.md) · [`AGENT_RUNTIME_INTEGRATION_PLAN.md`](./AGENT_RUNTIME_INTEGRATION_PLAN.md) · [`CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md`](./CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md) · [`CLINE_RESEARCH_AND_MAPPING_2026-04-22.md`](./CLINE_RESEARCH_AND_MAPPING_2026-04-22.md).
 
 **Last synced:** 2026-04-22
 
@@ -75,7 +75,7 @@ Each sub-phase names its exact code paths, SQL impact, smoke-test file, and road
 - **Problem.** DSPy/GEPA needs trace JSONL + golden eval cases. We have neither exported yet.
 - **Files.** New `scripts/export-traces.ts` → `docs/traces/<date>.jsonl`. New `docs/evals/` seeded with 10 golden cases in the same shape `openswanBenchmarks.ts` already uses. New 1-page `docs/EVOLVABLE_SURFACES.md` naming exactly which surfaces the optimizer may touch (skill bodies, tool descriptions, prompt components) — and that `.ts` files are out of bounds.
 - **Effort.** M. **SQL:** none.
-- **Note.** This is **preparation only**. Actual optimizer stays out of scope until `≥50 skills + ≥1K persisted runs` gate (`HERMES_INTEGRATION_PLAN.md` Phase 5).
+- **Note.** This is **preparation only**. Actual optimizer stays out of scope until `≥50 skills + ≥1K persisted runs` gate (`AGENT_RUNTIME_INTEGRATION_PLAN.md` Phase 5).
 
 ### CA-8h · Context file priority + per-turn discovery append · **task #82 · SHIPPED 2026-04-23**
 
@@ -100,7 +100,7 @@ Each sub-phase names its exact code paths, SQL impact, smoke-test file, and road
 
 ## Conflicts resolved (locked)
 
-From [HERMES_DELTA_PLAN_2026-04-22.md §5](./HERMES_DELTA_PLAN_2026-04-22.md#part-5--conflicts-with-existing-plans). Agents MUST follow these rulings.
+From [AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md §5](./AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md#part-5--conflicts-with-existing-plans). Agents MUST follow these rulings.
 
 1. **Two memory regimes.** Shared `circle_memory` keeps HITL compaction at 4K-token threshold. Per-user `user_memory` adopts Hermes caps (2,200 / 1,375 chars) and agent-self-consolidate error envelope.
 2. **Subagent visibility is split.** Chat transcript → summary only (Hermes contract). Run Ledger → full child event tree (operator debugging).

@@ -68,6 +68,7 @@ import { calculatePeriodCosts } from '../../../lib/costCalculations';
 import OfficeActionPanel from '../../../components/OfficeActionPanel';
 import AgentActivityFeed from '../../../components/AgentActivityFeed';
 import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
+import type { ComputerTaskChecklistCard } from '../../../lib/computerTaskState';
 import { useAgentApprovals, useAgentControl } from '../../../services/hitlService';
 import {
   CircleOfficeAgent,
@@ -252,6 +253,24 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [savingSessionMemoryMode, setSavingSessionMemoryMode] = useState(false);
   const pendingApprovals = useAgentApprovals(circleId);
   // showControlCard removed — controls now embedded in AgentPanel
+
+  // D6: active computer-task card from the persisted record (main thread) —
+  // Office is the away-from-chat surface, so a task paused on a question or
+  // approval must be visible here too. Light poll; storage read is cheap.
+  const [computerTaskCard, setComputerTaskCard] = useState<ComputerTaskChecklistCard | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const { loadComputerTaskState, buildComputerTaskChecklistCard } = await import('../../../lib/computerTaskState');
+        const record = await loadComputerTaskState(circleId);
+        if (!cancelled) setComputerTaskCard(buildComputerTaskChecklistCard(record));
+      } catch { /* dashboard extra — never break Office */ }
+    };
+    void load();
+    const timer = setInterval(load, 30_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [circleId]);
 
   // Agent control hook for selected agent
   const selectedSessionKey = getAgentIdentityKey(selectedAgent);
@@ -3633,6 +3652,43 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     <View style={styles.container}>
       {/* HITL Approval Banner */}
       <HitlApprovalBanner approvals={pendingApprovals} circleId={circleId} />
+
+      {/* D6: active computer task — phase, needs-you, stage progress */}
+      {computerTaskCard?.active ? (
+        <View
+          style={{
+            marginHorizontal: 12,
+            marginTop: 6,
+            paddingVertical: 8,
+            paddingHorizontal: 12,
+            borderRadius: 10,
+            borderWidth: 1,
+            borderColor: computerTaskCard.needsYou.length > 0 ? '#e8b33955' : '#33415555',
+            backgroundColor: computerTaskCard.needsYou.length > 0 ? '#e8b33912' : '#1e293b33',
+          }}
+        >
+          <Text style={{ color: '#e2e8f0', fontSize: 12, fontWeight: '700' }} numberOfLines={1}>
+            🖥 {computerTaskCard.title} — {computerTaskCard.phaseLabel}
+          </Text>
+          {computerTaskCard.needsYou.slice(0, 2).map((item, index) => (
+            <Text key={`${item.kind}_${index}`} style={{ color: '#e8b339', fontSize: 11, marginTop: 2 }} numberOfLines={2}>
+              ⚑ {item.kind === 'question' ? 'Needs your answer' : item.kind === 'approval' ? 'Needs your approval' : 'Blocked'}: {item.label}
+            </Text>
+          ))}
+          {computerTaskCard.stages.length > 0 ? (
+            <Text style={{ color: '#94a3b8', fontSize: 11, marginTop: 2 }} numberOfLines={1}>
+              {computerTaskCard.stages.map((stage) => (
+                stage.status === 'completed' ? '✓' : stage.status === 'failed' ? '✕' : '○'
+              )).join(' ')} {computerTaskCard.stages.length} stages
+            </Text>
+          ) : null}
+          {computerTaskCard.needsYou.length > 0 ? (
+            <Text style={{ color: '#64748b', fontSize: 10, marginTop: 2 }} numberOfLines={1}>
+              Open Chat → Use Computer to answer or approve.
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
 
       {/* Budget Alerts */}
       {!budgetAlertsDismissed && budgetAlerts.length > 0 && (

@@ -384,12 +384,16 @@ export async function publishClaudeCodeAgent(
   }
 
   if (result.agent) {
+    // Count MAIN sessions only — `sessions` now includes live subagents,
+    // so `sessionCount` (total) would over-report. updateClaudeCodeAgentStatus
+    // overwrites this label with the subagent-aware one on the next poll.
+    const activeCount = sessions ? mainSessions.length : sessionCount;
     await supabase
       .from('circle_office_agents')
       .update({
         status: 'idle',
-        current_task: sessionCount > 0
-          ? `${sessionCount} session(s) active`
+        current_task: activeCount > 0
+          ? `${activeCount} session(s) active`
           : 'Bridge connected',
         last_active_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
