@@ -633,3 +633,60 @@ regression when the mime type is indeterminate.
 No approval fingerprints, tool names, or behavior contracts changed; both upload
 result shapes preserved; the multipart fallback guarantees no upload regression
 when the mime is indeterminate. `npm run typecheck` passes.
+
+## Wave 5 — shipped 2026-06-29
+
+Wave 5 wired the already-shipped pure helpers from the prior waves into their
+runtime call sites and added the R8 enablement gate. No new app runtime path was
+introduced by the probe; no v2 default flipped; no approval fingerprints, tool
+names, or behavior contracts changed.
+
+### R5 caller wiring — CPT REST-base resolution (fail-closed)
+- `src/lib/wpAdmin.ts` now resolves the real `rest_base` before any CPT write:
+  `resolvePostTypeRestBase` (`wpAdmin.ts:123-155`) calls the (previously
+  uncalled) `discoverPostTypes` → `resolveRestBase` to pick the discovered
+  `rest_base`, then `classifyPostTypeWritability` to gate it.
+- Wired into `createPost` (`wpAdmin.ts:275`), `updatePost` (`:310`),
+  `trashPost` (`:357`), and `listPosts` (`:402`) via `requireRestWritable: true`.
+- `uploadImageAndCreateSlide` (`wpAdmin.ts:418-438`) no longer hardcodes
+  `flavor_di_slides`; it derives the slide CPT through `resolveDefaultSlidePostType`
+  and routes through `createPost`, so it inherits the same resolution + gate.
+- Behavior on a clean `rest_no_route`/404/`show_in_rest=false` signal: **fail
+  closed** — `resolvePostTypeRestBase` throws a structured Error
+  (`wpAdmin.ts:149-151`) pointing at the wp-admin browser fallback. This
+  supersedes the doc's earlier "next wave / returned-marker" framing
+  (the `needsAdminFallback` marker is still emitted by the pure
+  `classifyPostTypeWritability`; the call site consumes it as a fail-closed
+  throw rather than a silent returned marker, preserving the
+  create/update/trash/list contracts). The wp-admin browser executor itself
+  stays **planned, not built**.
+- When `/types` discovery is transiently unavailable, the slug is validated and
+  passed through unchanged (`wpAdmin.ts:134-141`) so existing CPT behavior is
+  preserved — no new failure mode.
+
+### R6 featured-image path — folded into `publishToWordPress`
+- `src/lib/siteAutomation.ts` `publishToWordPress` (`siteAutomation.ts:1154-1176`)
+  now uses the SAME raw-binary path as `uploadWordPressMedia` /
+  `wpAdmin.uploadMedia`: `resolveUploadMimeType` → `buildMediaUploadHeaders`
+  (`Content-Type` + `Content-Disposition`) when the mime resolves, else the
+  existing multipart `FormData` fallback. Non-fatal on failure; the
+  `{ success, postId?, postUrl?, returnedMeta? }` result shape is unchanged.
+  This closes the "out of scope" item noted in the WP1/WP3 (R6) section above.
+
+### R8.0 — Browserbase live-probe (enablement only)
+- New `scripts/browserbase-live-probe.mjs` (Node ≥18, `npm run probe:browserbase`):
+  reads `BROWSERBASE_API_KEY` + `BROWSERBASE_PROJECT_ID` from env only (never
+  argv), masks/redacts secrets in all output, isolates each probe, always
+  releases any session it creates, best-effort deletes any context, and prints a
+  PASS/FAIL summary mapping to the R8.0 go/no-go (GO IFF Q0 `connectUrl` PASS AND
+  Q1 `debug` PASS). Q2 probes the legacy `www.browserbase.com/.../commands`
+  endpoint (body shape mirrors `computer-use-agent/index.ts:1432`) without
+  depending on it. Exit codes: `0` GO, `1` NO-GO/FAIL, `2` env missing.
+- The R8 gate procedure is documented in
+  `docs/WORDPRESS_BROWSER_AUTOMATION_RESEARCH_2026-06-23.md` ("How to run R8.0").
+- The CDP migration itself (R8.x), Contexts (R9), live `/debug` view (R11), and
+  CDP file-upload (R12) remain **out of scope / deferred** behind a GO result.
+
+Validation: `npm run typecheck` passes; `npm run smoke:wordpress-media-upload`
+and `npm run smoke:wordpress-post-type-resolver` pass (both already in
+`smoke:all`); `node --check scripts/browserbase-live-probe.mjs` clean.

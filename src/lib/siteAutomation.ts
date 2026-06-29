@@ -1151,16 +1151,29 @@ export async function publishToWordPress(
           const urlParts = request.featuredImageUrl.split('/');
           const fileName = urlParts[urlParts.length - 1]?.split('?')[0] || 'featured-image.jpg';
 
-          const formData = new FormData();
-          formData.append('file', imgBlob, fileName);
-
-          const mediaRes = await fetch(`${base}/wp-json/wp/v2/media`, {
-            method: 'POST',
-            headers: {
-              Authorization: auth,
-            },
-            body: formData,
-          });
+          // R6: prefer the raw-binary upload (Content-Type + Content-Disposition)
+          // when the mime is determinable, matching uploadWordPressMedia /
+          // wpAdmin.uploadMedia; fall back to multipart FormData otherwise so an
+          // indeterminate mime never breaks the upload. Result shape unchanged.
+          const mimeType = resolveUploadMimeType((imgBlob as Blob).type, fileName);
+          let mediaRes: Response;
+          if (mimeType) {
+            mediaRes = await fetch(`${base}/wp-json/wp/v2/media`, {
+              method: 'POST',
+              headers: buildMediaUploadHeaders({ authorization: auth, mimeType, filename: fileName }),
+              body: imgBlob,
+            });
+          } else {
+            const formData = new FormData();
+            formData.append('file', imgBlob, fileName);
+            mediaRes = await fetch(`${base}/wp-json/wp/v2/media`, {
+              method: 'POST',
+              headers: {
+                Authorization: auth,
+              },
+              body: formData,
+            });
+          }
 
           if (mediaRes.ok) {
             const mediaData = await mediaRes.json();

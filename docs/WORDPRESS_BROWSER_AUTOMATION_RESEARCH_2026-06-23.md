@@ -95,3 +95,42 @@ Legend — value implied by ordering within group; **E** effort (s/m/l), **R** r
 6. `redactText` export/import-safety from the root-owned `wordpressAdminSourceIntelligence.ts` (needed by R20); `vaultImport.ts` capability (R21).
 7. Whether the specific Dealer Inspire slide CPT is `show_in_rest=false` — confirm at runtime via `/wp/v2/types` (R5), don't hardcode.
 8. Whether `scripts/browser-bridge.js` injects manual sleeps that defeat Playwright auto-wait (relevant to R16).
+
+## How to run R8.0 (live-probe gate)
+
+R8 is gated on facts that can only be confirmed against a **live** Browserbase
+account (open question 1 above, and the sequencing note: _docs absence ≠ account
+absence_). `scripts/browserbase-live-probe.mjs` answers those facts. It is an
+**enablement probe only — it changes no app runtime path.**
+
+**Run it (against your own account):**
+
+```bash
+export BROWSERBASE_API_KEY=...        # read from env only; never passed as argv
+export BROWSERBASE_PROJECT_ID=...
+node scripts/browserbase-live-probe.mjs   # or: npm run probe:browserbase
+```
+
+**What each check proves:**
+
+| Check | Question | Proves |
+|-------|----------|--------|
+| Q0 | `POST api.browserbase.com/v1/sessions` returns a CDP `connectUrl`? | the migration target exists (vs today's `www.` host + faked liveUrl at `computer-use-agent/index.ts:1340,1357-1358`) |
+| Q1 | `GET /v1/sessions/{id}/debug` returns `debuggerFullscreenUrl`? | the R11 live-view / 2FA-takeover URL is real |
+| Q2 | legacy `POST www.browserbase.com/v1/sessions/{id}/commands` still exists? | whether R8 must KEEP the fallback (`computer-use-agent/index.ts:1426`) |
+| Q3 | `POST /v1/contexts` creates a context? | R9 persistent encrypted WP login is enable-able |
+
+**Go / no-go rule:**
+
+- **GO for R8.0 (CDP migration) IFF Q0 (`connectUrl`) PASS AND Q1 (`debug`) PASS.**
+- **Q2 EXISTS** → R8 keeps the legacy `/commands` fallback behind the flag.
+  **Q2 GONE** → removal is safe only after a feature-flag bake. This is the
+  direct answer to **open question 1** above.
+- **Q3 PASS** → unblocks R9 design.
+
+**Safety:** the script never prints secrets (masked + redacted), isolates each
+probe so one failure does not abort the others, and always releases the session
+it creates (browser-minutes cost); a created context is deleted best-effort and
+its id reported if it cannot be removed. Exit codes: `0` GO, `1` NO-GO/any FAIL,
+`2` missing env (no network call made). It is intentionally **excluded from
+`smoke:all`** because it makes real, billable, account-gated calls.
