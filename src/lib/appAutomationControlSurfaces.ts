@@ -5,6 +5,7 @@ import {
 // Type-only — erased at runtime, so this module stays free of the
 // Supabase/RN-backed capability registry and remains Node-loadable.
 import type { ComputerCapabilityAudit } from './computerCapabilityRegistry';
+import type { LocalComputerAwarenessIntent } from './localComputerAwarenessIntent';
 
 export type AppAutomationTargetId =
   | 'adobe_indesign'
@@ -22,8 +23,10 @@ export type AppAutomationControlSurfaceId =
   | 'adobe_photoshop_cloud_api'
   | 'autocad_lisp_dotnet_api'
   | 'autodesk_aps_automation_api'
+  | 'autodesk_ai_mcp_assistant'
   | 'fusion_api_scripts_addins'
   | 'solidworks_com_api'
+  | 'matlab_mcp_agentic_toolkit'
   | 'rhino_common_api'
   | 'revit_api_addin'
   | 'inventor_api_ilogic'
@@ -77,6 +80,98 @@ export interface AppAutomationControlSurfacePlan {
   sourceRefs: AppAutomationResearchRef[];
 }
 
+export type AppAutomationRecipe = {
+  id: string;
+  targetApp: string;
+  controlSurface: string;
+  sourceRefs: string[];
+  approvalBefore: string[];
+  verification: string[];
+  smokeCases: string[];
+  noteBody?: string | null;
+};
+
+export const APPLE_NOTES_CREATE_NOTE_SOURCE_REFS = [
+  'Apple Notes User Guide - Create and edit notes on Mac: https://support.apple.com/guide/notes/create-and-edit-notes-not9474646a9/mac',
+  'Apple Mac Automation Scripting Guide: https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/',
+  'Apple UI scripting and Accessibility: https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/AutomatetheUserInterface.html',
+];
+
+const APPLE_NOTES_APP_RE = /\b(?:apple\s+)?notes?(?:\s+(?:app|application|window))?\b/i;
+const APPLE_NOTES_CREATE_NOTE_RE = /\b(?:create|make|start|take|draft|add|write)\s+(?:a\s+)?(?:new\s+)?note\b|\bnew\s+note\b/i;
+const APPLE_NOTES_NOTE_BODY_PATTERNS = [
+  /\b(?:that(?:'?s|s| is)?\s+)?(?:says?|saying|reads?|reading|should\s+say|with(?:\s+(?:text|body|content))?|containing)\s+["'`]([\s\S]{1,4000}?)["'`]\s*$/i,
+  /\b(?:that(?:'?s|s| is)?\s+)?(?:says?|saying|reads?|reading|should\s+say|with(?:\s+(?:text|body|content))?|containing)\s+([\s\S]{1,4000})$/i,
+  /\b(?:create|make|start|take|draft|add|write)\s+(?:a\s+)?(?:new\s+)?note\s+(?:with|containing|about)\s+([\s\S]{1,4000})$/i,
+];
+
+function cleanAppleNotesNoteBody(raw: string | undefined): string | null {
+  const value = String(raw || '').trim();
+  if (!value) return null;
+  const unwrapped = value.replace(/^["'`]+|["'`]+$/g, '').trim();
+  return unwrapped || null;
+}
+
+export function extractAppleNotesNoteBody(task: string): string | null {
+  const text = String(task || '').trim();
+  for (const pattern of APPLE_NOTES_NOTE_BODY_PATTERNS) {
+    const match = text.match(pattern);
+    const noteBody = cleanAppleNotesNoteBody(match?.[1]);
+    if (noteBody) return noteBody;
+  }
+  return null;
+}
+
+export function buildAppleNotesCreateNoteRecipe(task: string): AppAutomationRecipe | null {
+  const text = String(task || '').trim();
+  if (!APPLE_NOTES_APP_RE.test(text) || !APPLE_NOTES_CREATE_NOTE_RE.test(text)) return null;
+  const noteBody = extractAppleNotesNoteBody(text);
+  return {
+    id: 'desktop.notes_create_note',
+    targetApp: 'Notes',
+    controlSurface: 'Notes AppleScript scripting interface (make new note) via the desktop bridge notes_create tool',
+    sourceRefs: APPLE_NOTES_CREATE_NOTE_SOURCE_REFS,
+    approvalBefore: ['mutating app state: create a new Notes note', 'note body text insertion'],
+    verification: ['notes_create returns the new note title', 'post-action proof screenshot'],
+    smokeCases: ['research-before-guess', 'approval-before-side-effect', 'verified-proof'],
+    noteBody,
+  };
+}
+
+export function buildAppleNotesCreateNoteSequence(recipe: AppAutomationRecipe): LocalComputerAwarenessIntent[] {
+  // Prefer the deterministic AppleScript-backed `notes_create` bridge tool: it
+  // creates the note in ONE shot via the Notes scripting API (it activates /
+  // launches Notes itself), instead of the fragile "click New Note, then paste
+  // into the editor" UI dance — which depended on finding the button and the
+  // editor keeping focus, and previously stalled on accessibility observation
+  // (a normal Notes window read as a "popup needing a decision").
+  if (recipe.noteBody) {
+    return [
+      { route: true, kind: 'notes_create', appQuery: 'Notes', text: recipe.noteBody, reason: 'apple-notes-create-note-applescript' },
+      { route: true, kind: 'screen_state', reason: 'apple-notes-proof-screenshot' },
+    ];
+  }
+  // No body text — just open Notes for the user.
+  return [
+    { route: true, kind: 'launch_app', appQuery: 'Notes', reason: 'apple-notes-launch' },
+    { route: true, kind: 'screen_state', reason: 'apple-notes-proof-screenshot' },
+  ];
+}
+
+export function serializeAppAutomationRecipe(recipe: AppAutomationRecipe | null): Record<string, unknown> | null {
+  if (!recipe) return null;
+  return {
+    id: recipe.id,
+    targetApp: recipe.targetApp,
+    controlSurface: recipe.controlSurface,
+    sourceRefs: recipe.sourceRefs,
+    approvalBefore: recipe.approvalBefore,
+    verification: recipe.verification,
+    smokeCases: recipe.smokeCases,
+    noteBody: recipe.noteBody || null,
+  };
+}
+
 export type AppAutomationRouteDecisionStatus =
   | 'ready_to_execute'
   | 'needs_observation'
@@ -120,12 +215,13 @@ const OFFICIAL_RESEARCH_REVIEWED_AT = '2026-05-29';
 function officialRef(
   ref: Pick<AppAutomationResearchRef, 'label' | 'url' | 'takeaway' | 'primaryUse'> & {
     sourceType: Exclude<AppAutomationResearchSourceType, 'repo'>;
+    lastReviewedAt?: string;
     mustConfirm?: string[];
   },
 ): AppAutomationResearchRef {
   return {
     ...ref,
-    lastReviewedAt: OFFICIAL_RESEARCH_REVIEWED_AT,
+    lastReviewedAt: ref.lastReviewedAt || OFFICIAL_RESEARCH_REVIEWED_AT,
     mustConfirm: ref.mustConfirm || [],
   };
 }
@@ -251,6 +347,15 @@ export const APP_AUTOMATION_RESEARCH_REFS = {
     primaryUse: 'local AutoCAD command automation and repeatable drawing edits',
     mustConfirm: ['script execution is approved', 'command prompt state is known before running a script'],
   }),
+  autocadDotNetApi: officialRef({
+    label: 'Autodesk AutoCAD .NET API',
+    url: 'https://help.autodesk.com/view/OARX/2027/ENU/?guid=GUID-C3F3C736-40CF-44A0-9210-55F6A939B6F2',
+    takeaway: 'The AutoCAD Managed .NET API is the durable route for custom commands, drawing object access, dimensions, layers, and repeatable in-process app extensions.',
+    sourceType: 'official_vendor',
+    lastReviewedAt: '2026-06-18',
+    primaryUse: 'AutoCAD custom commands, ObjectARX/.NET add-ins, drawing object access, and production-grade adapter buildout',
+    mustConfirm: ['AutoCAD version/API compatibility is known', 'assembly/add-in load path and execution approval are explicit'],
+  }),
   autodeskAutomationApi: officialRef({
     label: 'Autodesk Platform Services Automation API',
     url: 'https://aps.autodesk.com/developer/overview/automation-api',
@@ -258,6 +363,42 @@ export const APP_AUTOMATION_RESEARCH_REFS = {
     sourceType: 'official_vendor',
     primaryUse: 'cloud/batch Autodesk design-file processing and output generation',
     mustConfirm: ['source upload approved', 'APS credentials available', 'output destination approved'],
+  }),
+  autodeskMcpServers: officialRef({
+    label: 'Autodesk MCP Servers',
+    url: 'https://www.autodesk.com/solutions/autodesk-ai/autodesk-mcp-servers',
+    takeaway: 'Autodesk MCP servers are the governed agentic execution surface when an Autodesk product exposes one, with permissions, boundaries, and editable results.',
+    sourceType: 'official_vendor',
+    lastReviewedAt: '2026-06-18',
+    primaryUse: 'Autodesk product-help grounding, Fusion direct design interaction, Revit/Fusion automation as available, and governed agent workflows',
+    mustConfirm: ['the specific Autodesk MCP server exists for the target product', 'permissions and execution boundaries are configured', 'the resulting design remains editable in the Autodesk product'],
+  }),
+  autodeskAssistant: officialRef({
+    label: 'Autodesk Assistant',
+    url: 'https://www.autodesk.com/solutions/autodesk-ai/autodesk-assistant',
+    takeaway: 'Autodesk Assistant is an in-product agentic AI surface for Autodesk workflows and should be used as a context-aware assistive route when available.',
+    sourceType: 'official_vendor',
+    lastReviewedAt: '2026-06-18',
+    primaryUse: 'in-product Autodesk guidance, text-to-command style workflows, recommendations, and assisted design/make execution',
+    mustConfirm: ['Assistant is available in the installed Autodesk product/version', 'the task stays within the user-approved product/session'],
+  }),
+  autodeskNeuralTechnology: officialRef({
+    label: 'Autodesk neural CAD technology',
+    url: 'https://www.autodesk.com/solutions/autodesk-ai/neural-technology',
+    takeaway: 'Autodesk neural CAD is an emerging generative geometry direction; treat it as a researched assistive/generative surface, not as a guaranteed local command path.',
+    sourceType: 'official_vendor',
+    lastReviewedAt: '2026-06-18',
+    primaryUse: 'future Fusion/Forma generative geometry and prompt-to-parametric-command research',
+    mustConfirm: ['feature is released in the target product/version', 'generated geometry or command sequence is reviewed before production use'],
+  }),
+  autodeskAiKeyTechnologies: officialRef({
+    label: 'Autodesk AI key technologies',
+    url: 'https://www.autodesk.com/solutions/autodesk-ai#key-ai-technologies',
+    takeaway: 'Autodesk positions Assistant, MCP Servers, and neural technology as the key AI surfaces; engineering automation should prefer those when product support and governance exist.',
+    sourceType: 'official_vendor',
+    lastReviewedAt: '2026-06-18',
+    primaryUse: 'Autodesk AI surface selection and product-support research before adapter buildout',
+    mustConfirm: ['target product supports the selected AI surface', 'data/IP and permission requirements are acceptable'],
   }),
   fusionApi: officialRef({
     label: 'Autodesk Fusion API',
@@ -274,6 +415,42 @@ export const APP_AUTOMATION_RESEARCH_REFS = {
     sourceType: 'official_vendor',
     primaryUse: 'SOLIDWORKS parts, assemblies, drawings, dimensions, and export automation',
     mustConfirm: ['SOLIDWORKS is installed/licensed', 'document type and active configuration/sheet are verified'],
+  }),
+  solidworksMacros: officialRef({
+    label: 'SOLIDWORKS macros',
+    url: 'https://help.solidworks.com/2024/english/api/sldworksapiprogguide/gettingstarted/solidworks_macros.htm',
+    takeaway: 'SOLIDWORKS macros are the fastest local bridge path for recording, editing, running, and hardening API-backed tasks before a full add-in is needed.',
+    sourceType: 'official_vendor',
+    lastReviewedAt: '2026-06-18',
+    primaryUse: 'SOLIDWORKS local macro/API proof, reusable automation recipes, dimension/feature/export workflows',
+    mustConfirm: ['macro execution is approved', 'document type/configuration/sheet match the requested operation', 'macro result is verified before save/export'],
+  }),
+  matlabMcpCoreServer: officialRef({
+    label: 'MATLAB MCP Core Server',
+    url: 'https://www.mathworks.com/products/matlab-mcp-core-server.html',
+    takeaway: 'MATLAB MCP Core Server lets an agent start/quit MATLAB, check code, evaluate code, run files/tests, and detect installed toolboxes through MCP.',
+    sourceType: 'official_vendor',
+    lastReviewedAt: '2026-06-18',
+    primaryUse: 'agentic MATLAB code execution, static analysis, tests, toolbox detection, and local MATLAB session control',
+    mustConfirm: ['local MATLAB installation/license is available', 'MATLAB MCP server is installed/configured', 'toolboxes needed by the task are detected'],
+  }),
+  matlabAgenticToolkit: officialRef({
+    label: 'MATLAB Agentic Toolkit',
+    url: 'https://www.mathworks.com/products/matlab-agentic-toolkit.html',
+    takeaway: 'MATLAB Agentic Toolkit combines MCP tools with curated skills for expert MATLAB workflows such as testing, debugging, app building, and code review.',
+    sourceType: 'official_vendor',
+    lastReviewedAt: '2026-06-18',
+    primaryUse: 'expert MATLAB workflow skills, idiomatic code generation, testing/debugging loops, and app/toolbox work',
+    mustConfirm: ['toolkit is cloned/configured for the agent client', 'skills are loaded only for relevant MATLAB workflows', 'generated code is run or tested before completion'],
+  }),
+  matlabAiSkillEngineering: officialRef({
+    label: 'MathWorks MATLAB AI skill engineering',
+    url: 'https://blogs.mathworks.com/matlab/2026/05/11/how-to-engineer-an-ai-skill-for-matlab/',
+    takeaway: 'MathWorks recommends skills that encode proven agent failure modes, front-load critical rules, and iterate through real run/test/debug evidence.',
+    sourceType: 'official_vendor',
+    lastReviewedAt: '2026-06-18',
+    primaryUse: 'building or refining MATLAB task skills when generic prompts fail on subtle multi-step APIs',
+    mustConfirm: ['the failing MATLAB workflow is reproduced first', 'skill rules target observed failures', 'generated MATLAB code is run/tested after skill changes'],
   }),
   rhinoCommon: officialRef({
     label: 'RhinoCommon guides',
@@ -390,13 +567,30 @@ function refKeysForCandidate(id: AppAutomationControlSurfaceId): AppAutomationRe
       return [
         APP_AUTOMATION_RESEARCH_REFS.autocadApi,
         APP_AUTOMATION_RESEARCH_REFS.autocadAutolisp,
+        APP_AUTOMATION_RESEARCH_REFS.autocadDotNetApi,
       ];
     case 'autodesk_aps_automation_api':
       return [APP_AUTOMATION_RESEARCH_REFS.autodeskAutomationApi];
+    case 'autodesk_ai_mcp_assistant':
+      return [
+        APP_AUTOMATION_RESEARCH_REFS.autodeskMcpServers,
+        APP_AUTOMATION_RESEARCH_REFS.autodeskAssistant,
+        APP_AUTOMATION_RESEARCH_REFS.autodeskAiKeyTechnologies,
+        APP_AUTOMATION_RESEARCH_REFS.autodeskNeuralTechnology,
+      ];
     case 'fusion_api_scripts_addins':
       return [APP_AUTOMATION_RESEARCH_REFS.fusionApi];
     case 'solidworks_com_api':
-      return [APP_AUTOMATION_RESEARCH_REFS.solidworksApi];
+      return [
+        APP_AUTOMATION_RESEARCH_REFS.solidworksApi,
+        APP_AUTOMATION_RESEARCH_REFS.solidworksMacros,
+      ];
+    case 'matlab_mcp_agentic_toolkit':
+      return [
+        APP_AUTOMATION_RESEARCH_REFS.matlabMcpCoreServer,
+        APP_AUTOMATION_RESEARCH_REFS.matlabAgenticToolkit,
+        APP_AUTOMATION_RESEARCH_REFS.matlabAiSkillEngineering,
+      ];
     case 'rhino_common_api':
       return [APP_AUTOMATION_RESEARCH_REFS.rhinoCommon];
     case 'revit_api_addin':
@@ -498,13 +692,14 @@ function detectTarget(task: string, preferred?: Partial<Pick<AppAutomationContro
 }
 
 function isEngineeringCadTask(text: string): boolean {
-  return /\b(auto\s*cad|autocad|civil\s*3d|fusion\s*360|solid\s*works|solidworks|revit|rhino(?:ceros)?|inventor|free\s*cad|freecad|libre\s*cad|librecad|qcad|sketch\s*up|sketchup|cad|dwg|dxf|rvt|rfa|sldprt|sldasm|slddrw|iges|igs|f3d|f3z|3dm|engineering drawing|technical drawing|floor plan|site plan|shop drawing|dimensioned drawing|bim|model space|paper space)\b|\.(?:step|stp)\b|\b(?:step|stp)\s+file\b/i.test(text);
+  return /\b(auto\s*cad|autocad|civil\s*3d|fusion(?:\s*360)?|solid\s*works|solidworks|matlab|mathworks|simulink|simscape|revit|rhino(?:ceros)?|inventor|free\s*cad|freecad|libre\s*cad|librecad|qcad|sketch\s*up|sketchup|cad|dwg|dxf|rvt|rfa|sldprt|sldasm|slddrw|iges|igs|f3d|f3z|3dm|mlx|slx|engineering drawing|technical drawing|floor plan|site plan|shop drawing|dimensioned drawing|bim|model space|paper space)\b|\.(?:step|stp|mlx|slx|mdl)\b|\b(?:step|stp)\s+file\b/i.test(text);
 }
 
 function detectCadTargetName(text: string): string {
   if (/\b(auto\s*cad|autocad|civil\s*3d|dwg|dxf|model space|paper space)\b/i.test(text)) return 'AutoCAD / DWG CAD app';
-  if (/\bfusion\s*360|\bf3d\b|\bf3z\b/i.test(text)) return 'Autodesk Fusion';
+  if (/\bfusion(?:\s*360)?\b|\bf3d\b|\bf3z\b/i.test(text)) return 'Autodesk Fusion';
   if (/\bsolid\s*works|solidworks|sldprt|sldasm|slddrw\b/i.test(text)) return 'SOLIDWORKS';
+  if (/\b(matlab|mathworks|simulink|simscape|mlx|slx)\b|\.(?:m|mlx|slx|mdl)\b/i.test(text)) return 'MATLAB / Simulink';
   if (/\brevit|rvt|rfa|bim\b/i.test(text)) return 'Autodesk Revit';
   if (/\brhino(?:ceros)?|\b3dm\b/i.test(text)) return 'Rhino';
   if (/\binventor\b|\bipt\b|\biam\b|\bidw\b|\bdwg\b/i.test(text)) return 'Autodesk Inventor';
@@ -532,6 +727,11 @@ function taskFamilyFor(task: string, targetId: AppAutomationTargetId): string {
   if (targetId === 'browser_app') return 'browser semantic workflow';
   if (targetId === 'adobe_creative_cloud') return 'Adobe app capability buildout';
   if (targetId === 'engineering_cad_app') {
+    if (/\b(matlab|mathworks|simulink|simscape|mlx|slx)\b|\.(?:m|mlx|slx|mdl)\b/i.test(text)) {
+      if (/\b(simulink|simscape|simulate|simulation|model|block|solver|stateflow)\b/i.test(text)) return 'MATLAB/Simulink simulation workflow';
+      if (/\b(app designer|app building|gui|toolbox|package|deploy|code review|debug|test|unit test|runtests)\b/i.test(text)) return 'MATLAB code/test/app workflow';
+      return 'MATLAB engineering computation';
+    }
     if (/\b(export|plot|publish|print|pdf|dxf|dwg|step|stp|iges|igs|stl|sat|convert|translate)\b/i.test(text)) return 'CAD export/translation';
     if (/\b(inspect|measure|dimension|units?|scale|verify|check|review|markup|redline)\b/i.test(text)) return 'CAD inspection/measurement';
     if (/\b(floor plan|site plan|shop drawing|technical drawing|title block|revision cloud|detail|paper space|model space|2d)\b/i.test(text)) return '2D drafting/documentation';
@@ -710,8 +910,10 @@ function broadAdobeCandidates(): AppAutomationControlSurfaceCandidate[] {
 function engineeringCadCandidates(task: string): AppAutomationControlSurfaceCandidate[] {
   const text = normalize(task);
   const candidates: AppAutomationControlSurfaceCandidate[] = [];
-  const hasKnownCadApp = /\b(auto\s*cad|autocad|civil\s*3d|fusion\s*360|solid\s*works|solidworks|revit|rhino(?:ceros)?|inventor|free\s*cad|freecad|libre\s*cad|librecad|qcad|sketch\s*up|sketchup)\b/i.test(text);
+  const hasKnownCadApp = /\b(auto\s*cad|autocad|civil\s*3d|fusion(?:\s*360)?|solid\s*works|solidworks|matlab|mathworks|simulink|simscape|revit|rhino(?:ceros)?|inventor|free\s*cad|freecad|libre\s*cad|librecad|qcad|sketch\s*up|sketchup)\b/i.test(text);
   const needsBatchOrCloud = /\b(batch|server|cloud|api|convert|translate|rendition|pipeline|many files|folder of|bulk)\b/i.test(text);
+  const isAutodeskTask = /\b(autodesk|auto\s*cad|autocad|civil\s*3d|fusion(?:\s*360)?|revit|inventor|forma|dwg|dxf|rvt|f3d|f3z|ipt|iam|idw)\b/i.test(text);
+  const asksAutodeskAiSurface = /\b(autodesk\s+ai|autodesk\s+assistant|mcp|model context protocol|neural\s+cad|agentic|assistant)\b/i.test(text);
 
   if (!hasKnownCadApp || /\b(auto\s*cad|autocad|civil\s*3d|dwg|dxf|model space|paper space|cad)\b/i.test(text)) {
     candidates.push(candidate(
@@ -727,7 +929,21 @@ function engineeringCadCandidates(task: string): AppAutomationControlSurfaceCand
     ));
   }
 
-  if (/\bfusion\s*360|\bf3d\b|\bf3z\b|\bcam\b|\btoolpath\b/i.test(text)) {
+  if (isAutodeskTask || asksAutodeskAiSurface) {
+    candidates.push(candidate(
+      'autodesk_ai_mcp_assistant',
+      'Autodesk Assistant / MCP / AI execution surface',
+      asksAutodeskAiSurface ? 108 : 68,
+      asksAutodeskAiSurface ? 'primary' : 'secondary',
+      ['governed Autodesk agent workflows', 'Fusion MCP direct design interaction when available', 'Autodesk product-help grounding', 'Assistant-supported text-to-command flows', 'AI-assisted geometry research'],
+      ['target Autodesk product/version identified', 'specific MCP server or Assistant capability confirmed', 'permissions/execution boundary configured', 'result remains editable in the Autodesk product'],
+      ['the target product has no released MCP/Assistant support for the requested action', 'a local AutoCAD/Fusion/Revit/Inventor API route is more deterministic', 'the task needs offline file mutation without approved cloud/service access'],
+      ['AI/MCP tool execution', 'cloud or Assistant action', 'geometry/model/drawing mutation', 'save/export/write'],
+      ['MCP/Assistant tool result or job status', 'active product/document state recheck', 'editable geometry/model proof', 'file_stat for outputs'],
+    ));
+  }
+
+  if (/\bfusion(?:\s*360)?\b|\bf3d\b|\bf3z\b|\bcam\b|\btoolpath\b/i.test(text)) {
     candidates.push(candidate(
       'fusion_api_scripts_addins',
       'Fusion API script/add-in surface',
@@ -752,6 +968,20 @@ function engineeringCadCandidates(task: string): AppAutomationControlSurfaceCand
       ['the task only needs a reversible visual read', 'document type or active configuration is unknown'],
       ['running macros/API calls', 'dimension/feature mutation', 'save/export/write'],
       ['document type/configuration recheck', 'dimension/feature/drawing state evidence', 'screenshot proof', 'file_stat for outputs'],
+    ));
+  }
+
+  if (/\b(matlab|mathworks|simulink|simscape|mlx|slx)\b|\.(?:m|mlx|slx|mdl)\b/i.test(text)) {
+    candidates.push(candidate(
+      'matlab_mcp_agentic_toolkit',
+      'MATLAB MCP / Agentic Toolkit surface',
+      100,
+      'primary',
+      ['MATLAB code generation and execution', 'static analysis and tests', 'toolbox-aware workflows', 'Simulink/Simscape model scripts', 'MATLAB app/toolbox buildout'],
+      ['MATLAB installed/licensed', 'MATLAB MCP Core Server configured or MATLAB CLI/session available', 'working folder/project verified', 'required toolboxes detected', 'approved generated-code or model execution'],
+      ['MATLAB license/session is unavailable', 'the task is a DWG/SOLIDWORKS/Revit model edit better handled by the CAD app API', 'the code would access external systems or overwrite files without approval'],
+      ['running generated MATLAB code', 'mutating .m/.mlx/.slx/.mdl files', 'long simulations', 'writing plots/reports/models/exports', 'installing packages/toolboxes'],
+      ['check_matlab_code or equivalent static-analysis result', 'run_matlab_file/test result or command output', 'detected toolbox/version evidence', 'output file_stat or MATLAB figure/model proof'],
     ));
   }
 
@@ -1317,4 +1547,320 @@ export function buildObserveBeforeActPromptBlock(
     `${statusBits.join('. ')}.`,
     'Act on THIS observed state. If it does not match what the task assumes, observe again with desktop.window_state / desktop.read_a11y_tree before mutating — do not act blind.',
   ].join('\n');
+}
+
+// ── E1: Mid-execution surface escalation ────────────────────────────────────
+// When the ACTIVE control surface fails at runtime (adapter error, empty a11y
+// tree, coverage miss), descend the already-ranked candidate ladder instead of
+// failing the whole run into a manual replan. Research grounding
+// (docs/EXECUTION_LADDER_RESEARCH_2026-06-11.md): UFO2's hybrid escalation
+// converts ~10% of otherwise-irrecoverable cases, and >62% of tree-only
+// failures are a11y COVERAGE gaps — so a11y failures must descend toward the
+// screenshot/coordinate rung automatically rather than retrying tree-based
+// surfaces. Pure and Node-loadable: the runtime supplies the failure signal
+// and capability statuses; this module owns the ranking semantics.
+
+export type SurfaceCapabilityStatus = 'ready' | 'partial' | 'missing';
+
+export interface SurfaceEscalationFailure {
+  /** Structured failure code when available (e.g. `a11y_tree_empty`, `adapter_error`). */
+  code?: string | null;
+  /** Failure area in the computerTaskEvidenceRecovery vocabulary (e.g. `approval_boundary`). */
+  area?: string | null;
+  message: string;
+}
+
+export interface PlanSurfaceEscalationInput {
+  currentSurfaceId: string;
+  /** The route decision's ranked candidate list (highest rank first). */
+  candidates: AppAutomationControlSurfaceCandidate[];
+  failure: SurfaceEscalationFailure;
+  /** Every surface already attempted this run, including the current one. */
+  attemptedSurfaceIds: string[];
+  /** Live capability status per surface id; 'partial' demotes, 'missing' excludes. */
+  capabilityStatusById?: Record<string, SurfaceCapabilityStatus>;
+  /** How many same-surface fresh-observation retries already happened (default 0). */
+  sameSurfaceRetryCount?: number;
+}
+
+export type SurfaceEscalationDecision =
+  | {
+      action: 'descend';
+      next: AppAutomationControlSurfaceCandidate;
+      freshObservationRequired: true;
+      /** approvalBefore items on the new rung NOT already covered by the current rung — gate BEFORE acting. */
+      extraApprovalsRequired: string[];
+      reason: string;
+    }
+  | { action: 'retry_same'; reason: string }
+  | { action: 'stop'; reason: string };
+
+/** Bounded: a run may descend at most this many times (research: UFO2 keeps hybrid escalation tight). */
+export const MAX_SURFACE_DESCENTS_PER_RUN = 2;
+
+// Failures that must NEVER widen the control surface. These stop (or wait for
+// the user/approval flow) instead of descending — descending around a rejected
+// approval, a user constraint, or a verification gate would silently bypass
+// the exact safety boundary that fired.
+const NON_ESCALATING_FAILURE_CODES = new Set([
+  'approval_rejected',
+  'approval_required',
+  'verification_gate',
+  'user_constraint_block',
+  'permission_denied',
+  'not_paired',
+  'origin_blocked',
+  'app_not_found',
+  'user_decision_needed',
+]);
+const NON_ESCALATING_FAILURE_AREAS = new Set(['approval_boundary', 'user_unblock']);
+
+// a11y coverage failures (E0's structured `a11y_tree_empty`, or a coverage
+// miss) descend PAST other tree-dependent rungs toward the pixel rung —
+// retrying a different tree consumer against an app whose toolkit bypasses the
+// platform a11y API just fails again.
+const A11Y_COVERAGE_FAILURE_CODES = new Set(['a11y_tree_empty', 'a11y_coverage_miss']);
+const A11Y_DEPENDENT_SURFACE_IDS = new Set<string>(['os_accessibility', 'semantic_desktop']);
+
+const FAILURE_CODE_LABELS: Record<string, string> = {
+  a11y_tree_empty: 'accessibility tree came back empty (coverage gap)',
+  a11y_coverage_miss: 'accessibility tree did not cover the target (coverage gap)',
+  a11y_path_stale: 'accessibility element path went stale',
+  adapter_error: 'adapter error',
+  adapter_unavailable: 'adapter unavailable',
+  approval_rejected: 'approval was rejected',
+  approval_required: 'approval is required first',
+  verification_gate: 'a pre-mutation verification gate fired',
+  user_constraint_block: 'a user constraint blocks this action',
+  permission_denied: 'macOS permission denied',
+  not_paired: 'desktop bridge not paired',
+  origin_blocked: 'desktop bridge rejected the request origin',
+  app_not_found: 'the target app is not installed',
+  user_decision_needed: 'a blocking dialog needs a user decision',
+};
+
+function failureLabel(failure: SurfaceEscalationFailure): string {
+  const code = normalize(failure.code || '');
+  if (code && FAILURE_CODE_LABELS[code]) return `${code} (${FAILURE_CODE_LABELS[code]})`;
+  if (code) return code;
+  const area = normalize(failure.area || '');
+  if (area) return `failure area ${area}`;
+  const message = String(failure.message || '').trim();
+  return message ? message.slice(0, 120) : 'unknown failure';
+}
+
+function isA11yCoverageFailure(failure: SurfaceEscalationFailure, sameSurfaceRetryCount: number): boolean {
+  const code = normalize(failure.code || '');
+  if (A11Y_COVERAGE_FAILURE_CODES.has(code)) return true;
+  // A stale path that already burned its same-surface retry behaves like a coverage miss.
+  if (code === 'a11y_path_stale' && sameSurfaceRetryCount > 0) return true;
+  const message = normalize(failure.message || '');
+  return /\ba11y_tree_empty\b/.test(message)
+    || (/\b(a11y|accessibility)\b/.test(message) && /\b(empty|coverage|no nodes|not in the tree)\b/.test(message));
+}
+
+/**
+ * Extract a structured failure signal from an adapter/tool result shape
+ * ({ message, warnings, data }) without importing the adapter module. Pure so
+ * smokes can pin the mapping.
+ */
+export function extractSurfaceFailureSignal(args: {
+  message?: string | null;
+  warnings?: string[] | null;
+  data?: Record<string, unknown> | null;
+}): SurfaceEscalationFailure {
+  const message = String(args.message || '').trim();
+  const haystack = [message, ...(args.warnings || [])].join('\n').toLowerCase();
+  const dataCode = typeof args.data?.errorCode === 'string' ? normalize(args.data.errorCode as string) : '';
+  const dataKind = typeof args.data?.kind === 'string' ? normalize(args.data.kind as string) : '';
+  let code: string | null = dataCode || null;
+  if (!code && dataKind === 'desktop_ai_modal_decision_needed') code = 'user_decision_needed';
+  if (!code) {
+    const knownCodes = [
+      'a11y_tree_empty',
+      'a11y_path_stale',
+      'permission_denied',
+      'not_paired',
+      'origin_blocked',
+      'app_not_found',
+      'approval_rejected',
+      'verification_gate',
+    ];
+    code = knownCodes.find((known) => haystack.includes(known)) || null;
+  }
+  return { code, area: null, message };
+}
+
+/**
+ * Map a capability audit onto the control-surface ids the escalation policy
+ * ranks. 'partial' is preserved (degraded rung — ranked after every ready
+ * candidate; fixes gap #6 where 'partial' was treated as 'ready') and
+ * 'missing' excludes the rung. Surfaces with no audit signal stay unknown
+ * (treated as usable).
+ */
+export function deriveSurfaceCapabilityStatusFromAudit(
+  audit: ComputerCapabilityAudit | null | undefined,
+): Record<string, SurfaceCapabilityStatus> {
+  if (!audit?.findings) return {};
+  const statusOf = (id: string): SurfaceCapabilityStatus | null => {
+    const finding = audit.findings.find((item) => item.id === id);
+    return finding ? finding.status : null;
+  };
+  const out: Record<string, SurfaceCapabilityStatus> = {};
+  const assign = (ids: string[], status: SurfaceCapabilityStatus | null) => {
+    if (!status) return;
+    for (const id of ids) out[id] = status;
+  };
+  assign(
+    ['os_accessibility', 'semantic_desktop', 'screenshot_coordinate_fallback', 'macos_apple_events'],
+    statusOf('desktop_control'),
+  );
+  assign(
+    [
+      'vendor_script_or_plugin_api',
+      'adobe_indesign_uxp_dom',
+      'adobe_photoshop_uxp_dom',
+      'adobe_photoshop_batchplay',
+      'autocad_lisp_dotnet_api',
+      'autodesk_ai_mcp_assistant',
+      'fusion_api_scripts_addins',
+      'solidworks_com_api',
+      'matlab_mcp_agentic_toolkit',
+      'rhino_common_api',
+      'revit_api_addin',
+      'inventor_api_ilogic',
+    ],
+    statusOf('app_tools'),
+  );
+  assign(['browser_dom_cdp'], statusOf('browser_automation'));
+  return out;
+}
+
+/**
+ * Decide what to do when the ACTIVE surface fails mid-run.
+ *
+ * Rules:
+ * - non-escalating failures (approval rejected/required, verification gate,
+ *   user constraint, permission/pairing/install blockers, blocking-dialog
+ *   decisions) NEVER descend — they stop/wait;
+ * - `a11y_path_stale` gets ONE fresh-observation retry on the same rung;
+ * - at most MAX_SURFACE_DESCENTS_PER_RUN descents, then stop-with-history;
+ * - descend only to the next-ranked NOT-yet-attempted candidate below the
+ *   current rung whose capability isn't known-missing; 'partial' candidates
+ *   rank after every ready/unknown candidate;
+ * - a11y coverage failures skip other tree-dependent rungs (descend toward
+ *   the screenshot/coordinate rung);
+ * - a descent always requires a fresh observation on the new rung, and any
+ *   approvalBefore items the new rung adds are returned so the caller gates
+ *   BEFORE acting — approvals are never widened silently.
+ */
+export function planSurfaceEscalation(input: PlanSurfaceEscalationInput): SurfaceEscalationDecision {
+  const currentSurfaceId = String(input.currentSurfaceId || '').trim();
+  const failure = input.failure || { message: '' };
+  const code = normalize(failure.code || '');
+  const area = normalize(failure.area || '');
+  const sameSurfaceRetryCount = Math.max(0, input.sameSurfaceRetryCount || 0);
+  const attempted = unique([
+    ...(input.attemptedSurfaceIds || []).map((id) => String(id || '').trim()).filter(Boolean),
+    ...(currentSurfaceId ? [currentSurfaceId] : []),
+  ]);
+  const attemptedLabel = attempted.join(', ') || 'none';
+  const label = failureLabel(failure);
+
+  if (NON_ESCALATING_FAILURE_CODES.has(code) || NON_ESCALATING_FAILURE_AREAS.has(area)) {
+    return {
+      action: 'stop',
+      reason: `non-escalating failure on ${currentSurfaceId || 'the current surface'}: ${label} — do not descend control surfaces; resolve the approval/user blocker first. Tried: ${attemptedLabel}.`,
+    };
+  }
+
+  if (code === 'a11y_path_stale' && sameSurfaceRetryCount === 0) {
+    return {
+      action: 'retry_same',
+      reason: `element path went stale on ${currentSurfaceId || 'the current surface'} — re-observe (fresh a11y tree) and retry on the SAME surface before descending.`,
+    };
+  }
+
+  const descentsSoFar = Math.max(0, attempted.length - 1);
+  if (descentsSoFar >= MAX_SURFACE_DESCENTS_PER_RUN) {
+    return {
+      action: 'stop',
+      reason: `escalation budget exhausted (${MAX_SURFACE_DESCENTS_PER_RUN} descents): tried ${attemptedLabel}; all failed — last failure: ${label}.`,
+    };
+  }
+
+  const candidates = input.candidates || [];
+  const currentIndex = candidates.findIndex((item) => item.id === currentSurfaceId);
+  const below = currentIndex >= 0 ? candidates.slice(currentIndex + 1) : candidates;
+  const attemptedSet = new Set(attempted);
+  const statusById = input.capabilityStatusById || {};
+  const a11yCoverage = isA11yCoverageFailure(failure, sameSurfaceRetryCount);
+  const eligible = below.filter((item) =>
+    item.id !== currentSurfaceId
+    && !attemptedSet.has(item.id)
+    // Connected-agent buildout is not an in-run rung — the stop path feeds
+    // the existing buildout/recovery machinery instead.
+    && item.id !== 'connected_agent_buildout'
+    && statusById[item.id] !== 'missing'
+    && !(a11yCoverage && A11Y_DEPENDENT_SURFACE_IDS.has(item.id)));
+  // 'partial' = degraded rung: usable, but only after every ready/unknown candidate.
+  const readyish = eligible.filter((item) => statusById[item.id] !== 'partial');
+  const partial = eligible.filter((item) => statusById[item.id] === 'partial');
+  const next = [...readyish, ...partial][0];
+
+  if (!next) {
+    return {
+      action: 'stop',
+      reason: `no usable lower control surface remains: tried ${attemptedLabel}; all failed — last failure: ${label}.`,
+    };
+  }
+
+  const currentApprovals = new Set(
+    normalizeFacts(currentIndex >= 0 ? candidates[currentIndex].approvalBefore : []),
+  );
+  const extraApprovalsRequired = unique(next.approvalBefore).filter(
+    (item) => !currentApprovals.has(normalize(item).replace(/\s+/g, ' ').trim()),
+  );
+
+  return {
+    action: 'descend',
+    next,
+    freshObservationRequired: true,
+    extraApprovalsRequired,
+    reason: `escalated from ${currentSurfaceId || 'unknown surface'} to ${next.id}: ${label}${statusById[next.id] === 'partial' ? ' (degraded rung — capability is partial)' : ''}.`,
+  };
+}
+
+// ── E1 breadcrumbs ──────────────────────────────────────────────────────────
+// Telemetry note: when escalation fires because of an a11y failure, the
+// breadcrumb carries the app name + structured failure code. The breadcrumbs
+// persisted on task records ARE our macOS AX-coverage dataset over time — the
+// 2026-06-11 research round found no published macOS coverage numbers, so we
+// measure them ourselves from these records. No extra infra needed.
+
+export interface ComputerTaskSurfaceEscalation {
+  fromSurface: string;
+  toSurface: string;
+  reason: string;
+  atIso: string;
+  appName?: string | null;
+  failureCode?: string | null;
+}
+
+export const MAX_SURFACE_ESCALATION_BREADCRUMBS = 3;
+
+/** Append a breadcrumb, keeping the list bounded (≤3, oldest dropped) and strings compact. */
+export function appendSurfaceEscalation(
+  list: ComputerTaskSurfaceEscalation[] | null | undefined,
+  entry: ComputerTaskSurfaceEscalation,
+): ComputerTaskSurfaceEscalation[] {
+  const compact: ComputerTaskSurfaceEscalation = {
+    fromSurface: String(entry.fromSurface || '').slice(0, 80),
+    toSurface: String(entry.toSurface || '').slice(0, 80),
+    reason: String(entry.reason || '').slice(0, 300),
+    atIso: String(entry.atIso || new Date().toISOString()),
+    appName: entry.appName ? String(entry.appName).slice(0, 80) : null,
+    failureCode: entry.failureCode ? String(entry.failureCode).slice(0, 60) : null,
+  };
+  return [...(list || []), compact].slice(-MAX_SURFACE_ESCALATION_BREADCRUMBS);
 }

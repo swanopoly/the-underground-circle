@@ -7,13 +7,42 @@ import { extractBrowserPlansFromToolActions } from './openswanRuntimeToolLoop';
 import { buildOpenSwanTaskPlan, type OpenSwanTaskPlan } from './openswanTaskPlanner';
 import {
   buildOpenSwanToolBrief,
+  getOpenSwanToolPolicy,
   listToolsHiddenByMode,
   previewOpenSwanToolsForSurface,
+  type OpenSwanRuntimeToolContext,
+  type OpenSwanRuntimeToolName,
 } from './openswanToolRuntime';
+import { runAgent, type AgentProvider, type AgentToolDefinition } from './agentExecutionCore';
+import { getOpenSwanToolsForSurface } from './openswanBridge';
+import { dispatchToolDetailed, MAX_TOOL_ROUNDS } from './openswanTools/index';
+import { EDGE_INVOKE_RETRIES, edgeRetryBackoffMs, isRetryableEdgeFailure } from './edgeInvokeRetry';
+import { extractAssistantText } from './toolLoopProgress';
+import { getFreshAccessToken } from './authSession';
+import { supabase } from './supabase';
+import {
+  accumulateLoopUsage,
+  buildLegacyToolEventFromResult,
+  buildLegacyToolLoopResult,
+  buildSwanbotToolTurnBody,
+  createLegacyApprovalGateAdapter,
+  createLegacyRoundNudgeHook,
+  createLoopUsageAccumulator,
+  finalizeLoopUsage,
+  mapAgentEventToOpenSwanStage,
+  needsCapExhaustionFinalization,
+  parseSwanbotToolTurnData,
+  shapeLegacyToolHandlerResult,
+  toAnthropicToolShapes,
+  type LegacyToolApprovalGate,
+  type LegacyToolEvent,
+  type LegacyToolLoopResult,
+} from './openswanSessionRuntimeAdapters';
 import { appendOpenSwanTranscriptEvent, buildOpenSwanTranscriptKey, upsertOpenSwanTranscriptHeader, type OpenSwanSessionTranscript } from './openswanTranscripts';
 import { executeOpenSwanVerificationPlan, type OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import { getSwanBotStructuredResponse, executeToolUseLoop, buildStreamableSystemPrompt, type SwanBotContext, type SwanBotStructuredArtifact, type SwanBotStructuredResponse } from './swanbot';
 import { findPendingResumeCheckpoint, buildResumeContextBlock } from './toolLoopResume';
+import { buildSnapshotAwareInitialMessages } from './circleSnapshotContextInjection';
 import { delegateToSubagents, planSubagentDelegation, shouldDelegateToSubagents } from './subagentRegistry';
 import { resolveEffectiveDelegationMode, type SessionDelegationMode } from './chatSessionProfile';
 import { buildOpenSwanModeResponseContract, getOpenSwanModePolicy } from './openswanModePolicy';
@@ -428,6 +457,311 @@ async function appendTranscriptEvent(
     console.warn('[OpenSwanRuntime] Transcript append failed (non-fatal):', error);
     return null;
   }
+}
+
+// ─── O1: typed-core tool loop (agentExecutionCore.runAgent) ─────────────────
+
+const OPENSWAN_TYPED_CORE_FLAG = 'uc_openswan_typed_core';
+
+/**
+ * O1 cutover switch — a MANUAL revert lever only, never an auto-fallback
+ * (flipping paths mid-run would risk double-executing tools). Defaults ON.
+ * Web: `localStorage.setItem('uc_openswan_typed_core', '0')` reverts the next
+ * turn to the legacy `executeToolUseLoop`; remove the key (or set '1') to
+ * re-enable. Native has no localStorage — the try/catch leaves the default.
+ */
+function isOpenSwanTypedCoreEnabled(): boolean {
+  try {
+    const store = (globalThis as { localStorage?: { getItem?: (k: string) => string | null } }).localStorage;
+    const value = store?.getItem?.(OPENSWAN_TYPED_CORE_FLAG);
+    if (value === '0' || value === 'false' || value === 'off') return false;
+  } catch { /* storage unavailable (native) → default ON */ }
+  return true;
+}
+
+/**
+ * Runs the session turn's tool loop on `agentExecutionCore.runAgent` while
+ * preserving the legacy `executeToolUseLoop` contract end-to-end:
+ *
+ *   - transport: the SAME `swanbot-ai` edge invoke the legacy loop used
+ *     (per-round fresh JWT + bounded transient retry via edgeInvokeRetry;
+ *     same body shape: message / tools / tool_messages / system_override),
+ *   - tools: the openswanBridge full-catalog adapter filtered to the same
+ *     `allowedToolNames` + mode the legacy loop advertised,
+ *   - approval gate: `opts.onToolApproval` payloads stay byte-identical
+ *     (R19 — see createLegacyApprovalGateAdapter),
+ *   - events: R13 stage mapping + R14 metadata-fed legacy toolEvents,
+ *   - result: legacy `{ response, toolEvents, routing, incomplete,
+ *     checkpoint }` shape incl. the cap-exhaustion finalization call.
+ */
+async function runTypedCoreToolLoop(args: {
+  systemPrompt: string;
+  userMessage: string;
+  /**
+   * Compact Circle Context Snapshot block (circleSnapshotContextInjection) —
+   * injected as a user-role context message AHEAD of the user message so the
+   * volatile index never touches the frozen/cached system prompt (R15/O7).
+   * `null`/absent ⇒ initial messages are exactly the pre-snapshot shape.
+   */
+  snapshotContextMessage?: string | null;
+  model: string;
+  circleId: string;
+  userId: string;
+  threadId?: string;
+  runId?: string;
+  activeSoulKey?: string;
+  activePluginIds?: string[];
+  allowedToolNames: string[];
+  surface: 'main_chat' | 'room_chat';
+  mode?: string | null;
+  maxToolRounds?: number;
+  toolApprovalGate?: LegacyToolApprovalGate;
+  onStage?: (stage: OpenSwanRunStage, label: string) => void;
+}): Promise<LegacyToolLoopResult> {
+  const toolCtx: OpenSwanRuntimeToolContext = {
+    circleId: args.circleId,
+    userId: args.userId,
+    threadId: args.threadId,
+    runId: args.runId,
+    activeSoulKey: args.activeSoulKey,
+    activePluginIds: args.activePluginIds,
+    surface: args.surface,
+  };
+  const bridgeTools = getOpenSwanToolsForSurface(args.surface, toolCtx, {
+    allowedToolNames: args.allowedToolNames as OpenSwanRuntimeToolName[],
+    mode: args.mode,
+  });
+  // O1 follow-up flip (T2/T8): see plan doc un-darking checklist
+  // const { tools: progressiveTools, resolveAdditionalTools } = getProgressiveOpenSwanTools(args.surface, toolCtx);
+  if (bridgeTools.length === 0) {
+    // Legacy parity: no advertised tools → no model round.
+    return { response: '', toolEvents: [] };
+  }
+
+  const toolEvents: LegacyToolEvent[] = [];
+  const rejectedToolUseIds = new Set<string>();
+  const pendingToolInputs = new Map<string, unknown>();
+  const usageAcc = createLoopUsageAccumulator();
+  let routing: LegacyToolLoopResult['routing'];
+  let edgeFailed = false;
+
+  // Wrap each bridge handler so its result carries the legacy dispatch
+  // metadata/status side channel (R14) and the legacy in-loop nudges,
+  // while the approval gate (below) still sees the RAW model input (R19).
+  const wrappedTools: AgentToolDefinition[] = bridgeTools.map((tool) => ({
+    ...tool,
+    handler: async (input, handlerCtx) => {
+      // Legacy dispatch normalized missing input to {} (`block.input || {}`).
+      const normalizedInput = (input as Record<string, unknown>) || {};
+      const inner = await tool.handler(normalizedInput, handlerCtx);
+      let toolPolicy: Record<string, unknown> | null = null;
+      try {
+        toolPolicy = getOpenSwanToolPolicy(
+          tool.name as OpenSwanRuntimeToolName,
+          args.activePluginIds,
+        ) as unknown as Record<string, unknown>;
+      } catch { /* policy lookup is best-effort metadata */ }
+      return shapeLegacyToolHandlerResult({
+        toolName: tool.name,
+        input: normalizedInput,
+        inner,
+        toolPolicy,
+        priorToolEvents: toolEvents,
+      });
+    },
+  }));
+
+  // T6: append the circle's external MCP tools (policy-gated via
+  // mcpToolBridge) to the advertised tool set. TYPED-CORE ONLY — the legacy
+  // executeToolUseLoop dispatches by name through openswanTools'
+  // dispatchToolDetailed, which has no handlers for mcp__* names, so the
+  // legacy (escape-hatch) path never sees these tools. Notes:
+  //  - fetched ONCE per turn here (tool assembly runs once; runAgent reuses
+  //    the same tools array across every round), never per round;
+  //  - trust comes from circles.settings.mcpTrustedServerIds (resolved inside
+  //    getMcpToolsForCircle; read failure ⇒ nothing trusted ⇒ every MCP tool
+  //    is approval-gated, fail closed);
+  //  - approvals flow through the SAME opts.onToolApproval gate as catalog
+  //    'ask' tools, with the server identity mapped into the gate payload;
+  //  - bounded ≤ MAX_MCP_TOOLS_PER_TURN in deterministic name order, with
+  //    catalog-name collisions skipped (namespacing makes them impossible,
+  //    asserted anyway);
+  //  - any failure (no MCP servers, fetch/trust errors) is silent: zero MCP
+  //    tools, the turn proceeds on catalog tools alone. MCP tools are not
+  //    wrapped in shapeLegacyToolHandlerResult — the bridge handlers already
+  //    enforce approval, fail-closed errors, and untrusted-result fencing.
+  let assembledTools: AgentToolDefinition[] = wrappedTools;
+  try {
+    const { getMcpToolsForCircle, mergeMcpToolsIntoCatalog, adaptLegacyToolApprovalGate } = await import('./mcpToolBridge');
+    const mcpTools = await getMcpToolsForCircle(args.circleId, {
+      approvalGate: args.toolApprovalGate ? adaptLegacyToolApprovalGate(args.toolApprovalGate) : undefined,
+    });
+    if (mcpTools.length > 0) {
+      const merged = mergeMcpToolsIntoCatalog(wrappedTools, mcpTools);
+      assembledTools = merged.tools;
+      if (merged.skippedCollisions.length > 0) {
+        console.warn('[OpenSwanRuntime] MCP tools skipped (catalog name collision):', merged.skippedCollisions.join(', '));
+      }
+      if (merged.overflow.length > 0) {
+        console.warn(`[OpenSwanRuntime] MCP tool cap reached — dropped ${merged.overflow.length} tool(s):`, merged.overflow.join(', '));
+      }
+    }
+  } catch { /* MCP tools are additive — never break the turn */ }
+
+  // Same transport as the legacy loop: swanbot-ai edge fn, fresh JWT per
+  // round, bounded transient retry. The invoke is idempotent (it returns the
+  // model's next message; tools run client-side after), so a retry can never
+  // double-execute a tool.
+  const invokeSwanbotToolTurn = async (
+    body: Record<string, unknown>,
+  ): Promise<{ data: any; error: any }> => {
+    let data: any = null;
+    let error: any = null;
+    for (let attempt = 0; attempt <= EDGE_INVOKE_RETRIES; attempt++) {
+      const accessToken = await getFreshAccessToken();
+      ({ data, error } = await supabase.functions.invoke('swanbot-ai', {
+        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+        body,
+      }));
+      if (data && !error) break;
+      if (attempt < EDGE_INVOKE_RETRIES && isRetryableEdgeFailure({
+        hasData: !!data,
+        errorName: (error as any)?.name,
+        errorMessage: (error as any)?.message,
+        status: (error as any)?.context?.status ?? (error as any)?.status,
+      })) {
+        await new Promise((resolve) => setTimeout(resolve, edgeRetryBackoffMs(attempt)));
+        continue;
+      }
+      break;
+    }
+    return { data, error };
+  };
+
+  const provider: AgentProvider = {
+    turn: async ({ messages, tools }) => {
+      const { data, error } = await invokeSwanbotToolTurn(buildSwanbotToolTurnBody({
+        userMessage: args.userMessage,
+        circleId: args.circleId,
+        userId: args.userId,
+        model: args.model,
+        systemPrompt: args.systemPrompt,
+        tools: toAnthropicToolShapes(tools),
+        messages,
+      }));
+      if (error || !data) {
+        // Legacy parity: a terminal edge failure ends the turn with the
+        // partial text and flags the loop result `incomplete` — it must NOT
+        // throw, or already-executed tool work would be lost to the
+        // text-only fallback (and re-answered without its results).
+        edgeFailed = true;
+        return {
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: String((data as any)?.response || 'Tool-use call failed.') }],
+        };
+      }
+      const parsed = parseSwanbotToolTurnData(data);
+      // Routing is fixed for the turn — capture the first round's report.
+      if (!routing && parsed.routing) routing = parsed.routing;
+      return parsed.turn;
+    },
+  };
+
+  const maxRounds = Math.max(1, Math.min(MAX_TOOL_ROUNDS, args.maxToolRounds ?? MAX_TOOL_ROUNDS));
+
+  // O1 nudge parity: the legacy loop's three loop-internal reliability nudges
+  // (deterministic re-observe on failed UI actions, proof-coverage nudge,
+  // tool-budget reminder) ride the core's round-complete hook — same pure
+  // helpers, same trigger conditions/text (see createLegacyRoundNudgeHook).
+  // The auto re-observe read uses the legacy dispatcher directly (NOT the
+  // allowed-tools-filtered bridge set) — legacy parity: the observation tool
+  // need not be advertised to the model to be auto-dispatched.
+  const onRoundComplete = createLegacyRoundNudgeHook({
+    toolEvents,
+    hasApprovalGate: !!args.toolApprovalGate,
+    dispatchObservation: async (observationTool) => {
+      const obs = await dispatchToolDetailed(observationTool, {}, toolCtx);
+      return { text: obs.text, status: String(obs.status) };
+    },
+  });
+
+  const runResult = await runAgent({
+    initialMessages: buildSnapshotAwareInitialMessages({
+      userMessage: args.userMessage,
+      snapshotContextMessage: args.snapshotContextMessage,
+    }),
+    tools: assembledTools,
+    provider,
+    maxIterations: maxRounds,
+    // The legacy loop only parallelized all-read-only, ungated rounds;
+    // until the T8 policy provider is flipped on, dispatch sequentially
+    // (safe superset of legacy ordering, incl. approval prompts).
+    parallelToolConcurrency: 1,
+    toolApprovalGate: args.toolApprovalGate
+      ? createLegacyApprovalGateAdapter(args.toolApprovalGate, (toolUseId) => rejectedToolUseIds.add(toolUseId))
+      : undefined,
+    onRoundComplete,
+    onEvent: (event) => {
+      if (event.kind === 'tool_call_start') {
+        pendingToolInputs.set(event.toolUseId, event.input);
+      } else if (event.kind === 'tool_call_result') {
+        const input = pendingToolInputs.get(event.toolUseId);
+        pendingToolInputs.delete(event.toolUseId);
+        toolEvents.push(buildLegacyToolEventFromResult({
+          toolName: event.toolName,
+          input,
+          result: event.result,
+          rejectedByGate: rejectedToolUseIds.has(event.toolUseId),
+        }));
+      } else if (event.kind === 'turn_end') {
+        accumulateLoopUsage(usageAcc, event.usage);
+      }
+      // R12 note: `iteration_complete` message snapshots are available here;
+      // the resumable checkpoint the transcript persists is built from
+      // toolEvents on cap exhaustion (buildLegacyToolLoopResult), matching
+      // what the legacy loop stored and what toolLoopResume reads back.
+      const stage = mapAgentEventToOpenSwanStage(event);
+      if (stage) args.onStage?.(stage.stage, stage.label);
+    },
+    // O1 follow-up flip (T2/T8): see plan doc un-darking checklist
+    // resolveAdditionalTools,
+    // toolParallelPolicyProvider: createOpenSwanToolParallelPolicyProvider({ activePluginIds: args.activePluginIds }),
+  });
+
+  // Legacy parity: the cap was hit on a pure tool_use round — the final
+  // round's results were pushed to history but no turn consumed them, so the
+  // model never answered. Give it one no-tools finalization call. Fail-safe:
+  // any error falls back to the limit note in buildLegacyToolLoopResult.
+  let finalizationText: string | null = null;
+  if (!edgeFailed && needsCapExhaustionFinalization(runResult)) {
+    try {
+      const finalToken = await getFreshAccessToken();
+      const { data: finalData } = await supabase.functions.invoke('swanbot-ai', {
+        headers: finalToken ? { Authorization: `Bearer ${finalToken}` } : undefined,
+        body: {
+          message: args.userMessage,
+          circleId: args.circleId,
+          userId: args.userId,
+          model: args.model,
+          tools: [],
+          tool_messages: runResult.messages.map((m) => ({ role: m.role, content: m.content })),
+          system_override: args.systemPrompt,
+        },
+      });
+      finalizationText = extractAssistantText((finalData as any)?.content)
+        || String((finalData as any)?.response || '');
+    } catch { /* fall back to the limit note */ }
+  }
+
+  return buildLegacyToolLoopResult({
+    runResult,
+    toolEvents,
+    routing,
+    maxRounds,
+    edgeFailed,
+    finalizationText,
+    usage: finalizeLoopUsage(usageAcc),
+  });
 }
 
 export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise<OpenSwanTurnResult> {
@@ -967,6 +1301,22 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     if (runtimeToolNames.length === 0) {
       structured = await runTextOnlyResponse();
     } else {
+      // Decide the loop path ONCE so the snapshot context placement matches:
+      // typed-core gets the snapshot as a user-role context message (below),
+      // so its system prompt suppresses the v1 dynamic-tail copy; the legacy
+      // revert path keeps the v1 system-prompt injection instead.
+      const typedCoreEnabled = isOpenSwanTypedCoreEnabled();
+
+      // Circle Context Snapshot — pre-built index injected as a USER-ROLE
+      // context message (R15/O7: volatile 60s-TTL data must stay out of the
+      // frozen system prompt; mirrors skillPromptInjection). Fail-safe: any
+      // build error/timeout (~1.5s) ⇒ null ⇒ the turn proceeds unchanged.
+      const snapshotContextMessage = typedCoreEnabled
+        ? await import('./circleSnapshotContextInjection')
+            .then(({ buildCircleSnapshotContextMessage }) =>
+              buildCircleSnapshotContextMessage(opts.context.circleId))
+            .catch(() => null)
+        : null;
 
       // Build the full system prompt (Blocks A-E: SOUL, wisdom, memory, attachments, skills)
       const systemPrompt = await buildStreamableSystemPrompt({
@@ -980,6 +1330,9 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         sessionProfile: taskPlan.profile,
         resolvedSkills: skillResolution.skills,
         resolvedSkillsPromptBlock: skillResolution.promptBlock,
+        // Avoid double-injection: typed-core carries the snapshot as a
+        // user-role message, so the v1 dynamic-tail block is suppressed.
+        omitCircleContextSnapshot: typedCoreEnabled,
         chatHistory: [
           opts.context.chatHistory || '',
           delegationSummary ? `## Specialist Sub-Agent Results\n${delegationSummary}` : '',
@@ -996,22 +1349,45 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       const resumeBlock = buildResumeContextBlock(findPendingResumeCheckpoint(transcript.events));
       const systemPromptWithResume = resumeBlock ? `${systemPrompt}\n\n${resumeBlock}` : systemPrompt;
 
-      const toolLoopResult = await executeToolUseLoop({
-        systemPrompt: systemPromptWithResume,
-        userMessage: prompt,
-        model: resolvedModel || 'claude-haiku-4-5',
-        circleId: opts.context.circleId!,
-        userId: opts.context.userId,
-        threadId: opts.chatSessionId || undefined,
-        runId: run?.id,
-        activeSoulKey,
-        activePluginIds: opts.activePluginIds,
-        allowedToolNames: runtimeToolNames,
-        surface: surfaceForTools,
-        mode: opts.mode || null,
-        maxToolRounds: toolRoundBudget,
-        toolApprovalGate: opts.onToolApproval,
-      });
+      // O1 cutover: the typed agentExecutionCore loop is the default; the
+      // legacy executeToolUseLoop stays callable behind the manual revert
+      // flag (`uc_openswan_typed_core` = '0'). Both paths return the same
+      // contract, so everything below is path-agnostic.
+      const toolLoopResult: LegacyToolLoopResult = typedCoreEnabled
+        ? await runTypedCoreToolLoop({
+            systemPrompt: systemPromptWithResume,
+            userMessage: prompt,
+            snapshotContextMessage,
+            model: resolvedModel || 'claude-haiku-4-5',
+            circleId: opts.context.circleId!,
+            userId: opts.context.userId,
+            threadId: opts.chatSessionId || undefined,
+            runId: run?.id,
+            activeSoulKey,
+            activePluginIds: opts.activePluginIds,
+            allowedToolNames: runtimeToolNames,
+            surface: surfaceForTools,
+            mode: opts.mode || null,
+            maxToolRounds: toolRoundBudget,
+            toolApprovalGate: opts.onToolApproval,
+            onStage: (stage, label) => emitStage(opts, stage, label),
+          })
+        : await executeToolUseLoop({
+            systemPrompt: systemPromptWithResume,
+            userMessage: prompt,
+            model: resolvedModel || 'claude-haiku-4-5',
+            circleId: opts.context.circleId!,
+            userId: opts.context.userId,
+            threadId: opts.chatSessionId || undefined,
+            runId: run?.id,
+            activeSoulKey,
+            activePluginIds: opts.activePluginIds,
+            allowedToolNames: runtimeToolNames,
+            surface: surfaceForTools,
+            mode: opts.mode || null,
+            maxToolRounds: toolRoundBudget,
+            toolApprovalGate: opts.onToolApproval,
+          });
 
       const designManifestLedgerActions = buildDesignAppRuntimeManifestLedgerActions({
         task: cleanMessage,
@@ -1053,7 +1429,9 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         response: toolLoopResult.response,
         tool_actions: runtimeToolActions,
         artifacts: [],
-        usage: {},
+        // Legacy loop reported no usage ({}); the typed core aggregates
+        // per-turn edge usage (O1) so run token totals stop reading 0.
+        usage: toolLoopResult.usage || {},
         ...(toolLoopResult.routing ? { routing: toolLoopResult.routing } : {}),
       };
 

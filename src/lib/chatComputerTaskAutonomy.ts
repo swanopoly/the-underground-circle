@@ -115,6 +115,7 @@ function buildGuardrails(route: ChatComputerRequestRoute): string[] {
 function buildAutomationSteps(route: ChatComputerRequestRoute, canAutoPrepare: boolean): string[] {
   return uniqueCompact([
     canAutoPrepare ? `Prepare ${autoPreparationTargets(route).join(', ')} quietly when possible.` : null,
+    ...(route.actionItems || []).map((item) => `${item.label} [${item.tool}]`),
     ...(route.evidenceContract?.observeBefore || []),
     ...(route.evidenceContract?.actionabilityChecks || []),
     ...(route.evidenceContract?.proofAfter || []),

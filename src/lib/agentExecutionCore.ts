@@ -90,6 +90,30 @@ export type AgentToolApprovalGate = (req: {
   iteration: number;
 }) => AgentToolApprovalDecision | Promise<AgentToolApprovalDecision>;
 
+/**
+ * Round-boundary hook (O1 nudge parity). Fired after a tool round's results
+ * are appended (and `iteration_complete` is emitted) but BEFORE the next
+ * provider turn, so adapters can inject round-boundary guidance the way the
+ * legacy `executeToolUseLoop` did inside its loop body (tool-budget reminder,
+ * proof-coverage nudge, deterministic re-observe note). Returning
+ * `appendUserNote` makes the core append exactly ONE user-role text message
+ * after the tool_result message — the next provider turn sees it as fresh
+ * user guidance. Contract:
+ *   - NOT fired after the final round (there is no next turn to guide —
+ *     matches the legacy `round < maxRounds - 1` gating on its nudges).
+ *   - Hook errors are swallowed: a nudge must never break the loop.
+ *   - `toolResults` summarizes this round only; `messages` is a snapshot of
+ *     the full history at the boundary (do not mutate).
+ */
+export type AgentRoundCompleteHook = (ctx: {
+  /** 1-indexed provider-turn counter for the round that just completed. */
+  iteration: number;
+  maxIterations: number;
+  /** This round's dispatched tools, in original tool_use order. */
+  toolResults: Array<{ toolName: string; ok: boolean; resultText?: string }>;
+  messages: readonly AgentMessage[];
+}) => { appendUserNote?: string } | void | Promise<{ appendUserNote?: string } | void>;
+
 export type ProviderTurnResult = {
   /** Stop reason from the model. `end_turn` means the assistant is done. */
   stop_reason: 'end_turn' | 'tool_use' | 'max_tokens' | 'stop_sequence';
@@ -181,6 +205,14 @@ export type AgentRunOptions = {
    * behavior (whole round dispatched via `parallelToolConcurrency`).
    */
   toolParallelPolicyProvider?: (toolName: string) => ToolParallelPolicy | null;
+  /**
+   * Optional round-boundary guidance hook (O1 nudge parity — see
+   * `AgentRoundCompleteHook`). The legacy `executeToolUseLoop` injected
+   * loop-internal reliability nudges between rounds; `runAgent` itself stays
+   * nudge-agnostic and exposes this single generic seam instead. Omit to keep
+   * existing behavior (no injected notes).
+   */
+  onRoundComplete?: AgentRoundCompleteHook;
   /**
    * Optional pre-turn context compression (Phase CA-8a). When provided,
    * the running message history is summarised before each provider turn
@@ -278,6 +310,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     toolApprovalGate,
     resolveAdditionalTools,
     toolParallelPolicyProvider,
+    onRoundComplete,
   } = opts;
 
   const emit = (e: AgentEvent) => { try { onEvent?.(e); } catch {} };
@@ -463,6 +496,34 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     // history is consistent (tool_use/tool_result pairs closed). Snapshot
     // so later mutation of `messages` doesn't alias into the handler.
     emit({ kind: 'iteration_complete', iteration, messages: [...messages] });
+
+    // Round-boundary guidance (O1 nudge parity). Skipped on the final round:
+    // there is no next provider turn to consume the note, matching the legacy
+    // loop's `round < maxRounds - 1` gating. Errors are swallowed — a nudge
+    // hook must never break the loop.
+    if (onRoundComplete && iteration < maxIterations) {
+      try {
+        const roundToolResults = toolUses.map((use, i) => {
+          const block = toolResultBlocks[i];
+          const tr = block?.type === 'tool_result' ? block : null;
+          return {
+            toolName: use.name,
+            ok: !tr?.is_error,
+            ...(typeof tr?.content === 'string' ? { resultText: tr.content } : {}),
+          };
+        });
+        const outcome = await onRoundComplete({
+          iteration,
+          maxIterations,
+          toolResults: roundToolResults,
+          messages: [...messages],
+        });
+        const note = outcome && typeof outcome === 'object' && typeof outcome.appendUserNote === 'string'
+          ? outcome.appendUserNote
+          : '';
+        if (note.trim()) messages.push({ role: 'user', content: note });
+      } catch { /* nudge hooks are best-effort — never break the loop */ }
+    }
 
     // Loop re-enters provider.turn() with the updated message history.
   }

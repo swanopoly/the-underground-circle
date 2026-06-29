@@ -153,8 +153,8 @@ export default function ResearchControlCenterScreen({ navigation, route }: any) 
             <Text style={styles.backText}>{'<-'} Back</Text>
           </Pressable>
           <View style={styles.headerCopy}>
-            <Text style={styles.kicker}>Knowledge Ops</Text>
-            <Text style={styles.title}>Wiki Knowledge Control Center</Text>
+            <Text style={styles.kicker}>Wiki Ops</Text>
+            <Text style={styles.title}>Wiki Control Center</Text>
             <Text style={styles.subtitle}>Daily research agents, source-backed Wiki documents, broad-domain knowledge intake, and the SOULs they are feeding.</Text>
           </View>
         </View>

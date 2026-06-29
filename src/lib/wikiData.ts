@@ -62,6 +62,50 @@ export interface WikiArticleReference {
   tags: string[];
 }
 
+export interface WikiFuturePath {
+  id: string;
+  title: string;
+  subtitle: string;
+  description: string;
+  icon: string;
+  color: string;
+  articleIds: string[];
+  searchQuery: string;
+  outcome: string;
+}
+
+export interface WikiBuilderPrompt {
+  id: string;
+  label: string;
+  title: string;
+  prompt: string;
+  followUp: string;
+  articleIds: string[];
+  searchQuery: string;
+}
+
+export interface WikiResearchInsight {
+  id: string;
+  title: string;
+  sourceLabel: string;
+  sourceUrl: string;
+  principle: string;
+  addToWiki: string;
+  userAction: string;
+  searchQuery: string;
+  color: string;
+}
+
+export interface WikiArticleLearningLoopStep {
+  id: string;
+  label: string;
+  title: string;
+  prompt: string;
+  sourceLabel: string;
+  sourceUrl: string;
+  searchQuery: string;
+}
+
 // =============================================================================
 // Categories
 // =============================================================================
@@ -1362,6 +1406,9 @@ function parseAutomationRequest(input: unknown): AutomationRequest | null {
           'Use buildOpenSwanWorktreeConfigSnapshot and formatOpenSwanWorktreeConfigPromptBlock before SwanBot/OpenSwan hands a repo or .openswan-worktrees checkout to a connected agent, or pass the snapshot as worktreeConfigSnapshot into the standards prompt helpers',
           'Managed terminal bridge launches append the hidden worktree config block through terminal-launch-utils when projectDir is this repo or an OpenSwan worktree',
           'Run check:openswan-worktree-config before risky connected-agent handoffs when checkout state matters',
+          'Run check:openswan-lanes when SwanBot/OpenSwan/Chat work becomes broad so changes are grouped by delivery lane before review',
+          'Run check:swanbot-chat:daily for normal SwanBot/OpenSwan/Chat development and check:swanbot-chat:release before a larger delivery',
+          'Run smoke:openswan-lane-report after changing the lane model or its package scripts',
           'Run smoke:openswan-worktree-config when the worktree config helper, report script, package scripts, .gitignore runtime artifacts, or OpenSwan worktree notes change',
           'Prefer extending mapped owners such as genericAppNavigator, appAutomationControlSurfaces, chat planning/metadata, chat computer runtime, OpenSwan runtime, product UI, second brain/research, standards/wiki, package scripts, or agent-runtime SQL before creating another file',
           'Escalate to a new roadmap owner only when no existing owner fits the concern',
@@ -6117,6 +6164,188 @@ Better follow-up:
   },
 ];
 
+export const WIKI_FUTURE_PATHS: WikiFuturePath[] = [
+  {
+    id: 'future-builder-city-systems',
+    title: 'Design The City That Teaches',
+    subtitle: 'Future cities, infrastructure, energy, and public learning as one system.',
+    description:
+      'Use this path to imagine places where transit, schools, utilities, civic data, and AI helpers make everyday life easier to understand and improve.',
+    icon: 'CT',
+    color: '#f59e0b',
+    articleIds: [
+      'future-cities-epcot-systems',
+      'infrastructure-public-systems',
+      'energy-materials-systems',
+      'nikola-tesla-systems-buildout-roadmap',
+    ],
+    searchQuery: 'future cities infrastructure energy systems',
+    outcome: 'Sketch a city system that a student could walk through, question, and improve.',
+  },
+  {
+    id: 'future-builder-human-health',
+    title: 'Make Health Knowledge Usable',
+    subtitle: 'Medical AI, cancer literacy, trials, prevention, and patient navigation.',
+    description:
+      'Use this path to turn intimidating health information into calm decision support, better questions, and safer care navigation.',
+    icon: 'HX',
+    color: '#ef4444',
+    articleIds: [
+      'health-biotech-knowledge-safety',
+      'all-cancers-research-atlas',
+      'cancer-screening-prevention-risk-guide',
+      'cancer-decision-support-self-advocacy',
+    ],
+    searchQuery: 'health biotech cancer decision support safety',
+    outcome: 'Design a health explainer that helps someone prepare for a real conversation with a clinician.',
+  },
+  {
+    id: 'future-builder-agent-craft',
+    title: 'Build Trustworthy Agents',
+    subtitle: 'Tools, memory, evals, permission gates, and app automation.',
+    description:
+      'Use this path to learn how serious agent systems sense the world, ask for permission, use tools, verify work, and recover when plans fail.',
+    icon: '>_',
+    color: '#22c55e',
+    articleIds: [
+      'agentic-computer-app-automation-for-agents',
+      'agent-tool-contracts-and-evals-for-agents',
+      'evals-ai-reliability',
+      'ai-safety-permission-patterns',
+    ],
+    searchQuery: 'agent automation evals safety tools memory',
+    outcome: 'Write a reliability checklist for an agent that can operate apps without surprising the user.',
+  },
+  {
+    id: 'future-builder-open-tools',
+    title: 'Own The Tools You Learn With',
+    subtitle: 'Open models, MCP servers, vector search, and local-first systems.',
+    description:
+      'Use this path to understand how open infrastructure lets students, builders, and small teams make learning systems they can inspect and extend.',
+    icon: '<>',
+    color: '#a855f7',
+    articleIds: [
+      'open-source-model-serving-stack',
+      'mcp-overview',
+      'mcp-tools-resources-prompts',
+      'vector-databases',
+    ],
+    searchQuery: 'open source mcp vector databases local models',
+    outcome: 'Map a personal learning lab that can search its notes, use local tools, and explain its sources.',
+  },
+  {
+    id: 'future-builder-cosmic-curiosity',
+    title: 'Stay Curious At Planet Scale',
+    subtitle: 'Science, frontier labs, universe maps, robotics, and research translation.',
+    description:
+      'Use this path to connect wonder with disciplined inquiry, so big questions become experiments, models, and better product judgment.',
+    icon: 'SC',
+    color: '#a855f7',
+    articleIds: [
+      'universe-science-field-map',
+      'ai-university-research-fronts-2026',
+      'frontier-ai-labs-2026',
+      'physical-ai-robotics-fronts-2026',
+    ],
+    searchQuery: 'science universe robotics research fronts',
+    outcome: 'Turn one big question into a testable research map with evidence, unknowns, and next experiments.',
+  },
+];
+
+export const WIKI_RESEARCH_INSIGHTS: WikiResearchInsight[] = [
+  {
+    id: 'retrieval-practice',
+    title: 'Recall Before Rereading',
+    sourceLabel: 'Dunlosky et al. / retrieval practice',
+    sourceUrl: 'https://pubmed.ncbi.nlm.nih.gov/26173288/',
+    principle:
+      'Learners remember more when they actively retrieve ideas instead of only rereading or highlighting.',
+    addToWiki:
+      'Add short recall prompts, self-check questions, and answer-later cards to every article.',
+    userAction: 'Close the article for one minute, then write the three ideas you can still explain.',
+    searchQuery: 'retrieval practice testing effect learning',
+    color: '#38bdf8',
+  },
+  {
+    id: 'spaced-return',
+    title: 'Come Back On Purpose',
+    sourceLabel: 'Dunlosky et al. / distributed practice',
+    sourceUrl: 'https://www.aft.org/ae/fall2013/dunlosky',
+    principle:
+      'Spacing practice over time is one of the highest-utility learning techniques across age groups and materials.',
+    addToWiki:
+      'Give articles a return plan: today for orientation, tomorrow for recall, next week for transfer.',
+    userAction: 'Save one article as a return topic and revisit it after doing something else.',
+    searchQuery: 'distributed practice spaced repetition learning',
+    color: '#22c55e',
+  },
+  {
+    id: 'transfer-metacognition',
+    title: 'Transfer To A New Situation',
+    sourceLabel: 'National Academies / How People Learn',
+    sourceUrl: 'https://www.nationalacademies.org/read/9853/chapter/6',
+    principle:
+      'Deep learning shows up when people can extend what they learned into a new context.',
+    addToWiki:
+      'Attach transfer prompts that ask readers to apply an idea to a classroom, company, city, lab, or app.',
+    userAction: 'Name one place where this idea would behave differently, then explain why.',
+    searchQuery: 'learning transfer metacognition reflection',
+    color: '#f59e0b',
+  },
+  {
+    id: 'project-based-learning',
+    title: 'Build A Public Product',
+    sourceLabel: 'PBLWorks / Gold Standard PBL',
+    sourceUrl: 'https://www.pblworks.org/what-is-pbl/gold-standard-project-design',
+    principle:
+      'Project-based learning works best around meaningful problems, sustained inquiry, authenticity, reflection, critique, and a public product.',
+    addToWiki:
+      'Turn article clusters into quests with a question, artifact, critique checklist, and shareable result.',
+    userAction: 'Convert the article into a one-afternoon project someone else could inspect.',
+    searchQuery: 'project based learning public product sustained inquiry',
+    color: '#ec4899',
+  },
+  {
+    id: 'knowledge-building',
+    title: 'Improve Ideas Together',
+    sourceLabel: 'Scardamalia/Bereiter knowledge building',
+    sourceUrl: 'https://www.knowledgebuilders.net/what-is-knowledge-building',
+    principle:
+      'Knowledge communities treat ideas as improvable public objects, not private notes that stop after first draft.',
+    addToWiki:
+      'Add idea-improvement prompts: what is promising, what is missing, what evidence would raise the quality?',
+    userAction: 'Rewrite one weak idea from the article into a stronger shared explanation.',
+    searchQuery: 'knowledge building idea improvement community knowledge',
+    color: '#a855f7',
+  },
+  {
+    id: 'futures-literacy',
+    title: 'Imagine More Than One Future',
+    sourceLabel: 'UNESCO Futures of Education',
+    sourceUrl: 'https://www.unesco.org/en/futures-education',
+    principle:
+      'Future-ready learning should help people imagine multiple futures and act in the present with more agency.',
+    addToWiki:
+      'Give future-facing articles scenario prompts: hopeful future, brittle future, surprising future, and what to build now.',
+    userAction: 'Write two possible futures from this idea, then choose one action that helps the better one happen.',
+    searchQuery: 'futures literacy education student agency',
+    color: '#14b8a6',
+  },
+  {
+    id: 'faceted-wayfinding',
+    title: 'Make Discovery Multi-Dimensional',
+    sourceLabel: 'Nielsen Norman Group / facets',
+    sourceUrl: 'https://www.nngroup.com/articles/filters-vs-facets/',
+    principle:
+      'Faceted navigation helps users narrow large content sets through meaningful dimensions instead of relying on search alone.',
+    addToWiki:
+      'Add filters for topic, domain, skill level, buildable artifact, source type, and future path.',
+    userAction: 'Use at least two lenses when browsing: topic plus what you want to make with it.',
+    searchQuery: 'faceted navigation information architecture wiki search',
+    color: '#84cc16',
+  },
+];
+
 // =============================================================================
 // Helper Functions
 // =============================================================================
@@ -6151,6 +6380,110 @@ export function getRelatedArticles(articleId: string): WikiArticle[] {
   return WIKI_ARTICLES.filter(a =>
     a.id !== articleId && a.tags.some(t => article.tags.includes(t))
   ).slice(0, 5);
+}
+
+export function getWikiFuturePaths(limit = WIKI_FUTURE_PATHS.length): WikiFuturePath[] {
+  return WIKI_FUTURE_PATHS
+    .filter(path => path.articleIds.some(articleId => Boolean(getArticle(articleId))))
+    .slice(0, limit);
+}
+
+export function getWikiResearchInsights(limit = WIKI_RESEARCH_INSIGHTS.length): WikiResearchInsight[] {
+  return WIKI_RESEARCH_INSIGHTS.slice(0, limit);
+}
+
+function insightById(id: string): WikiResearchInsight {
+  const insight = WIKI_RESEARCH_INSIGHTS.find(item => item.id === id);
+  if (!insight) throw new Error(`Missing wiki research insight: ${id}`);
+  return insight;
+}
+
+export function getWikiArticleLearningLoop(articleId: string): WikiArticleLearningLoopStep[] {
+  const article = getArticle(articleId);
+  if (!article) return [];
+
+  const recall = insightById('retrieval-practice');
+  const transfer = insightById('transfer-metacognition');
+  const project = insightById('project-based-learning');
+  const future = insightById('futures-literacy');
+
+  return [
+    {
+      id: `${article.id}-recall`,
+      label: 'Recall',
+      title: 'Pull it from memory',
+      prompt: `Without looking back, explain the main idea of ${article.title} in three sentences and list two details you almost forgot.`,
+      sourceLabel: recall.sourceLabel,
+      sourceUrl: recall.sourceUrl,
+      searchQuery: recall.searchQuery,
+    },
+    {
+      id: `${article.id}-transfer`,
+      label: 'Transfer',
+      title: 'Use it somewhere else',
+      prompt: `Apply ${article.title} to a different setting: a classroom, city, health system, lab, company, or personal project. What changes?`,
+      sourceLabel: transfer.sourceLabel,
+      sourceUrl: transfer.sourceUrl,
+      searchQuery: transfer.searchQuery,
+    },
+    {
+      id: `${article.id}-project`,
+      label: 'Project',
+      title: 'Make one inspectable artifact',
+      prompt: `Turn ${article.title} into a visible artifact: a map, checklist, prototype, explainer, experiment, or operating guide someone else can critique.`,
+      sourceLabel: project.sourceLabel,
+      sourceUrl: project.sourceUrl,
+      searchQuery: project.searchQuery,
+    },
+    {
+      id: `${article.id}-future`,
+      label: 'Future',
+      title: 'Compare two futures',
+      prompt: `Imagine a hopeful future and a brittle future shaped by ${article.title}. What present-day choice pushes toward the better one?`,
+      sourceLabel: future.sourceLabel,
+      sourceUrl: future.sourceUrl,
+      searchQuery: future.searchQuery,
+    },
+  ];
+}
+
+export function getWikiArticleBuilderPrompts(articleId: string, limit = 3): WikiBuilderPrompt[] {
+  const article = getArticle(articleId);
+  if (!article) return [];
+
+  const relatedIds = getRelatedArticles(articleId).slice(0, 2).map(item => item.id);
+  const primaryIdea = article.content[0]?.title || article.title;
+  const articleIds = [article.id, ...relatedIds];
+
+  return [
+    {
+      id: `${article.id}-imagine`,
+      label: 'Imagine',
+      title: 'Picture the world after this idea works',
+      prompt: `Imagine ${article.title} is normal in everyday life. What becomes easier, safer, more beautiful, or more understandable for a young person growing up with it?`,
+      followUp: `Use "${primaryIdea}" as the anchor, then name one risk that still needs adult-level judgment.`,
+      articleIds,
+      searchQuery: article.tags.slice(0, 4).join(' '),
+    },
+    {
+      id: `${article.id}-build`,
+      label: 'Build',
+      title: 'Turn the lesson into a small prototype',
+      prompt: `Design a small prototype, classroom activity, app feature, or field experiment that teaches the core idea behind ${article.title}.`,
+      followUp: 'Keep it small enough to test in one afternoon, and name the evidence that would prove it helped.',
+      articleIds,
+      searchQuery: `${article.category} prototype ${article.tags[0] || article.title}`,
+    },
+    {
+      id: `${article.id}-question`,
+      label: 'Question',
+      title: 'Ask the hard question before scaling it',
+      prompt: `What should a responsible builder ask before applying ${article.title} to real people, public systems, or shared data?`,
+      followUp: 'Separate curiosity, safety, access, incentives, and long-term maintenance.',
+      articleIds,
+      searchQuery: `${article.title} safety responsibility`,
+    },
+  ].slice(0, limit);
 }
 
 export function getArticlesForLesson(trackId: string, moduleId: string, lessonId: string): WikiArticle[] {
@@ -6261,7 +6594,7 @@ export function buildWikiKnowledgeBundle(query: string, limit = 6): string {
   const intro = `Wiki coverage map: ${categorySummary}. Impact domains: ${domainSummary}.`;
 
   if (relevant.length === 0) {
-    return `${intro}\n${domainGuidance ? `${domainGuidance}\n` : ''}No direct article match found for this query, but the Knowledge Wiki covers AI, agents, models, frameworks, design, open-source tooling, MCP, future cities, science, infrastructure, health, energy, materials, foundations, and landscape topics.`;
+    return `${intro}\n${domainGuidance ? `${domainGuidance}\n` : ''}No direct article match found for this query, but the Wiki covers AI, agents, models, frameworks, design, open-source tooling, MCP, future cities, science, infrastructure, health, energy, materials, foundations, and landscape topics.`;
   }
 
   const articleLines = relevant.map(article => {
@@ -6376,7 +6709,7 @@ export function buildWikiSearchResponse(query: string, limit = 5): string {
   const relevant = getRelevantWikiArticles(query, limit);
 
   if (relevant.length === 0) {
-    return `**Knowledge Wiki Search:** No strong match for "${query}".\n\nTry a more specific topic like:\n- future cities\n- EPCOT\n- universe science\n- infrastructure\n- health and biotech\n- energy and materials\n- MCP\n- coding agents\n- model families`;
+    return `**Wiki Search:** No strong match for "${query}".\n\nTry a more specific topic like:\n- future cities\n- EPCOT\n- universe science\n- infrastructure\n- health and biotech\n- energy and materials\n- MCP\n- coding agents\n- model families`;
   }
 
   const lines = relevant.map((article, index) => {
@@ -6390,5 +6723,5 @@ export function buildWikiSearchResponse(query: string, limit = 5): string {
     ].filter(Boolean).join('\n');
   }).join('\n\n');
 
-  return `**Knowledge Wiki Search: "${query}"**\n\n${lines}`;
+  return `**Wiki Search: "${query}"**\n\n${lines}`;
 }

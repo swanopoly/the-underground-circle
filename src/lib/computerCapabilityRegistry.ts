@@ -6,6 +6,9 @@ import {
   type CircleIntegrationProvider,
 } from './circleIntegrations';
 import { getBridgeUrl } from './bridgeEnvironment';
+import { isAgentBridgeCapabilityReady } from './computerCapabilityReadiness';
+
+export { isAgentBridgeCapabilityReady } from './computerCapabilityReadiness';
 
 export type ComputerCapabilityId =
   | 'browser_automation'
@@ -166,7 +169,21 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     integrationProviders.includes('browserbase') ? 'integration: Browserbase' : null,
   ]);
 
-  const bridgeSources = enabledConnections.map((conn) => `bridge: ${conn.provider}`);
+  // The live local bridge (claude-bridge.js on :7778) IS an agent bridge —
+  // it's the Claude Code / Codex transport that serves the desktop endpoints.
+  // So a successful health probe satisfies `agent_bridges` even when the
+  // persisted connection store is empty (auto-connected bridges aren't always
+  // written there). Without this, `agent_bridges` audited 'missing' while the
+  // bridge was demonstrably alive — blocking unknown-app tasks (e.g. "create a
+  // Notes note") with a phantom "Agent bridges missing" preflight.
+  const agentBridgesReady = isAgentBridgeCapabilityReady({
+    enabledConnectionCount: enabledConnections.length,
+    bridgeAlive,
+  });
+  const bridgeSources = summarizeSources([
+    ...enabledConnections.map((conn) => `bridge: ${conn.provider}`),
+    bridgeAlive && enabledConnections.length === 0 ? 'desktop bridge: localhost:7778 (live health probe)' : null,
+  ]);
   const fileSources = summarizeSources([
     bridgeHasFileSearch || bridgeHasFileRead || bridgeHasFileWrite
       ? `desktop bridge: ${[
@@ -267,10 +284,12 @@ export async function auditComputerCapabilities(circleId: string): Promise<Compu
     {
       id: 'agent_bridges',
       label: 'Agent bridges',
-      status: enabledConnections.length > 0 ? 'ready' : 'missing',
+      status: agentBridgesReady ? 'ready' : 'missing',
       detail: enabledConnections.length > 0
         ? 'Local or remote agent bridges are enabled and can extend what the circle can do.'
-        : 'No enabled agent bridges are visible.',
+        : bridgeAlive
+          ? 'The live local bridge on localhost:7778 (Claude Code / Codex transport) is reachable and can run agent tasks.'
+          : 'No enabled agent bridges are visible.',
       sources: bridgeSources,
     },
     {

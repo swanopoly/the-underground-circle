@@ -109,6 +109,82 @@ export interface SecondBrainGraph {
   clusters: Array<{ tag: string; count: number; noteIds: string[] }>;
 }
 
+const SECOND_BRAIN_UNAVAILABLE_CACHE_KEY = 'openswan:second_brain_unavailable_until';
+const SECOND_BRAIN_UNAVAILABLE_REASON_KEY = 'openswan:second_brain_unavailable_reason';
+const SECOND_BRAIN_UNAVAILABLE_COOLDOWN_MS = 60_000;
+
+let secondBrainUnavailableUntil = 0;
+let secondBrainUnavailableReason = '';
+
+function readStoredSecondBrainUnavailable(): { until: number; reason: string } {
+  try {
+    if (typeof sessionStorage === 'undefined') return { until: 0, reason: '' };
+    const until = Number(sessionStorage.getItem(SECOND_BRAIN_UNAVAILABLE_CACHE_KEY) || 0);
+    const reason = sessionStorage.getItem(SECOND_BRAIN_UNAVAILABLE_REASON_KEY) || '';
+    return { until: Number.isFinite(until) ? until : 0, reason };
+  } catch {
+    return { until: 0, reason: '' };
+  }
+}
+
+function writeStoredSecondBrainUnavailable(until: number, reason: string) {
+  try {
+    if (typeof sessionStorage === 'undefined') return;
+    sessionStorage.setItem(SECOND_BRAIN_UNAVAILABLE_CACHE_KEY, String(until));
+    sessionStorage.setItem(SECOND_BRAIN_UNAVAILABLE_REASON_KEY, reason);
+  } catch {}
+}
+
+export function getSecondBrainUnavailableMessage(): string | null {
+  const stored = readStoredSecondBrainUnavailable();
+  const until = Math.max(secondBrainUnavailableUntil, stored.until);
+  if (until <= Date.now()) {
+    if (secondBrainUnavailableUntil > 0) {
+      secondBrainUnavailableUntil = 0;
+      secondBrainUnavailableReason = '';
+    }
+    return null;
+  }
+  return secondBrainUnavailableReason
+    || stored.reason
+    || 'Second brain storage is temporarily unavailable.';
+}
+
+function classifySecondBrainStorageError(error: any): { missing: boolean; unavailable: boolean; message: string } {
+  const status = Number(error?.status || error?.statusCode || 0);
+  const code = String(error?.code || '');
+  const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.trim();
+  const lower = message.toLowerCase();
+  const missing = code === '42P01'
+    || code === 'PGRST204'
+    || code === 'PGRST205'
+    || status === 404
+    || lower.includes('does not exist')
+    || lower.includes('schema cache')
+    || lower.includes('relation');
+  const unavailable = missing
+    || status >= 500
+    || code.startsWith('XX')
+    || lower.includes('internal server error')
+    || lower.includes('server error')
+    || lower.includes('failed to fetch');
+  return {
+    missing,
+    unavailable,
+    message: message || 'Second brain storage is temporarily unavailable.',
+  };
+}
+
+export function rememberSecondBrainStorageError(error: any, fallback = 'Second brain storage is temporarily unavailable.'): boolean {
+  const classified = classifySecondBrainStorageError(error);
+  if (!classified.unavailable) return false;
+  const until = Date.now() + SECOND_BRAIN_UNAVAILABLE_COOLDOWN_MS;
+  secondBrainUnavailableUntil = until;
+  secondBrainUnavailableReason = classified.message || fallback;
+  writeStoredSecondBrainUnavailable(until, secondBrainUnavailableReason);
+  return true;
+}
+
 function normalizeRow(row: any): SecondBrainNote {
   return {
     id: row.id,
@@ -156,7 +232,11 @@ export async function loadSecondBrainNotes(
     createdBy?: string;
     visibilityFilter?: SecondBrainVisibility;
   } = {},
-): Promise<{ notes: SecondBrainNote[]; error?: string; missing?: boolean }> {
+): Promise<{ notes: SecondBrainNote[]; error?: string; missing?: boolean; unavailable?: boolean }> {
+  const unavailableMessage = getSecondBrainUnavailableMessage();
+  if (unavailableMessage) {
+    return { notes: [], error: unavailableMessage, unavailable: true };
+  }
   try {
     let query = supabase
       .from('circle_second_brain_notes')
@@ -177,18 +257,25 @@ export async function loadSecondBrainNotes(
     }
     const { data, error } = await query;
     if (error) {
-      const missing = ['42P01', 'PGRST205', 'PGRST204'].includes((error as any).code);
-      return { notes: [], error: error.message, missing };
+      const classified = classifySecondBrainStorageError(error);
+      if (classified.unavailable) rememberSecondBrainStorageError(error);
+      return { notes: [], error: error.message, missing: classified.missing, unavailable: classified.unavailable };
     }
     return { notes: (data || []).map(normalizeRow) };
   } catch (err: any) {
-    return { notes: [], error: err?.message || 'Failed to load second brain notes' };
+    const classified = classifySecondBrainStorageError(err);
+    if (classified.unavailable) rememberSecondBrainStorageError(err);
+    return { notes: [], error: err?.message || 'Failed to load second brain notes', missing: classified.missing, unavailable: classified.unavailable };
   }
 }
 
 export async function loadSecondBrainLinks(
   circleId: string,
-): Promise<{ links: SecondBrainLink[]; error?: string; missing?: boolean }> {
+): Promise<{ links: SecondBrainLink[]; error?: string; missing?: boolean; unavailable?: boolean }> {
+  const unavailableMessage = getSecondBrainUnavailableMessage();
+  if (unavailableMessage) {
+    return { links: [], error: unavailableMessage, unavailable: true };
+  }
   const { data, error } = await supabase
     .from('circle_second_brain_links')
     .select('*')
@@ -196,8 +283,9 @@ export async function loadSecondBrainLinks(
     .order('created_at', { ascending: false })
     .limit(300);
   if (error) {
-    const missing = ['42P01', 'PGRST205', 'PGRST204'].includes((error as any).code);
-    return { links: [], error: error.message, missing };
+    const classified = classifySecondBrainStorageError(error);
+    if (classified.unavailable) rememberSecondBrainStorageError(error);
+    return { links: [], error: error.message, missing: classified.missing, unavailable: classified.unavailable };
   }
   return { links: (data || []).map(normalizeLink) };
 }
@@ -225,7 +313,11 @@ async function embedAndStoreSecondBrainNote(note: SecondBrainNote): Promise<bool
 
 export async function createSecondBrainNote(
   input: SecondBrainCaptureInput,
-): Promise<{ note: SecondBrainNote | null; error?: string; missing?: boolean }> {
+): Promise<{ note: SecondBrainNote | null; error?: string; missing?: boolean; unavailable?: boolean }> {
+  const unavailableMessage = getSecondBrainUnavailableMessage();
+  if (unavailableMessage) {
+    return { note: null, error: unavailableMessage, unavailable: true };
+  }
   const content = input.content.trim();
   if (!content) return { note: null, error: 'Note content is required.' };
   const explicitTags = input.tags || [];
@@ -260,8 +352,9 @@ export async function createSecondBrainNote(
     .single();
 
   if (error) {
-    const missing = ['42P01', 'PGRST205', 'PGRST204'].includes((error as any).code);
-    return { note: null, error: error.message, missing };
+    const classified = classifySecondBrainStorageError(error);
+    if (classified.unavailable) rememberSecondBrainStorageError(error);
+    return { note: null, error: error.message, missing: classified.missing, unavailable: classified.unavailable };
   }
 
   const note = normalizeRow(data);
@@ -282,7 +375,11 @@ export async function createSecondBrainNote(
 export async function updateSecondBrainNote(
   noteId: string,
   updates: Partial<Pick<SecondBrainNote, 'title' | 'content' | 'summary' | 'tags' | 'status' | 'note_kind' | 'visibility' | 'importance' | 'metadata'>>,
-): Promise<{ note: SecondBrainNote | null; error?: string }> {
+): Promise<{ note: SecondBrainNote | null; error?: string; unavailable?: boolean }> {
+  const unavailableMessage = getSecondBrainUnavailableMessage();
+  if (unavailableMessage) {
+    return { note: null, error: unavailableMessage, unavailable: true };
+  }
   const payload: Record<string, unknown> = { ...updates };
   if (typeof updates.content === 'string' && !updates.summary) {
     payload.summary = summarizeSecondBrainContent(updates.content);
@@ -294,7 +391,10 @@ export async function updateSecondBrainNote(
     .eq('id', noteId)
     .select()
     .single();
-  if (error) return { note: null, error: error.message };
+  if (error) {
+    const unavailable = rememberSecondBrainStorageError(error);
+    return { note: null, error: error.message, unavailable };
+  }
   const note = normalizeRow(data);
   if (updates.title || updates.content || updates.summary) {
     void embedAndStoreSecondBrainNote(note).catch((err) => console.warn('[secondBrain] re-embed failed:', err));
@@ -311,7 +411,11 @@ export async function createSecondBrainLink(input: {
   strength?: number;
   reason?: string;
   metadata?: Record<string, unknown>;
-}): Promise<{ link: SecondBrainLink | null; error?: string }> {
+}): Promise<{ link: SecondBrainLink | null; error?: string; unavailable?: boolean }> {
+  const unavailableMessage = getSecondBrainUnavailableMessage();
+  if (unavailableMessage) {
+    return { link: null, error: unavailableMessage, unavailable: true };
+  }
   if (!input.toNoteId && !input.toMemoryId) return { link: null, error: 'Link target is required.' };
   const { data, error } = await supabase
     .from('circle_second_brain_links')
@@ -327,7 +431,10 @@ export async function createSecondBrainLink(input: {
     })
     .select()
     .single();
-  if (error) return { link: null, error: error.message };
+  if (error) {
+    const unavailable = rememberSecondBrainStorageError(error);
+    return { link: null, error: error.message, unavailable };
+  }
   return { link: normalizeLink(data) };
 }
 
@@ -527,7 +634,7 @@ export async function searchSecondBrain(
 export async function buildSecondBrainGraph(
   circleId: string,
   opts?: { userId?: string; mode?: 'mine' | 'circle' },
-): Promise<{ graph: SecondBrainGraph; error?: string; missing?: boolean }> {
+): Promise<{ graph: SecondBrainGraph; error?: string; missing?: boolean; unavailable?: boolean }> {
   const notesFilter: Parameters<typeof loadSecondBrainNotes>[1] = { status: 'active', limit: 120 };
   if (opts?.mode === 'mine' && opts.userId) {
     notesFilter.createdBy = opts.userId;
@@ -592,5 +699,6 @@ export async function buildSecondBrainGraph(
     },
     error: notesResult.error || linksResult.error,
     missing: notesResult.missing || linksResult.missing,
+    unavailable: notesResult.unavailable || linksResult.unavailable,
   };
 }

@@ -47,6 +47,13 @@ async function main() {
   assert(cors.runbook.steps.some((step) => step.id === 'verify-bridge'), 'CORS token header runbook includes bridge verification');
   assert(shouldLaunchConnectedAgentRecovery(cors), 'CORS token header recovery may launch a connected agent');
 
+  // Regression: the computer-app readiness "preflight" must NOT be misread as
+  // a CORS preflight. A failed Photoshop task that emitted "preflight: partial"
+  // warnings was getting mislabeled cors_preflight_blocked → wrong "restart the
+  // bridge" advice when CORS was fine; the real failure was file resolution.
+  const appPreflight = policyFor('Adobe Photoshop Layered Creative Control Loop preflight: partial. 4 warnings before execution. Could not resolve the file pearsoncdjr-img inside the granted roots.');
+  assert(appPreflight.assessment.failureClass !== 'cors_preflight_blocked', 'app readiness "preflight" is NOT misclassified as a CORS preflight', appPreflight.assessment.failureClass);
+
   const token = policyFor('Browser action failed (token_rejected): Token rejected. Next: Re-pair the local desktop bridge.');
   assert(token.assessment.failureClass === 'token_rejected', 'browser token rejection is classified');
   assert(token.action === 'restart_or_update_bridge', 'browser token rejection routes to bridge recovery');
@@ -117,6 +124,26 @@ async function main() {
   assert(blockedLaunch.launched === false, 'protected user-action failure does not launch Codex');
   assert(blockedLaunch.runbook.nextActor === 'user', 'blocked launch result keeps machine-readable user action');
   assert(blockedLaunch.message.includes('not launched'), 'blocked launch result explains that recovery was not launched');
+
+  // ─── Approval gate: a would-handoff failure must NOT auto-launch a terminal ──
+  // Regression guard for "open the notes app spawned a Codex terminal": when
+  // the policy WOULD hand off to a connected agent, automatic recovery (no
+  // explicit approval) must NOT launch or commandeer an agent — it prepares
+  // and waits for the user to approve the repair option.
+  const capabilityFailure = {
+    task: 'Resize the InDesign banner layout',
+    failureMessage: 'Missing adapter: no InDesign resize/layout bridge tool is implemented for this command.',
+    executionKind: 'run_computer_task',
+    source: 'smoketest',
+  };
+  const wouldHandoff = buildAgentFailureRecoveryPolicy(capabilityFailure);
+  assert(shouldLaunchConnectedAgentRecovery(wouldHandoff), 'capability-gap failure would hand off to a connected agent');
+
+  const gated = await startConnectedAgentFailureRecovery(capabilityFailure);
+  assert(!gated.ok, 'connected-agent recovery is not auto-started without explicit approval');
+  assert(gated.launched === false, 'connected-agent recovery does NOT launch a terminal without approval (the surprise-terminal guard)');
+  assert(/approve the repair option/i.test(gated.message), 'gated message points the user to the approval option');
+  assert(gated.runbook.nextActor === 'connected_agent', 'gated result still records connected_agent as the next actor for the approval option');
 
   if (failures > 0) {
     console.error(`\n${failures} agent failure recovery smoke-test failure(s)`);

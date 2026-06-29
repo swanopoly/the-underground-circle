@@ -23,12 +23,19 @@ import {
   type ChatFailureRecoveryExecutionPlan,
   type ChatFailureRecoveryExecutionPolicy,
 } from './chatFailureRecovery';
+import { OPENSWAN_AUTOMATION_INTENT_SEED } from './openswanAutomationLaunch';
+import {
+  inferWpListTargetFromText,
+  inferWpPostListStatusFromText,
+  type WpListTarget,
+  type WpPostListStatus,
+} from './wordpressCommandRisk';
 import type { ScenarioPolicy } from './scenarioPolicies';
 import type { LocalComputerAwarenessKind } from './localComputerAwarenessIntent';
 
 export type PlannerConversationalIntent =
   | { type: 'wordpress_publish'; title?: string; imageUrl?: string; status: 'draft' | 'publish' }
-  | { type: 'wordpress_list' }
+  | { type: 'wordpress_list'; target?: WpListTarget; status?: WpPostListStatus }
   | { type: 'wordpress_schedule'; date?: string; title?: string }
   | { type: 'create_task'; title: string; description?: string }
   | { type: 'office_agent_task'; agentName: string; modelName?: string; taskTarget: 'latest_user_task' | 'latest_circle_task' }
@@ -146,8 +153,16 @@ function detectPlannerConversationalIntent(
   attachments?: Array<{ uri?: string; type?: string; id?: string }>,
 ): PlannerConversationalIntent {
   const lower = message.toLowerCase();
+  const mentionsWordPress = /\b(wordpress|wp|blog|cms)\b/i.test(message);
+  const mentionsWordPressListTarget = /\b(posts?|drafts?|pages?|categories|cats|tags|media library|uploads?)\b/i.test(message);
 
-  if (/\b(post|publish|upload|send)\b.*\b(wordpress|wp|blog|site)\b/i.test(message)) {
+  if (/\b(schedule|queue|plan)\b.*\b(post|article|blog)\b/i.test(message)) {
+    const date = extractPlannerWordPressScheduleDate(message);
+    const title = extractPlannerWordPressScheduleTitle(message) || message.slice(0, 80);
+    return { type: 'wordpress_schedule', date, title };
+  }
+  if (/\b(post|publish|upload|send|draft|write|create)\b.*\b(wordpress|wp|blog|site|cms)\b/i.test(message)
+    || (mentionsWordPress && /\b(post|publish|upload|send|draft|write|create)\b/i.test(message) && !/\b(list|show|see|get|find)\b/i.test(message))) {
     return {
       type: 'wordpress_publish',
       title: message.slice(0, 80),
@@ -155,21 +170,23 @@ function detectPlannerConversationalIntent(
       status: /\b(publish|go live|put it live)\b/i.test(lower) ? 'publish' : 'draft',
     };
   }
-  if (/\b(show|list|see)\b.*\b(wordpress|wp|blog)\b.*\b(posts?|drafts?|pages?)\b/i.test(message)) {
-    return { type: 'wordpress_list' };
-  }
-  if (/\b(schedule|queue|plan)\b.*\b(post|article|blog)\b/i.test(message)) {
-    return { type: 'wordpress_schedule', title: message.slice(0, 80) };
-  }
-  if (/\b(create|add|make|open)\b.*\b(task|todo|ticket|issue)\b/i.test(message)) {
-    return { type: 'create_task', title: message.slice(0, 120) };
+  if (/\b(show|list|see|get|find)\b/i.test(message) && mentionsWordPress && mentionsWordPressListTarget) {
+    return {
+      type: 'wordpress_list',
+      target: inferWpListTargetFromText(message),
+      status: inferWpPostListStatusFromText(message),
+    };
   }
   if (/\b(spin up|create|make)\b.*\b(agent|pixel agent)\b/i.test(message) && /\btask\b/i.test(message)) {
     return {
       type: 'office_agent_task',
-      agentName: 'Agent',
+      agentName: extractPlannerOfficeAgentName(message) || 'Agent',
+      modelName: extractPlannerRequestedModel(message),
       taskTarget: /\btask\s+we\s+just\s+made\b/i.test(message) ? 'latest_user_task' : 'latest_circle_task',
     };
+  }
+  if (/\b(create|add|make|open)\b.*\b(task|todo|ticket|issue)\b/i.test(message)) {
+    return { type: 'create_task', title: message.slice(0, 120) };
   }
   if (/\bremember\b/i.test(message) && !/\b(remember\s+me|checkbox|check\s*box|button|field|input|toggle|switch|menu|control)\b/i.test(message)) {
     return { type: 'remember', content: message.replace(/^(please\s+)?remember\s+/i, '').trim() || message };
@@ -184,6 +201,55 @@ function detectPlannerConversationalIntent(
     return { type: 'generate_image', prompt: message };
   }
   return { type: 'none' };
+}
+
+function extractPlannerWordPressScheduleDate(message: string): string | undefined {
+  const explicitDate = message.match(/\b(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?)\b/);
+  if (explicitDate?.[1]) return explicitDate[1];
+
+  const dayMatch = message.match(/\b(next\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i);
+  if (!dayMatch?.[2]) return undefined;
+  const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const target = days.indexOf(dayMatch[2].toLowerCase());
+  if (target < 0) return undefined;
+  const now = new Date();
+  const diff = ((target - now.getDay()) + 7) % 7 || 7;
+  const date = new Date(now.getTime() + diff * 86400000);
+  return date.toISOString().split('T')[0];
+}
+
+function extractPlannerWordPressScheduleTitle(message: string): string | undefined {
+  const quoted = message.match(/(?:titled?|called?|named?|about|on)\s+"([^"]+)"/i);
+  if (quoted?.[1]) return quoted[1].trim();
+
+  const about = message.match(/(?:about|on|titled?)\s+(.+?)(?:\s+(?:for|on|at)\s+\d{4}-\d{2}-\d{2}|\s+for\s+next\b|\s+on\s+next\b|$)/i);
+  if (about?.[1]) return about[1].trim();
+
+  return undefined;
+}
+
+function extractPlannerOfficeAgentName(message: string): string | null {
+  const mention = message.match(/@([A-Za-z0-9_-]{2,40})/);
+  if (mention?.[1]) return mention[1].trim();
+
+  const quoted = message.match(/\b(?:agent|pixel agent)?\s*(?:called|named)\s+"([^"]+)"/i);
+  if (quoted?.[1]) return quoted[1].trim();
+
+  const bare = message.match(/\b(?:agent|pixel agent)?\s*(?:called|named)\s+([A-Za-z0-9_-]{2,40})/i);
+  if (bare?.[1]) return bare[1].trim();
+
+  const descriptor = message.match(/\b(?:the\s+)?([A-Z][A-Za-z0-9_-]{1,40})\s+agent\b/);
+  if (descriptor?.[1] && descriptor[1].toLowerCase() !== 'pixel') return descriptor[1].trim();
+
+  return null;
+}
+
+function extractPlannerRequestedModel(message: string): string | undefined {
+  const lower = message.toLowerCase();
+  if (/\bopus\b/.test(lower)) return 'claude-opus-4-6';
+  if (/\bsonnet\b/.test(lower)) return 'claude-sonnet-4-6';
+  if (/\bhaiku\b/.test(lower)) return 'claude-haiku-4-5';
+  return undefined;
 }
 
 // ── Underspecification detection ────────────────────────────────────────────
@@ -229,9 +295,7 @@ function detectConversationalClarification(
       return null;
     }
     case 'office_agent_task': {
-      const namedAgent = /@[\w-]+/.test(message)
-        || /\bagent\s+(?:named|called)\s+\S+/i.test(message);
-      if (!namedAgent) {
+      if (!extractPlannerOfficeAgentName(message)) {
         return {
           question: 'Which agent should handle this? Name the agent (or @mention it), and confirm the task you want them to take on.',
           missingParams: ['which agent'],
@@ -244,6 +308,15 @@ function detectConversationalClarification(
     }
     case 'wordpress_publish':
     case 'wordpress_schedule': {
+      if (intent.type === 'wordpress_schedule' && !intent.date) {
+        return {
+          question: 'When should the WordPress post go live? Give me a future date like 2026-07-01.',
+          missingParams: ['publish date'],
+          reason: 'A WordPress schedule request was detected without a concrete future date.',
+          pendingIntent: 'wordpress_schedule',
+          examples: ['2026-07-01', 'Next Monday'],
+        };
+      }
       const stripped = message
         .replace(/\b(post|publish|upload|send|schedule|queue|plan|draft)\b/ig, ' ')
         .replace(/\b(to|on|the)?\s*(wordpress|wp|blog|site|website)\b/ig, ' ');
@@ -301,6 +374,33 @@ function buildClarificationPlan(
   };
 }
 
+function buildConversationalActionPlan(
+  message: string,
+  conversationalIntent: PlannerConversationalIntent,
+): ChatAutomationPlan {
+  const routeId = mapConversationalIntentToRouteId(conversationalIntent.type);
+  // C1/R6 pre-cutover fix: listing WordPress posts is read-only — it must
+  // not inherit the wordpress route's external_side_effect approval gate.
+  // wordpress_publish/wordpress_schedule keep the gated path unchanged.
+  const risk: ChatAutomationRisk = conversationalIntent.type === 'wordpress_list' ? 'safe' : buildRiskForRoute(routeId);
+  return {
+    source: 'conversational_intent',
+    intent: {
+      kind: 'conversational_action',
+      intent: conversationalIntent,
+      routeId,
+    },
+    execution:
+      conversationalIntent.type === 'build_webpage'
+        ? { kind: 'run_build_discovery', routeId, commandText: message }
+        : { kind: 'run_command_handler', routeId, commandText: message },
+    risk,
+    approval: buildApproval(routeId, risk),
+    confidence: 0.85,
+    notes: ['Matched conversational intent router.'],
+  };
+}
+
 function buildRiskForRoute(routeId: ChatCommandRouteId | null): ChatAutomationRisk {
   switch (routeId) {
     case 'wordpress':
@@ -323,6 +423,13 @@ function buildApproval(routeId: ChatCommandRouteId | null, risk: ChatAutomationR
     return { required: true, reason: 'Browser tasks may require manual approval before side effects.' };
   }
   return { required: false, reason: null };
+}
+
+function startsWithOpenSwanAutomationSeed(message: string): boolean {
+  return message
+    .trim()
+    .toLowerCase()
+    .startsWith(OPENSWAN_AUTOMATION_INTENT_SEED.trim().toLowerCase());
 }
 
 function hasReviewLevelMutationIntent(message: string): boolean {
@@ -459,6 +566,9 @@ function shouldUseComputerTaskForLocalIntent(kind: LocalComputerAwarenessKind | 
   if (!kind) return false;
   if (kind.startsWith('file_')) return true;
   return [
+    'notes_create',
+    'open_path',
+    'open_file_search_match',
     'launch_app',
     'focus_app',
     'window_manage',
@@ -531,11 +641,13 @@ function buildPlanFromLocalComputerIntent(
   if (!localComputerIntent.route) return null;
   const useComputerTask = shouldUseComputerTaskForLocalIntent(localComputerIntent.kind);
   const localRisk = getLocalComputerAwarenessRisk(localComputerIntent);
-  const risk: ChatAutomationRisk = localRisk === 'external_side_effect'
-    ? 'external_side_effect'
-    : localRisk === 'review'
-      ? 'review'
-      : 'safe';
+  const risk: ChatAutomationRisk = isLowRiskLocalImageExportTask(normalized)
+    ? 'safe'
+    : localRisk === 'external_side_effect'
+      ? 'external_side_effect'
+      : localRisk === 'review'
+        ? 'review'
+        : 'safe';
   const pipeline = bestPipeline ? summarizeUserTaskPipelineMatch(bestPipeline) : null;
   const surfacePlan = pipeline ? buildExecutionSurfacePlan({ message: normalized, pipeline, pipelineDecision }) : null;
   const ledgerPreview = pipeline ? buildAgentRunLedgerPreview({
@@ -675,6 +787,31 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
     };
   }
 
+  if (startsWithOpenSwanAutomationSeed(normalized)) {
+    const pipeline = bestPipeline ? summarizeUserTaskPipelineMatch(bestPipeline) : null;
+    const surfacePlan = pipeline ? buildExecutionSurfacePlan({ message: normalized, pipeline, pipelineDecision }) : null;
+    const ledgerPreview = pipeline ? buildAgentRunLedgerPreview({
+      message: normalized,
+      pipeline,
+      pipelineDecision,
+      surfacePlan,
+    }) : null;
+    return {
+      source: 'plain_chat',
+      intent: { kind: 'direct_chat', message: normalized },
+      execution: { kind: 'run_openswan', routeId: null, commandText: normalized },
+      risk: 'safe',
+      approval: { required: false, reason: null },
+      confidence: 0.88,
+      notes: ['Matched OpenSwan repeat-automation seed; planning a reusable workflow instead of executing the target app immediately.'],
+      pipeline,
+      pipelineDecision,
+      scenarioPolicy: surfacePlan?.policy || null,
+      surfacePlan,
+      ledgerPreview,
+    };
+  }
+
   const recoveryOptionSelection = parseChatFailureRecoveryOptionSelection(normalized);
   if (recoveryOptionSelection) {
     const recoveryExecutionPlan = buildChatFailureRecoveryExecutionPlan(recoveryOptionSelection);
@@ -735,6 +872,15 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
       recoveryPolicy,
       recoveryExecutionPlan,
     };
+  }
+
+  const earlyConversationalIntent = detectPlannerConversationalIntent(normalized, input.attachments);
+  if (earlyConversationalIntent.type === 'office_agent_task') {
+    const conversationalClarification = detectConversationalClarification(earlyConversationalIntent, normalized);
+    if (conversationalClarification) {
+      return buildClarificationPlan(normalized, conversationalClarification, pipelineDecision);
+    }
+    return buildConversationalActionPlan(normalized, earlyConversationalIntent);
   }
 
   const localSequencePlan = buildPlanFromLocalComputerSequence(normalized, bestPipeline, pipelineDecision);
@@ -834,24 +980,7 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
     if (conversationalClarification) {
       return buildClarificationPlan(normalized, conversationalClarification, pipelineDecision);
     }
-    const routeId = mapConversationalIntentToRouteId(conversationalIntent.type);
-    const risk = buildRiskForRoute(routeId);
-    return {
-      source: 'conversational_intent',
-      intent: {
-        kind: 'conversational_action',
-        intent: conversationalIntent,
-        routeId,
-      },
-      execution:
-        conversationalIntent.type === 'build_webpage'
-          ? { kind: 'run_build_discovery', routeId, commandText: normalized }
-          : { kind: 'run_command_handler', routeId, commandText: normalized },
-      risk,
-      approval: buildApproval(routeId, risk),
-      confidence: 0.85,
-      notes: ['Matched conversational intent router.'],
-    };
+    return buildConversationalActionPlan(normalized, conversationalIntent);
   }
 
   if (looksLikeBrowserbaseWorkflow(normalized)) {
@@ -866,7 +995,9 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
       risk: hasReviewLevelMutationIntent(normalized)
         ? 'review'
         : 'safe',
-      approval: { required: false, reason: null },
+      approval: hasReviewLevelMutationIntent(normalized)
+        ? { required: true, reason: 'Computer task mutation requires approval before execution.' }
+        : { required: false, reason: null },
       confidence: 0.82,
       notes: ['Detected as a Browserbase workflow: web data retrieval, Stagehand semantic browser action, or form submission.'],
     };
@@ -919,7 +1050,9 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
       risk: hasReviewLevelMutationIntent(normalized)
         ? 'review'
         : 'safe',
-      approval: { required: false, reason: null },
+      approval: hasReviewLevelMutationIntent(normalized)
+        ? { required: true, reason: 'Computer task mutation requires approval before execution.' }
+        : { required: false, reason: null },
       confidence: 0.72,
       notes: ['Detected as a computer task request spanning browser, files, apps, or hybrid work.'],
     };

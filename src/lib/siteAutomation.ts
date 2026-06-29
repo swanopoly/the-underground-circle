@@ -1,5 +1,26 @@
 import { supabase } from './supabase';
 import { deleteLocalSecret, readLocalSecret, writeLocalSecret } from './localSecrets';
+import { buildWordPressPostBody } from './wordpressRestPayload';
+import { redactRestError } from './wordpressRestError';
+import {
+  buildCaptionFollowUpBody,
+  buildMediaUploadHeaders,
+  resolveUploadMimeType,
+} from './wordpressMediaUpload';
+import {
+  MAX_LIST_PAGES,
+  parsePaginationHeaders,
+  shouldFetchNextPage,
+  type WpListResult,
+} from './wordpressListPagination';
+import { getVaultEntryAllowedActions, getVaultEntryAllowedOrigins } from './vaultAgentAccess';
+import {
+  escapedParagraph,
+  escapedHeading,
+  escapedList,
+  escapedQuote,
+  escapedImageAlt,
+} from './wordpressContentMetadata';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -130,6 +151,7 @@ export interface WordPressPostRequest {
   excerpt?: string;
   slug?: string;
   date?: string;  // ISO 8601 — for scheduled posts, set future date + status: 'future'
+  dateGmt?: string;  // UTC wall-clock (no tz suffix) for `date_gmt`; preferred for scheduling so the hour doesn't shift with the runtime timezone
   meta?: Record<string, string>;  // SEO meta: _yoast_wpseo_title, rank_math_title, etc.
 }
 
@@ -171,6 +193,12 @@ export interface WordPressPostResult {
   postId?: number;
   postUrl?: string;
   error?: string;
+  /**
+   * Meta object WordPress echoed back on a create response. WP only echoes
+   * show_in_rest + editable keys, so this lets callers detect dropped SEO meta
+   * honestly (see diffPersistedSeoMeta). Absent when WP returned no meta.
+   */
+  returnedMeta?: Record<string, unknown>;
 }
 
 export interface WordPressConnectionResult {
@@ -652,7 +680,7 @@ export async function storeCircleSiteCredential(
       accessPolicy: {
         require_approval: true,
         allowed_origins: siteUrl ? [siteUrl] : [],
-        allowed_actions: ['login', 'post', 'edit'],
+        allowed_actions: ['login', 'post', 'edit', 'publish', 'delete'],
       },
     });
 
@@ -862,7 +890,7 @@ export async function testWordPressConnection(
       if (response.status === 404) {
         return { connected: false, error: 'WordPress REST API not found at this URL' };
       }
-      return { connected: false, error: `HTTP ${response.status}: ${errorText.slice(0, 200)}` };
+      return { connected: false, error: redactRestError(errorText, response.status) };
     }
 
     const data = await response.json();
@@ -1138,7 +1166,7 @@ export async function publishToWordPress(
             const mediaData = await mediaRes.json();
             featuredMediaId = mediaData.id;
           } else {
-            console.warn('[WordPress] Failed to upload featured image:', await mediaRes.text().catch(() => ''));
+            console.warn('[WordPress] Failed to upload featured image:', redactRestError(await mediaRes.text().catch(() => ''), mediaRes.status));
           }
         }
       } catch (imgErr) {
@@ -1147,20 +1175,15 @@ export async function publishToWordPress(
     }
 
     // Step 2: Create the post
-    const postBody: Record<string, unknown> = {
-      title: request.title,
-      content: request.content,
-      status: request.status,
-    };
+    const postBody = buildWordPressPostBody(request, featuredMediaId);
 
-    if (featuredMediaId) {
-      postBody.featured_media = featuredMediaId;
-    }
-    if (request.categories && request.categories.length > 0) {
-      postBody.categories = request.categories;
-    }
-    if (request.tags && request.tags.length > 0) {
-      postBody.tags = request.tags;
+    // Scheduling: WP reads `date` as site-local and `date_gmt` as UTC. Send the
+    // UTC instant in `date_gmt` (and drop any local `date`) so the publish hour
+    // is correct regardless of the runtime timezone. Layered here because the
+    // shared payload builder is read-only and only emits `date`.
+    if (request.dateGmt) {
+      (postBody as Record<string, unknown>).date_gmt = request.dateGmt;
+      delete (postBody as Record<string, unknown>).date;
     }
 
     const postRes = await fetch(`${base}/wp-json/wp/v2/posts`, {
@@ -1176,7 +1199,7 @@ export async function publishToWordPress(
       const errorText = await postRes.text().catch(() => '');
       return {
         success: false,
-        error: `Failed to create post: HTTP ${postRes.status} \u2014 ${errorText.slice(0, 300)}`,
+        error: `Failed to create post: ${redactRestError(errorText, postRes.status)}`,
       };
     }
 
@@ -1186,6 +1209,9 @@ export async function publishToWordPress(
       success: true,
       postId: postData.id,
       postUrl: postData.link || postData.guid?.rendered,
+      returnedMeta: (postData && typeof postData.meta === 'object' && postData.meta)
+        ? postData.meta as Record<string, unknown>
+        : undefined,
     };
   } catch (err: any) {
     console.error('[WordPress] Publish error:', err);
@@ -1389,7 +1415,7 @@ export async function updateWordPressPost(
     });
     if (!res.ok) {
       const err = await res.text().catch(() => '');
-      return { success: false, error: `HTTP ${res.status}: ${err.slice(0, 200)}` };
+      return { success: false, error: redactRestError(err, res.status) };
     }
     const d = await res.json();
     return { success: true, postId: d.id, postUrl: d.link };
@@ -1411,7 +1437,7 @@ export async function deleteWordPressPost(
     });
     if (!res.ok) {
       const err = await res.text().catch(() => '');
-      return { success: false, error: `HTTP ${res.status}: ${err.slice(0, 200)}` };
+      return { success: false, error: redactRestError(err, res.status) };
     }
     return { success: true };
   } catch (e: any) { return { success: false, error: e.message }; }
@@ -1441,6 +1467,121 @@ export async function listWordPressPages(
   } catch { return []; }
 }
 
+// ─── 13b. Paginated, error-vs-empty Result variants (R7) ────────────────────
+//
+// Parallel to the four []-returning helpers above. These page-walk via the
+// X-WP-TotalPages header (bounded by MAX_LIST_PAGES) and return a WpListResult
+// tuple so callers can tell an HTTP/network error apart from a genuinely-empty
+// list. The legacy helpers are left untouched so existing callers are
+// unaffected; adopt these only where the error-vs-empty distinction matters.
+
+async function pageWalkWordPressList<T>(
+  url: (page: number) => string,
+  auth: string,
+  mapItem: (raw: any) => T,
+): Promise<WpListResult<T>> {
+  try {
+    const items: T[] = [];
+    let total = 0;
+    let totalPages = 0;
+    let page = 1;
+    // First page resolves totalPages; subsequent pages gated by shouldFetchNextPage.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const res = await fetch(url(page), {
+        headers: { Authorization: auth, 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        return { ok: false, error: redactRestError(body, res.status), status: res.status };
+      }
+      const headerInfo = parsePaginationHeaders(res.headers);
+      if (page === 1) {
+        total = headerInfo.total;
+        totalPages = headerInfo.totalPages;
+      }
+      const data = await res.json();
+      for (const raw of (data || [])) items.push(mapItem(raw));
+      if (!shouldFetchNextPage(page, totalPages, MAX_LIST_PAGES)) break;
+      page += 1;
+    }
+    return { ok: true, items, total, totalPages };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || 'Network error' };
+  }
+}
+
+export async function fetchWordPressCategoriesResult(
+  siteUrl: string, username: string, appPassword: string,
+): Promise<WpListResult<WordPressCategory>> {
+  const base = normalizeSiteUrl(siteUrl);
+  return pageWalkWordPressList<WordPressCategory>(
+    (page) => `${base}/wp-json/wp/v2/categories?per_page=100&page=${page}`,
+    wpAuthHeader(username, appPassword),
+    (cat) => ({ id: cat.id, name: cat.name, slug: cat.slug, count: cat.count || 0 }),
+  );
+}
+
+export async function fetchWordPressTagsResult(
+  siteUrl: string, username: string, appPassword: string,
+): Promise<WpListResult<WordPressTag>> {
+  const base = normalizeSiteUrl(siteUrl);
+  return pageWalkWordPressList<WordPressTag>(
+    (page) => `${base}/wp-json/wp/v2/tags?per_page=100&page=${page}`,
+    wpAuthHeader(username, appPassword),
+    (tag) => ({ id: tag.id, name: tag.name, slug: tag.slug, count: tag.count || 0 }),
+  );
+}
+
+export async function listWordPressPostsResult(
+  siteUrl: string, username: string, appPassword: string,
+  opts: { status?: string; search?: string; perPage?: number; orderby?: string } = {},
+): Promise<WpListResult<WordPressPost>> {
+  const base = normalizeSiteUrl(siteUrl);
+  const perPage = opts.perPage || 100;
+  return pageWalkWordPressList<WordPressPost>(
+    (page) => {
+      const params = new URLSearchParams();
+      params.set('per_page', String(perPage));
+      params.set('page', String(page));
+      params.set('orderby', opts.orderby || 'date');
+      params.set('order', 'desc');
+      if (opts.status) params.set('status', opts.status);
+      if (opts.search) params.set('search', opts.search);
+      return `${base}/wp-json/wp/v2/posts?${params}`;
+    },
+    wpAuthHeader(username, appPassword),
+    (p) => ({
+      id: p.id, title: p.title?.rendered || '', slug: p.slug, status: p.status,
+      date: p.date, modified: p.modified, link: p.link,
+      excerpt: (p.excerpt?.rendered || '').replace(/<[^>]+>/g, '').trim(),
+      categories: p.categories || [], tags: p.tags || [], featured_media: p.featured_media || 0,
+    }),
+  );
+}
+
+export async function listWordPressPagesResult(
+  siteUrl: string, username: string, appPassword: string,
+  opts: { status?: string; perPage?: number } = {},
+): Promise<WpListResult<WordPressPage>> {
+  const base = normalizeSiteUrl(siteUrl);
+  const perPage = opts.perPage || 100;
+  return pageWalkWordPressList<WordPressPage>(
+    (page) => {
+      const params = new URLSearchParams();
+      params.set('per_page', String(perPage));
+      params.set('page', String(page));
+      if (opts.status) params.set('status', opts.status);
+      return `${base}/wp-json/wp/v2/pages?${params}`;
+    },
+    wpAuthHeader(username, appPassword),
+    (p) => ({
+      id: p.id, title: p.title?.rendered || '', slug: p.slug, status: p.status,
+      date: p.date, modified: p.modified, link: p.link, parent: p.parent || 0,
+    }),
+  );
+}
+
 // ─── 14. Create/Update Page ───────────────────────────────────────────────────
 
 export async function publishWordPressPage(
@@ -1456,7 +1597,7 @@ export async function publishWordPressPage(
     });
     if (!res.ok) {
       const err = await res.text().catch(() => '');
-      return { success: false, error: `HTTP ${res.status}: ${err.slice(0, 200)}` };
+      return { success: false, error: redactRestError(err, res.status) };
     }
     const d = await res.json();
     return { success: true, postId: d.id, postUrl: d.link };
@@ -1467,24 +1608,57 @@ export async function publishWordPressPage(
 
 export async function uploadWordPressMedia(
   siteUrl: string, username: string, appPassword: string,
-  file: Blob, fileName: string, altText?: string,
+  file: Blob, fileName: string, altText?: string, caption?: string,
 ): Promise<{ success: boolean; mediaId?: number; url?: string; error?: string }> {
   try {
     const base = normalizeSiteUrl(siteUrl);
-    const formData = new FormData();
-    formData.append('file', file, fileName);
-    if (altText) formData.append('alt_text', altText);
+    const authorization = wpAuthHeader(username, appPassword);
 
-    const res = await fetch(`${base}/wp-json/wp/v2/media`, {
-      method: 'POST',
-      headers: { Authorization: wpAuthHeader(username, appPassword) },
-      body: formData,
-    });
+    // R6: prefer the raw-binary upload (Content-Type + Content-Disposition)
+    // when the mime is determinable; fall back to multipart otherwise so an
+    // indeterminate mime never breaks the upload.
+    const mimeType = resolveUploadMimeType((file as Blob).type, fileName);
+    let res: Response;
+    if (mimeType) {
+      res = await fetch(`${base}/wp-json/wp/v2/media`, {
+        method: 'POST',
+        headers: buildMediaUploadHeaders({ authorization, mimeType, filename: fileName }),
+        body: file,
+      });
+    } else {
+      const formData = new FormData();
+      formData.append('file', file, fileName);
+      if (altText) formData.append('alt_text', altText);
+      res = await fetch(`${base}/wp-json/wp/v2/media`, {
+        method: 'POST',
+        headers: { Authorization: authorization },
+        body: formData,
+      });
+    }
     if (!res.ok) {
       const err = await res.text().catch(() => '');
-      return { success: false, error: `HTTP ${res.status}: ${err.slice(0, 200)}` };
+      return { success: false, error: redactRestError(err, res.status) };
     }
     const d = await res.json();
+    // WP often ignores alt_text / caption on media create. Confirm them with a
+    // single JSON follow-up POST; non-fatal — keep the mediaId on failure.
+    if (d.id) {
+      const captionBody = buildCaptionFollowUpBody(caption);
+      const followUp: Record<string, unknown> = {};
+      if (altText) followUp.alt_text = altText;
+      if (captionBody) followUp.caption = captionBody.caption;
+      if (Object.keys(followUp).length > 0) {
+        try {
+          await fetch(`${base}/wp-json/wp/v2/media/${d.id}`, {
+            method: 'POST',
+            headers: { Authorization: authorization, 'Content-Type': 'application/json' },
+            body: JSON.stringify(followUp),
+          });
+        } catch (followErr) {
+          console.warn('[WP] media alt_text/caption follow-up failed:', followErr);
+        }
+      }
+    }
     return { success: true, mediaId: d.id, url: d.source_url };
   } catch (e: any) { return { success: false, error: e.message }; }
 }
@@ -1526,19 +1700,13 @@ export async function createWordPressTag(
 // ─── 17. Gutenberg Block Builder ──────────────────────────────────────────────
 
 export const wpBlock = {
-  paragraph: (text: string) =>
-    `<!-- wp:paragraph -->\n<p>${text}</p>\n<!-- /wp:paragraph -->`,
-  heading: (text: string, level: 2 | 3 | 4 = 2) =>
-    `<!-- wp:heading {"level":${level}} -->\n<h${level}>${text}</h${level}>\n<!-- /wp:heading -->`,
-  image: (url: string, alt: string = '', id?: number) =>
-    `<!-- wp:image ${id ? `{"id":${id}}` : '{}'} -->\n<figure class="wp-block-image"><img src="${url}" alt="${alt}"${id ? ` class="wp-image-${id}"` : ''}/></figure>\n<!-- /wp:image -->`,
-  list: (items: string[], ordered: boolean = false) => {
-    const tag = ordered ? 'ol' : 'ul';
-    const inner = items.map(i => `<li>${i}</li>`).join('\n');
-    return `<!-- wp:list ${ordered ? '{"ordered":true}' : '{}'} -->\n<${tag}>\n${inner}\n</${tag}>\n<!-- /wp:list -->`;
-  },
-  quote: (text: string, citation?: string) =>
-    `<!-- wp:quote -->\n<blockquote class="wp-block-quote"><p>${text}</p>${citation ? `<cite>${citation}</cite>` : ''}</blockquote>\n<!-- /wp:quote -->`,
+  // Text-bearing blocks escape their TEXT args (defense against unescaped
+  // user/AI text breaking markup); `html`/`code` keep their raw behavior.
+  paragraph: (text: string) => escapedParagraph(text),
+  heading: (text: string, level: 2 | 3 | 4 = 2) => escapedHeading(text, level),
+  image: (url: string, alt: string = '', id?: number) => escapedImageAlt(url, alt, id),
+  list: (items: string[], ordered: boolean = false) => escapedList(items, ordered),
+  quote: (text: string, citation?: string) => escapedQuote(text, citation),
   code: (code: string) =>
     `<!-- wp:code -->\n<pre class="wp-block-code"><code>${code.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</code></pre>\n<!-- /wp:code -->`,
   separator: () =>
@@ -1551,9 +1719,26 @@ export const wpBlock = {
 
 // ─── 18. Auto-load WordPress credentials for agent use ────────────────────────
 
-export async function getActiveWordPressCredentials(circleId?: string): Promise<{
-  siteUrl: string; username: string; appPassword: string;
-} | null> {
+export interface WordPressVaultPolicy {
+  accessPolicy: Record<string, unknown>;
+  allowedActions: string[];
+  allowedOrigins: string[];
+}
+
+export interface ActiveWordPressCredentials {
+  siteUrl: string;
+  username: string;
+  appPassword: string;
+  /**
+   * Present ONLY when the credentials came from the circle vault — carries the
+   * row's accessPolicy taxonomy/origins so mutation handlers can enforce it
+   * (R19). Legacy circle-table / user-table fallbacks omit it, so their
+   * behavior is unchanged (policy-less).
+   */
+  vaultPolicy?: WordPressVaultPolicy;
+}
+
+export async function getActiveWordPressCredentials(circleId?: string): Promise<ActiveWordPressCredentials | null> {
   try {
     const { data: userData } = await supabase.auth.getUser().catch(() => ({ data: null as any }));
     if (!userData?.user) return null;
@@ -1568,6 +1753,11 @@ export async function getActiveWordPressCredentials(circleId?: string): Promise<
             siteUrl: primary.siteUrl,
             username: primary.username,
             appPassword: reveal.result.secret,
+            vaultPolicy: {
+              accessPolicy: (primary.accessPolicy || {}) as Record<string, unknown>,
+              allowedActions: getVaultEntryAllowedActions(primary),
+              allowedOrigins: getVaultEntryAllowedOrigins(primary),
+            },
           };
         }
       }

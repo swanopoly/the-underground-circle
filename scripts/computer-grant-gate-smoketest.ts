@@ -1,10 +1,33 @@
 /**
  * computer-grant-gate-smoketest — pins the local vault grant/readiness
- * rules used before agents can automate logins with saved credentials.
+ * rules used before agents can automate logins with saved credentials,
+ * plus the sticky per-site/per-app "always allow" scope model (T7 UX):
+ * floor exclusion, normalization, matching, expiry/revocation, partitioning,
+ * and bounded history.
  *
  * Run: npm run smoke:computer-grant-gate
  */
 
+import {
+  applyStickyScopes,
+  buildStickyScopeOfferFromTask,
+  compactStickyAllowScopes,
+  createStickyScope,
+  extractStickyTaskTargets,
+  formatStickyScopeAppliedNotice,
+  getActiveStickyScopes,
+  markStickyScopesUsed,
+  normalizeScopeKey,
+  pruneStickyScopes,
+  revokeStickyScope,
+  scopeMatchesTask,
+  setActiveStickyScopes,
+  STICKY_FLOOR_CATEGORIES,
+  STICKY_GRANTABLE_CATEGORIES,
+  STICKY_SCOPE_MAX_ACTIVE,
+  STICKY_SCOPE_MAX_HISTORY,
+  type StickyAllowScope,
+} from '../src/lib/computerGrantGate';
 import {
   analyzeVaultEntrySecurity,
   buildVaultSecurityReport,
@@ -106,11 +129,159 @@ function main() {
   assert(report.expiredGrantCount === 1, 'report counts expired grants');
   assert(report.score < 100, 'report score drops for risky credential');
 
+  stickyScopeCases();
+
   if (failures > 0) {
     console.error(`\n${failures} computer-grant-gate smoke-test failure(s)`);
     process.exit(1);
   }
   console.log('\nAll computer-grant-gate smoke cases passed.');
+}
+
+// ─── T7 UX: sticky per-site/per-app "always allow" scopes ───────────────────
+
+function stickyScopeCases() {
+  const NOW = '2026-06-10T12:00:00Z';
+  const NOW_MS = Date.parse(NOW);
+
+  // Floor exclusion is structural: the floor and grantable sets are disjoint
+  // and together cover every router category that matters here.
+  assert(
+    STICKY_FLOOR_CATEGORIES.every((cat) => !STICKY_GRANTABLE_CATEGORIES.includes(cat)),
+    'sticky: floor and grantable category sets are disjoint',
+  );
+  for (const cat of ['pay', 'delete', 'login', 'grant'] as const) {
+    assert(STICKY_FLOOR_CATEGORIES.includes(cat), `sticky: floor includes ${cat}`);
+  }
+
+  // Creation rejects floor categories loudly.
+  for (const cat of STICKY_FLOOR_CATEGORIES) {
+    const rejected = createStickyScope({
+      scopeKind: 'site',
+      scopeKey: 'acme.com',
+      allowedCategories: ['publish', cat],
+      nowIso: NOW,
+    });
+    assert(!rejected.ok, `sticky: creation rejects floor category ${cat}`);
+  }
+  assert(
+    !createStickyScope({ scopeKind: 'site', scopeKey: 'acme.com', allowedCategories: [], nowIso: NOW }).ok,
+    'sticky: creation rejects empty categories',
+  );
+  assert(
+    !createStickyScope({ scopeKind: 'site', scopeKey: '   ', allowedCategories: ['publish'], nowIso: NOW }).ok,
+    'sticky: creation rejects empty scope key',
+  );
+
+  // Normalization: www./subdomains/case/scheme/path collapse to eTLD+1-ish.
+  assert(normalizeScopeKey('site', 'https://WWW.Acme.com/checkout?x=1') === 'acme.com', 'sticky: url normalizes to acme.com');
+  assert(normalizeScopeKey('site', 'shop.acme.com') === 'acme.com', 'sticky: subdomain collapses to acme.com');
+  assert(normalizeScopeKey('site', 'deep.shop.acme.co.uk') === 'acme.co.uk', 'sticky: multi-part TLD keeps acme.co.uk');
+  assert(normalizeScopeKey('site', 'localhost') === 'localhost', 'sticky: single-label host passes through');
+  assert(normalizeScopeKey('app', '  Adobe  Photoshop App ') === 'adobe photoshop', 'sticky: app name lowercases and trims');
+
+  const created = createStickyScope({
+    scopeKind: 'site',
+    scopeKey: 'www.Acme.com',
+    allowedCategories: ['publish', 'upload', 'publish'],
+    grantedByUserId: 'user_1',
+    nowIso: NOW,
+  });
+  if (!created.ok) {
+    fail('sticky: valid creation should succeed');
+    return;
+  }
+  const scope = created.scope;
+  assert(scope.scopeKey === 'acme.com', 'sticky: created scope key normalized');
+  assert(scope.allowedCategories.join(',') === 'publish,upload', 'sticky: categories deduped');
+  assert(scope.expiresAtIso === new Date(NOW_MS + 30 * 24 * 60 * 60 * 1000).toISOString(), 'sticky: default 30-day expiry');
+
+  // Matching: www/subdomain/case on the task side; wrong site/app never match.
+  assert(scopeMatchesTask(scope, { hostname: 'WWW.ACME.COM' }, NOW_MS), 'sticky: matches www + case variant');
+  assert(scopeMatchesTask(scope, { hostname: 'shop.acme.com' }, NOW_MS), 'sticky: matches subdomain');
+  assert(!scopeMatchesTask(scope, { hostname: 'acme.org' }, NOW_MS), 'sticky: different TLD does not match');
+  assert(!scopeMatchesTask(scope, { hostname: 'evilacme.com' }, NOW_MS), 'sticky: lookalike domain does not match');
+  assert(!scopeMatchesTask(scope, { appName: 'acme.com' }, NOW_MS), 'sticky: site scope never matches an app target');
+
+  // Expiry and revocation are respected.
+  const after31Days = NOW_MS + 31 * 24 * 60 * 60 * 1000;
+  assert(!scopeMatchesTask(scope, { hostname: 'acme.com' }, after31Days), 'sticky: expired scope does not match');
+  const revokedList = revokeStickyScope([scope], scope.id, 'user_2', NOW);
+  assert(Boolean(revokedList[0].revoked) && revokedList[0].revoked?.byUserId === 'user_2', 'sticky: revocation recorded with actor');
+  assert(!scopeMatchesTask(revokedList[0], { hostname: 'acme.com' }, NOW_MS), 'sticky: revoked scope does not match');
+
+  // Partitioning: floor categories ALWAYS stay required — even when a
+  // maliciously crafted persisted scope object claims to allow them.
+  const malicious = {
+    ...scope,
+    allowedCategories: ['publish', 'pay', 'delete', 'login', 'grant'] as StickyAllowScope['allowedCategories'],
+  };
+  const partition = applyStickyScopes([malicious], { hostname: 'acme.com' }, ['publish', 'pay', 'login'], NOW_MS);
+  assert(partition.autoApproved.join(',') === 'publish', 'sticky: only non-floor categories auto-approve');
+  assert(
+    partition.stillRequired.includes('pay') && partition.stillRequired.includes('login'),
+    'sticky: floor categories stay required despite malicious scope contents',
+  );
+
+  // Full vs partial coverage.
+  const covered = applyStickyScopes([scope], { hostname: 'shop.acme.com' }, ['publish', 'upload'], NOW_MS);
+  assert(covered.stillRequired.length === 0 && covered.usedScopeIds.length === 1, 'sticky: full coverage partitions clean');
+  const partial = applyStickyScopes([scope], { hostname: 'acme.com' }, ['publish', 'send'], NOW_MS);
+  assert(partial.stillRequired.join(',') === 'send', 'sticky: uncovered category stays required');
+  const noMatch = applyStickyScopes([scope], { hostname: 'other.com' }, ['publish'], NOW_MS);
+  assert(noMatch.usedScopeIds.length === 0 && noMatch.stillRequired.join(',') === 'publish', 'sticky: non-matching target keeps approval');
+  const generic = applyStickyScopes([scope], { hostname: 'acme.com' }, [], NOW_MS);
+  assert(generic.usedScopeIds.length === 1 && generic.stillRequired.length === 0, 'sticky: category-less task covered by matching scope');
+
+  // Use bookkeeping.
+  const used = markStickyScopesUsed([scope], [scope.id], NOW);
+  assert(used[0].useCount === 1 && Date.parse(used[0].lastUsedAtIso || '') === NOW_MS, 'sticky: use bookkeeping bumps count');
+
+  // Prune bounds: ≤50 active, ≤20 history; compaction drops malformed and
+  // strips floor categories from persisted data.
+  const many: StickyAllowScope[] = [];
+  for (let i = 0; i < 60; i += 1) {
+    const item = createStickyScope({ scopeKind: 'site', scopeKey: `site${i}.com`, allowedCategories: ['save'], nowIso: NOW });
+    if (item.ok) many.push(i % 2 === 0 ? item.scope : { ...item.scope, revoked: { atIso: NOW, byUserId: null } });
+  }
+  const pruned = pruneStickyScopes(many, NOW_MS);
+  assert(pruned.active.length <= STICKY_SCOPE_MAX_ACTIVE, 'sticky: active list bounded');
+  assert(pruned.history.length <= STICKY_SCOPE_MAX_HISTORY, 'sticky: history list bounded');
+
+  const compacted = compactStickyAllowScopes([
+    { scopeKind: 'site', scopeKey: 'WWW.Acme.com', allowedCategories: ['publish', 'pay'], grantedAtIso: NOW },
+    { scopeKind: 'site', scopeKey: '', allowedCategories: ['publish'] },
+    { scopeKind: 'app', scopeKey: 'Notion', allowedCategories: ['login'] },
+    'garbage',
+    null,
+  ]);
+  assert(compacted.length === 1, 'sticky: compaction drops malformed + floor-only entries');
+  assert(compacted[0].scopeKey === 'acme.com' && compacted[0].allowedCategories.join(',') === 'publish', 'sticky: compaction strips floor categories');
+
+  // Target extraction: urls, bare domains, app names; file names excluded.
+  assert(extractStickyTaskTargets('publish the post on https://shop.acme.com/admin').hostname === 'acme.com', 'sticky: url target extracted');
+  assert(extractStickyTaskTargets('upload the logo to acme.com').hostname === 'acme.com', 'sticky: bare domain extracted');
+  assert(extractStickyTaskTargets('open banner.png and save it').hostname === null, 'sticky: file name not mistaken for domain');
+  assert(extractStickyTaskTargets('in the Notion app, publish the page').appName === 'notion', 'sticky: known app extracted');
+
+  // Post-task offer: floor categories never offered.
+  const offer = buildStickyScopeOfferFromTask({ task: 'log into acme.com and publish the post', categories: ['login', 'publish'] });
+  assert(Boolean(offer) && offer?.scopeKey === 'acme.com' && offer?.categories.join(',') === 'publish', 'sticky: offer strips floor categories');
+  const noTargetOffer = buildStickyScopeOfferFromTask({ task: 'tidy up my desktop files', categories: ['save'] });
+  assert(noTargetOffer === null, 'sticky: no offer without a target site/app');
+
+  // Notice copy is the single approved line.
+  assert(
+    formatStickyScopeAppliedNotice({ scopeKey: 'acme.com' }) === 'Auto-approved via your standing grant for acme.com — revoke in Computer Use → Permissions.',
+    'sticky: applied notice copy pinned',
+  );
+
+  // Registry round-trip (router default source) — compaction applies.
+  setActiveStickyScopes([malicious]);
+  const registry = getActiveStickyScopes();
+  assert(registry.length === 1 && registry[0].allowedCategories.every((cat) => !STICKY_FLOOR_CATEGORIES.includes(cat)), 'sticky: registry compacts floor categories away');
+  setActiveStickyScopes([]);
+  assert(getActiveStickyScopes().length === 0, 'sticky: registry resets');
 }
 
 main();

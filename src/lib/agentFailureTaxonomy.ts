@@ -103,7 +103,11 @@ const RULES: FailureRule[] = [
     retryable: true,
     userActionRequired: false,
     recommendedRecovery: 'Update the local bridge CORS allow-headers to include the requested desktop token header, then retry the health probe.',
-    patterns: [/\bcors\b/i, /\bpreflight\b/i, /\bx-uc-desktop-token\b/i, /\bAccess-Control-Allow-Headers\b/i],
+    // Must be CORS-SPECIFIC. The bare word "preflight" collides with the
+    // computer-app readiness preflight ("Photoshop … preflight: partial. 4
+    // warnings"), which made every failed design-app task get mislabeled
+    // "CORS blocked → restart the bridge" — wrong advice when CORS is fine.
+    patterns: [/\bcors\b/i, /\bAccess-Control-Allow-(?:Headers|Origin)\b/i, /\bx-uc-desktop-token\b/i, /\b(?:cors|access-control)[\s-]*preflight\b/i, /\bpreflight\b[^.\n]*\b(?:cors|header|origin|access-control|blocked by)\b/i],
   },
   {
     failureClass: 'bridge_endpoint_missing',
@@ -290,7 +294,7 @@ const RULES: FailureRule[] = [
     retryable: true,
     userActionRequired: true,
     recommendedRecovery: 'Ask for the correct file path or search root.',
-    patterns: [/\bfile not found\b/i, /\bno such file\b/i, /\bENOENT\b/i],
+    patterns: [/\bfile not found\b/i, /\bno such file\b/i, /\bENOENT\b/i, /\bpath[_\s-]*not[_\s-]*found\b/i, /\bpath does not exist\b/i, /\bfile or folder does not exist\b/i],
   },
   {
     failureClass: 'constraint_violation',

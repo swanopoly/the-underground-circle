@@ -150,6 +150,19 @@ only when required SwanBot/OpenSwan worktree configuration is blocked. Use
 `npx tsx scripts/openswan-worktree-config-report.ts --prompt` when a bridge or
 local agent launcher needs the hidden prompt block.
 
+Use `npm run check:openswan-lanes` when SwanBot/OpenSwan/Chat work starts to
+feel broad. It groups `git status --short -uall` paths into delivery lanes such
+as SwanBot v2 readiness, chat dispatcher, OpenSwan typed core, tool contracts,
+computer/app evidence, WordPress managed sites, product UI, knowledge/research,
+and edge SQL. The human-readable lane model lives in
+`docs/SWANBOT_OPENSWAN_AGENT_LANES_2026-06-29.md`. Use
+`npm run check:openswan-lanes:strict` before customer delivery when the branch
+should fail if it spans too many lanes.
+
+Use `npm run check:swanbot-chat:daily` for normal SwanBot/OpenSwan/Chat
+development and `npm run check:swanbot-chat:release` for a larger delivery.
+`smoke:all` remains an integration sweep, not the daily default.
+
 Managed Claude Code, Codex, Cursor Composer, and Gemini CLI launches call
 `appendOpenSwanWorktreeConfigPrompt(...)` from `scripts/terminal-launch-utils.js`
 so launched agents receive the hidden worktree config block when their
@@ -176,6 +189,9 @@ The checklist:
   scripts, or runtime artifact ignore rules change.
 - runs `npm run check:openswan-worktree-config` before risky connected-agent
   handoffs when the checkout state matters.
+- runs `npm run check:openswan-lanes` to keep broad SwanBot/OpenSwan/Chat
+  changes split by owner lane before review.
+- runs `npm run smoke:openswan-lane-report` after changing the lane model.
 - appends hidden worktree config to managed terminal-agent launch prompts
   through `scripts/terminal-launch-utils.js`.
 

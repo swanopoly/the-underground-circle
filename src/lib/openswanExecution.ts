@@ -7,7 +7,11 @@ export type OpenSwanExecutionStatus =
   | 'passed'
   | 'failed'
   | 'manual_required'
-  | 'blocked';
+  | 'blocked'
+  // O5: the check does not apply to this task and is not required —
+  // distinct from 'planned' (will run later) and 'blocked' (should have
+  // run but couldn't). Never counts against run greenness.
+  | 'not_applicable';
 
 export type OpenSwanExecutionMode = 'automatic' | 'manual' | 'blocked' | 'informational';
 
@@ -31,6 +35,7 @@ export function sortOpenSwanExecutionContracts(contracts: OpenSwanExecutionContr
     manual_required: 3,
     passed: 4,
     planned: 5,
+    not_applicable: 6,
   };
   return [...contracts].sort((a, b) => {
     const aRank = rank[a.status] ?? 99;
@@ -53,7 +58,13 @@ export function buildOpenSwanExecutionStream(params: {
     executed: event.status === 'passed' || event.status === 'failed',
     error: event.status === 'failed' || event.status === 'blocked' ? event.summary : null,
   }));
-  const verificationContracts = (params.verificationResults || []).map((result) => result.execution);
+  // O5: not_applicable checks stay OUT of the execution stream — the stream
+  // is "work that ran or still must run" and drives the run-ledger step
+  // counts/greenness. The checks list still shows them (N/A label/color via
+  // the helpers below), so they are visible without diluting progress math.
+  const verificationContracts = (params.verificationResults || [])
+    .map((result) => result.execution)
+    .filter((execution) => execution.status !== 'not_applicable');
   return sortOpenSwanExecutionContracts([...toolContracts, ...verificationContracts]);
 }
 
@@ -69,6 +80,8 @@ export function getOpenSwanExecutionStatusLabel(status: OpenSwanExecutionStatus)
       return 'MANUAL';
     case 'blocked':
       return 'BLOCK';
+    case 'not_applicable':
+      return 'N/A';
     case 'planned':
     default:
       return 'PLAN';
@@ -87,6 +100,8 @@ export function getOpenSwanExecutionStatusColor(status: OpenSwanExecutionStatus)
       return '#38bdf8';
     case 'blocked':
       return '#a78bfa';
+    case 'not_applicable':
+      return '#64748b';
     case 'planned':
     default:
       return '#94a3b8';

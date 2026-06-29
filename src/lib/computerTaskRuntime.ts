@@ -38,7 +38,25 @@ import {
 import {
   buildObserveBeforeActPromptBlock,
   deriveAuditObservedEvidence,
+  deriveSurfaceCapabilityStatusFromAudit,
+  type ComputerTaskSurfaceEscalation,
+  type SurfaceEscalationDecision,
 } from './appAutomationControlSurfaces';
+import {
+  deriveCapabilityHintsFromFacts,
+  inferRunSurfaceIdFromEscalations,
+  loadAppLearnedFacts,
+  mergeCapabilityStatusWithLearnedHints,
+  normalizeAppKey,
+  recordAppLearnedFactsBuildoutProposal,
+  recordAppLearnedFactsOutcome,
+  shouldInjectDesktopExample,
+  shouldProposeCapabilityBuildout,
+  type AppLearnedFacts,
+} from './appLearnedFacts';
+
+/** E1: a descend decision the runtime still has to act on (narrowed union member). */
+type PendingSurfaceDescent = Extract<SurfaceEscalationDecision, { action: 'descend' }>;
 
 export type ComputerTaskRuntimeAdapterId =
   | 'browser_adapter'
@@ -55,6 +73,14 @@ export interface ComputerTaskRuntimeResult {
   observedEval?: OpenSwanObservedEvalSummary | null;
   handoffSuggestion?: AgentRunResult['handoffSuggestion'];
   capabilityBuildout?: ComputerTaskCapabilityBuildout | null;
+  /**
+   * E1: bounded (≤3) mid-run surface-escalation breadcrumbs
+   * ({fromSurface, toSurface, reason, atIso, appName?, failureCode?}).
+   * Additive optional field — persistence/recovery consumers can adopt it
+   * without a schema change. a11y-coded entries double as the macOS
+   * AX-coverage telemetry described in appAutomationControlSurfaces.
+   */
+  surfaceEscalations?: ComputerTaskSurfaceEscalation[] | null;
   warnings: string[];
 }
 
@@ -78,6 +104,217 @@ export function hasFollowUpIntent(task: string): boolean {
   // "with" / "about" / "for" + object — usually describes follow-up content.
   if (/\b(with|about|for)\s+\w+/i.test(lower) && lower.length > 25) return true;
   return false;
+}
+
+// ─── L1: Desktop action-trace capture + retrieval-as-context ────────────────
+//
+// Desktop twin of the browser guided-replay trace (D7c) in
+// `supabase/functions/computer-use-agent/index.ts`:
+//   - matcher (`normalizeTaskForReplay`, ~lines 332-336): lowercase, strip the
+//     "run this computer task exactly as written:" schedule prefix, collapse
+//     whitespace, trim; 45-day window; completed runs only; first (newest)
+//     exact match wins.
+//   - redaction (`redactForTrace`/`recordTrace`, ~lines 531-547): credential-
+//     shaped keys (/password|secret|token|otp|credential|passcode|pin|cvv|card/i)
+//     masked at write time, strings truncated to 200 chars, ≤40-action
+//     sliding window (oldest dropped first).
+//   - injection (~lines 354-358): numbered `tool(input)` steps + drift rules.
+// Keep these semantics in lockstep with the edge function. One deliberate
+// strengthening over the edge version: redaction here recurses into nested
+// objects/arrays, so nested credential keys are masked too.
+//
+// Per UFO2/ActionEngine (verified findings 3-5 in
+// docs/LEARNING_LOOP_RESEARCH_2026-06-12.md): recorded steps are HYPOTHESES
+// with per-step precondition anchors (a11y verify before replay), never a
+// forced script; retrieval is exact-match only; and a successful run that
+// received an example writes back its NEW trace (newest successful trace
+// wins — no in-place patching).
+//
+// NOTE: scripts/desktop-action-trace-smoketest.ts mirrors these pure helpers
+// (it cannot import this module — agentRuntime drags in react-native). Keep
+// the mirror in lockstep.
+
+export interface DesktopActionTraceEntry {
+  tool: string;
+  input: unknown;
+}
+
+export interface DesktopActionTrace {
+  v: 1;
+  normalizedTask: string;
+  capturedAtIso: string;
+  actions: DesktopActionTraceEntry[];
+}
+
+export const DESKTOP_ACTION_TRACE_MAX_ACTIONS = 40;
+export const DESKTOP_ACTION_TRACE_MAX_STRING_CHARS = 200;
+/** Bounded run-row metadata payload (~12kb serialized). */
+export const DESKTOP_ACTION_TRACE_MAX_PAYLOAD_CHARS = 12_000;
+/** Bounded prompt example block (~2.5k chars). */
+export const DESKTOP_ACTION_TRACE_EXAMPLE_MAX_CHARS = 2_500;
+/** Same matching window as the edge replay matcher (45 days). */
+export const DESKTOP_ACTION_TRACE_WINDOW_DAYS = 45;
+
+/** Same key regex as the edge `SENSITIVE_KEY_RE` — keep in lockstep. */
+const DESKTOP_TRACE_SENSITIVE_KEY_RE = /password|secret|token|otp|credential|passcode|pin|cvv|card/i;
+const DESKTOP_TRACE_MAX_REDACTION_DEPTH = 4;
+const DESKTOP_TRACE_MAX_ARRAY_ITEMS = 20;
+
+/** Mirrors the edge `normalizeTaskForReplay` matcher exactly. */
+export function normalizeDesktopTaskText(text: string): string {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/^run this computer task exactly as written:\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function redactDesktopTraceValue(value: unknown, depth: number): unknown {
+  if (typeof value === 'string') return value.slice(0, DESKTOP_ACTION_TRACE_MAX_STRING_CHARS);
+  if (!value || typeof value !== 'object') return value;
+  // Fail closed on very deep structures instead of persisting them unredacted.
+  if (depth >= DESKTOP_TRACE_MAX_REDACTION_DEPTH) return '[depth-capped]';
+  if (Array.isArray(value)) {
+    return value.slice(0, DESKTOP_TRACE_MAX_ARRAY_ITEMS).map((item) => redactDesktopTraceValue(item, depth + 1));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (DESKTOP_TRACE_SENSITIVE_KEY_RE.test(key)) {
+      out[key] = '[redacted]';
+      continue;
+    }
+    out[key] = redactDesktopTraceValue(entry, depth + 1);
+  }
+  return out;
+}
+
+/**
+ * Edge-parity redaction for one tool input: credential-shaped keys →
+ * '[redacted]', strings truncated to 200 chars (nested keys also masked —
+ * deliberate strengthening over the shallow edge version).
+ */
+export function redactDesktopTraceInput(input: unknown): unknown {
+  return redactDesktopTraceValue(input, 0);
+}
+
+/**
+ * Capture primitive — mirrors the edge `recordTrace`: push the redacted
+ * action, keep a ≤40-entry sliding window (oldest dropped first). Mutates
+ * and returns `trace` so callers can fold over a raw action list.
+ */
+export function recordDesktopActionTraceEntry(
+  trace: DesktopActionTraceEntry[],
+  action: { tool: string; input: unknown },
+): DesktopActionTraceEntry[] {
+  trace.push({
+    tool: String(action.tool || 'unknown_tool'),
+    input: redactDesktopTraceInput(action.input),
+  });
+  if (trace.length > DESKTOP_ACTION_TRACE_MAX_ACTIONS) trace.shift();
+  return trace;
+}
+
+/**
+ * Success-only persistence shape for `agent_runs.metadata.desktopActionTrace`.
+ * Bounded to ~12kb serialized by dropping the OLDEST actions first; returns
+ * null (fail closed) when there is nothing worth persisting or even a single
+ * action cannot fit the bound.
+ */
+export function buildDesktopActionTracePayload(args: {
+  task: string;
+  actions: DesktopActionTraceEntry[];
+  capturedAtIso?: string;
+}): DesktopActionTrace | null {
+  const normalizedTask = normalizeDesktopTaskText(args.task);
+  if (!normalizedTask || !Array.isArray(args.actions) || args.actions.length === 0) return null;
+  const payload: DesktopActionTrace = {
+    v: 1,
+    normalizedTask,
+    capturedAtIso: args.capturedAtIso || new Date().toISOString(),
+    actions: args.actions.slice(-DESKTOP_ACTION_TRACE_MAX_ACTIONS),
+  };
+  const serializedLength = () => {
+    try {
+      return JSON.stringify(payload).length;
+    } catch {
+      return Number.MAX_SAFE_INTEGER; // unserializable input → fail closed below
+    }
+  };
+  while (payload.actions.length > 1 && serializedLength() > DESKTOP_ACTION_TRACE_MAX_PAYLOAD_CHARS) {
+    payload.actions.shift();
+  }
+  if (serializedLength() > DESKTOP_ACTION_TRACE_MAX_PAYLOAD_CHARS) return null;
+  return payload;
+}
+
+/**
+ * Render a prior successful trace as an EXAMPLE block (never a command) for
+ * prompt assembly. Numbered steps mirror the edge injection format; the rules
+ * carry the UFO2-style per-step precondition anchors (verify the target
+ * element/window via a11y before replaying; on ANY mismatch stop and
+ * re-ground) and never relax approval gates. Capped at ~2.5k chars by
+ * dropping the LAST steps (the opening steps anchor the example).
+ */
+export function buildDesktopActionTraceExampleBlock(trace: DesktopActionTrace): string {
+  if (!trace || trace.v !== 1 || !Array.isArray(trace.actions) || trace.actions.length === 0) return '';
+  const header = `## Example: previous successful run of this exact task (${String(trace.capturedAtIso || '').slice(0, 10)})`;
+  const intro = 'A previous successful run of this exact task used these steps:';
+  const rules = [
+    'Treat each step as a HYPOTHESIS, not a script: before replaying a step, verify the target element/window still exists and is enabled (desktop.read_a11y_tree / desktop.window_state); on ANY mismatch stop following the example and re-ground normally (observe, then act).',
+    'Never skip approval or ask_user steps — the example never overrides approval gates.',
+    'The example shortens exploration — correctness rules are unchanged.',
+  ].join('\n');
+  const stepLines = trace.actions.map((action, index) => {
+    let inputText = '{}';
+    try {
+      inputText = JSON.stringify(action.input ?? {}).slice(0, DESKTOP_ACTION_TRACE_MAX_STRING_CHARS);
+    } catch { /* keep '{}' */ }
+    return `${index + 1}. ${action.tool}(${inputText})`;
+  });
+  const render = (lines: string[]) => [header, intro, ...lines, rules].join('\n');
+  let kept = stepLines.slice();
+  let omitted = 0;
+  const renderWithOmission = () =>
+    render(omitted > 0 ? [...kept, `… (${omitted} more step(s) omitted)`] : kept);
+  while (kept.length > 1 && renderWithOmission().length > DESKTOP_ACTION_TRACE_EXAMPLE_MAX_CHARS) {
+    kept.pop();
+    omitted += 1;
+  }
+  const text = renderWithOmission();
+  // Even a single step won't fit — drop the example entirely (fail closed).
+  return text.length <= DESKTOP_ACTION_TRACE_EXAMPLE_MAX_CHARS ? text : '';
+}
+
+/**
+ * Write-back (ActionEngine lite): after a SUCCESSFUL desktop/app/hybrid run,
+ * harvest the run's tool actions from the persisted event stream, fold them
+ * through the redaction/window capture primitive, and merge the bounded
+ * trace onto the run row metadata. Newest successful trace wins on the next
+ * retrieval — there is no in-place patching of older traces. Best-effort
+ * telemetry: never blocks or fails the user-visible task.
+ */
+async function persistDesktopActionTraceForRun(args: {
+  runId: string;
+  circleId: string;
+  userId: string;
+  task: string;
+  sinceIso: string;
+}): Promise<void> {
+  try {
+    const { harvestDesktopRunActionEntries, mergeRunMetadata } = await import('./agentRunSystem');
+    const rawActions = await harvestDesktopRunActionEntries({
+      runId: args.runId,
+      circleId: args.circleId,
+      userId: args.userId,
+      sinceIso: args.sinceIso,
+    });
+    if (rawActions.length === 0) return;
+    const trace: DesktopActionTraceEntry[] = [];
+    for (const action of rawActions) recordDesktopActionTraceEntry(trace, action);
+    const payload = buildDesktopActionTracePayload({ task: args.task, actions: trace });
+    if (!payload) return;
+    await mergeRunMetadata(args.runId, { desktopActionTrace: payload });
+  } catch { /* trace persistence is telemetry — never block the task */ }
 }
 
 function shouldRequestConnectedAppCapabilityBuildout(args: {
@@ -108,8 +345,20 @@ async function requestConnectedAppCapabilityBuildout(args: {
   agentResponse?: string | null;
   errorMessage?: string | null;
   warnings?: string[];
+  /**
+   * L3: learned-facts propose reason. When set, the per-run outcome heuristic
+   * gate is bypassed — the accumulated failure evidence IS the trigger.
+   */
+  learnedProposalReason?: string | null;
+  /**
+   * L3: run anchor for the HITL approval. With a runId, openswanToolRuntime's
+   * 'ask' policy files an agent_run_approvals row (with the existing same-title
+   * duplicate-pending guard) and the buildout dispatch WAITS for the human
+   * decision instead of executing — the proposal stays a draft.
+   */
+  runId?: string | null;
 }): Promise<ComputerTaskCapabilityBuildout | null> {
-  if (!shouldRequestConnectedAppCapabilityBuildout({
+  if (!args.learnedProposalReason && !shouldRequestConnectedAppCapabilityBuildout({
     execution: args.execution,
     task: args.task,
     agentResponse: args.agentResponse,
@@ -125,6 +374,7 @@ async function requestConnectedAppCapabilityBuildout(args: {
       circleId: args.circleId,
       userId: args.userId,
       surface: 'main_chat' as const,
+      ...(args.runId ? { runId: args.runId } : {}),
     };
     const roster = await executeOpenSwanRuntimeTool('office.list_agents', {}, context).catch((error: any) => ({
       ok: false,
@@ -136,7 +386,7 @@ async function requestConnectedAppCapabilityBuildout(args: {
       previewKind: args.execution.preview.kind,
       appAdapterMessage: args.appAdapterMessage,
       agentResponse: args.agentResponse,
-      errorMessage: args.errorMessage,
+      errorMessage: args.errorMessage || args.learnedProposalReason || null,
       warnings: args.warnings,
     });
     const buildout = await executeOpenSwanRuntimeTool('agent.build_app_capability', {
@@ -369,7 +619,14 @@ export async function executeComputerTaskWithAgent(args: {
   replyTo?: string;
   readyCapabilityBuildout?: ComputerTaskCapabilityBuildout | null;
   disableCapabilityBuildout?: boolean;
+  /** Route-level app choice — threads into the complexity plan's dispatch
+   *  block so the agent opens the chosen app first (App-choice contract). */
+  appResolution?: import('./computerTaskComplexityPlan').ComputerTaskAppChoiceResolution | null;
 }): Promise<ComputerTaskRuntimeResult> {
+  // L1: window start for the post-success action-trace harvest (the v2 tool
+  // loop persists tool inputs under its own sibling run row — see
+  // harvestDesktopRunActionEntries in agentRunSystem).
+  const desktopTraceTaskStartedAtIso = new Date().toISOString();
   const previewForRouting = prepareComputerTaskExecution({
     task: args.task,
     audit: args.audit,
@@ -392,6 +649,7 @@ export async function executeComputerTaskWithAgent(args: {
     audit: args.audit,
     grantedIds: args.grantedIds,
     businessModelPlan,
+    appResolution: args.appResolution ?? null,
   });
   const readyCapabilityBuildout = args.readyCapabilityBuildout?.status === 'ready_to_retry'
     ? args.readyCapabilityBuildout
@@ -413,6 +671,98 @@ export async function executeComputerTaskWithAgent(args: {
     warnings.push(execution.grants.approvalSummary);
   }
 
+  // E1: live capability status per control-surface id, fed to the adapter so
+  // the escalation policy can demote 'partial' rungs and exclude 'missing'
+  // ones when a failure asks for a descent.
+  // L4: learned per-app facts (device storage, per circle) layer conservative
+  // hints onto the audit statuses — audit WINS on conflict; learned hints only
+  // fill gaps or demote repeatedly-failing rungs, never promote a rung the
+  // audit says is missing or partial.
+  const learnedFactsAppKey = normalizeAppKey(inferAppNameForCapabilityBuildout(args.task) || '');
+  const learnedFacts: AppLearnedFacts | null = learnedFactsAppKey
+    ? await loadAppLearnedFacts(args.circleId, learnedFactsAppKey).catch(() => null)
+    : null;
+  const capabilityStatusById = mergeCapabilityStatusWithLearnedHints(
+    deriveSurfaceCapabilityStatusFromAudit(args.audit),
+    deriveCapabilityHintsFromFacts(learnedFacts),
+  );
+  let surfaceEscalations: ComputerTaskSurfaceEscalation[] | null = null;
+  let pendingEscalation: PendingSurfaceDescent | null = null;
+  let deterministicDescentMessage: string | null = null;
+
+  // L4: fold the run outcome (final surface + E1 breadcrumbs) into the
+  // learned facts. Success paths fire-and-forget; failure paths await the
+  // updated facts so the L3 propose check can run on fresh evidence.
+  // `exampleInjected` (when the L1 example seam was consulted) folds the
+  // outcome into the assisted/unassisted gate buckets too — undefined (the
+  // deterministic adapter + buildout-retry paths) touches neither bucket.
+  const recordLearnedAppOutcome = async (
+    ok: boolean,
+    escalations: ComputerTaskSurfaceEscalation[] | null | undefined,
+    exampleInjected?: boolean,
+  ): Promise<AppLearnedFacts | null> => {
+    if (!learnedFactsAppKey) return null;
+    return recordAppLearnedFactsOutcome(args.circleId, learnedFactsAppKey, {
+      surfaceId: inferRunSurfaceIdFromEscalations(escalations),
+      ok,
+      escalations,
+      ...(typeof exampleInjected === 'boolean' ? { exampleInjected } : {}),
+    }).catch(() => null);
+  };
+
+  // L3: at the end of a FAILED desktop/app task, consult the pure propose
+  // trigger. On propose, route through the EXISTING connected-agent buildout
+  // path. The proposal is a DRAFT for human approval — it is only filed when a
+  // runId anchors the HITL approval row (openswanToolRuntime's 'ask' policy +
+  // duplicate-pending guard); without that anchor, or when no connected agent
+  // can take it, the proposal is recorded on the facts as unmet (reason
+  // preserved for later buildout-UI surfacing) instead of auto-executing.
+  const maybeProposeLearnedCapabilityBuildout = async (input: {
+    updatedFacts: AppLearnedFacts | null;
+    runId?: string | null;
+    existingBuildout: ComputerTaskCapabilityBuildout | null | undefined;
+    appAdapterMessage?: string | null;
+    agentResponse?: string | null;
+    errorMessage?: string | null;
+  }): Promise<ComputerTaskCapabilityBuildout | null> => {
+    if (!learnedFactsAppKey || !input.updatedFacts) return null;
+    const decision = shouldProposeCapabilityBuildout(input.updatedFacts);
+    if (!decision.propose) return null;
+    if (input.existingBuildout) {
+      // The per-run heuristic already filed a buildout this run — count it as
+      // the proposal so the cooldown suppresses duplicate drafts.
+      void recordAppLearnedFactsBuildoutProposal(args.circleId, learnedFactsAppKey, {
+        filed: true,
+        reason: decision.reason,
+      });
+      return null;
+    }
+    if (!canRequestCapabilityBuildout || !input.runId) {
+      void recordAppLearnedFactsBuildoutProposal(args.circleId, learnedFactsAppKey, {
+        filed: false,
+        reason: decision.reason,
+      });
+      return null;
+    }
+    const proposed = await requestConnectedAppCapabilityBuildout({
+      circleId: args.circleId,
+      userId: args.userId,
+      task: args.task,
+      execution,
+      appAdapterMessage: input.appAdapterMessage,
+      agentResponse: input.agentResponse,
+      errorMessage: input.errorMessage,
+      warnings,
+      learnedProposalReason: decision.reason,
+      runId: input.runId,
+    });
+    void recordAppLearnedFactsBuildoutProposal(args.circleId, learnedFactsAppKey, {
+      filed: Boolean(proposed && proposed.status !== 'failed'),
+      reason: decision.reason,
+    });
+    return proposed;
+  };
+
   // Deterministic local desktop sequences should execute locally even
   // when the preview labels the utterance "hybrid" because it mentions
   // both an app and a filename, e.g. "Open Photoshop and save the image
@@ -422,16 +772,45 @@ export async function executeComputerTaskWithAgent(args: {
     const appResult = await executeComputerAppTask({
       circleId: args.circleId,
       task: args.task,
+      capabilityStatusById,
     });
-    return {
-      adapterId: 'app_adapter',
-      execution,
-      response: appResult.message,
-      warnings: [...warnings, ...appResult.warnings],
-    };
+    surfaceEscalations = appResult.surfaceEscalations || null;
+    if (appResult.surfaceEscalation?.action === 'descend') {
+      // E1: the deterministic rung failed and the policy descended — continue
+      // on the next-ranked control surface via the agent loop below (fresh
+      // observation + approval gate enforced there) instead of returning the
+      // raw failure for a manual replan.
+      warnings.push(...appResult.warnings);
+      pendingEscalation = appResult.surfaceEscalation;
+      deterministicDescentMessage = appResult.message;
+    } else {
+      // Success, a retry_same hint, or a stop (the message already carries the
+      // attempted-surface history for recovery) — return as before.
+      if (appResult.ok) {
+        void recordLearnedAppOutcome(true, surfaceEscalations);
+      } else {
+        // L4 + L3: fold the failure, then check the propose trigger. No runId
+        // exists on this deterministic path, so a propose is recorded as an
+        // unmet proposal on the facts rather than dispatched.
+        const updatedFacts = await recordLearnedAppOutcome(false, surfaceEscalations);
+        await maybeProposeLearnedCapabilityBuildout({
+          updatedFacts,
+          runId: null,
+          existingBuildout: null,
+          appAdapterMessage: appResult.message,
+        });
+      }
+      return {
+        adapterId: 'app_adapter',
+        execution,
+        response: appResult.message,
+        surfaceEscalations,
+        warnings: [...warnings, ...appResult.warnings],
+      };
+    }
   }
 
-  if (execution.preview.kind === 'file_task') {
+  if (execution.preview.kind === 'file_task' && !pendingEscalation) {
     const fileResult = await executeComputerFileTask({
       circleId: args.circleId,
       task: args.task,
@@ -451,21 +830,68 @@ export async function executeComputerTaskWithAgent(args: {
   // actions inside the app. Detect the difference and let multi-intent
   // utterances fall through to the agent loop (which has desktop.*
   // tools and can press Cmd+N / type / etc.).
-  let appAdapterMessage: string | null = null;
+  let appAdapterMessage: string | null = deterministicDescentMessage;
   let appBridgeLaunched = false;
-  if (execution.preview.kind === 'app_task') {
+  if (execution.preview.kind === 'app_task' && !pendingEscalation) {
     const appResult = await executeComputerAppTask({
       circleId: args.circleId,
       task: args.task,
+      capabilityStatusById,
     });
     warnings.push(...appResult.warnings);
+    surfaceEscalations = appResult.surfaceEscalations || surfaceEscalations;
+    const escalation = appResult.surfaceEscalation || null;
+    if (escalation?.action === 'stop') {
+      // E1 stop: never send the agent off to keep mutating around a stop
+      // decision (approval/user blockers, exhausted ladder). Fail with the
+      // attempted-surface history (already appended to the message) so the
+      // existing recovery/buildout diagnosis can pick the next move.
+      const capabilityBuildout = canRequestCapabilityBuildout
+        ? await requestConnectedAppCapabilityBuildout({
+            circleId: args.circleId,
+            userId: args.userId,
+            task: args.task,
+            execution,
+            appAdapterMessage: appResult.message,
+            errorMessage: escalation.reason,
+            warnings,
+          })
+        : readyCapabilityBuildout;
+      // L4 + L3: an E1 stop is a failed app task. Fold the failure (with the
+      // breadcrumbs), then run the propose trigger — with no runId here, a
+      // propose either rides the heuristic buildout above (cooldown stamp) or
+      // is recorded as unmet on the facts.
+      const updatedFacts = await recordLearnedAppOutcome(false, surfaceEscalations);
+      await maybeProposeLearnedCapabilityBuildout({
+        updatedFacts,
+        runId: null,
+        existingBuildout: canRequestCapabilityBuildout ? capabilityBuildout : null,
+        appAdapterMessage: appResult.message,
+        errorMessage: escalation.reason,
+      });
+      return {
+        adapterId: 'app_adapter',
+        execution,
+        response: [appResult.message, visibleCapabilityBuildoutMessage(capabilityBuildout)].filter(Boolean).join('\n\n'),
+        capabilityBuildout,
+        surfaceEscalations,
+        warnings,
+      };
+    }
+    if (escalation?.action === 'descend') {
+      // Breadcrumb already recorded on the adapter result; the agent run
+      // below continues on the new rung with a forced fresh observation.
+      pendingEscalation = escalation;
+    }
     const wasBridgeLaunch = (appResult.data as any)?.kind === 'desktop_bridge_launch';
     // A capability gap (no adapter matched) is NOT a success even when the
     // adapter returns ok:true with a surface inventory — it must reach the
     // buildout gate, not short-circuit as a pure launch.
     const isCapabilityGap = (appResult.data as any)?.kind === 'app_capability_gap';
-    if (appResult.ok && !isCapabilityGap && !hasFollowUpIntent(args.task) && !readyCapabilityBuildout) {
+    const isCompletedDesktopSequence = (appResult.data as any)?.kind === 'desktop_action_sequence';
+    if (appResult.ok && !isCapabilityGap && (!hasFollowUpIntent(args.task) || isCompletedDesktopSequence) && !readyCapabilityBuildout) {
       // Pure launch or a completed single-shot app action — no agent needed.
+      void recordLearnedAppOutcome(true, surfaceEscalations); // L4
       return {
         adapterId: 'app_adapter',
         execution,
@@ -513,21 +939,81 @@ export async function executeComputerTaskWithAgent(args: {
       + 'Continue from there — use desktop.wait_for_app / desktop.window_state / desktop.read_a11y_tree / desktop.menu_click / desktop.click_element / desktop.set_element_value / desktop.press_keys / desktop.type_text as needed. Do NOT re-launch.\n\n'
       + genericNavigatorPreamble
     : genericNavigatorPreamble;
+  // E1 descend: continue on the next-ranked control surface. The block forces
+  // a FRESH observation on the new rung before any mutation (the policy sets
+  // freshObservationRequired on every descend) and gates any approvals the new
+  // rung adds BEFORE acting — approvals are never widened silently.
+  let escalationPreamble = '';
+  if (pendingEscalation) {
+    const next = pendingEscalation.next;
+    if (pendingEscalation.extraApprovalsRequired.length > 0) {
+      warnings.push(`surface escalation to ${next.id} needs approval before acting: ${pendingEscalation.extraApprovalsRequired.join('; ')}`);
+    }
+    escalationPreamble = [
+      '## Surface escalation (mid-run)',
+      pendingEscalation.reason,
+      `Continue on the **${next.label}** rung (\`${next.id}\`). Do NOT retry the failed surface.`,
+      'FRESH OBSERVATION REQUIRED: re-observe on this rung (desktop.window_state + desktop.read_a11y_tree; desktop.screenshot + desktop.screen_size for the coordinate rung) BEFORE any mutation — observations from the failed surface are stale here.',
+      ...(pendingEscalation.extraApprovalsRequired.length > 0
+        ? [`APPROVAL GATE: this rung requires approvals the previous rung did not. Request them via approvals.request and WAIT for the grant BEFORE any mutating action: ${pendingEscalation.extraApprovalsRequired.join('; ')}.`]
+        : []),
+      ...(next.requirements.length > 0
+        ? [`Rung requirements: ${next.requirements.slice(0, 4).join('; ')}.`]
+        : []),
+    ].join('\n') + '\n\n';
+  }
   // Observe-before-act: for desktop/app surfaces, read the live state and hand
   // the agent the re-decided ground truth before it acts. Skipped for
   // capability-buildout retries (own prompt) and non-desktop task shapes;
   // fail-open if the bridge can't observe.
   let observeBeforeActBlock = '';
-  if (
-    !readyCapabilityBuildout
-    && (execution.preview.kind === 'app_task' || execution.preview.kind === 'hybrid_task')
-  ) {
+  const isDesktopTraceTaskKind =
+    execution.preview.kind === 'app_task' || execution.preview.kind === 'hybrid_task';
+  if (!readyCapabilityBuildout && isDesktopTraceTaskKind) {
     const liveObservations = await captureLiveSurfaceObservations(args.audit);
     if (liveObservations.length > 0) {
       const block = buildObserveBeforeActPromptBlock(args.task, liveObservations, {
         auditEvidence: deriveAuditObservedEvidence(args.audit),
       });
       if (block) observeBeforeActBlock = `${block}\n\n`;
+    }
+  }
+  // L1 retrieval-as-context: if this EXACT task (normalized like the edge
+  // replay matcher) succeeded recently in this circle, inject the prior
+  // redacted action trace as an EXAMPLE block — never a forced script.
+  // Exact-match only (verified finding 5: self-experience retrieval can
+  // regress strong models, so injection stays conservative). Skipped for
+  // capability-buildout retries, which carry their own prompt.
+  // Evidence gate (research open question 3): the per-app MEASURED
+  // assisted-vs-unassisted record decides whether the example is injected —
+  // UFO2 saw retrieved self-experience regress a strong model's overall
+  // success even while helping recovery, so suppression is earned by numbers,
+  // never assumed. No facts ⇒ inject (the verified default).
+  // `desktopExampleInjected` stays null when the seam was never consulted so
+  // those outcomes don't pollute either gate bucket.
+  let desktopTraceExampleBlock = '';
+  let desktopExampleInjected: boolean | null = null;
+  if (!readyCapabilityBuildout && isDesktopTraceTaskKind) {
+    desktopExampleInjected = false;
+    const exampleGate = shouldInjectDesktopExample(learnedFacts);
+    if (!exampleGate.inject) {
+      warnings.push(`desktop example injection suppressed by learned evidence: ${exampleGate.reason}`);
+    } else {
+      try {
+        const { findRecentDesktopActionTrace } = await import('./agentRunSystem');
+        const priorTrace = await findRecentDesktopActionTrace(
+          args.circleId,
+          normalizeDesktopTaskText(args.task),
+        );
+        if (priorTrace) {
+          const block = buildDesktopActionTraceExampleBlock(priorTrace);
+          if (block) {
+            desktopTraceExampleBlock = `${block}\n\n`;
+            desktopExampleInjected = true;
+            warnings.push(`desktop example injected from a prior successful run (${exampleGate.reason})`);
+          }
+        }
+      } catch { /* trace retrieval is an optimization — never block the task */ }
     }
   }
   const prompt = readyCapabilityBuildout
@@ -543,7 +1029,7 @@ export async function executeComputerTaskWithAgent(args: {
         appAdapterMessage,
         dispatchPrefix: execution.dispatchPrefix,
       })
-    : `${execution.dispatchPrefix}\n${observeBeforeActBlock}${followUpPreamble}USER COMPUTER TASK\n${args.task}`;
+    : `${execution.dispatchPrefix}\n${observeBeforeActBlock}${escalationPreamble}${followUpPreamble}${desktopTraceExampleBlock}USER COMPUTER TASK\n${args.task}`;
 
   // Belt-and-suspenders: if executeAgentRun throws (provider outage,
   // v2 continuation cap, model returns null), we still need to surface
@@ -581,6 +1067,19 @@ export async function executeComputerTaskWithAgent(args: {
           warnings,
         })
       : readyCapabilityBuildout;
+    // L4 + L3: the agent run itself failed — fold the failure and run the
+    // propose trigger (no runId on a thrown run → propose is recorded on the
+    // facts, never dispatched).
+    if (isDesktopTraceTaskKind) {
+      const updatedFacts = await recordLearnedAppOutcome(false, surfaceEscalations, desktopExampleInjected ?? undefined);
+      await maybeProposeLearnedCapabilityBuildout({
+        updatedFacts,
+        runId: null,
+        existingBuildout: canRequestCapabilityBuildout ? capabilityBuildout : null,
+        appAdapterMessage,
+        errorMessage: errMsg,
+      });
+    }
     const retryAttempt = await retryComputerTaskAfterReadyCapabilityBuildout({
       task: args.task,
       circleId: args.circleId,
@@ -595,6 +1094,14 @@ export async function executeComputerTaskWithAgent(args: {
       replyTo: args.replyTo,
     });
     if (retryAttempt?.warning) warnings.push(retryAttempt.warning);
+    // L4 (post-retry gap): fold the buildout-retry outcome into the learned
+    // facts via the same recording closure — a success after buildout is
+    // exactly the signal that resets the failure/a11y counters and records
+    // lastSuccessSurfaceId; a thrown retry is one more genuine failure.
+    // exampleInjected stays undefined: the retry prompt has no example seam.
+    if (retryAttempt && isDesktopTraceTaskKind) {
+      void recordLearnedAppOutcome(Boolean(retryAttempt.response), surfaceEscalations);
+    }
     if (retryAttempt?.response) {
       const retriedAt = new Date().toISOString();
       const retriedCapabilityBuildout = capabilityBuildout
@@ -616,6 +1123,7 @@ export async function executeComputerTaskWithAgent(args: {
         observedEval: retryAttempt.observedEval,
         handoffSuggestion: retryAttempt.handoffSuggestion,
         capabilityBuildout: retriedCapabilityBuildout,
+        surfaceEscalations,
         warnings,
       };
     }
@@ -628,6 +1136,7 @@ export async function executeComputerTaskWithAgent(args: {
       response: [fallback, visibleCapabilityBuildoutMessage(capabilityBuildout)].filter(Boolean).join('\n\n'),
       runId: null,
       capabilityBuildout,
+      surfaceEscalations,
       warnings,
     };
   }
@@ -636,7 +1145,7 @@ export async function executeComputerTaskWithAgent(args: {
   // string when every provider tier punts. Keep the bridge-launch
   // message visible so the user isn't looking at a blank bubble.
   const agentResponse = String(result.response || '').trim();
-  const capabilityBuildout = canRequestCapabilityBuildout
+  const heuristicCapabilityBuildout = canRequestCapabilityBuildout
     ? await requestConnectedAppCapabilityBuildout({
         circleId: args.circleId,
         userId: args.userId,
@@ -647,6 +1156,30 @@ export async function executeComputerTaskWithAgent(args: {
         warnings,
       })
     : readyCapabilityBuildout;
+  // L4: record the run outcome. Failed = no usable agent response, or the
+  // per-run heuristic detected a capability gap and filed a buildout.
+  // L3: on failure, run the propose trigger. This is the one seam with a run
+  // anchor (result.runId), so a propose that the heuristic missed files the
+  // buildout DRAFT through the existing path with the HITL approval attached
+  // (status `approval_required`) — it never executes before a human decision.
+  let learnedProposalBuildout: ComputerTaskCapabilityBuildout | null = null;
+  if (isDesktopTraceTaskKind) {
+    const learnedRunFailed = !agentResponse
+      || Boolean(canRequestCapabilityBuildout && heuristicCapabilityBuildout);
+    if (learnedRunFailed) {
+      const updatedFacts = await recordLearnedAppOutcome(false, surfaceEscalations, desktopExampleInjected ?? undefined);
+      learnedProposalBuildout = await maybeProposeLearnedCapabilityBuildout({
+        updatedFacts,
+        runId: result.runId || null,
+        existingBuildout: canRequestCapabilityBuildout ? heuristicCapabilityBuildout : null,
+        appAdapterMessage,
+        agentResponse,
+      });
+    } else {
+      void recordLearnedAppOutcome(true, surfaceEscalations, desktopExampleInjected ?? undefined);
+    }
+  }
+  const capabilityBuildout = heuristicCapabilityBuildout || learnedProposalBuildout;
   const retryAttempt = await retryComputerTaskAfterReadyCapabilityBuildout({
     task: args.task,
     circleId: args.circleId,
@@ -661,6 +1194,14 @@ export async function executeComputerTaskWithAgent(args: {
     replyTo: args.replyTo,
   });
   if (retryAttempt?.warning) warnings.push(retryAttempt.warning);
+  // L4 (post-retry gap): fold the buildout-retry outcome into the learned
+  // facts via the same closure semantics — success after buildout resets
+  // failure counters / sets lastSuccessSurfaceId. The main run's outcome was
+  // already recorded above; this records the RETRY run. exampleInjected stays
+  // undefined: the capability-retry prompt never carries the example block.
+  if (retryAttempt && isDesktopTraceTaskKind) {
+    void recordLearnedAppOutcome(Boolean(retryAttempt.response), surfaceEscalations);
+  }
   if (retryAttempt?.response) {
     const retriedAt = new Date().toISOString();
     const retriedCapabilityBuildout = capabilityBuildout
@@ -682,6 +1223,7 @@ export async function executeComputerTaskWithAgent(args: {
       observedEval: retryAttempt.observedEval || result.observedEval,
       handoffSuggestion: retryAttempt.handoffSuggestion || result.handoffSuggestion,
       capabilityBuildout: retriedCapabilityBuildout,
+      surfaceEscalations,
       warnings,
     };
   }
@@ -690,6 +1232,29 @@ export async function executeComputerTaskWithAgent(args: {
     : (appAdapterMessage
         ? `${appAdapterMessage}\n\n_(Agent didn't return follow-up text. The app is open — say what to do next and I'll continue from there.)_`
         : '(No response from the agent — try rephrasing.)');
+
+  // L1 success-only persistence + write-back: only the clean-success path
+  // stores a trace (desktop/app/hybrid kind, run row present, real agent
+  // response, no capability-buildout escalation, no mid-run surface
+  // escalations — perturbed-rung traces are brittle per verified finding 4).
+  // A run that consumed an example block and succeeded persists its NEW
+  // trace here, so the newest successful trace wins on the next retrieval.
+  if (
+    isDesktopTraceTaskKind
+    && result.runId
+    && agentResponse
+    && !capabilityBuildout
+    && !pendingEscalation
+    && (!surfaceEscalations || surfaceEscalations.length === 0)
+  ) {
+    void persistDesktopActionTraceForRun({
+      runId: result.runId,
+      circleId: args.circleId,
+      userId: args.userId,
+      task: args.task,
+      sinceIso: desktopTraceTaskStartedAtIso,
+    });
+  }
 
   return {
     adapterId: adapterIdForKind(execution.preview.kind),
@@ -700,6 +1265,7 @@ export async function executeComputerTaskWithAgent(args: {
     observedEval: result.observedEval,
     handoffSuggestion: result.handoffSuggestion,
     capabilityBuildout,
+    surfaceEscalations,
     warnings,
   };
 }

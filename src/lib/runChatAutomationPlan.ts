@@ -25,6 +25,7 @@ import type {
   ChatMode,
 } from './chatAutomationPlanner';
 import { isPlanSafeForPlanMode, describePlanModeRefusal } from './chatAutomationPlanner';
+import { buildChatAutomationPlanPreview } from './chatAutomationPlanPreview';
 
 /**
  * Outcome each transport reports back. Normalised so the caller can log
@@ -64,6 +65,38 @@ export type ChatTransportHandler = (
   ctx: ChatTransportContext,
 ) => Promise<ChatAutomationOutcome>;
 
+/**
+ * R9 — one parked clarification for a thread. Mirrors exactly what
+ * ChatTab's `pendingClarificationRef` entries hold today (the refs remain
+ * the backing store; this is just the typed seam over them) so handlers can
+ * park/resume clarifications without reaching into component refs.
+ */
+export type ChatClarificationResumePending = {
+  /** The user's original (underspecified) message. */
+  originalMessage: string;
+  /** The conversational intent we'd run once the gap is filled. */
+  pendingIntent: string | null;
+  /** Which fields the planner could not resolve. */
+  missingParams: string[];
+  /** Epoch ms when the question was asked (freshness window on resume). */
+  askedAt: number;
+};
+
+/**
+ * R9 — clarification park/resume store handed to handlers through the
+ * dispatch context. `ask_clarification` parks via `setPending`; the resume
+ * path reads `pending` and `clearPending`s once consumed. Scoped by the
+ * caller to the active thread (the ctx carries one thread's store, not the
+ * whole map). Added so the upcoming `create_task` cutover — which also
+ * produces clarifications — can park/resume through the same seam instead
+ * of needing its own ref plumbing.
+ */
+export type ChatClarificationResumeStore = {
+  pending?: ChatClarificationResumePending | null;
+  setPending: (pending: ChatClarificationResumePending) => void;
+  clearPending: () => void;
+};
+
 /** Opaque per-dispatch context. Callers populate what they have. */
 export type ChatTransportContext = {
   circleId: string;
@@ -80,6 +113,8 @@ export type ChatTransportContext = {
    *  everything subject to the HITL gate. Defaults to `'act'` when the
    *  caller does not specify. */
   chatMode?: ChatMode;
+  /** R9 — thread-scoped clarification park/resume store (see type docs). */
+  clarificationResume?: ChatClarificationResumeStore;
   /** Caller supplies app-specific extras (nav functions, state setters). */
   extras?: Record<string, unknown>;
 };
@@ -166,6 +201,19 @@ export type DispatchOptions = {
   onOutcome?: ChatAutomationObserver;
 };
 
+function attachPlanPreview(
+  plan: ChatAutomationPlan,
+  outcome: ChatAutomationOutcome,
+): ChatAutomationOutcome {
+  return {
+    ...outcome,
+    data: {
+      ...(outcome.data || {}),
+      chatAutomationPlanPreview: buildChatAutomationPlanPreview(plan),
+    },
+  };
+}
+
 // ─── Dispatch ───────────────────────────────────────────────────────────────
 
 export async function dispatchChatAutomationPlan(
@@ -186,13 +234,16 @@ export async function dispatchChatAutomationPlan(
       data: { planModeRefusal: true, executionKind: plan.execution.kind, risk: plan.risk },
       durationMs: Date.now() - started,
     };
-    try { await opts.onOutcome?.(plan, outcome, ctx); } catch {}
-    return outcome;
+    const finalOutcome = attachPlanPreview(plan, outcome);
+    try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
+    return finalOutcome;
   }
 
-  // Approval gate first. If the plan requires approval and the gate
-  // defers, we short-circuit — no transport runs.
-  if (plan.approval.required && opts.approvalGate) {
+  // Approval gate first. The gate may enforce category policy even when
+  // `plan.approval.required` is false (for example, a circle can set a
+  // normally-safe category to "never"). If the gate defers, we short-circuit
+  // and no transport runs.
+  if (opts.approvalGate) {
     const gate = await opts.approvalGate(plan, ctx);
     if (!gate.pass) {
       // Resolve retryable: explicit flag wins; otherwise derive from the
@@ -208,8 +259,9 @@ export async function dispatchChatAutomationPlan(
         durationMs: Date.now() - started,
         ...(category ? { data: { approvalCategory: category, approvalRetryable: retryable } } : {}),
       };
-      try { await opts.onOutcome?.(plan, outcome, ctx); } catch {}
-      return outcome;
+      const finalOutcome = attachPlanPreview(plan, outcome);
+      try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
+      return finalOutcome;
     }
   }
 
@@ -221,8 +273,9 @@ export async function dispatchChatAutomationPlan(
       message: `No handler registered for execution kind "${plan.execution.kind}". Falling back to caller's legacy path.`,
       durationMs: Date.now() - started,
     };
-    try { await opts.onOutcome?.(plan, outcome, ctx); } catch {}
-    return outcome;
+    const finalOutcome = attachPlanPreview(plan, outcome);
+    try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
+    return finalOutcome;
   }
 
   let outcome: ChatAutomationOutcome;
@@ -235,13 +288,18 @@ export async function dispatchChatAutomationPlan(
     outcome = {
       executionKind: plan.execution.kind,
       status: 'failed',
-      message: `Transport threw: ${err instanceof Error ? err.message : String(err)}`,
+      message: 'That automation step hit an internal error. Technical details were saved for recovery.',
+      warnings: [`Transport threw: ${err instanceof Error ? err.message : String(err)}`],
+      data: {
+        rawError: err instanceof Error ? err.message : String(err),
+      },
       durationMs: Date.now() - started,
     };
   }
 
-  try { await opts.onOutcome?.(plan, outcome, ctx); } catch {}
-  return outcome;
+  const finalOutcome = attachPlanPreview(plan, outcome);
+  try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
+  return finalOutcome;
 }
 
 // The canonical observer that writes `chatAutomationDecision` into

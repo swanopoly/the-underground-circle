@@ -19,6 +19,7 @@ const image = { name: 'photo.jpg', mimeType: 'image/jpeg', sizeBytes: 900_000 };
 const spreadsheet = { name: 'budget.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', sizeBytes: 32_000 };
 const cadDrawing = { name: 'site-plan.dwg', mimeType: 'application/octet-stream', sizeBytes: 12_400_000 };
 const solidPart = { name: 'mounting-bracket.sldprt', mimeType: 'application/octet-stream', sizeBytes: 22_000_000 };
+const matlabScript = { name: 'controller.m', mimeType: 'text/x-matlab', sizeBytes: 18_000 };
 const unknownProject = { name: 'machine-profile.customapp', mimeType: 'application/octet-stream', sizeBytes: 300_000 };
 const archive = { name: 'assets.zip', mimeType: 'application/zip', sizeBytes: 2_000_000 };
 const inddHash = 'a'.repeat(64);
@@ -36,6 +37,8 @@ assert.equal(inferDesktopAppForAttachment(image, 'crop this in photoshop'), 'Ado
 assert.equal(inferDesktopAppForAttachment(spreadsheet, 'update the totals in excel'), 'Microsoft Excel');
 assert.equal(inferDesktopAppForAttachment(cadDrawing, 'open the site plan and verify the dimensions'), 'AutoCAD');
 assert.equal(inferDesktopAppForAttachment({ name: 'panel.dxf', mimeType: 'application/octet-stream' }, 'open in Fusion 360 and inspect it'), 'Fusion 360');
+assert.equal(inferDesktopAppForAttachment(matlabScript, 'open in MATLAB and run the tests'), 'MATLAB');
+assert.equal(inferDesktopAppForAttachment({ name: 'plant.slx', mimeType: 'application/octet-stream' }, 'open the Simulink model'), 'MATLAB');
 assert.equal(inferDesktopAppForAttachment({ name: 'bracket.fcstd', mimeType: 'application/octet-stream' }, 'open and measure it'), 'FreeCAD');
 assert.equal(inferDesktopAppForAttachment({ name: 'plate.dxf', mimeType: 'application/octet-stream' }, 'open in QCAD'), 'QCAD');
 assert.equal(inferDesktopAppForAttachment(solidPart, 'open the part and check the hole spacing'), 'SOLIDWORKS');

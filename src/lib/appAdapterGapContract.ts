@@ -140,12 +140,13 @@ const PLATFORM_RESEARCH_KEYS: Record<KnownAppPlatform, string[]> = {
 const APP_RESEARCH_KEYS: { test: RegExp; keys: string[] }[] = [
   { test: /\b(photoshop|psd|psb)\b/i, keys: ['photoshopUxpScripting', 'photoshopExecuteAsModal', 'photoshopApi'] },
   { test: /\b(indesign|in\s*design|indd|idml)\b/i, keys: ['indesignUxpScripts', 'indesignUxpPlugins', 'indesignApi'] },
-  { test: /\bautocad\b/i, keys: ['autocadApi', 'autocadAutolisp', 'autodeskAutomationApi'] },
-  { test: /\b(fusion|fusion\s*360)\b/i, keys: ['fusionApi', 'autodeskAutomationApi'] },
-  { test: /\bsolidworks\b/i, keys: ['solidworksApi'] },
+  { test: /\b(auto\s*cad|autocad|civil\s*3d|autodesk)\b/i, keys: ['autocadApi', 'autocadAutolisp', 'autocadDotNetApi', 'autodeskAutomationApi', 'autodeskMcpServers', 'autodeskAssistant', 'autodeskAiKeyTechnologies'] },
+  { test: /\b(fusion|fusion\s*360)\b/i, keys: ['fusionApi', 'autodeskAutomationApi', 'autodeskMcpServers', 'autodeskAssistant'] },
+  { test: /\b(?:solid\s*works|solidworks)\b/i, keys: ['solidworksApi', 'solidworksMacros'] },
+  { test: /\b(matlab|mathworks|simulink|simscape)\b/i, keys: ['matlabMcpCoreServer', 'matlabAgenticToolkit', 'matlabAiSkillEngineering'] },
   { test: /\b(rhino|grasshopper)\b/i, keys: ['rhinoCommon'] },
-  { test: /\brevit\b/i, keys: ['revitApi', 'autodeskAutomationApi'] },
-  { test: /\binventor\b/i, keys: ['inventorApi'] },
+  { test: /\brevit\b/i, keys: ['revitApi', 'autodeskAutomationApi', 'autodeskMcpServers', 'autodeskAssistant'] },
+  { test: /\binventor\b/i, keys: ['inventorApi', 'autodeskAutomationApi', 'autodeskAssistant'] },
   { test: /\b(chrome|safari|firefox|edge|browser|web\s*app|webpage|website)\b/i, keys: ['chromeDevtoolsProtocol', 'playwrightLocators'] },
 ];
 
@@ -160,15 +161,18 @@ function researchRefsFor(appName: string, platform: KnownAppPlatform): AppAutoma
   // The generic navigator refs (Apple/Windows/Playwright/CDP) are structurally
   // AppAutomationResearchRef and cover the universal-control fallback.
   const generic = GENERIC_APP_NAVIGATOR_SOURCE_REFS as unknown as AppAutomationResearchRef[];
-  return uniqueRefs([...fromCatalog, ...generic]).slice(0, 6);
+  return uniqueRefs([...fromCatalog, ...generic]).slice(0, 9);
 }
 
 function controlSurfaceFor(appName: string, platform: KnownAppPlatform, knownApp: boolean): string {
   if (/\b(photoshop|indesign|illustrator|premiere|after effects|audition)\b/i.test(appName)) {
     return 'vendor scripting API (UXP/ExtendScript) or plugin, inside the app, before UI control';
   }
-  if (/\b(autocad|fusion|solidworks|rhino|revit|inventor)\b/i.test(appName)) {
-    return 'vendor automation API / scripting (LISP, .NET, iLogic, RhinoCommon, APS) before UI control';
+  if (/\b(matlab|mathworks|simulink|simscape)\b/i.test(appName)) {
+    return 'MATLAB MCP Core Server / Agentic Toolkit / MATLAB scripts and tests before UI control';
+  }
+  if (/\b(auto\s*cad|autocad|fusion|solid\s*works|solidworks|rhino|revit|inventor|autodesk)\b/i.test(appName)) {
+    return 'vendor automation API / scripting / MCP / Assistant surface (LISP, .NET, macros, iLogic, RhinoCommon, APS) before UI control';
   }
   if (/\b(chrome|safari|firefox|edge|browser|web\s*app|webpage|website)\b/i.test(appName)) {
     return 'browser DOM via semantic locators (role/label/text) or CDP, before screenshots/coordinates';

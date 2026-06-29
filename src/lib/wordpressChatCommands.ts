@@ -8,22 +8,37 @@
 import {
   getActiveWordPressCredentials,
   listWordPressPosts,
+  listWordPressPostsResult,
   getWordPressPost,
   publishToWordPress,
   updateWordPressPost,
   deleteWordPressPost,
   listWordPressPages,
+  listWordPressPagesResult,
   publishWordPressPage,
   fetchWordPressCategories,
+  fetchWordPressCategoriesResult,
   fetchWordPressTags,
+  fetchWordPressTagsResult,
   createWordPressCategory,
   createWordPressTag,
   getWordPressSiteInfo,
   uploadWordPressMedia,
   wpBlock,
-  type WordPressPostStatus,
+  type ActiveWordPressCredentials,
 } from './siteAutomation';
+import { evaluateWpMutationPolicy, type WpMutationAction } from './wordpressVaultPolicy';
 import { getSwanBotResponse, type SwanBotContext } from './swanbot';
+import { buildSeoMeta, diffPersistedSeoMeta, buildSeoStalenessNotice } from './wordpressContentMetadata';
+import {
+  classifyWpCommandRisk,
+  classifyWpListTarget,
+  buildWpConfirmPrompt,
+  type WpCommandAction,
+} from './wordpressCommandRisk';
+import { buildSeoPreviewCard } from './wordpressSeoPreview';
+import { slugify, resolveUniqueSlug } from './wordpressSlug';
+import { toWordPressDateGmt } from './wordpressScheduleDate';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -34,7 +49,7 @@ export interface WpCommandResult {
 
 // ── Credential loader ───────────────────────────────────────────────────────
 
-async function getCreds(circleId?: string): Promise<{ siteUrl: string; username: string; appPassword: string } | null> {
+async function getCreds(circleId?: string): Promise<ActiveWordPressCredentials | null> {
   const creds = await getActiveWordPressCredentials(circleId);
   if (!creds) return null;
   return creds;
@@ -42,6 +57,46 @@ async function getCreds(circleId?: string): Promise<{ siteUrl: string; username:
 
 function noCreds(): WpCommandResult {
   return { success: false, message: 'No WordPress site connected. Go to **Integrations > WordPress** to add your site.' };
+}
+
+// R19: when the creds came from the circle vault, enforce the row accessPolicy
+// (allowed_actions taxonomy + HTTPS origin binding) in ADDITION to the Wave-1
+// chat confirm gate. Returns a fail-closed blocker on deny, or null to proceed.
+// Absent vaultPolicy (legacy fallbacks) skips silently — unchanged behavior.
+// requiresApproval is already satisfied by the confirm token reaching the
+// handler post-confirm, so this adds no second prompt and no new fingerprint.
+function enforceVaultMutationPolicy(
+  creds: ActiveWordPressCredentials,
+  action: WpMutationAction,
+): WpCommandResult | null {
+  if (!creds.vaultPolicy) return null;
+  const decision = evaluateWpMutationPolicy({
+    accessPolicy: creds.vaultPolicy.accessPolicy,
+    allowedActions: creds.vaultPolicy.allowedActions,
+    allowedOrigins: creds.vaultPolicy.allowedOrigins,
+    siteUrl: creds.siteUrl,
+    action,
+  });
+  if (decision.allowed) return null;
+  return {
+    success: false,
+    message: `**Blocked by vault policy:** ${decision.reason}. Update the credential's allowed actions/origins in the Vault dashboard to permit this.`,
+  };
+}
+
+// Best-effort existing-slug list for collision-free slug generation. Fails OPEN
+// (returns []) on any fetch/HTTP error so a transient read never blocks a draft;
+// the error-vs-empty Result tuple lets us avoid treating an error as "no posts".
+async function fetchExistingPostSlugs(
+  siteUrl: string, username: string, appPassword: string,
+): Promise<string[]> {
+  try {
+    const res = await listWordPressPostsResult(siteUrl, username, appPassword, { perPage: 100, status: 'any' });
+    if (!res.ok) return [];
+    return res.items.map((p) => p.slug).filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 // ── Featured image generation ───────────────────────────────────────────────
@@ -121,6 +176,42 @@ function splitImageUrl(input: string): [string, string | undefined] {
   return [input.trim(), undefined];
 }
 
+function stripTrailingConfirmToken(input: string): { args: string; confirmed: boolean } {
+  const raw = String(input || '').trim();
+  const match = raw.match(/\s+confirm\s*$/i);
+  if (!match) return { args: raw, confirmed: false };
+  return { args: raw.slice(0, match.index).trim(), confirmed: true };
+}
+
+function buildWpMutationConfirmMessage(action: 'edit' | 'image', args: string): string {
+  const command = action === 'image' ? 'image' : 'edit';
+  const exampleArgs = args.trim() || (action === 'image' ? '<post_id> <image_url>' : '<id> <field>: <value>');
+  const summary = action === 'image'
+    ? 'upload media and set a featured image on WordPress content'
+    : 'edit WordPress content';
+  return `This will ${summary}. Re-issue with the confirm token to proceed: \`/wp ${command} ${exampleArgs} confirm\``;
+}
+
+// ── Pre-mutation target preview ───────────────────────────────────────────────
+
+// Best-effort resolve the post title for a confirm prompt. Failures are
+// swallowed — the prompt still works without a title.
+async function resolveWpTargetSummary(
+  action: WpCommandAction,
+  targetId: number | undefined,
+  circleId?: string,
+): Promise<string | undefined> {
+  if (!targetId || (action !== 'publish' && action !== 'delete')) return undefined;
+  try {
+    const creds = await getCreds(circleId);
+    if (!creds) return undefined;
+    const post = await getWordPressPost(creds.siteUrl, creds.username, creds.appPassword, targetId);
+    return post?.title ? post.title.slice(0, 80) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // ── Main Dispatcher ─────────────────────────────────────────────────────────
 
 export async function executeWpCommand(
@@ -135,17 +226,51 @@ export async function executeWpCommand(
 
   if (cmd === 'help') return handleHelp();
   if (cmd === 'status' || cmd === 'info') return handleStatus(context.circleId);
-  if (cmd.startsWith('list') || cmd === 'posts') return handleList(cmd, context.circleId);
-  if (cmd.startsWith('pages')) return handlePages(context.circleId);
+  const listTarget = classifyWpListTarget(cmd);
+  if (listTarget === 'pages') return handlePages(context.circleId);
+  if (listTarget === 'categories') return handleCategories(context.circleId);
+  if (listTarget === 'tags') return handleTags(context.circleId);
+  if (listTarget === 'posts') return handleList(cmd, context.circleId);
   if (cmd.startsWith('get ')) return handleGet(cmd.slice(4).trim(), context.circleId);
-  if (cmd.startsWith('delete ') || cmd.startsWith('trash ')) return handleDelete(cmd.replace(/^(delete|trash)\s+/, '').trim(), context.circleId);
-  if (cmd.startsWith('publish ')) return handlePublish(cmd.slice(8).trim(), context.circleId);
+
+  // Live-mutation confirm gate (publish/delete/schedule). Draft/AI-write stay
+  // ungated — they only create drafts. A mutating command without a trailing
+  // `confirm` token previews the change and asks the user to re-issue.
+  if (cmd.startsWith('delete ') || cmd.startsWith('trash ') || cmd.startsWith('publish ') || cmd.startsWith('schedule ')) {
+    const risk = classifyWpCommandRisk(cmd);
+    if (risk.mutating && !risk.hasConfirmToken) {
+      const summary = await resolveWpTargetSummary(risk.action, risk.targetId, context.circleId);
+      return { success: false, message: buildWpConfirmPrompt(risk.action, risk.targetId, summary) };
+    }
+    // Confirmed — delegate to the existing handlers with the token removed.
+    if (risk.action === 'delete') {
+      return handleDelete(risk.argsWithoutToken, context.circleId);
+    }
+    if (risk.action === 'publish') {
+      return handlePublish(risk.argsWithoutToken, context.circleId);
+    }
+    if (risk.action === 'schedule') {
+      // Preserve title case: strip the confirm token from the original
+      // case-preserving args rather than the lowercased `cmd`.
+      const caseArgs = trimmed.slice(trimmed.toLowerCase().indexOf('schedule ') + 9).trim();
+      const caseRisk = classifyWpCommandRisk(`schedule ${caseArgs}`);
+      return handleSchedule(caseRisk.argsWithoutToken, context);
+    }
+  }
   if (cmd.startsWith('draft ')) return handleDraft(trimmed.slice(trimmed.toLowerCase().indexOf('draft ') + 6).trim(), context);
-  if (cmd.startsWith('schedule ')) return handleSchedule(trimmed.slice(trimmed.toLowerCase().indexOf('schedule ') + 9).trim(), context);
-  if (cmd.startsWith('edit ')) return handleEdit(cmd.slice(5).trim(), context.circleId);
-  if (cmd.startsWith('image ') || cmd.startsWith('featured ')) return handleSetImage(cmd.replace(/^(image|featured)\s+/, '').trim(), context.circleId);
-  if (cmd.startsWith('categories') || cmd === 'cats') return handleCategories(context.circleId);
-  if (cmd.startsWith('tags')) return handleTags(context.circleId);
+  if (cmd.startsWith('edit ')) {
+    const caseArgs = trimmed.slice(trimmed.toLowerCase().indexOf('edit ') + 5).trim();
+    const confirmed = stripTrailingConfirmToken(caseArgs);
+    if (!confirmed.confirmed) return { success: false, message: buildWpMutationConfirmMessage('edit', confirmed.args) };
+    return handleEdit(confirmed.args, context.circleId);
+  }
+  if (cmd.startsWith('image ') || cmd.startsWith('featured ')) {
+    const verbMatch = trimmed.match(/^\/wp\s+(image|featured)\s+/i);
+    const caseArgs = verbMatch ? trimmed.slice(verbMatch[0].length).trim() : cmd.replace(/^(image|featured)\s+/, '').trim();
+    const confirmed = stripTrailingConfirmToken(caseArgs);
+    if (!confirmed.confirmed) return { success: false, message: buildWpMutationConfirmMessage('image', confirmed.args) };
+    return handleSetImage(confirmed.args, context.circleId);
+  }
   if (cmd.startsWith('write ') || cmd.startsWith('create ')) return handleAIWrite(trimmed.slice(trimmed.indexOf(' ') + 1).trim(), context);
 
   return { success: false, message: `Unknown WordPress command: "${cmd}". Type \`/wp help\` for available commands.` };
@@ -167,18 +292,20 @@ async function handleHelp(): Promise<WpCommandResult> {
 | \`/wp get <id>\` | Get post details by ID |
 | \`/wp draft <title>\` | Create a draft post (AI writes content) |
 | \`/wp write <topic>\` | AI writes and drafts a full blog post |
-| \`/wp publish <id>\` | Publish a draft post |
-| \`/wp schedule <date> <title>\` | Schedule a post for future |
-| \`/wp edit <id> title: New Title\` | Edit a post |
-| \`/wp delete <id>\` | Move post to trash |
-| \`/wp image <id> <url>\` | Set featured image from URL |
+| \`/wp publish <id> confirm\` | Publish a draft post (needs \`confirm\`) |
+| \`/wp schedule <date> <title> confirm\` | Schedule a post (needs \`confirm\`) |
+| \`/wp edit <id> title: New Title confirm\` | Edit a post (needs \`confirm\`) |
+| \`/wp delete <id> confirm\` | Move post to trash (needs \`confirm\`) |
+| \`/wp image <id> <url> confirm\` | Set featured image from URL (needs \`confirm\`) |
 | \`/wp categories\` | List categories |
 | \`/wp tags\` | List tags |
 
 **Adding featured images:**
 - \`/wp draft My Post | https://example.com/img.jpg\` — draft with featured image
 - \`/wp write My Topic | https://example.com/img.jpg\` — AI write with featured image
-- \`/wp image 42 https://example.com/img.jpg\` — set image on existing post`,
+- \`/wp image 42 https://example.com/img.jpg confirm\` — set image on existing post
+
+**Live changes require confirmation:** \`publish\`, \`delete\`, and \`schedule\` only run when you append \`confirm\` (e.g. \`/wp publish 42 confirm\`). Drafts and AI writes never need it.`,
   };
 }
 
@@ -215,9 +342,14 @@ async function handleList(cmd: string, circleId?: string): Promise<WpCommandResu
   const status = cmd.includes('draft') ? 'draft' : cmd.includes('pending') ? 'pending' : cmd.includes('all') ? 'any' : undefined;
   const search = cmd.replace(/^list\s*/, '').replace(/drafts?|pending|all|posts?/g, '').trim() || undefined;
 
-  const { posts, total } = await listWordPressPosts(creds.siteUrl, creds.username, creds.appPassword, {
+  const result = await listWordPressPostsResult(creds.siteUrl, creds.username, creds.appPassword, {
     status, search, perPage: 15,
   });
+  if (!result.ok) {
+    return { success: false, message: `Could not list WordPress posts: ${result.error || 'WordPress returned an error.'}` };
+  }
+  const posts = result.items;
+  const total = result.total || posts.length;
 
   if (posts.length === 0) {
     return { success: true, message: `No ${status || ''} posts found${search ? ` matching "${search}"` : ''}.` };
@@ -239,7 +371,11 @@ async function handlePages(circleId?: string): Promise<WpCommandResult> {
   const creds = await getCreds(circleId);
   if (!creds) return noCreds();
 
-  const pages = await listWordPressPages(creds.siteUrl, creds.username, creds.appPassword);
+  const result = await listWordPressPagesResult(creds.siteUrl, creds.username, creds.appPassword, { perPage: 100 });
+  if (!result.ok) {
+    return { success: false, message: `Could not list WordPress pages: ${result.error || 'WordPress returned an error.'}` };
+  }
+  const pages = result.items;
   if (pages.length === 0) return { success: true, message: 'No pages found.' };
 
   const rows = pages.map(p => `| ${p.id} | ${p.title.slice(0, 40)} | ${p.status.toUpperCase()} | ${p.link} |`);
@@ -283,6 +419,9 @@ async function handleDelete(idStr: string, circleId?: string): Promise<WpCommand
   const id = parseInt(idStr, 10);
   if (isNaN(id)) return { success: false, message: 'Usage: `/wp delete <post_id>`' };
 
+  const blocked = enforceVaultMutationPolicy(creds, 'delete');
+  if (blocked) return blocked;
+
   const result = await deleteWordPressPost(creds.siteUrl, creds.username, creds.appPassword, id);
   if (!result.success) return { success: false, message: `Failed to delete post #${id}: ${result.error}` };
   return { success: true, message: `Post #${id} moved to trash.` };
@@ -294,6 +433,9 @@ async function handlePublish(idStr: string, circleId?: string): Promise<WpComman
 
   const id = parseInt(idStr, 10);
   if (isNaN(id)) return { success: false, message: 'Usage: `/wp publish <post_id>`' };
+
+  const blocked = enforceVaultMutationPolicy(creds, 'publish');
+  if (blocked) return blocked;
 
   const result = await updateWordPressPost(creds.siteUrl, creds.username, creds.appPassword, id, { status: 'publish' });
   if (!result.success) return { success: false, message: `Failed to publish: ${result.error}` };
@@ -318,9 +460,12 @@ async function handleDraft(rawTitle: string, context: { circleId: string; userId
   // Upload featured image if provided
   const featuredMediaId = imageUrl ? await uploadFeaturedImage(creds.siteUrl, creds.username, creds.appPassword, title, imageUrl) : undefined;
 
+  const existingSlugs = await fetchExistingPostSlugs(creds.siteUrl, creds.username, creds.appPassword);
+  const slug = resolveUniqueSlug(slugify(title), existingSlugs);
+
   const result = await publishToWordPress({
     siteUrl: creds.siteUrl, username: creds.username, appPassword: creds.appPassword,
-    title, content, status: 'draft',
+    title, content, status: 'draft', slug,
     featuredImageUrl: featuredMediaId ? undefined : imageUrl, // If upload worked, we set it manually below
   });
 
@@ -349,6 +494,10 @@ async function handleSchedule(input: string, context: { circleId: string; userId
     return { success: false, message: 'Schedule date must be in the future.' };
   }
 
+  // schedule == future-dated publish → require the `publish` vault action.
+  const blocked = enforceVaultMutationPolicy(creds, 'schedule');
+  if (blocked) return blocked;
+
   const aiContext: SwanBotContext = { userId: context.userId, circleId: context.circleId, userName: context.userName };
   const content = await getSwanBotResponse(
     `Write a blog post titled "${title}". Write it in HTML suitable for WordPress. Include proper headings, paragraphs, formatting. At least 500 words. Return ONLY HTML.`,
@@ -359,7 +508,8 @@ async function handleSchedule(input: string, context: { circleId: string; userId
 
   const result = await publishToWordPress({
     siteUrl: creds.siteUrl, username: creds.username, appPassword: creds.appPassword,
-    title, content, status: 'draft',
+    title, content, status: 'future',
+    dateGmt: toWordPressDateGmt(scheduleDate),
     featuredImageUrl: featuredMediaId ? undefined : imageUrl,
   });
 
@@ -368,11 +518,6 @@ async function handleSchedule(input: string, context: { circleId: string; userId
   if (featuredMediaId && result.postId) {
     await updateWordPressPost(creds.siteUrl, creds.username, creds.appPassword, result.postId, { featured_media: featuredMediaId } as any);
   }
-
-  // Schedule it
-  await updateWordPressPost(creds.siteUrl, creds.username, creds.appPassword, result.postId!, {
-    status: 'future' as WordPressPostStatus,
-  });
 
   return {
     success: true,
@@ -386,10 +531,13 @@ async function handleSetImage(input: string, circleId?: string): Promise<WpComma
 
   // Parse: /wp image 42 https://example.com/img.jpg
   const match = input.match(/^(\d+)\s+(https?:\/\/.+)$/);
-  if (!match) return { success: false, message: 'Usage: `/wp image <post_id> <image_url>`\nExample: `/wp image 42 https://example.com/photo.jpg`' };
+  if (!match) return { success: false, message: 'Usage: `/wp image <post_id> <image_url> confirm`\nExample: `/wp image 42 https://example.com/photo.jpg confirm`' };
 
   const [, idStr, url] = match;
   const postId = parseInt(idStr, 10);
+
+  const blocked = enforceVaultMutationPolicy(creds, 'edit');
+  if (blocked) return blocked;
 
   const mediaId = await uploadFeaturedImage(creds.siteUrl, creds.username, creds.appPassword, `post-${postId}`, url);
   if (!mediaId) return { success: false, message: `Failed to upload image from: ${url.slice(0, 80)}` };
@@ -406,15 +554,20 @@ async function handleEdit(input: string, circleId?: string): Promise<WpCommandRe
 
   // Parse: /wp edit 123 title: New Title
   const match = input.match(/^(\d+)\s+(\w+):\s*(.+)$/);
-  if (!match) return { success: false, message: 'Usage: `/wp edit <id> <field>: <value>`\nFields: title, status, excerpt\nExample: `/wp edit 42 title: My Updated Title`' };
+  if (!match) return { success: false, message: 'Usage: `/wp edit <id> <field>: <value> confirm`\nFields: title, status, excerpt\nExample: `/wp edit 42 title: My Updated Title confirm`' };
 
   const [, idStr, field, value] = match;
   const id = parseInt(idStr, 10);
   const updates: Record<string, string> = {};
-  if (field === 'title') updates.title = value;
-  else if (field === 'status') updates.status = value as any;
-  else if (field === 'excerpt') updates.excerpt = value;
+  const fieldKey = field.toLowerCase();
+  if (fieldKey === 'title') updates.title = value;
+  else if (fieldKey === 'status') updates.status = value as any;
+  else if (fieldKey === 'excerpt') updates.excerpt = value;
   else return { success: false, message: `Unknown field "${field}". Use: title, status, excerpt` };
+
+  const policyAction = fieldKey === 'status' && value.trim().toLowerCase() === 'publish' ? 'publish' : 'edit';
+  const blocked = enforceVaultMutationPolicy(creds, policyAction);
+  if (blocked) return blocked;
 
   const result = await updateWordPressPost(creds.siteUrl, creds.username, creds.appPassword, id, updates);
   if (!result.success) return { success: false, message: `Edit failed: ${result.error}` };
@@ -425,7 +578,11 @@ async function handleCategories(circleId?: string): Promise<WpCommandResult> {
   const creds = await getCreds(circleId);
   if (!creds) return noCreds();
 
-  const cats = await fetchWordPressCategories(creds.siteUrl, creds.username, creds.appPassword);
+  const result = await fetchWordPressCategoriesResult(creds.siteUrl, creds.username, creds.appPassword);
+  if (!result.ok) {
+    return { success: false, message: `Could not list WordPress categories: ${result.error || 'WordPress returned an error.'}` };
+  }
+  const cats = result.items;
   if (cats.length === 0) return { success: true, message: 'No categories found.' };
 
   const rows = cats.map(c => `| ${c.id} | ${c.name} | ${c.slug} | ${c.count} |`);
@@ -436,7 +593,11 @@ async function handleTags(circleId?: string): Promise<WpCommandResult> {
   const creds = await getCreds(circleId);
   if (!creds) return noCreds();
 
-  const tags = await fetchWordPressTags(creds.siteUrl, creds.username, creds.appPassword);
+  const result = await fetchWordPressTagsResult(creds.siteUrl, creds.username, creds.appPassword);
+  if (!result.ok) {
+    return { success: false, message: `Could not list WordPress tags: ${result.error || 'WordPress returned an error.'}` };
+  }
+  const tags = result.items;
   if (tags.length === 0) return { success: true, message: 'No tags found.' };
 
   const rows = tags.map(t => `| ${t.id} | ${t.name} | ${t.slug} | ${t.count} |`);
@@ -457,8 +618,9 @@ async function handleAIWrite(rawTopic: string, context: { circleId: string; user
 
 Requirements:
 - Compelling title (return it on the first line prefixed with TITLE: )
-- SEO-optimized meta description (return on second line prefixed with META: )
-- 3-5 suggested tags (return on third line prefixed with TAGS: comma,separated)
+- SEO-optimized meta description (return on a line prefixed with META: )
+- SEO browser/title-tag headline, <= 60 chars (return on a line prefixed with SEOTITLE: )
+- 3-5 suggested tags (return on a line prefixed with TAGS: comma,separated)
 - Full HTML content after a blank line — at least 800 words
 - Use h2, h3 headings, paragraphs, bullet lists, bold text
 - Engaging intro, detailed body, strong conclusion with CTA
@@ -470,11 +632,13 @@ Requirements:
   const lines = aiResponse.split('\n');
   let title = topic;
   let metaDesc = '';
+  let seoTitle = '';
   let tagNames: string[] = [];
   let contentStart = 0;
 
   for (let i = 0; i < Math.min(lines.length, 10); i++) {
-    if (lines[i].startsWith('TITLE:')) { title = lines[i].slice(6).trim(); contentStart = i + 1; }
+    if (lines[i].startsWith('SEOTITLE:')) { seoTitle = lines[i].slice(9).trim(); contentStart = i + 1; }
+    else if (lines[i].startsWith('TITLE:')) { title = lines[i].slice(6).trim(); contentStart = i + 1; }
     else if (lines[i].startsWith('META:')) { metaDesc = lines[i].slice(5).trim(); contentStart = i + 1; }
     else if (lines[i].startsWith('TAGS:')) { tagNames = lines[i].slice(5).split(',').map(t => t.trim()).filter(Boolean); contentStart = i + 1; }
     else if (lines[i].trim() === '' && contentStart > 0) { contentStart = i + 1; break; }
@@ -497,16 +661,16 @@ Requirements:
   // Upload featured image if provided
   const featuredMediaId = imageUrl ? await uploadFeaturedImage(creds.siteUrl, creds.username, creds.appPassword, title, imageUrl) : undefined;
 
-  // Publish as draft with SEO meta
-  const meta: Record<string, string> = {};
-  if (metaDesc) {
-    meta._yoast_wpseo_metadesc = metaDesc;
-    meta.rank_math_description = metaDesc;
-  }
+  // Publish as draft with SEO meta — emits both Yoast + RankMath keys, and a
+  // dedicated SEO title-tag headline when the model returned one.
+  const focusKeyword = tagNames[0];
+  const meta = buildSeoMeta({ metaDesc, seoTitle, focusKeyword });
+  const existingSlugs = await fetchExistingPostSlugs(creds.siteUrl, creds.username, creds.appPassword);
+  const slug = resolveUniqueSlug(slugify(title), existingSlugs);
 
   const result = await publishToWordPress({
     siteUrl: creds.siteUrl, username: creds.username, appPassword: creds.appPassword,
-    title, content, status: 'draft', tags: tagIds, meta,
+    title, content, status: 'draft', tags: tagIds, meta, slug,
     featuredImageUrl: featuredMediaId ? undefined : imageUrl,
   });
 
@@ -517,20 +681,38 @@ Requirements:
     await updateWordPressPost(creds.siteUrl, creds.username, creds.appPassword, result.postId, { featured_media: featuredMediaId } as any);
   }
 
+  // Honest SEO-meta read-back: WP only echoes show_in_rest + editable keys, so
+  // a dropped key is a reliable "not persisted" signal. Never fails the draft.
+  const seoDiff = diffPersistedSeoMeta(meta, result.returnedMeta);
+  const seoMetaRow = Object.keys(meta).length === 0
+    ? 'None'
+    : seoDiff.dropped.length === 0
+      ? `Persisted (${seoDiff.persisted.length} keys)`
+      : `Partial — persisted ${seoDiff.persisted.length}, dropped ${seoDiff.dropped.length}`;
+
+  // Field-level SEO approval preview — mirrors exactly what was written.
+  const previewCard = buildSeoPreviewCard({
+    title,
+    metaDesc,
+    seoTitle,
+    focusKeyword,
+    tags: tagNames,
+    postId: result.postId,
+    wordCount: content.split(/\s+/).filter(Boolean).length,
+    featuredImage: featuredMediaId ? 'attached' : imageUrl ? 'failed' : 'none',
+  });
+
+  const blockerLine = seoDiff.blocker ? `\n\n> ${seoDiff.blocker}` : '';
+  const stalenessLine = buildSeoStalenessNotice(seoDiff.persisted.length);
+
   return {
     success: true,
-    message: `**AI Blog Post Created** (Draft)
+    message: `**AI Blog Post Created** (Draft, ID ${result.postId})
 
-| | |
-|---|---|
-| **Title** | ${title} |
-| **ID** | ${result.postId} |
-| **Status** | DRAFT |
-| **Featured Image** | ${featuredMediaId ? 'Attached' : imageUrl ? 'Upload failed' : 'None — use `/wp image ${result.postId} <url>`'} |
-| **Tags** | ${tagNames.join(', ') || 'None'} |
-| **SEO Meta** | ${metaDesc.slice(0, 80) || 'None'}... |
-| **Words** | ~${content.split(/\s+/).length} |
+${previewCard}
 
-Use \`/wp publish ${result.postId}\` to go live, or \`/wp get ${result.postId}\` to review.`,
+**SEO Meta:** ${seoMetaRow}${blockerLine}${stalenessLine ? `\n\n> ${stalenessLine}` : ''}
+
+Use \`/wp publish ${result.postId} confirm\` to go live, or \`/wp get ${result.postId}\` to review.`,
   };
 }

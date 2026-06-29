@@ -19,6 +19,7 @@ import {
   formatChatFailureRecoveryOptionSelection,
   formatChatFailureRecoveryOptionSelectionForPrompt,
   formatChatFailureRecoveryUserMessage,
+  formatChatFailureRecoveryDetail,
   parseChatFailureRecoveryOptionSelection,
   resolveChatFailureRecoveryOptionFollowup,
   shouldSuppressDuplicateChatFailureHandoff,
@@ -205,20 +206,31 @@ async function main() {
     failureMessage: agentInput.failureMessage,
     checkpointRecovery,
   }, fakeRecovery);
+  const detailMessage = formatChatFailureRecoveryDetail({
+    task: agentInput.task,
+    failureMessage: agentInput.failureMessage,
+    checkpointRecovery,
+  }, fakeRecovery);
   const recoveryOptions = buildChatFailureRecoveryOptions({
     task: agentInput.task,
     failureMessage: agentInput.failureMessage,
     checkpointRecovery,
   }, fakeRecovery);
-  assert(userMessage.includes('The chat task failed:'), 'user message includes visible failure context');
-  assert(userMessage.includes('Connected agent recovery started'), 'user message reports delegated recovery');
-  assert(userMessage.includes('constraint_violation'), 'user message includes failure class');
-  assert(userMessage.includes('Next actor: `connected_agent`'), 'user message includes runbook next actor');
-  assert(userMessage.includes('Next step:'), 'user message includes actionable runbook step');
-  assert(userMessage.includes('Failed checkpoint: `observe-desktop`'), 'user message includes failed checkpoint');
-  assert(userMessage.includes('Options:'), 'user message includes recovery options');
-  assert(userMessage.includes('Retry after fresh evidence'), 'user message includes fresh-evidence retry option');
-  assert(userMessage.includes('Let codex repair it'), 'user message includes connected-agent repair option');
+  // Chat bubble is TERSE: a one-line reason + the recovery status, no diagnosis dump.
+  assert(userMessage.startsWith("Couldn't finish:"), 'terse chat message leads with a one-line reason');
+  assert(userMessage.includes('Launched Codex failure recovery.'), 'terse message reports the delegated recovery');
+  assert(!userMessage.includes('Failed checkpoint:') && !userMessage.includes('Classified as'), 'terse message omits the internal diagnosis dump');
+  assert(userMessage.split('\n').length <= 3, 'terse message is at most a couple of lines');
+  // The full breakdown is preserved on the detail formatter (archive/debug).
+  assert(detailMessage.includes('The chat task failed:'), 'detail message includes visible failure context');
+  assert(detailMessage.includes('Connected agent recovery started'), 'detail message reports delegated recovery');
+  assert(detailMessage.includes('constraint_violation'), 'detail message includes failure class');
+  assert(detailMessage.includes('Next actor: `connected_agent`'), 'detail message includes runbook next actor');
+  assert(detailMessage.includes('Next step:'), 'detail message includes actionable runbook step');
+  assert(detailMessage.includes('Failed checkpoint: `observe-desktop`'), 'detail message includes failed checkpoint');
+  assert(detailMessage.includes('Options:'), 'detail message includes recovery options');
+  assert(detailMessage.includes('Retry after fresh evidence'), 'detail message includes fresh-evidence retry option');
+  assert(detailMessage.includes('Let codex repair it'), 'detail message includes connected-agent repair option');
   const inferredEvidenceAgentInput = buildChatFailureRecoveryInput({
     task: 'Open Photoshop and update the headline text layer, then export a proof png',
     failureMessage: 'Photoshop layer inventory was missing before the text mutation.',
@@ -264,7 +276,7 @@ async function main() {
     source: 'computer_task_outcome',
   }, fakeRecovery);
   assert(inferredEvidenceOptions.some((option) => option.source === 'evidence_contract'), 'inferred evidence recovery produces evidence-contract options');
-  const cardOnlyVisibleMessage = stripChatFailureRecoveryOptionsText(userMessage);
+  const cardOnlyVisibleMessage = stripChatFailureRecoveryOptionsText(detailMessage);
   assert(!cardOnlyVisibleMessage.includes('Options:'), 'card renderer can strip duplicate recovery option text');
   assert(cardOnlyVisibleMessage.includes('The chat task failed:'), 'stripped recovery message keeps failure context');
   assert(cardOnlyVisibleMessage.includes('Failed checkpoint: `observe-desktop`'), 'stripped recovery message keeps checkpoint context');
@@ -525,8 +537,9 @@ async function main() {
   });
   assert(!suppressed.recovery.ok, 'suppressed duplicate recovery does not call connected agent');
   assert(suppressed.recovery.launched === false, 'suppressed duplicate recovery does not launch Codex');
-  assert(suppressed.userMessage.includes('Duplicate handoff suppressed'), 'suppressed duplicate user message explains dedupe');
-  assert(suppressed.userMessage.includes('Options:'), 'suppressed duplicate user message still shows options');
+  assert(suppressed.userMessage.startsWith("Couldn't finish:"), 'suppressed duplicate chat message is terse');
+  assert(suppressed.detail.includes('Duplicate handoff suppressed'), 'suppressed duplicate detail explains dedupe');
+  assert(suppressed.detail.includes('Options:'), 'suppressed duplicate detail still shows options');
   assert(suppressed.recoveryOptions.some((option) => option.id === 'let_connected_agent_repair'), 'suppressed duplicate preserves connected-agent option context');
   assert(suppressed.archiveSummary.includes('suppressed'), 'suppressed duplicate archive summary is explicit');
   assert(suppressed.archiveMetadata.suppressed === true, 'suppressed duplicate archive metadata is explicit');
@@ -547,8 +560,9 @@ async function main() {
   assert(!blocked.recovery.ok, 'human-verification chat recovery returns blocked result');
   assert(blocked.recovery.launched === false, 'human-verification chat recovery does not launch Codex');
   assert(blocked.runbook.nextActor === 'user', 'human-verification chat recovery returns user-action runbook');
-  assert(blocked.userMessage.includes('did not launch'), 'blocked user message explains no launch');
-  assert(blocked.userMessage.includes('Options:'), 'blocked user message gives options');
+  assert(blocked.userMessage.startsWith("Couldn't finish:"), 'blocked chat message is terse');
+  assert(blocked.detail.includes('did not launch'), 'blocked detail explains no launch');
+  assert(blocked.detail.includes('Options:'), 'blocked detail gives options');
   assert(blocked.recoveryOptions.some((option) => option.id === 'user_unblock' && option.actor === 'user'), 'blocked recovery offers user unblock option');
   assert(blocked.archiveMetadata.failureClass === 'human_verification_required', 'blocked archive metadata includes human verification class');
 
@@ -564,7 +578,7 @@ async function main() {
   });
   assert(complexRecovery.runbook.complexity.level === 'complex', 'complex chat recovery returns complex runbook');
   assert(complexRecovery.runbook.coordinationMode === 'decompose_then_recover', 'complex chat recovery returns decomposition coordination');
-  assert(complexRecovery.userMessage.includes('Complexity: `complex`'), 'complex chat recovery user message includes complexity');
+  assert(complexRecovery.detail.includes('Complexity: `complex`'), 'complex chat recovery detail includes complexity');
   assert(complexRecovery.archiveMetadata.coordinationMode === 'decompose_then_recover', 'complex chat recovery archives coordination mode');
 
   if (failures > 0) {

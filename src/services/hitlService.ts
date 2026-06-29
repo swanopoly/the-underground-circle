@@ -96,6 +96,31 @@ export async function getAgentControl(
   }
 }
 
+/**
+ * O4: the most restrictive `spending_limit_daily` configured across the
+ * circle's agent control rows, in USD. Controls are per office agent
+ * (session_key), but subagent delegation is a circle-level multiplier on
+ * spend, so the gate honors the tightest configured budget. Returns null
+ * when no control row exists or the read fails — callers treat null as
+ * "no limit configured" (the delegation budget guard fails open).
+ */
+export async function getCircleMinSpendingLimit(circleId: string): Promise<number | null> {
+  try {
+    const { data, error } = await supabase
+      .from('agent_controls')
+      .select('spending_limit_daily')
+      .eq('circle_id', circleId);
+    if (error || !data || data.length === 0) return null;
+    const limits = data
+      .map(row => Number(row.spending_limit_daily))
+      .filter(value => Number.isFinite(value) && value >= 0);
+    if (limits.length === 0) return null;
+    return Math.min(...limits);
+  } catch {
+    return null;
+  }
+}
+
 export async function upsertAgentControl(
   circleId: string,
   sessionKey: string,

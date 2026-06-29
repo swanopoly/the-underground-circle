@@ -1033,7 +1033,7 @@ function inferApp(input: string): PredictiveChatCommand['app'] | null {
   if (/\bwordpress|wp\b|wp-admin|blog|cms|posts?|publish|draft post|media library\b/i.test(input)) {
     return 'WordPress';
   }
-  if (/\b(auto\s*cad|autocad|cad|fusion\s*360|solid\s*works|solidworks|sketch\s*up|sketchup|freecad|librecad|qcad|rhino(?:ceros)?|revit|civil\s*3d|inventor|onshape|dwg|dxf|floor plan|technical drawing|engineering drawing|mechanical drawing|blueprint|dimensioned drawing|parametric sketch)\b/i.test(input)) {
+  if (/\b(auto\s*cad|autocad|cad|fusion\s*360|solid\s*works|solidworks|matlab|simulink|simscape|sketch\s*up|sketchup|freecad|librecad|qcad|rhino(?:ceros)?|revit|civil\s*3d|inventor|onshape|dwg|dxf|mlx|slx|floor plan|technical drawing|engineering drawing|mechanical drawing|blueprint|dimensioned drawing|parametric sketch|simulation|toolbox)\b/i.test(input)) {
     return 'Engineering';
   }
   if (/\bimage|photo|picture|generative fill|generative expand|save for web|background|harmoni[sz]e|style transfer|smart portrait|social canvas|selected area|highlighted area|selection brush|marquee\b/i.test(input)) {
@@ -1067,7 +1067,7 @@ function nextStepCommands(input: string): PredictiveCommandSeed[] {
   const targetText = normalize([input, last?.appQuery, last?.reason, last?.targetLabel, last?.menuPath?.join(' ')].filter(Boolean).join(' '));
   if (!targetText) return [];
 
-  if (/\b(auto\s*cad|autocad|cad|fusion\s*360|solid\s*works|solidworks|sketch\s*up|sketchup|freecad|librecad|qcad|rhino(?:ceros)?|revit|civil\s*3d|inventor|onshape|dwg|dxf|engineering drawing|technical drawing|floor plan|parametric sketch)\b/i.test(targetText)) {
+  if (/\b(auto\s*cad|autocad|cad|fusion\s*360|solid\s*works|solidworks|matlab|simulink|simscape|sketch\s*up|sketchup|freecad|librecad|qcad|rhino(?:ceros)?|revit|civil\s*3d|inventor|onshape|dwg|dxf|mlx|slx|engineering drawing|technical drawing|floor plan|parametric sketch|simulation|toolbox)\b/i.test(targetText)) {
     if (/\b(export|save|dxf|dwg|step|stl|overwrite)\b/i.test(targetText)) {
       return ENGINEERING_COMMANDS.filter((cmd) => ['eng-export-dxf', 'eng-dimension-check', 'eng-open-cad'].includes(cmd.id));
     }

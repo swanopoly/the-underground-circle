@@ -15,6 +15,7 @@ import {
   buildChatFailureRecoveryOptions,
   buildChatFailureRecoveryVerificationPlan,
   formatChatFailureRecoveryUserMessage,
+  formatChatFailureRecoveryDetail,
 } from '../src/lib/chatFailureRecovery';
 import { buildChatComputerRequestRoute } from '../src/lib/chatComputerRequestRouter';
 import {
@@ -212,8 +213,10 @@ const buildoutOptions = buildChatFailureRecoveryOptions({
 assert(buildoutOptions.some((option) => option.id === 'let_connected_agent_repair' && option.detail.includes('codex-session-1') && option.source === 'evidence_contract'), 'connected-agent recovery option keeps launched session context');
 
 const userMessage = formatChatFailureRecoveryUserMessage(input, fakeRecovery);
-assert(userMessage.includes('Evidence contract:'), 'visible recovery message includes compact evidence contract diagnosis');
-assert(userMessage.includes('Retry with required evidence') || userMessage.includes('Retry after fresh evidence'), 'visible recovery message includes fresh evidence option');
+assert(userMessage.startsWith("Couldn't finish:"), 'chat bubble is terse — one-line reason, no evidence-contract dump');
+const detailMessage = formatChatFailureRecoveryDetail(input, fakeRecovery);
+assert(detailMessage.includes('Evidence contract:'), 'detail message includes compact evidence contract diagnosis');
+assert(detailMessage.includes('Retry with required evidence') || detailMessage.includes('Retry after fresh evidence'), 'detail message includes fresh evidence option');
 
 const archive = buildChatFailureRecoveryArchive(input, fakeRecovery);
 assert((archive.archiveMetadata.evidenceRecovery as any)?.failureArea === 'actionability', 'archive metadata stores evidence recovery context');
@@ -260,5 +263,68 @@ assert(acmeFreshRecovery?.requiredFreshEvidence.some((item) => /accessibility|se
 
 // Non-app failures are unchanged: no app capability research is attached.
 assert.equal(browserRecovery?.appCapabilityResearch ?? null, null, 'browser recovery has no app capability research');
+
+// ─── AR4: context-aware recovery — switch to a launchable fallback ────────
+const webFallback = {
+  displayName: 'Photopea',
+  surface: 'browser' as const,
+  openVia: 'browser_url',
+  openTarget: 'https://www.photopea.com',
+  reason: 'full-featured web app — works in the browser',
+  availability: 'web' as const,
+};
+
+// The user asked for Pixelmator; its adapter is missing. WITHOUT a fallback
+// this routes to a connected-agent buildout — WITH a launchable web fallback
+// it becomes a one-tap switch-and-retry that names both intent and target.
+const unavailableNoFallback = diagnoseComputerTaskEvidenceFailure({
+  contract: photoshopRoute.evidenceContract,
+  task: 'Edit the product photo in Pixelmator',
+  failureMessage: 'Missing adapter: no Pixelmator bridge tool is implemented for this command.',
+});
+assert.equal(unavailableNoFallback?.failureArea, 'capability_gap', 'AR4: missing adapter → capability gap');
+assert.equal(unavailableNoFallback?.recommendedOptionId, 'let_connected_agent_repair', 'AR4: missing adapter with NO fallback routes to buildout');
+assert.equal(unavailableNoFallback?.appFallback ?? null, null, 'AR4: no fallback → no appFallback on the context');
+
+const unavailableWithFallback = diagnoseComputerTaskEvidenceFailure({
+  contract: photoshopRoute.evidenceContract,
+  task: 'Edit the product photo in Pixelmator',
+  failureMessage: 'Missing adapter: no Pixelmator bridge tool is implemented for this command.',
+  namedAppIntent: 'pixelmator',
+  appFallback: webFallback,
+});
+assert.equal(unavailableWithFallback?.recommendedOptionId, 'retry_with_fresh_evidence', 'AR4: launchable fallback turns a dead-end into switch-and-retry');
+assert.equal(unavailableWithFallback?.userActionRequired, false, 'AR4: switch does not require the user');
+assert.equal(unavailableWithFallback?.retryAllowed, true, 'AR4: switch allows retry');
+assert.equal(unavailableWithFallback?.appFallback?.displayName, 'Photopea', 'AR4: the fallback rides the recovery context');
+assert(/you asked to use pixelmator/i.test(unavailableWithFallback?.reason || ''), 'AR4: reason names the user intent');
+assert(/photopea/i.test(unavailableWithFallback?.reason || ''), 'AR4: reason names the concrete fallback');
+assert(/switch to photopea/i.test(unavailableWithFallback?.resumeInstruction || ''), 'AR4: resume instruction says switch to the fallback');
+assert(/open it in the browser/i.test(unavailableWithFallback?.resumeInstruction || ''), 'AR4: resume instruction says how to open the fallback');
+// Re-grounds on the fallback surface — not the capability-gap buildout smokes.
+assert(!unavailableWithFallback?.requiredEvidence.some((item) => item.tool === 'agent.build_app_capability.result'), 'AR4: switch re-grounds, no buildout-result requirement');
+
+// A website auth/verification wall is NOT solved by switching photo editors —
+// the fallback must be suppressed there.
+const authWall = diagnoseComputerTaskEvidenceFailure({
+  contract: photoshopRoute.evidenceContract,
+  task: 'Edit the product photo in Pixelmator',
+  failureMessage: 'A two-factor verification code is required to sign in before continuing.',
+  namedAppIntent: 'pixelmator',
+  appFallback: webFallback,
+});
+assert.equal(authWall?.appFallback ?? null, null, 'AR4: auth/verification blocker suppresses the app switch');
+assert.notEqual(authWall?.recommendedOptionId, 'retry_with_fresh_evidence', 'AR4: auth blocker still routes to the user, not a silent switch');
+
+// An UNCONFIRMED ('maybe') desktop fallback is not offered — switching to
+// another unverified app would just chain the same failure.
+const maybeFallback = diagnoseComputerTaskEvidenceFailure({
+  contract: photoshopRoute.evidenceContract,
+  task: 'Edit the product photo in Pixelmator',
+  failureMessage: 'Pixelmator Pro is not available on this Mac.',
+  namedAppIntent: 'pixelmator',
+  appFallback: { displayName: 'GIMP', surface: 'desktop', availability: 'maybe' },
+});
+assert.equal(maybeFallback?.appFallback ?? null, null, "AR4: a 'maybe' desktop fallback is not offered as a switch");
 
 console.log('All computer task evidence recovery smoke cases passed.');

@@ -28,6 +28,7 @@ export type PendingBotMessageRecord = {
   recoveryOptions?: unknown[];
   recoveryReliability?: unknown;
   computerHandoff?: unknown;
+  chatAutomationPlanPreview?: unknown;
   modeOutcomeSummary?: { headline: string; bulletPoints?: string[]; blockers?: string[] } | null;
   observedEval?: unknown;
   commandDecisions?: unknown[];

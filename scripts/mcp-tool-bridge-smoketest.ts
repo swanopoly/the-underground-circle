@@ -16,11 +16,15 @@ import {
   fenceUntrustedMcpText,
   extractMcpResultText,
   buildMcpAgentTools,
+  mergeMcpToolsIntoCatalog,
+  adaptLegacyToolApprovalGate,
+  getMcpToolsForCircle,
   MCP_TOOL_NAME_MAX_LENGTH,
   MCP_RESULT_TEXT_MAX_CHARS,
+  MAX_MCP_TOOLS_PER_TURN,
   type McpToolApprovalGate,
 } from '../src/lib/mcpToolBridge';
-import type { AgentToolContext } from '../src/lib/agentExecutionCore';
+import type { AgentToolContext, AgentToolDefinition } from '../src/lib/agentExecutionCore';
 
 let failures = 0;
 
@@ -352,6 +356,155 @@ async function run() {
     expect(defs.length === 2, `both sanitization-colliding tools survive (got ${defs.length})`);
     expect(new Set(defs.map((d) => d.name)).size === 2, 'post-sanitization duplicate tool names are disambiguated');
     pass('unknown-server tools dropped; duplicate sanitized names disambiguated');
+  }
+
+  // -------------------------------------------------------------------------
+  // 5. getMcpToolsForCircle — whole-path trusted-ids plumbing (stubbed deps)
+  // -------------------------------------------------------------------------
+  {
+    const calls: string[] = [];
+    const deps = {
+      listMcpServers: async () => [
+        { id: 'srv-a', name: 'Server A' },
+        { id: 'srv-b', name: 'Server B' },
+      ],
+      fetchAllMcpTools: async () => [
+        { name: 'read_docs', inputSchema: { type: 'object' }, serverId: 'srv-a', annotations: { readOnlyHint: true } } as any,
+        { name: 'read_docs', inputSchema: { type: 'object' }, serverId: 'srv-b', annotations: { readOnlyHint: true } } as any,
+      ],
+      callMcpTool: async (serverId: string, toolName: string) => {
+        calls.push(`${serverId}:${toolName}`);
+        return { content: [{ type: 'text', text: 'ok' }] };
+      },
+    };
+
+    // 5a. Trust store says srv-a is trusted ⇒ its readOnly tool runs auto
+    // end-to-end; srv-b stays untrusted ⇒ policy block without a gate.
+    const trustReads: string[] = [];
+    const defs = await getMcpToolsForCircle('circle-1', {
+      deps: {
+        ...deps,
+        getTrustedServerIds: async (circleId) => {
+          trustReads.push(circleId);
+          return ['srv-a'];
+        },
+      },
+    });
+    expect(trustReads.length === 1, 'trust store is consulted exactly once per fetch');
+    expect(trustReads[0] === 'circle-1', 'trust store sees the circle id');
+    const trustedTool = defs.find((d) => d.name === 'mcp__server_a__read_docs')!;
+    const untrustedTool = defs.find((d) => d.name === 'mcp__server_b__read_docs')!;
+    expect(!!trustedTool && !!untrustedTool, 'both servers expose namespaced tools');
+    const okResult = await trustedTool.handler({}, ctx);
+    expect(okResult.ok === true, 'trusted server + readOnly tool runs auto through the whole path');
+    expect(calls.includes('srv-a:read_docs'), 'trusted auto call reaches the stubbed mcpClient');
+    const blockedResult = await untrustedTool.handler({}, ctx);
+    expect(blockedResult.ok === false && /POLICY BLOCK/.test((blockedResult as any).error), 'untrusted server readOnly tool stays gated (fail closed)');
+    expect(!calls.includes('srv-b:read_docs'), 'untrusted gated call never reaches the server');
+
+    // 5b. Trust read throwing ⇒ silent empty ⇒ everything untrusted.
+    const failClosedDefs = await getMcpToolsForCircle('circle-1', {
+      deps: {
+        ...deps,
+        getTrustedServerIds: async () => {
+          throw new Error('settings table unreachable');
+        },
+      },
+    });
+    const aTool = failClosedDefs.find((d) => d.name === 'mcp__server_a__read_docs')!;
+    const aResult = await aTool.handler({}, ctx);
+    expect(aResult.ok === false && /POLICY BLOCK/.test((aResult as any).error), 'trust-read failure resolves to nothing trusted (fail closed)');
+
+    // 5c. Explicit opts.trustedServerIds wins over the trust store.
+    let storeConsulted = false;
+    const explicitDefs = await getMcpToolsForCircle('circle-1', {
+      trustedServerIds: ['srv-b'],
+      deps: {
+        ...deps,
+        getTrustedServerIds: async () => {
+          storeConsulted = true;
+          return ['srv-a'];
+        },
+      },
+    });
+    expect(!storeConsulted, 'explicit trustedServerIds skips the trust-store read');
+    const bTool = explicitDefs.find((d) => d.name === 'mcp__server_b__read_docs')!;
+    const bResult = await bTool.handler({}, ctx);
+    expect(bResult.ok === true, 'explicitly-trusted server runs its readOnly tool auto');
+    pass('getMcpToolsForCircle plumbs trusted ids end-to-end (auto when trusted, fail closed otherwise)');
+  }
+
+  // -------------------------------------------------------------------------
+  // 6. mergeMcpToolsIntoCatalog — bounding, deterministic order, collisions
+  // -------------------------------------------------------------------------
+  {
+    const mkTool = (name: string): AgentToolDefinition => ({
+      name,
+      description: name,
+      input_schema: { type: 'object' },
+      handler: async () => ({ ok: true, data: name }),
+    });
+    const catalog = [mkTool('vault.read'), mkTool('mcp__dup__tool')];
+
+    // Deterministic order regardless of input order.
+    const mcpA = [mkTool('mcp__s__b'), mkTool('mcp__s__a'), mkTool('mcp__s__c')];
+    const mcpB = [...mcpA].reverse();
+    const mergedA = mergeMcpToolsIntoCatalog(catalog, mcpA);
+    const mergedB = mergeMcpToolsIntoCatalog(catalog, mcpB);
+    expect(
+      JSON.stringify(mergedA.tools.map((t) => t.name)) === JSON.stringify(mergedB.tools.map((t) => t.name)),
+      'merge order is deterministic regardless of MCP fetch order',
+    );
+    expect(
+      JSON.stringify(mergedA.appended) === JSON.stringify(['mcp__s__a', 'mcp__s__b', 'mcp__s__c']),
+      `MCP tools append in sorted name order (got ${mergedA.appended.join(', ')})`,
+    );
+    expect(mergedA.tools[0].name === 'vault.read', 'catalog tools stay first and untouched');
+
+    // Bounding: default cap is 20; overflow tail is reported deterministically.
+    const many = Array.from({ length: 25 }, (_, i) => mkTool(`mcp__s__t${String(i).padStart(2, '0')}`));
+    const bounded = mergeMcpToolsIntoCatalog([], many);
+    expect(bounded.appended.length === MAX_MCP_TOOLS_PER_TURN, `appended set is capped at ${MAX_MCP_TOOLS_PER_TURN}`);
+    expect(bounded.overflow.length === 5, 'overflow names are reported');
+    expect(bounded.overflow[0] === 'mcp__s__t20', 'overflow is the deterministic sorted tail');
+
+    // Collision assert: identical name in catalog is skipped, never shadowed.
+    const colliding = mergeMcpToolsIntoCatalog(catalog, [mkTool('mcp__dup__tool'), mkTool('mcp__ok__tool')]);
+    expect(colliding.skippedCollisions.includes('mcp__dup__tool'), 'catalog-name collision is skipped');
+    expect(colliding.appended.length === 1 && colliding.appended[0] === 'mcp__ok__tool', 'non-colliding tool still appends');
+    expect(colliding.tools.filter((t) => t.name === 'mcp__dup__tool').length === 1, 'no shadowed duplicate in the merged set');
+    pass('mergeMcpToolsIntoCatalog bounds to 20, orders deterministically, and skips collisions');
+  }
+
+  // -------------------------------------------------------------------------
+  // 7. adaptLegacyToolApprovalGate — same UX payload as catalog 'ask' tools
+  // -------------------------------------------------------------------------
+  {
+    const seen: Array<{ name: string; input: any }> = [];
+    const gate = adaptLegacyToolApprovalGate(async (call) => {
+      seen.push(call);
+      return call.input?.mcp_tool === 'delete_repo' ? 'reject' : 'approve';
+    });
+    const req = {
+      toolName: 'mcp__vetted_server__read_docs',
+      mcpToolName: 'read_docs',
+      serverId: 'srv-1',
+      serverName: 'Vetted Server',
+      input: { q: 'hi' },
+      policy: { approvalMode: 'ask' as const, mutatesState: true, externalSideEffect: true, approvalKind: 'privileged_action' as const, reason: 'because' },
+    };
+    const approved = await gate(req);
+    expect(approved.decision === 'approve', 'legacy approve maps to approve');
+    expect(seen[0].name === 'mcp__vetted_server__read_docs', 'gate sees the namespaced tool name');
+    expect(seen[0].input.mcp_server === 'Vetted Server', 'server name is visible in the gate payload');
+    expect(seen[0].input.mcp_tool === 'read_docs', 'original MCP tool name is visible in the gate payload');
+    expect(seen[0].input.policy_reason === 'because', 'policy reason rides along');
+    expect(JSON.stringify(seen[0].input.arguments) === JSON.stringify({ q: 'hi' }), 'model arguments are shown to the approver');
+
+    const rejected = await gate({ ...req, mcpToolName: 'delete_repo', toolName: 'mcp__vetted_server__delete_repo' });
+    expect(rejected.decision === 'reject', 'legacy reject maps to reject');
+    expect(rejected.decision === 'reject' && /Vetted Server/.test(rejected.reason || ''), 'rejection reason names the server');
+    pass('legacy onToolApproval adapter surfaces server identity through the same gate UX');
   }
 
   console.log('');

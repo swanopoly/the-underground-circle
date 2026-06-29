@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { buildDigitalBrainSystemMap, DIGITAL_BRAIN_DB_TABLES } from '../src/lib/digitalBrainSystemMap';
 import {
   buildNextSecondBrainReviewMetadata,
@@ -143,5 +144,12 @@ assert(systemMap.nodes.some(node => node.id === 'backpack-brain'), 'system map i
 assert(systemMap.nodes.some(node => node.id === 'memory-memory-1'), 'system map includes memory nodes');
 assert(systemMap.edges.some(edge => edge.kind === 'memory'), 'system map includes memory flow edges');
 assert(DIGITAL_BRAIN_DB_TABLES.some(table => table.table === 'circle_second_brain_notes'), 'db table catalog includes brain notes');
+assert.equal(DIGITAL_BRAIN_DB_TABLES.find(table => table.table === 'chat_sessions')?.probe, 'skip', 'legacy chat sessions probe is skipped');
+assert.equal(DIGITAL_BRAIN_DB_TABLES.find(table => table.table === 'user_ai_usage')?.probe, 'skip', 'optional user usage probe is skipped');
+assert.equal(DIGITAL_BRAIN_DB_TABLES.find(table => table.table === 'circle_second_brain_notes')?.probe, 'skip', 'brain notes are counted by graph loader instead of duplicate probes');
+
+const siteMapSource = readFileSync('src/lib/secondBrainSiteMap.ts', 'utf8');
+assert(siteMapSource.includes("SECOND_BRAIN_SITE_MAP_AGENT_STATUSES = ['building', 'idle']"), 'site map only queries db-safe office agent statuses');
+assert(!siteMapSource.includes(".in('status', ['active', 'idle'])"), 'site map never queries unsupported active db status');
 
 console.log('second-brain smoketest passed');

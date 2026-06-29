@@ -16,6 +16,7 @@
 import { buildChatAutomationPlan, summarisePlanForTelemetry, type ChatAutomationPlan } from '../src/lib/chatAutomationPlanner';
 import { formatChatFailureRecoveryOptionSelection } from '../src/lib/chatFailureRecovery';
 import { reconstructClarificationAnswer } from '../src/lib/chatGapFill';
+import { extractDirectLocalImageFormatConversionTask } from '../src/lib/computerTaskPlanner';
 
 let failures = 0;
 const PHOTOSHOP_SCREENSHOT_RENAME_REQUEST = 'open the file Screenshot 2026-05-21 at 4.44.42\u202fPM thats on the desktop and open it in Photoshop and rename it lmao and save it as a png';
@@ -23,6 +24,10 @@ const PHOTOSHOP_SCREENSHOT_RENAME_REQUEST = 'open the file Screenshot 2026-05-21
 function fail(msg: string) {
   failures += 1;
   console.error('FAIL:', msg);
+}
+
+function pass(msg: string) {
+  console.log(`pass: ${msg}`);
 }
 
 function check(
@@ -122,11 +127,66 @@ check(
   { source: 'conversational_intent', kind: 'run_command_handler', routeId: 'wordpress', risk: 'external_side_effect', approvalRequired: true },
 );
 
+// C1/R6 pre-cutover fix: listing posts is read-only — wordpress route, but no
+// external_side_effect risk and no approval gate.
+check(
+  'conversational:wordpress list → read-only, no approval',
+  buildChatAutomationPlan({ message: 'Show my WordPress posts' }),
+  { source: 'conversational_intent', kind: 'run_command_handler', routeId: 'wordpress', risk: 'safe', approvalRequired: false },
+);
+
+check(
+  'conversational:wordpress list pages in any order → read-only, no approval',
+  buildChatAutomationPlan({ message: 'List pages in WordPress' }),
+  { source: 'conversational_intent', kind: 'run_command_handler', routeId: 'wordpress', risk: 'safe', approvalRequired: false },
+);
+const wordpressPagesPlan = buildChatAutomationPlan({ message: 'List pages in WordPress' });
+if (wordpressPagesPlan.intent.kind === 'conversational_action' && wordpressPagesPlan.intent.intent.type === 'wordpress_list' && wordpressPagesPlan.intent.intent.target === 'pages') {
+  pass('conversational:wordpress list pages preserves page target');
+} else {
+  fail('conversational:wordpress list pages should preserve target=pages');
+}
+
+const wordpressSchedulePlan = buildChatAutomationPlan({ message: 'Schedule a WordPress post about launch recap for 2026-07-01' });
+check(
+  'conversational:wordpress schedule with date → external side effect',
+  wordpressSchedulePlan,
+  { source: 'conversational_intent', kind: 'run_command_handler', routeId: 'wordpress', risk: 'external_side_effect', approvalRequired: true },
+);
+if (wordpressSchedulePlan.intent.kind === 'conversational_action'
+  && wordpressSchedulePlan.intent.intent.type === 'wordpress_schedule'
+  && wordpressSchedulePlan.intent.intent.date === '2026-07-01'
+  && wordpressSchedulePlan.intent.intent.title === 'launch recap') {
+  pass('conversational:wordpress schedule preserves date and title');
+} else {
+  fail('conversational:wordpress schedule should preserve date=2026-07-01 and title="launch recap"');
+}
+
 check(
   'conversational:create task → mission route',
   buildChatAutomationPlan({ message: 'Create a task to review the invoice' }),
   { source: 'conversational_intent', kind: 'run_command_handler', routeId: 'mission' },
 );
+
+const officeAgentPlan = buildChatAutomationPlan({
+  message: 'Create an agent named Scout with Opus and add it to the task we just made',
+});
+check(
+  'conversational:office agent task → mission route',
+  officeAgentPlan,
+  { source: 'conversational_intent', kind: 'run_command_handler', routeId: 'mission' },
+);
+if (officeAgentPlan.intent.kind === 'conversational_action' && officeAgentPlan.intent.intent.type === 'office_agent_task') {
+  const officeAgentIntent = officeAgentPlan.intent.intent;
+  if (officeAgentIntent.agentName === 'Scout') pass('conversational:office agent task extracts agent name');
+  else fail(`conversational:office agent task extracts agent name\n    expected Scout, got ${officeAgentIntent.agentName}`);
+  if (officeAgentIntent.modelName === 'claude-opus-4-6') pass('conversational:office agent task extracts requested model');
+  else fail(`conversational:office agent task extracts requested model\n    expected claude-opus-4-6, got ${officeAgentIntent.modelName}`);
+  if (officeAgentIntent.taskTarget === 'latest_user_task') pass('conversational:office agent task targets latest user task');
+  else fail(`conversational:office agent task targets latest user task\n    expected latest_user_task, got ${officeAgentIntent.taskTarget}`);
+} else {
+  fail('conversational:office agent task carries office_agent_task intent');
+}
 
 check(
   'conversational:remember → memory route',
@@ -213,6 +273,75 @@ check(
   buildChatAutomationPlan({ message: 'Open WordPress media library and upload logo.png from Desktop' }),
   { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'external_side_effect', approvalRequired: true, minConfidence: 0.8 },
 );
+const wordpressMediaPlan = buildChatAutomationPlan({ message: 'Open WordPress media library and upload logo.png from Desktop' });
+if (wordpressMediaPlan.computerRequestRoute?.appStrategy?.label !== 'WordPress Media/Admin File Transfer Workflow') {
+  fail(`wordpress media upload should expose WordPress media/admin strategy, got ${wordpressMediaPlan.computerRequestRoute?.appStrategy?.label || 'none'}`);
+} else if (!wordpressMediaPlan.computerRequestRoute?.recommendedTools.includes('wp.upload_media')) {
+  fail('wordpress media upload should recommend wp.upload_media before browser fallback');
+} else {
+  pass('wordpress media upload exposes WordPress media/admin strategy metadata');
+}
+
+check(
+  'Dealer Inspire DI slide upload/create → computer task',
+  buildChatAutomationPlan({ message: 'Upload banner.jpg and create a Dealer Inspire DI Slide, assign it to StellantisUS-1920x600, and set expiration_date to June 30 after approval' }),
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'external_side_effect', approvalRequired: true, minConfidence: 0.8 },
+);
+const dealerInspirePlan = buildChatAutomationPlan({ message: 'Upload banner.jpg and create a Dealer Inspire DI Slide, assign it to StellantisUS-1920x600, and set expiration_date to June 30 after approval' });
+if (!dealerInspirePlan.computerRequestRoute?.recommendedTools.includes('wp.create_slide')) {
+  fail('Dealer Inspire DI slide upload/create should recommend wp.create_slide');
+} else if (!dealerInspirePlan.computerRequestRoute?.recommendedTools.includes('browser.wp_admin_source_intelligence')) {
+  fail('Dealer Inspire DI slide upload/create should recommend browser.wp_admin_source_intelligence');
+} else if (!dealerInspirePlan.computerRequestRoute?.actionItems?.some((item) => item.id === 'inspect-wordpress-admin-source' && item.tool === 'browser.wp_admin_source_intelligence')) {
+  fail('Dealer Inspire DI slide upload/create should inspect WordPress admin source facts with browser.wp_admin_source_intelligence');
+} else {
+  pass('Dealer Inspire DI slide upload/create exposes DI-aware source-intelligence route metadata');
+}
+
+const dealerInspireUpdatePlan = buildChatAutomationPlan({ message: 'Update the Dealer Inspire DI Slide Promaster expiration_date in Quick Edit after approval' });
+if (!dealerInspireUpdatePlan.computerRequestRoute?.recommendedTools.includes('wp.update_post')) {
+  fail('Dealer Inspire DI slide update should recommend wp.update_post');
+} else if (!dealerInspireUpdatePlan.computerRequestRoute?.recommendedTools.includes('browser.wp_admin_source_intelligence')) {
+  fail('Dealer Inspire DI slide update should recommend browser.wp_admin_source_intelligence');
+} else {
+  pass('Dealer Inspire DI slide update exposes wp.update_post plus source intelligence');
+}
+
+for (const input of [
+  'edit a page in wp-admin',
+  'install plugin in wp-admin',
+  'install a WordPress plugin after approval',
+  'change WordPress settings after approval',
+  'Quick Edit Dealer Inspire DI Slide Promaster expiration_date in wp-admin after approval',
+]) {
+  const plan = buildChatAutomationPlan({ message: input });
+  check(
+    `wordpress admin mutation → browser computer task: ${input}`,
+    plan,
+    { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'external_side_effect', approvalRequired: true, minConfidence: 0.8 },
+  );
+  if (plan.computerRequestRoute?.appStrategy?.label !== 'WordPress Admin Browser Workflow') {
+    fail(`${input} should expose WordPress Admin Browser Workflow, got ${plan.computerRequestRoute?.appStrategy?.label || 'none'}`);
+  } else if (!plan.computerRequestRoute?.actionItems?.some((item) => item.id === 'pause-for-wordpress-approval')) {
+    fail(`${input} should include a WordPress approval action item`);
+  } else {
+    pass(`wordpress admin mutation exposes approval-ready action items: ${input}`);
+  }
+}
+
+{
+  const plan = buildChatAutomationPlan({ message: 'log into wp-admin and edit a page' });
+  check(
+    'wordpress admin login/edit → browser computer task',
+    plan,
+    { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'external_side_effect', approvalRequired: true, minConfidence: 0.8 },
+  );
+  if (plan.computerRequestRoute?.appStrategy?.label !== 'WordPress Admin Browser Workflow') {
+    fail('wordpress admin login/edit should expose WordPress Admin Browser Workflow');
+  } else {
+    pass('wordpress admin login/edit exposes WordPress strategy metadata');
+  }
+}
 
 check(
   'local file search → computer task with session grant',
@@ -256,22 +385,95 @@ check(
   { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
 );
 
+const pearsonPngPlan = buildChatAutomationPlan({ message: 'on the desktop open pearsoncdjr-img in photoshop and save it as a png' });
+const pearsonPngConversion = extractDirectLocalImageFormatConversionTask('on the desktop open pearsoncdjr-img in photoshop and save it as a png');
+if (pearsonPngConversion?.source !== 'pearsoncdjr-img' || pearsonPngConversion.format !== 'png') {
+  fail(`local Photoshop simple image format conversion parser returned ${JSON.stringify(pearsonPngConversion)}`);
+} else {
+  console.log('pass: local Photoshop simple image format conversion parser extracts source and target format');
+}
+check(
+  'local Photoshop simple image format conversion uses direct conversion path',
+  pearsonPngPlan,
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
+);
+if (pearsonPngPlan.computerRequestRoute?.appStrategy?.id !== 'file_readonly') {
+  fail('local Photoshop simple image format conversion uses local-file conversion strategy');
+} else {
+  console.log('pass: local Photoshop simple image format conversion uses local-file conversion strategy');
+}
+if (pearsonPngPlan.computerRequestRoute?.designExecutionPipeline) {
+  fail('local Photoshop simple image format conversion must not use layered creative design pipeline');
+} else {
+  console.log('pass: local Photoshop simple image format conversion skips layered creative design pipeline');
+}
+if (!pearsonPngPlan.computerRequestRoute?.recommendedTools.includes('desktop.convert_image')) {
+  fail('local Photoshop simple image format conversion recommends desktop.convert_image');
+} else {
+  console.log('pass: local Photoshop simple image format conversion recommends desktop.convert_image');
+}
+if (!pearsonPngPlan.computerRequestRoute?.actionItems?.some((item) => item.tool === 'desktop.convert_image')) {
+  fail('local Photoshop simple image format conversion carries executable conversion action item');
+} else {
+  console.log('pass: local Photoshop simple image format conversion carries executable conversion action item');
+}
+
+const desktopGeminiJpgMessage = 'open Gemini_Generated_Image_lppqo8lppqo8lppq.png from the desktop and make it a jpg';
+const desktopGeminiJpgPlan = buildChatAutomationPlan({ message: desktopGeminiJpgMessage });
+const desktopGeminiJpgConversion = extractDirectLocalImageFormatConversionTask(desktopGeminiJpgMessage);
+if (desktopGeminiJpgConversion?.source !== 'Gemini_Generated_Image_lppqo8lppqo8lppq.png' || desktopGeminiJpgConversion.format !== 'jpg') {
+  fail(`desktop filename pronoun image conversion parser returned ${JSON.stringify(desktopGeminiJpgConversion)}`);
+} else {
+  console.log('pass: desktop filename pronoun image conversion parser extracts source and JPG target format');
+}
+check(
+  'desktop filename pronoun image conversion uses direct conversion path',
+  desktopGeminiJpgPlan,
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
+);
+if (!desktopGeminiJpgPlan.computerRequestRoute?.recommendedTools.includes('desktop.convert_image')) {
+  fail('desktop filename pronoun image conversion recommends desktop.convert_image');
+} else {
+  console.log('pass: desktop filename pronoun image conversion recommends desktop.convert_image');
+}
+if (desktopGeminiJpgPlan.computerRequestRoute?.actionItems?.[0]?.tool !== 'desktop.file_search') {
+  fail('desktop filename pronoun image conversion resolves source before conversion');
+} else {
+  console.log('pass: desktop filename pronoun image conversion resolves source before conversion');
+}
+if (!desktopGeminiJpgPlan.computerRequestRoute?.actionItems?.some((item) => item.tool === 'desktop.convert_image')) {
+  fail('desktop filename pronoun image conversion carries executable conversion action item');
+} else {
+  console.log('pass: desktop filename pronoun image conversion carries executable conversion action item');
+}
+
 const photoshopScreenshotRenamePlan = buildChatAutomationPlan({ message: PHOTOSHOP_SCREENSHOT_RENAME_REQUEST });
+const photoshopScreenshotRenameConversion = extractDirectLocalImageFormatConversionTask(PHOTOSHOP_SCREENSHOT_RENAME_REQUEST);
+if (photoshopScreenshotRenameConversion !== null) {
+  fail(`local Photoshop screenshot open/rename/export should not use format-only conversion parser, got ${JSON.stringify(photoshopScreenshotRenameConversion)}`);
+} else {
+  console.log('pass: local Photoshop screenshot open/rename/export skips format-only conversion parser');
+}
 check(
   'local Photoshop screenshot open/rename/export stays deterministic computer task',
   photoshopScreenshotRenamePlan,
-  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'review', approvalRequired: true, minConfidence: 0.7 },
 );
 if (photoshopScreenshotRenamePlan.computerRequestRoute?.appStrategy?.id !== 'creative_layout_control') {
-  fail('local Photoshop screenshot open/rename/export exposes creative_layout_control route metadata');
+  fail('local Photoshop screenshot open/rename/export uses creative layout strategy');
 } else {
-  console.log('pass: local Photoshop screenshot open/rename/export exposes computer route metadata');
+  console.log('pass: local Photoshop screenshot open/rename/export uses creative layout strategy');
 }
 const photoshopScreenshotCapabilities = photoshopScreenshotRenamePlan.computerRequestRoute?.computerPreview.requiredCapabilities || [];
 if (!photoshopScreenshotCapabilities.includes('file_write')) {
   fail('local Photoshop screenshot open/rename/export requires write-scoped local file capability before proof export');
 } else {
   console.log('pass: local Photoshop screenshot open/rename/export prepares write-scoped local file capability');
+}
+if (photoshopScreenshotRenamePlan.computerRequestRoute?.recommendedTools.includes('desktop.convert_image')) {
+  fail('local Photoshop screenshot open/rename/export must not recommend desktop.convert_image until output-name conversion is supported');
+} else {
+  console.log('pass: local Photoshop screenshot open/rename/export avoids desktop.convert_image shortcut');
 }
 
 check(
@@ -555,6 +757,15 @@ check(
   'pipeline:workflow recording routes to review-gated OpenSwan work',
   buildChatAutomationPlan({ message: 'Record this browser workflow and turn it into a reusable automation' }),
   { source: 'plain_chat', kind: 'run_openswan', routeId: null, risk: 'review', pipelineId: 'workflow_recording_replay', minConfidence: 0.7 },
+);
+
+check(
+  'control panel: repeat automation seed stays an OpenSwan planning turn',
+  buildChatAutomationPlan({
+    message: 'Turn this into a repeatable automation: draft a WordPress weekly update, preview it, and ask before publishing.',
+    selectedMode: 'plan',
+  }),
+  { source: 'plain_chat', kind: 'run_openswan', routeId: null, risk: 'safe', approvalRequired: false, minConfidence: 0.7 },
 );
 
 check(

@@ -41,6 +41,7 @@ import {
   copyFile as bridgeCopyFile,
   writeClipboard as bridgeWriteClipboard,
   clearClipboard as bridgeClearClipboard,
+  createNote as bridgeCreateNote,
   getWindowState as bridgeGetWindowState,
   readA11yTree as bridgeReadA11yTree,
   clickElement as bridgeClickElement,
@@ -96,12 +97,30 @@ import {
   treeLooksLikeSaveReplaceExistingDialog,
   type SaveForWebTargetFormat,
 } from './computerAppSaveDialogs';
+import {
+  appendSurfaceEscalation,
+  buildAppleNotesCreateNoteRecipe,
+  buildAppleNotesCreateNoteSequence,
+  buildAppAutomationControlSurfacePlan,
+  extractSurfaceFailureSignal,
+  planSurfaceEscalation,
+  serializeAppAutomationRecipe,
+  type AppAutomationControlSurfaceCandidate,
+  type AppAutomationRecipe,
+  type ComputerTaskSurfaceEscalation,
+  type SurfaceCapabilityStatus,
+  type SurfaceEscalationDecision,
+} from './appAutomationControlSurfaces';
 
 export interface ComputerAppAdapterResult {
   ok: boolean;
   message: string;
   warnings: string[];
   data?: Record<string, unknown>;
+  /** E1: escalation decision attached when a failure consulted the surface-escalation policy. */
+  surfaceEscalation?: SurfaceEscalationDecision;
+  /** E1: bounded (≤3) escalation breadcrumbs recorded for this run. */
+  surfaceEscalations?: ComputerTaskSurfaceEscalation[];
 }
 
 function normalizeText(value: string | null | undefined): string {
@@ -289,6 +308,76 @@ function compactA11yCandidates(root: A11yNode): string {
     .join('\n');
 }
 
+// ─── A11y tree observation cache ─────────────────────────────────────────
+//
+// Models re-reading the same app tree within a few seconds tend to
+// re-describe an identical UI from scratch, wasting turns. We cache a
+// cheap hash of the last serialized tree per app ({pid, hash, at});
+// when a re-read inside a short window hashes identical, the result
+// carries an explicit "[unchanged since last observation Xs ago]" note
+// so the model can move on. The read itself ALWAYS still happens — the
+// evidence-freshness contract is untouched; this only annotates that
+// nothing changed. Bounded: 1 entry per cache key, ≤5 keys, oldest
+// evicted. E2 cache-coherence decision: the key is app + slice mode +
+// target (not just app), so pruned targeting slices for different
+// targets are tracked as distinct observations rather than colliding
+// with each other or with full reads.
+
+const A11Y_OBSERVATION_UNCHANGED_WINDOW_MS = 10_000;
+const A11Y_OBSERVATION_CACHE_MAX_APPS = 5;
+
+interface A11yObservationCacheEntry {
+  pid: number;
+  hash: string;
+  at: number;
+}
+
+const a11yObservationCache = new Map<string, A11yObservationCacheEntry>();
+
+/** Cheap djb2-xor string hash — a cache hint, not a security boundary. */
+function hashA11yObservation(serialized: string): string {
+  let hash = 5381;
+  for (let i = 0; i < serialized.length; i += 1) {
+    hash = ((hash << 5) + hash) ^ serialized.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function noteA11yTreeObservation(args: {
+  app: string;
+  pid: number;
+  serializedTree: string;
+  /** E2 — sliced reads with different targets are DIFFERENT observations:
+   *  the cache key includes slice mode + target so a pruned "Save"-slice
+   *  never marks a later "Cancel"-slice (or a full read) as unchanged. */
+  target?: string | null;
+  slice?: string | null;
+  now?: number;
+}): { unchanged: boolean; note: string | null } {
+  const appKey = String(args.app || '').trim().toLowerCase();
+  if (!appKey) return { unchanged: false, note: null };
+  const key = `${appKey}::${String(args.slice || 'full').toLowerCase()}::${String(args.target || '').trim().toLowerCase()}`;
+  const now = typeof args.now === 'number' ? args.now : Date.now();
+  const hash = hashA11yObservation(args.serializedTree);
+  const prev = a11yObservationCache.get(key) || null;
+  a11yObservationCache.set(key, { pid: args.pid, hash, at: now });
+  if (a11yObservationCache.size > A11Y_OBSERVATION_CACHE_MAX_APPS) {
+    let oldestKey: string | null = null;
+    let oldestAt = Number.POSITIVE_INFINITY;
+    for (const [cachedKey, entry] of a11yObservationCache) {
+      if (entry.at < oldestAt) { oldestAt = entry.at; oldestKey = cachedKey; }
+    }
+    if (oldestKey && oldestKey !== key) a11yObservationCache.delete(oldestKey);
+  }
+  if (!prev) return { unchanged: false, note: null };
+  const ageMs = now - prev.at;
+  if (prev.pid !== args.pid) return { unchanged: false, note: null };
+  if (ageMs < 0 || ageMs > A11Y_OBSERVATION_UNCHANGED_WINDOW_MS) return { unchanged: false, note: null };
+  if (prev.hash !== hash) return { unchanged: false, note: null };
+  const seconds = Math.max(1, Math.round(ageMs / 1000));
+  return { unchanged: true, note: `[unchanged since last observation ${seconds}s ago]` };
+}
+
 async function decideBlockingModalWithAdvisor(args: {
   root: A11yNode;
   app?: string | null;
@@ -386,7 +475,7 @@ async function handleBlockingAppModals(
       summary: aiDecision?.reason || 'AI modal advisor selected a guarded popup action.',
     };
     if (!activePlan.buttonPath) break;
-    const clicked = await bridgeClickElement({ pid: tree.data.pid, path: activePlan.buttonPath });
+    const clicked = await bridgeClickElement({ pid: tree.data.pid, path: activePlan.buttonPath, appName: tree.data.app || appName });
     if (!clicked.ok) {
       return {
         ok: false,
@@ -472,7 +561,7 @@ async function ensureSaveForWebFormat(
       data: { kind: 'desktop_save_for_web_format_picker_missing', app: initialTree.data.app || appQuery || null, targetFormat },
     };
   }
-  const opened = await bridgeClickElement({ pid: initialTree.data.pid, path: formatControl.id });
+  const opened = await bridgeClickElement({ pid: initialTree.data.pid, path: formatControl.id, appName: initialTree.data.app || appQuery });
   if (!opened.ok) {
     return {
       ok: false,
@@ -509,7 +598,7 @@ async function ensureSaveForWebFormat(
       data: { kind: 'desktop_save_for_web_format_option_missing', app: menuTree.data.app || initialTree.data.app || appQuery || null, targetFormat },
     };
   }
-  const selected = await bridgeClickElement({ pid: menuTree.data.pid, path: formatOption.id });
+  const selected = await bridgeClickElement({ pid: menuTree.data.pid, path: formatOption.id, appName: menuTree.data.app || appQuery });
   if (!selected.ok) {
     return {
       ok: false,
@@ -618,7 +707,7 @@ async function clickSaveForWebSaveButton(appQuery?: string, targetFormat?: SaveF
       data: { kind: 'desktop_save_for_web_save_missing', app: saveTree.data.app || appQuery || null, targetFormat: targetFormat || null, format: formatResult?.data || null },
     };
   }
-  const clicked = await bridgeClickElement({ pid: saveTree.data.pid, path: saveButton.id });
+  const clicked = await bridgeClickElement({ pid: saveTree.data.pid, path: saveButton.id, appName: saveTree.data.app || appQuery });
   if (!clicked.ok) {
     const pressed = await bridgePressKeys('Return');
     if (pressed.ok) {
@@ -672,7 +761,7 @@ async function setSaveDialogFilename(filename: string, appQuery?: string): Promi
         data: { kind: 'desktop_save_filename_field_missing', app: tree.data.app || appQuery || null },
       };
     }
-    const set = await bridgeSetElementValue({ pid: tree.data.pid, path: field.id, text: filename });
+    const set = await bridgeSetElementValue({ pid: tree.data.pid, path: field.id, text: filename, appName: tree.data.app || appQuery });
     if (set.ok) {
       return {
         ok: true,
@@ -681,7 +770,7 @@ async function setSaveDialogFilename(filename: string, appQuery?: string): Promi
         data: { kind: 'desktop_save_filename_set', app: tree.data.app || appQuery || null, targetPath: field.id, method: set.data?.method || 'ax_set_value', chars: set.data?.chars ?? filename.length },
       };
     }
-    const clicked = await bridgeClickElement({ pid: tree.data.pid, path: field.id });
+    const clicked = await bridgeClickElement({ pid: tree.data.pid, path: field.id, appName: tree.data.app || appQuery });
     if (!clicked.ok) {
       return {
         ok: false,
@@ -816,7 +905,7 @@ async function maybeResolveSaveExtensionMismatch(appQuery: string | undefined, f
       },
     };
   }
-  const clicked = await bridgeClickElement({ pid: tree.data.pid, path: keepExtensionButton.id });
+  const clicked = await bridgeClickElement({ pid: tree.data.pid, path: keepExtensionButton.id, appName: tree.data.app || appQuery });
   if (!clicked.ok) {
     return {
       ok: false,
@@ -869,7 +958,7 @@ async function maybeResolveSaveReplaceExisting(appQuery: string | undefined, fil
       },
     };
   }
-  const clicked = await bridgeClickElement({ pid: tree.data.pid, path: replaceButton.id });
+  const clicked = await bridgeClickElement({ pid: tree.data.pid, path: replaceButton.id, appName: tree.data.app || appQuery });
   if (!clicked.ok) {
     return {
       ok: false,
@@ -994,7 +1083,7 @@ async function maybeConfirmPostSaveOptions(appQuery: string | undefined, filenam
     if (!/\b(jpeg|jpg|png|tiff|image options|quality|format options|options)\b/i.test(labels)) return null;
     const okButton = findBestA11yNode(tree.data.tree, 'OK') || findBestA11yNode(tree.data.tree, 'Save');
     if (okButton) {
-      const clicked = await bridgeClickElement({ pid: tree.data.pid, path: okButton.id });
+      const clicked = await bridgeClickElement({ pid: tree.data.pid, path: okButton.id, appName: tree.data.app || appQuery });
       if (clicked.ok) {
         return {
           ok: true,
@@ -1102,11 +1191,93 @@ async function verifySaveDialogOutputFile(outputPath: string): Promise<ComputerA
   };
 }
 
+function detectComputerAppAdapterSequence(task: string): {
+  sequence: LocalComputerAwarenessIntent[];
+  recipe: AppAutomationRecipe | null;
+} {
+  const recipe = buildAppleNotesCreateNoteRecipe(task);
+  if (recipe) {
+    return {
+      sequence: buildAppleNotesCreateNoteSequence(recipe),
+      recipe,
+    };
+  }
+  return {
+    sequence: detectLocalComputerAwarenessIntentSequence(task),
+    recipe: null,
+  };
+}
+
 export const __computerAppAdapterTestables = {
   treeLooksLikeSaveExtensionMismatchDialog,
   findPreferredSaveExtensionMismatchButton,
   normalizeFileExtension,
+  buildAppleNotesCreateNoteRecipe,
+  buildAppleNotesCreateNoteSequence,
+  detectComputerAppAdapterSequence,
 };
+
+// E3 — region-zoom coordinate re-click. When an a11y element click fails
+// but the matched node carries a bbox, take ONE bounded region screenshot
+// around the target (zoom re-observe at full resolution — the
+// vendor-validated fix for missed small targets) and then a single
+// coordinate click at the bbox centre. Returns null when the fallback
+// is not applicable (no bbox, bad bounds, zoom or click failed) so the
+// caller surfaces the original element-click failure.
+const REGION_ZOOM_PADDING_PX = 48;
+
+async function regionZoomCoordinateReclick(args: {
+  match: A11yNode;
+  app: string | null;
+  targetLabel: string;
+  failedClickError: string;
+}): Promise<ComputerAppAdapterResult | null> {
+  const bbox = args.match.bbox;
+  if (!bbox || bbox.length !== 4) return null;
+  const x = Math.max(0, Math.round(bbox[0]));
+  const y = Math.max(0, Math.round(bbox[1]));
+  const w = Math.round(bbox[2]);
+  const h = Math.round(bbox[3]);
+  if (w <= 0 || h <= 0) return null;
+  const screen = await bridgeGetScreenSize();
+  if (!screen.ok || !screen.data) return null;
+  const screenW = Number(screen.data.width || 0);
+  const screenH = Number(screen.data.height || 0);
+  const centerX = Math.round(x + w / 2);
+  const centerY = Math.round(y + h / 2);
+  if (screenW <= 0 || screenH <= 0 || centerX >= screenW || centerY >= screenH) return null;
+  const region: [number, number, number, number] = [
+    Math.max(0, x - REGION_ZOOM_PADDING_PX),
+    Math.max(0, y - REGION_ZOOM_PADDING_PX),
+    Math.min(screenW, x + w + REGION_ZOOM_PADDING_PX),
+    Math.min(screenH, y + h + REGION_ZOOM_PADDING_PX),
+  ];
+  if (region[2] <= region[0] || region[3] <= region[1]) return null;
+  const zoom = await bridgeTakeScreenshot({ region });
+  if (!zoom.ok || !zoom.data) return null;
+  const clicked = await bridgeMouseClick({ x: centerX, y: centerY });
+  if (!clicked.ok) return null;
+  const label = args.match.label || args.match.value || args.targetLabel;
+  return {
+    ok: true,
+    message:
+      `Accessibility click on **${label}** failed (${args.failedClickError}), so I re-observed the target with a ` +
+      `${region[2] - region[0]}x${region[3] - region[1]}px region zoom (${Math.round((zoom.data.sizeBytes || 0) / 1024)} KB) ` +
+      `and clicked its centre at (${centerX}, ${centerY})${args.app ? ` in **${args.app}**` : ''}.`,
+    warnings: ['a11y element click failed; used region-zoom coordinate fallback'],
+    data: {
+      kind: 'desktop_semantic_click_coordinate_fallback',
+      app: args.app,
+      targetPath: args.match.id,
+      targetRole: args.match.role,
+      targetLabel: label,
+      region,
+      clickX: centerX,
+      clickY: centerY,
+      zoomSizeBytes: zoom.data.sizeBytes || 0,
+    },
+  };
+}
 
 async function observeBeforeCoordinateAction(points: Array<{ x: number; y: number }>): Promise<{ ok: true; note: string } | { ok: false; message: string }> {
   const screen = await bridgeGetScreenSize();
@@ -2549,6 +2720,35 @@ async function executeLocalDesktopSequenceStep(
       },
     };
   }
+  if (step.kind === 'notes_create') {
+    const body = String(step.text || '').trim();
+    if (!body) {
+      return {
+        ok: false,
+        message: 'No note text was provided. Tell me what the note should say.',
+        warnings: ['notes_create missing text'],
+        data: { kind: 'desktop_invalid_input' },
+      };
+    }
+    const created = await bridgeCreateNote({ text: body });
+    if (!created.ok) {
+      const staleHint = /unknown\s+\/desktop\s+endpoint/i.test(created.error || '') || created.errorCode === 'stale_bridge'
+        ? ' Restart `node scripts/claude-bridge.js` so the new Notes endpoint is available.'
+        : '';
+      return {
+        ok: false,
+        message: `Could not create the note via the Notes app: ${created.error || created.errorCode || 'unknown bridge error'}.${staleHint}`,
+        warnings: [`desktop_notes_create failed with ${created.errorCode || 'unknown_error'}`],
+        data: { kind: 'desktop_bridge_error', errorCode: created.errorCode },
+      };
+    }
+    return {
+      ok: true,
+      message: `Created a note in Notes${created.data?.title ? ` titled "${created.data.title}"` : ''}.`,
+      warnings: [],
+      data: { kind: 'desktop_notes_create', title: created.data?.title || '', chars: created.data?.chars || body.length },
+    };
+  }
   return await executeLocalDesktopIntent(command, { sequenceMode: true }) || {
     ok: false,
     message: `Could not execute parsed step: ${command}`,
@@ -2712,7 +2912,8 @@ async function executeLocalDesktopIntent(
   task: string,
   options: { sequenceMode?: boolean } = {},
 ): Promise<ComputerAppAdapterResult | null> {
-  const sequence = detectLocalComputerAwarenessIntentSequence(task);
+  const detectedSequence = detectComputerAppAdapterSequence(task);
+  const { sequence, recipe } = detectedSequence;
   if (sequence.length > 1) {
     const needsBridge = sequence.some((step) => step.kind !== 'wait');
     if (needsBridge) {
@@ -2766,7 +2967,7 @@ async function executeLocalDesktopIntent(
           ok: false,
           message: `Stopped at step ${index + 1}/${sequence.length}: ${result.message}`,
           warnings: ['desktop sequence stopped', ...result.warnings],
-          data: { kind: 'desktop_action_sequence', steps },
+          data: { kind: 'desktop_action_sequence', steps, recipe: serializeAppAutomationRecipe(recipe) },
         };
       }
       if (!successRecorded) {
@@ -2800,7 +3001,7 @@ async function executeLocalDesktopIntent(
             ok: false,
             message: `Stopped after step ${index + 1}/${sequence.length}: ${postSaveDialog.message}`,
             warnings: ['desktop sequence stopped', ...postSaveDialog.warnings],
-            data: { kind: 'desktop_action_sequence', steps },
+            data: { kind: 'desktop_action_sequence', steps, recipe: serializeAppAutomationRecipe(recipe) },
           };
         }
       }
@@ -2814,7 +3015,7 @@ async function executeLocalDesktopIntent(
             ok: false,
             message: `Stopped after step ${index + 1}/${sequence.length}: ${outputVerification.message}`,
             warnings: ['desktop sequence stopped', ...outputVerification.warnings],
-            data: { kind: 'desktop_action_sequence', steps },
+            data: { kind: 'desktop_action_sequence', steps, recipe: serializeAppAutomationRecipe(recipe) },
           };
         }
       }
@@ -2841,7 +3042,7 @@ async function executeLocalDesktopIntent(
             ok: false,
             message: `Stopped after step ${index + 1}/${sequence.length}: ${modalResult.message}`,
             warnings: ['desktop sequence stopped', ...modalResult.warnings],
-            data: { kind: 'desktop_action_sequence', steps },
+            data: { kind: 'desktop_action_sequence', steps, recipe: serializeAppAutomationRecipe(recipe) },
           };
         }
       }
@@ -2850,7 +3051,7 @@ async function executeLocalDesktopIntent(
       ok: true,
       message: `Completed ${steps.length} desktop app steps:\n${steps.map((step) => `${step.index}. ${step.message}`).join('\n')}`,
       warnings: [],
-      data: { kind: 'desktop_action_sequence', steps },
+      data: { kind: 'desktop_action_sequence', steps, recipe: serializeAppAutomationRecipe(recipe) },
     };
   }
 
@@ -2913,6 +3114,7 @@ async function executeLocalDesktopIntent(
     await ensureDesktopBridgePaired().catch(() => null);
 
     if (
+      intent.kind === 'notes_create' ||
       intent.kind === 'indesign_document_status' ||
 	      intent.kind === 'indesign_text_inventory' ||
 	      intent.kind === 'indesign_set_layer_state' ||
@@ -3086,11 +3288,22 @@ async function executeLocalDesktopIntent(
         .filter((node) => node.label || node.value)
         .slice(0, 12)
         .map((node) => `[${node.id}] ${node.role} "${node.label || node.value || ''}"`);
+      const observation = noteA11yTreeObservation({
+        app: tree.data.app || intent.appQuery || 'frontmost',
+        pid: tree.data.pid,
+        serializedTree: JSON.stringify(tree.data.tree),
+      });
       return {
         ok: true,
-        message: `Read **${tree.data.app || intent.appQuery || 'the frontmost app'}** accessibility tree (${tree.data.budget_used || 0} nodes).${controls.length ? `\nTop controls:\n${controls.join('\n')}` : ''}`,
+        message: `Read **${tree.data.app || intent.appQuery || 'the frontmost app'}** accessibility tree (${tree.data.budget_used || 0} nodes).${observation.note ? ` ${observation.note}` : ''}${controls.length ? `\nTop controls:\n${controls.join('\n')}` : ''}`,
         warnings: [],
-        data: { kind: 'desktop_a11y_tree', app: tree.data.app, pid: tree.data.pid, nodeCount: tree.data.budget_used || 0 },
+        data: {
+          kind: 'desktop_a11y_tree',
+          app: tree.data.app,
+          pid: tree.data.pid,
+          nodeCount: tree.data.budget_used || 0,
+          unchangedSinceLastObservation: observation.unchanged,
+        },
       };
     }
 
@@ -3119,7 +3332,10 @@ async function executeLocalDesktopIntent(
 
     if (intent.kind === 'semantic_click' && intent.targetLabel) {
       if (intent.appQuery) await bridgeFocusApp(intent.appQuery).catch(() => null);
-      const tree = await bridgeReadA11yTree({ appName: intent.appQuery, maxDepth: 10, maxNodes: 500 });
+      // E2 — request a pruned targeting slice around the label we want to
+      // click (matches + ancestors + ±2 siblings + interactive roles)
+      // instead of a full dump. findBestA11yNode runs on the slice.
+      let tree = await bridgeReadA11yTree({ appName: intent.appQuery, maxDepth: 10, maxNodes: 500, target: intent.targetLabel });
       if (!tree.ok || !tree.data?.tree) {
         return {
           ok: false,
@@ -3130,7 +3346,25 @@ async function executeLocalDesktopIntent(
           data: { kind: 'desktop_bridge_error', errorCode: tree.errorCode },
         };
       }
-      const match = findBestA11yNode(tree.data.tree, intent.targetLabel);
+      let match = findBestA11yNode(tree.data.tree, intent.targetLabel);
+      if (!match && tree.data.slice === 'interactive') {
+        // E2 — slice missed: the pruning is token-based while
+        // findBestA11yNode is fuzzier. Retry ONCE on the full tree
+        // before declaring no-match (full stays available on request).
+        const fullTree = await bridgeReadA11yTree({ appName: intent.appQuery, maxDepth: 10, maxNodes: 500, slice: 'full' });
+        if (fullTree.ok && fullTree.data?.tree) {
+          tree = fullTree;
+          match = findBestA11yNode(fullTree.data.tree, intent.targetLabel);
+        }
+      }
+      if (!tree.ok || !tree.data?.tree) {
+        return {
+          ok: false,
+          message: `Could not read the accessibility tree${intent.appQuery ? ` for **${intent.appQuery}**` : ''}: ${tree.error || tree.errorCode || 'unknown bridge error'}.`,
+          warnings: [`desktop_a11y_tree failed with ${tree.errorCode || 'unknown_error'}`],
+          data: { kind: 'desktop_bridge_error', errorCode: tree.errorCode },
+        };
+      }
       if (!match) {
         const candidates = flattenA11yNodes(tree.data.tree)
           .filter((node) => node.label || node.value)
@@ -3146,8 +3380,18 @@ async function executeLocalDesktopIntent(
           data: { kind: 'desktop_semantic_click_no_match', targetLabel: intent.targetLabel, app: tree.data.app },
         };
       }
-      const clicked = await bridgeClickElement({ pid: tree.data.pid, path: match.id });
+      const clicked = await bridgeClickElement({ pid: tree.data.pid, path: match.id, appName: tree.data.app || intent.appQuery });
       if (!clicked.ok) {
+        // E3 — small/missed-target recovery: one bounded region screenshot
+        // around the target bbox (zoom re-observe at full resolution),
+        // then a single coordinate re-click at the bbox centre.
+        const reclicked = await regionZoomCoordinateReclick({
+          match,
+          app: tree.data.app || intent.appQuery || null,
+          targetLabel: intent.targetLabel,
+          failedClickError: clicked.error || clicked.errorCode || 'unknown bridge error',
+        });
+        if (reclicked) return reclicked;
         return {
           ok: false,
           message: `Found **${match.label || match.value || intent.targetLabel}** but could not click it: ${clicked.error || clicked.errorCode || 'unknown bridge error'}.`,
@@ -3195,7 +3439,9 @@ async function executeLocalDesktopIntent(
         return { ok: false, message: 'No text was provided to put into the field.', warnings: ['empty desktop field text'], data: { kind: 'desktop_invalid_input' } };
       }
       if (intent.appQuery) await bridgeFocusApp(intent.appQuery).catch(() => null);
-      const tree = await bridgeReadA11yTree({ appName: intent.appQuery, maxDepth: 10, maxNodes: 500 });
+      // E2 — pruned targeting slice around the field label; full-tree
+      // retry once when the slice misses (see semantic_click).
+      let tree = await bridgeReadA11yTree({ appName: intent.appQuery, maxDepth: 10, maxNodes: 500, target: intent.targetLabel });
       if (!tree.ok || !tree.data?.tree) {
         return {
           ok: false,
@@ -3204,7 +3450,22 @@ async function executeLocalDesktopIntent(
           data: { kind: 'desktop_bridge_error', errorCode: tree.errorCode },
         };
       }
-      const match = findBestTextEntryA11yNode(tree.data.tree, intent.targetLabel);
+      let match = findBestTextEntryA11yNode(tree.data.tree, intent.targetLabel);
+      if (!match && tree.data.slice === 'interactive') {
+        const fullTree = await bridgeReadA11yTree({ appName: intent.appQuery, maxDepth: 10, maxNodes: 500, slice: 'full' });
+        if (fullTree.ok && fullTree.data?.tree) {
+          tree = fullTree;
+          match = findBestTextEntryA11yNode(fullTree.data.tree, intent.targetLabel);
+        }
+      }
+      if (!tree.ok || !tree.data?.tree) {
+        return {
+          ok: false,
+          message: `Could not read the accessibility tree${intent.appQuery ? ` for **${intent.appQuery}**` : ''}: ${tree.error || tree.errorCode || 'unknown bridge error'}.`,
+          warnings: [`desktop_a11y_tree failed with ${tree.errorCode || 'unknown_error'}`],
+          data: { kind: 'desktop_bridge_error', errorCode: tree.errorCode },
+        };
+      }
       if (!match) {
         const candidates = flattenA11yNodes(tree.data.tree)
           .filter((node) => node.label || node.value)
@@ -3218,7 +3479,7 @@ async function executeLocalDesktopIntent(
           data: { kind: 'desktop_set_field_no_match', targetLabel: intent.targetLabel, app: tree.data.app },
         };
       }
-      const set = await bridgeSetElementValue({ pid: tree.data.pid, path: match.id, text: intent.text });
+      const set = await bridgeSetElementValue({ pid: tree.data.pid, path: match.id, text: intent.text, appName: tree.data.app || intent.appQuery });
       if (set.ok) {
         return {
           ok: true,
@@ -3227,7 +3488,7 @@ async function executeLocalDesktopIntent(
           data: { kind: 'desktop_set_field_text', app: tree.data.app, pid: tree.data.pid, targetPath: match.id, targetRole: match.role, targetLabel: match.label || match.value || intent.targetLabel, method: set.data?.method || 'ax_set_value', chars: set.data?.chars ?? intent.text.length },
         };
       }
-      const clicked = await bridgeClickElement({ pid: tree.data.pid, path: match.id });
+      const clicked = await bridgeClickElement({ pid: tree.data.pid, path: match.id, appName: tree.data.app || intent.appQuery });
       if (!clicked.ok) {
         return {
           ok: false,
@@ -3415,7 +3676,133 @@ async function executeLocalDesktopIntent(
   return null;
 }
 
+// ─── E1: mid-execution surface escalation (failure-side wiring) ────────────
+//
+// When the deterministic adapter path fails, consult the pure escalation
+// policy (`planSurfaceEscalation`) instead of just erroring. A `descend`
+// decision is attached to the result so the runtime can continue on the
+// next-ranked control surface after a FRESH observation; a `stop` decision
+// carries the attempted-surface history so the existing recovery/buildout
+// diagnosis can pick the next move; `retry_same` asks for a fresh re-observe
+// on the same rung.
+//
+// TELEMETRY: a11y-failure breadcrumbs carry the app name + structured failure
+// code (`a11y_tree_empty`, `a11y_path_stale`, ...). Persisted alongside task
+// results, these breadcrumbs ARE our macOS AX-coverage dataset — the
+// 2026-06-11 research round (docs/EXECUTION_LADDER_RESEARCH_2026-06-11.md,
+// RQ2) found no published macOS coverage numbers, so we measure per-app
+// coverage ourselves from exactly these records.
+
+/**
+ * Map an adapter failure shape onto the control-surface rung that was being
+ * driven when it failed, restricted to ids the route plan actually ranks.
+ */
+function inferAttemptedSurfaceId(
+  result: ComputerAppAdapterResult,
+  candidates: AppAutomationControlSurfaceCandidate[],
+  failureCode: string | null,
+): string {
+  const ids = new Set(candidates.map((item) => item.id as string));
+  const pick = (...preferred: string[]): string =>
+    preferred.find((id) => ids.has(id)) || candidates[0]?.id || '';
+  const data = (result.data || {}) as Record<string, unknown>;
+  const kind = typeof data.kind === 'string' ? data.kind : '';
+  // MCP/app-tool execution failures happened on the vendor script/API rung.
+  if (typeof data.toolName === 'string') return pick('vendor_script_or_plugin_api', 'os_accessibility');
+  // a11y reads/element actions are the OS accessibility rung.
+  if (
+    failureCode === 'a11y_tree_empty'
+    || failureCode === 'a11y_path_stale'
+    || /a11y/.test(kind)
+  ) {
+    return pick('os_accessibility', 'semantic_desktop');
+  }
+  // Any other desktop_* failure (launch, focus, menu, save dialogs, …) was
+  // driven through the bridge's accessibility/semantic surface.
+  if (kind.startsWith('desktop_')) return pick('os_accessibility', 'semantic_desktop');
+  return pick('os_accessibility');
+}
+
+function applySurfaceEscalationToAdapterFailure(
+  task: string,
+  result: ComputerAppAdapterResult,
+  options?: { capabilityStatusById?: Record<string, SurfaceCapabilityStatus> },
+): ComputerAppAdapterResult {
+  if (result.ok) return result;
+  let decision: SurfaceEscalationDecision;
+  let fromSurfaceId = '';
+  let failureCode: string | null = null;
+  let appName: string | null = null;
+  try {
+    const failure = extractSurfaceFailureSignal({
+      message: result.message,
+      warnings: result.warnings,
+      data: (result.data as Record<string, unknown>) || null,
+    });
+    failureCode = failure.code || null;
+    const plan = buildAppAutomationControlSurfacePlan(task);
+    const data = (result.data || {}) as Record<string, unknown>;
+    appName = String(data.app || data.displayName || plan.targetName || '').trim() || null;
+    fromSurfaceId = inferAttemptedSurfaceId(result, plan.candidates, failureCode);
+    decision = planSurfaceEscalation({
+      currentSurfaceId: fromSurfaceId,
+      candidates: plan.candidates,
+      failure,
+      attemptedSurfaceIds: [fromSurfaceId],
+      capabilityStatusById: options?.capabilityStatusById,
+    });
+  } catch {
+    // The escalation policy must never turn a readable failure into a crash.
+    return result;
+  }
+  if (decision.action === 'retry_same') {
+    return {
+      ...result,
+      surfaceEscalation: decision,
+      message: `${result.message}\n\n**Surface retry:** ${decision.reason}`,
+    };
+  }
+  if (decision.action === 'stop') {
+    // Attempted-surface history rides in decision.reason — this message feeds
+    // the existing failure-time recovery diagnosis.
+    return {
+      ...result,
+      surfaceEscalation: decision,
+      message: `${result.message}\n\n**Surface escalation stopped:** ${decision.reason}`,
+    };
+  }
+  const surfaceEscalations = appendSurfaceEscalation(result.surfaceEscalations, {
+    fromSurface: fromSurfaceId,
+    toSurface: decision.next.id,
+    reason: decision.reason,
+    atIso: new Date().toISOString(),
+    appName,
+    failureCode,
+  });
+  const approvalLine = decision.extraApprovalsRequired.length > 0
+    ? `\nApprovals required BEFORE acting on the new surface: ${decision.extraApprovalsRequired.join('; ')}.`
+    : '';
+  return {
+    ...result,
+    surfaceEscalation: decision,
+    surfaceEscalations,
+    message: `${result.message}\n\n**Surface escalation:** ${decision.reason} Take a FRESH observation on **${decision.next.label}** before any mutation.${approvalLine}`,
+  };
+}
+
 export async function executeComputerAppTask(args: {
+  circleId: string;
+  task: string;
+  /** E1: live capability status per control-surface id (deriveSurfaceCapabilityStatusFromAudit). */
+  capabilityStatusById?: Record<string, SurfaceCapabilityStatus>;
+}): Promise<ComputerAppAdapterResult> {
+  const result = await executeComputerAppTaskInner(args);
+  return applySurfaceEscalationToAdapterFailure(args.task, result, {
+    capabilityStatusById: args.capabilityStatusById,
+  });
+}
+
+async function executeComputerAppTaskInner(args: {
   circleId: string;
   task: string;
 }): Promise<ComputerAppAdapterResult> {
@@ -3431,7 +3818,7 @@ export async function executeComputerAppTask(args: {
   // Multi-step app instructions ("open Photoshop then click File > Save")
   // need to stay in the deterministic desktop pipeline. The single-app
   // shortcut below would otherwise stop after the launch step.
-  if (detectLocalComputerAwarenessIntentSequence(task).length > 1) {
+  if (detectComputerAppAdapterSequence(task).sequence.length > 1) {
     const sequencedDesktopResult = await executeLocalDesktopIntent(task);
     if (sequencedDesktopResult) return sequencedDesktopResult;
   }

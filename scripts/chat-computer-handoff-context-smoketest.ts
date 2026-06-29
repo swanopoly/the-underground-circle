@@ -55,6 +55,26 @@ assert(browserNoticeVisible.includes('I found the browser path for this request.
 assert(browserNoticeVisible.includes('Approve browser run'));
 assert(!browserNoticeVisible.includes('browser-plan-shopify'), 'request notice handoff hides internal browser plan id');
 
+// T7 sticky allow scopes: the standing-grant stamp rides handoff metadata
+// (scope id + bounded notice) and the visible approval/summary lines.
+const stickyHandoff = buildChatComputerHandoffContext({
+  task: 'Save the updated pricing table on acme.com',
+  entrypoint: 'browser_runtime',
+  adapterId: 'browser_adapter',
+  taskKind: 'browser_task',
+  taskLabel: 'Browser task',
+  browserPlanId: 'browser-plan-sticky',
+  stickyScopeApplied: { scopeId: 'scope-sticky-1', scopeKey: 'acme.com' },
+});
+assert.equal(stickyHandoff.metadata.standingGrant?.scopeId, 'scope-sticky-1');
+assert.equal(stickyHandoff.metadata.standingGrant?.scopeKey, 'acme.com');
+assert(stickyHandoff.metadata.standingGrant!.notice.includes('acme.com'), 'standing grant notice names the scope');
+assert(stickyHandoff.metadata.standingGrant!.notice.length <= 240, 'standing grant notice stays bounded');
+assert(stickyHandoff.chatLines.some((line) => line.includes('Standing grant: acme.com')), 'compact summary carries the standing grant line');
+const stickyVisible = formatChatComputerHandoffForMessage(stickyHandoff);
+assert(stickyVisible.includes('standing grant for acme.com'), 'approval lines surface the standing grant notice');
+assert.equal(browser.metadata.standingGrant, null, 'routes without a grant keep an empty standingGrant');
+
 const desktopTask = buildDesktopAttachmentComputerTask('change APR to 2.9%', [{
   name: 'dealer-banner.indd',
   mimeType: 'application/octet-stream',

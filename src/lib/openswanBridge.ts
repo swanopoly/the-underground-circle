@@ -59,9 +59,17 @@ export function getOpenSwanToolsForSurface(
      * the model reads `data.text` far better than raw JSON for most tools.
      */
     includeFormattedText?: boolean;
+    /**
+     * Chat mode ('plan' | 'build' | 'review' | …). Forwarded to the
+     * catalog's mode filter so tools that declare a `modes` allowlist only
+     * appear in those modes — same semantics as the legacy loop's
+     * `getToolDefinitions(allowed, surface, mode)` (O1 parity). Omit to
+     * keep existing behavior (no mode filtering).
+     */
+    mode?: string | null;
   },
 ): AgentToolDefinition[] {
-  const catalog = listOpenSwanAnthropicToolsForSurface(surface, opts?.allowedToolNames);
+  const catalog = listOpenSwanAnthropicToolsForSurface(surface, opts?.allowedToolNames, opts?.mode);
   const includeFormatted = opts?.includeFormattedText !== false;
 
   return catalog.map((tool) => ({

@@ -50,6 +50,31 @@ function isColumnMissingError(error: { code?: string; message?: string } | null 
   );
 }
 
+/**
+ * A CHECK-constraint violation — specifically the `messages_content_check`
+ * length cap. Surfaced as Postgres code 23514 / a "violates check constraint"
+ * message. Pre-migration the cap is 1000 chars (see
+ * `20260612_messages_content_cap.sql`), which long agent/recovery messages
+ * exceed; we truncate and retry so persistence degrades gracefully instead of
+ * hard-failing with a 400.
+ */
+function isContentCheckViolation(error: { code?: string; message?: string } | null | undefined): boolean {
+  return !!error && (
+    error.code === '23514' ||
+    /content_check|violates check constraint/i.test(error.message || '')
+  );
+}
+
+/** Pre-migration DB cap on messages.content. Truncate to just under it. */
+const MESSAGES_CONTENT_FALLBACK_CAP = 1000;
+
+export function truncateMessageContentForColumn(content: string, cap = MESSAGES_CONTENT_FALLBACK_CAP): string {
+  const text = String(content ?? '');
+  if (text.length <= cap) return text;
+  const marker = '… (truncated)';
+  return `${text.slice(0, Math.max(0, cap - marker.length))}${marker}`;
+}
+
 export async function getCurrentChatUserProfile(): Promise<ChatCurrentUserProfile | null> {
   const { data: auth } = await supabase.auth.getUser();
   const user = auth.user;
@@ -217,12 +242,26 @@ export async function persistChatMessage(input: PersistChatMessageInput): Promis
     .single();
 
   if (!error) return data?.id || null;
-  if (!isColumnMissingError(error)) throw error;
+
+  // Long agent/recovery messages exceed the pre-migration 1000-char cap. Retry
+  // once with truncated content so the row still persists (full content stays
+  // in the local recoverable copy). Harmless once the cap migration is applied.
+  if (isContentCheckViolation(error)) {
+    const { data: truncatedData, error: truncatedError } = await supabase
+      .from('messages')
+      .insert({ ...payload, content: truncateMessageContentForColumn(input.content) })
+      .select('id')
+      .single();
+    if (!truncatedError) return truncatedData?.id || null;
+    if (!isColumnMissingError(truncatedError)) throw truncatedError;
+  } else if (!isColumnMissingError(error)) {
+    throw error;
+  }
 
   const fallbackPayload = {
     circle_id: input.circleId,
     user_id: input.userId,
-    content: input.content,
+    content: truncateMessageContentForColumn(input.content, 100_000),
     ...(input.threadId ? { thread_id: input.threadId } : {}),
     ...(input.replyToId ? { reply_to: input.replyToId } : {}),
   };
@@ -233,6 +272,15 @@ export async function persistChatMessage(input: PersistChatMessageInput): Promis
     .select('id')
     .single();
 
+  if (fallbackError && isContentCheckViolation(fallbackError)) {
+    const { data: lastData, error: lastError } = await supabase
+      .from('messages')
+      .insert({ ...fallbackPayload, content: truncateMessageContentForColumn(input.content) })
+      .select('id')
+      .single();
+    if (lastError) throw lastError;
+    return lastData?.id || null;
+  }
   if (fallbackError) throw fallbackError;
   return fallbackData?.id || null;
 }

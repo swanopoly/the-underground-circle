@@ -779,8 +779,8 @@ ${durableMemories.map((m: any) => `- [${m.memory_kind || m.category || "fact"}] 
   }
 
   if (ctx.wikiContext) {
-    volatile += `\n\n## Internal AI Wiki Knowledge
-Use this as trusted internal reference knowledge from the app's AI Wiki when the user asks about AI agents, MCP, models, design-to-code, retrieval, evals, browser automation, multimodal tooling, safety, or related topics.
+    volatile += `\n\n## Internal AI Wiki Context
+Use this as trusted internal reference context from the app's Wiki when the user asks about AI agents, MCP, models, design-to-code, retrieval, evals, browser automation, multimodal tooling, safety, or related topics.
 ${ctx.wikiContext}`;
   }
 

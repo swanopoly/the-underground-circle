@@ -44,27 +44,12 @@ process.env.EXPO_PUBLIC_SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '
 process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || 'tool-lint-smoke-anon-key';
 
 const NATIVE_STUBS = new Set(['react-native', '@react-native-async-storage/async-storage']);
-const STUB_SOURCE = `
-export const Platform = { OS: 'web', select: (obj) => (obj ? (obj.web !== undefined ? obj.web : obj.default) : undefined) };
-export const AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
-export const Dimensions = { get: () => ({ width: 1280, height: 800, scale: 2, fontScale: 1 }) };
-export const NativeModules = {};
-export const StyleSheet = { create: (s) => s, flatten: (s) => s };
-const asyncStorageStub = {
-  getItem: async () => null, setItem: async () => {}, removeItem: async () => {},
-  multiGet: async () => [], multiSet: async () => {}, multiRemove: async () => {}, getAllKeys: async () => [],
-};
-export default asyncStorageStub;
-`;
+const STUB_URL = new URL('./native-module-stub.mjs', import.meta.url).href;
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (NATIVE_STUBS.has(specifier)) return { url: `stub:${specifier}`, shortCircuit: true };
+    if (NATIVE_STUBS.has(specifier)) return { url: STUB_URL, shortCircuit: true };
     return nextResolve(specifier, context);
-  },
-  load(url, context, nextLoad) {
-    if (url.startsWith('stub:')) return { format: 'module', source: STUB_SOURCE, shortCircuit: true };
-    return nextLoad(url, context);
   },
 });
 
@@ -135,6 +120,8 @@ const UNTRUSTED_CONTENT_TOOLS = new Set<string>([
   'search_memories',    // retrieved memory content is untrusted per roadmap
   'skills.view',        // skill bodies are guidance, never user commands
   'browser.dom_snapshot', // live webpage content
+  'desktop.list_installed_apps', // local app names are fenced machine metadata
+  'context.search',     // <untrusted_quoted>-wrapped circle context index lines
 ]);
 const UNTRUSTED_PHRASE_RE = /untrusted|as data, not|not (as )?(commands|instructions)|guidance, not commands|treat .* as data/i;
 
@@ -142,22 +129,12 @@ const UNTRUSTED_PHRASE_RE = /untrusted|as data, not|not (as )?(commands|instruct
  * Justified exceptions. Every entry must list the rule ids it exempts and a
  * reason; entries that no longer suppress anything fail the smoke.
  *
- * credentials.get is a READ-ONLY handler (privileged 1Password read, no
- * write) that falls through to the catch-all coordination policy in
- * `getBaseOpenSwanToolPolicy`, which marks it `mutatesState: true`.
- * Descriptions must describe what the handler ACTUALLY does (no invented
- * side effects), so it is exempt from `mutating-side-effect` until the T5
- * policy-categorization pass gives it an honest read-only policy. Other
- * read-only catch-all tools (automations.list, wp.discover_types,
- * wp.list_posts) happen to satisfy the verb heuristic and need no entry —
- * the same T5 caveat applies to their policies.
+ * (credentials.get used to be exempt from `mutating-side-effect` because the
+ * catch-all coordination policy over-reported `mutatesState: true`. It now has
+ * a dedicated read-only `vault` policy (`mutatesState: false`, approvalMode
+ * 'ask'), so the mutating rule no longer applies and no exemption is needed.)
  */
-const ALLOWLIST: Record<string, { rules: string[]; reason: string }> = {
-  'credentials.get': {
-    rules: ['mutating-side-effect'],
-    reason: 'Read-only 1Password fetch (privileged read, no write); catch-all policy over-reports mutatesState (T5 scope).',
-  },
-};
+const ALLOWLIST: Record<string, { rules: string[]; reason: string }> = {};
 
 // ── Lint engine ─────────────────────────────────────────────────────────────
 

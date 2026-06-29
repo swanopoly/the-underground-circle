@@ -9,7 +9,12 @@
 import {
   MAX_CONCURRENT_DELEGATIONS_PER_CIRCLE,
   MAX_DELEGATION_DEPTH,
+  SUBAGENT_TYPED_CORE_FLAG,
+  buildSubagentChildRunOptions,
+  buildSubagentLoopSummary,
+  buildSubagentParentSummary,
   canDelegate,
+  isSubagentTypedCoreEnabled,
   redactSubagentOutput,
   serializeSubagentSummaryForParent,
   type SubagentTranscript,
@@ -83,6 +88,43 @@ function main() {
     const d = canDelegate({ proposedDepth: 5, inFlight: 5 });
     assert(!d.ok, 'gate: both violated → rejected');
     assert(d.reason === 'depth_exceeded', 'gate: depth reason takes priority');
+  }
+
+  // ─── O4: daily spend limit ──────────────────────────────────────
+  {
+    const d = canDelegate({ proposedDepth: 1, inFlight: 0, dailySpendUsd: 12.5, dailySpendLimitUsd: 10 });
+    assert(!d.ok, 'gate: spend over limit rejected');
+    assert(d.reason === 'spend_limit_exceeded', 'gate: reason=spend_limit_exceeded');
+    assert(d.detail?.includes('$12.50') && d.detail?.includes('$10.00'), 'gate: detail names spend + limit');
+    assert(d.remainingSlots === 0, 'gate: remainingSlots=0 on spend reject');
+  }
+  {
+    const d = canDelegate({ proposedDepth: 1, inFlight: 0, dailySpendUsd: 10, dailySpendLimitUsd: 10 });
+    assert(!d.ok && d.reason === 'spend_limit_exceeded', 'gate: spend exactly at limit rejected (>=)');
+  }
+  {
+    const d = canDelegate({ proposedDepth: 1, inFlight: 0, dailySpendUsd: 4.2, dailySpendLimitUsd: 10 });
+    assert(d.ok, 'gate: spend under limit allowed');
+  }
+  {
+    const d = canDelegate({ proposedDepth: 1, inFlight: 0, dailySpendUsd: 0, dailySpendLimitUsd: 0 });
+    assert(!d.ok && d.reason === 'spend_limit_exceeded', 'gate: explicit $0 limit blocks every spawn');
+  }
+  {
+    // Fail-open: missing telemetry or missing limit skips the check.
+    const noSpend = canDelegate({ proposedDepth: 1, inFlight: 0, dailySpendUsd: null, dailySpendLimitUsd: 10 });
+    assert(noSpend.ok, 'gate: null spend (telemetry unavailable) fails open');
+    const noLimit = canDelegate({ proposedDepth: 1, inFlight: 0, dailySpendUsd: 999, dailySpendLimitUsd: null });
+    assert(noLimit.ok, 'gate: null limit (unconfigured circle) fails open');
+    const nan = canDelegate({ proposedDepth: 1, inFlight: 0, dailySpendUsd: NaN, dailySpendLimitUsd: 10 });
+    assert(nan.ok, 'gate: NaN spend fails open');
+    const negative = canDelegate({ proposedDepth: 1, inFlight: 0, dailySpendUsd: -3, dailySpendLimitUsd: 10 });
+    assert(negative.ok, 'gate: negative spend (bad telemetry) fails open');
+  }
+  {
+    // Depth/concurrency still win over the spend check (checked first).
+    const d = canDelegate({ proposedDepth: 3, inFlight: 0, dailySpendUsd: 999, dailySpendLimitUsd: 10 });
+    assert(d.reason === 'depth_exceeded', 'gate: depth reason beats spend reason');
   }
 
   // ─── Invalid input ──────────────────────────────────────────────
@@ -243,6 +285,138 @@ function main() {
   {
     const payload = redactSubagentOutput({ finalText: 'partial', toolCalls: [], stopReason: 'max_tokens' });
     assert(payload.completed === false, 'delegation: stopReason=max_tokens → completed=false');
+  }
+
+  // ─── O3: gate context fields are decision-neutral ───────────────
+  {
+    const plain = canDelegate({ proposedDepth: 1, inFlight: 0 });
+    const withCtx = canDelegate({
+      proposedDepth: 1,
+      inFlight: 0,
+      requestedRole: 'coder',
+      taskPreview: 'Implement the primary solution for this task',
+    });
+    assert(withCtx.ok === plain.ok && withCtx.reason === plain.reason
+      && withCtx.remainingSlots === plain.remainingSlots,
+      'O3 gate: requestedRole/taskPreview do not change the decision');
+    const rejected = canDelegate({ proposedDepth: 9, inFlight: 0, requestedRole: 'coder', taskPreview: 'x' });
+    assert(!rejected.ok && rejected.reason === 'depth_exceeded',
+      'O3 gate: refusal shape unchanged with context fields');
+  }
+
+  // ─── O3: escape-hatch flag (uc_subagent_typed_core) ─────────────
+  {
+    const g = globalThis as { localStorage?: { getItem?: (k: string) => string | null } };
+    const original = g.localStorage;
+    const withStore = (value: string | null) => {
+      g.localStorage = { getItem: (k: string) => (k === SUBAGENT_TYPED_CORE_FLAG ? value : null) };
+    };
+    try {
+      delete g.localStorage;
+      assert(isSubagentTypedCoreEnabled() === true, 'O3 flag: no storage → default ON');
+      withStore(null);
+      assert(isSubagentTypedCoreEnabled() === true, 'O3 flag: key absent → ON');
+      withStore('0');
+      assert(isSubagentTypedCoreEnabled() === false, "O3 flag: '0' → legacy path");
+      withStore('false');
+      assert(isSubagentTypedCoreEnabled() === false, "O3 flag: 'false' → legacy path");
+      withStore('off');
+      assert(isSubagentTypedCoreEnabled() === false, "O3 flag: 'off' → legacy path");
+      withStore('1');
+      assert(isSubagentTypedCoreEnabled() === true, "O3 flag: '1' → typed core");
+      g.localStorage = { getItem: () => { throw new Error('storage exploded'); } };
+      assert(isSubagentTypedCoreEnabled() === true, 'O3 flag: storage throw → default ON');
+    } finally {
+      if (original === undefined) delete g.localStorage;
+      else g.localStorage = original;
+    }
+  }
+
+  // ─── O3: buildSubagentLoopSummary (uniform summary builder) ─────
+  {
+    const payload = buildSubagentLoopSummary({
+      finalText: 'y'.repeat(3000),
+      toolCalls: [{ name: 'tasks.list', ok: true }, { name: 'fs.write', ok: false }],
+      completedCleanly: true,
+      usage: { input_tokens: 1234, output_tokens: 567 },
+    });
+    assert(payload.summary.length === 1200 && payload.summary.endsWith('...'),
+      'O3 loop summary: bounded with truncation marker');
+    assert(payload.toolCallCount === 2, 'O3 loop summary: toolCallCount accurate');
+    assert(payload.completed === true, 'O3 loop summary: completedCleanly → completed');
+    assert(payload.inputTokens === 1234 && payload.outputTokens === 567,
+      'O3 loop summary: usage carried into tokens');
+  }
+  {
+    const payload = buildSubagentLoopSummary({
+      finalText: 'partial work before cap',
+      toolCalls: [{ name: 'a' }],
+      completedCleanly: false,
+    });
+    assert(payload.completed === false, 'O3 loop summary: cap/edge failure → completed=false');
+    assert(payload.inputTokens === undefined && payload.outputTokens === undefined,
+      'O3 loop summary: no usage → tokens omitted (legacy path parity)');
+  }
+
+  // ─── O3: buildSubagentParentSummary (parent-visible contract) ───
+  {
+    const parent = buildSubagentParentSummary({
+      payload: { summary: 'did the thing', toolCallCount: 3, completed: true, inputTokens: 10, outputTokens: 4 },
+      status: 'completed',
+      runId: 'run-1',
+    });
+    assert(JSON.stringify(Object.keys(parent).sort())
+      === JSON.stringify(['runId', 'status', 'summary', 'tokens', 'toolCallCount']),
+      `O3 parent summary: EXACT key set (got ${Object.keys(parent).sort().join(',')})`);
+    assert(parent.tokens.input === 10 && parent.tokens.output === 4, 'O3 parent summary: tokens accurate');
+    assert(parent.status === 'completed' && parent.runId === 'run-1', 'O3 parent summary: status + runId carried');
+  }
+  {
+    const parent = buildSubagentParentSummary({
+      payload: { summary: 'blocked', toolCallCount: 0, completed: false },
+      status: 'blocked',
+    });
+    assert(parent.tokens.input === null && parent.tokens.output === null,
+      'O3 parent summary: missing usage → null tokens (never fabricated 0)');
+    assert(!('runId' in parent), 'O3 parent summary: runId omitted when absent');
+  }
+
+  // ─── O3: child run persistence options (parentRunId pin) ────────
+  {
+    const longTask = 't'.repeat(200);
+    const options = buildSubagentChildRunOptions({
+      circleId: 'c1',
+      userId: 'u1',
+      surface: 'main_chat',
+      subagentRole: 'coder',
+      subagentDisplayName: 'Coder',
+      task: longTask,
+      model: 'claude-haiku-4-5',
+      roomId: 'room-9',
+      parentRunId: 'parent-run-7',
+      delegationDepth: 2,
+      runtimePlanVersion: 3,
+    });
+    assert(options.parentRunId === 'parent-run-7', 'O3 child run: parentRunId carried to createPersistedRun');
+    assert(options.metadata.delegationDepth === 2, 'O3 child run: delegationDepth stamped (grandchild gate input)');
+    assert(options.metadata.delegatedToRole === 'coder', 'O3 child run: role rides metadata');
+    assert(options.metadata.runtimePlanVersion === 3, 'O3 child run: runtimePlanVersion stamped');
+    assert(options.title === `Coder: ${'t'.repeat(80)}`, 'O3 child run: legacy title format (80-char slice)');
+    assert(options.mode === 'coder' && options.model === 'claude-haiku-4-5' && options.roomId === 'room-9',
+      'O3 child run: mode/model/roomId preserved');
+  }
+  {
+    const options = buildSubagentChildRunOptions({
+      circleId: 'c1',
+      userId: 'u1',
+      surface: 'room_chat',
+      subagentRole: 'reviewer',
+      subagentDisplayName: 'Reviewer',
+      task: 'short',
+      delegationDepth: 1,
+    });
+    assert(!('parentRunId' in options), 'O3 child run: root delegation omits parentRunId');
+    assert(!('model' in options) && !('roomId' in options), 'O3 child run: optional fields omitted, not undefined');
   }
 
   if (failures > 0) {

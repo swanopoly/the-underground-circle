@@ -24,6 +24,7 @@ export type LocalComputerAwarenessKind =
   | 'file_trash'
   | 'file_mkdir'
   | 'file_write_text'
+  | 'notes_create'
   | 'a11y_tree'
   | 'window_manage'
   | 'semantic_click'
@@ -127,6 +128,7 @@ const FILE_SEARCH_IN_FOR_RE = /^\s*(?:please\s+)?(?:search|find|locate)\s+(?:fil
 const FILE_SEARCH_FOR_IN_RE = /^\s*(?:please\s+)?(?:search|find|locate)\s+(?:files?|folders?)?\s*(?:for\s+)?(.+?)\s+(?:in|inside|under)\s+(.+?)\s*[.!?]?\s*$/i;
 const FILE_SEARCH_FOR_ON_RE = /^\s*(?:(?:can|could)\s+you\s+)?(?:please\s+)?(?:search|find|locate|look\s+for)\s+(?:the\s+)?(?:file\s+|image\s+|photo\s+|picture\s+|document\s+)?(.+?)\s+(?:on|in|inside|under)\s+(?:my\s+)?(desktop|downloads?|documents?|pictures?|photos?|computer|mac|laptop|home folder|home directory|files?)\s*[.!?]?\s*$/i;
 const FILE_FIND_AND_OPEN_RE = /^\s*(?:please\s+)?(?:find|locate|search\s+for)\s+(?:and\s+)?open\s+(?:the\s+)?(?:file\s+|image\s+|photo\s+|picture\s+|document\s+)?(.+?)\s+(?:on|in|inside|under)\s+(?:my\s+)?(.+?)\s*[.!?]?\s*$/i;
+const FILE_OPEN_FROM_ROOT_RE = /^\s*(?:please\s+)?(?:open|reveal|show|preview|view)\s+(?:the\s+)?(?:file\s+|image\s+|photo\s+|picture\s+|document\s+)?(.+?)\s+(?:from|on|in|inside|under)\s+(?:my\s+)?(?:the\s+)?(desktop|downloads?|documents?|pictures?|photos?|computer|mac|laptop|home folder|home directory|files?)(?:\s+(?:and|then)\s+[\s\S]*)?\s*[.!?]?$/i;
 const GOOGLE_DRIVE_ROOT_RE = /^(?:google[_\s-]*drive|gdrive|my\s+drive)$/i;
 const GOOGLE_DRIVE_FILE_SEARCH_RE = /^\s*(?:please\s+)?(?:search|find|locate|look\s+for)\s+(?:the\s+)?(?:file\s+|document\s+|layout\s+)?["'`]?([\s\S]{1,240}?)["'`]?\s+(?:in|inside|on|under)\s+(?:my\s+)?(?:google\s+drive|gdrive|my\s+drive)\s*[.!?]?\s*$/i;
 const GOOGLE_DRIVE_INDESIGN_WORKFLOW_RE = /^\s*(?:please\s+)?(?:find|locate|search(?:\s+for)?|open|load)\s+(?:the\s+)?(?:indesign\s+)?(?:file\s+|document\s+|layout\s+)?["'`]?([\s\S]{1,240}?)["'`]?\s+(?:in|inside|on|under|from)\s+(?:my\s+)?(?:google\s+drive|gdrive|my\s+drive)\s+(?:(?:and|then)\s+)?(?:(?:open|load)\s+(?:it|the\s+file|the\s+document|the\s+layout)?\s+)?(?:in|inside|with|on)\s+(?:adobe\s+)?indesign(?:\s+\d{4})?(?:\s*(?:and|then|,)\s*([\s\S]{1,2000}))?\s*$/i;
@@ -139,7 +141,14 @@ const FILE_RENAME_RE = /\b(rename|change)\b(?=[\s\S]{0,220}\b(to|as)\b)(?=[\s\S]
 const FILE_COPY_RE = /\b(copy|duplicate|make a copy)\b(?=[\s\S]{0,220}\b(to|as)\b)(?=[\s\S]{0,220}\b(file|folder|image|photo|picture|document|desktop|downloads?|documents?)\b)/i;
 const FILE_TRASH_RE = /\b(delete|remove|trash)\b(?=[\s\S]{0,220}\b(file|folder|image|photo|picture|document|desktop|downloads?|documents?)\b)|\bmove\b(?=[\s\S]{0,220}\btrash\b)(?=[\s\S]{0,220}\b(file|folder|image|photo|picture|document|desktop|downloads?|documents?)\b)/i;
 const FILE_MKDIR_RE = /\b(create|make|new)\b[\s\S]{0,80}\b(folder|directory)\b/i;
-const FILE_WRITE_TEXT_RE = /\b(write|save|create|make|append)\b[\s\S]{0,120}\b(file|text file|note|notes|txt|markdown|md)\b/i;
+// NOTE: "note"/"notes" are deliberately NOT here — "create a note that says X"
+// is a Notes-app action (NOTES_CREATE_RE below), not a text-file write. Keeping
+// them here mis-routed Notes tasks into local-file-write-text.
+const FILE_WRITE_TEXT_RE = /\b(write|save|create|make|append)\b[\s\S]{0,120}\b(file|text file|txt|markdown|md)\b/i;
+// "create a note that says X" / "make a note saying X" / "add a note: X" →
+// the system Notes app (a scriptable app), captured body in group 1. Tolerant
+// of the common "thats says" typo and an optional "in the Notes app" clause.
+const NOTES_CREATE_RE = /\b(?:create|make|add|write|jot(?:\s+down)?|start|new)\s+(?:a\s+|an\s+|the\s+)?(?:new\s+|quick\s+)?note\b(?:\s+(?:in|using|with)\s+(?:the\s+)?notes(?:\s+app)?)?\s*(?:that\s*(?:['’]?s)?\s*say(?:s|ing)?|that\s+reads?|saying|reads?|titled|called|containing|with(?:\s+(?:the\s+)?(?:text|body|content))?|of|:|-)?\s*["'`]?([\s\S]*?)["'`]?\s*$/i;
 const MOUSE_DRAG_RE = /^\s*(?:please\s+)?drag(?:\s+(?:the\s+)?(?:mouse|cursor))?\s+(?:from\s+)?(\d{1,5})\s*,\s*(\d{1,5})\s+(?:to|into|onto)\s+(\d{1,5})\s*,\s*(\d{1,5})\s*[.!?]?\s*$/i;
 const MOUSE_MOVE_RE = /^\s*(?:please\s+)?(?:move|hover|position)\s+(?:the\s+)?(?:mouse|cursor)(?:\s+(?:to|at|over))?\s+(\d{1,5})\s*,\s*(\d{1,5})\s*[.!?]?\s*$/i;
 const MOUSE_CLICK_RE = /^\s*(?:please\s+)?(?:(right|left)\s+)?(?:(double|single)\s+)?click(?:\s+(?:the\s+)?(?:mouse|cursor))?(?:\s+(?:at|on))?\s+(\d{1,5})\s*,\s*(\d{1,5})\s*[.!?]?\s*$/i;
@@ -283,7 +292,7 @@ const GMAIL_SEARCH_RE = /^\s*(?:please\s+)?(?:search|find|look\s+for)\s+(?:gmail
 const GMAIL_SEARCH_TRAILING_RE = /^\s*(?:please\s+)?(?:search|find|look\s+for)\s+([\s\S]{1,500}?)\s+(?:in|inside|on)\s+(?:gmail|mail|email|emails)(?:\s+(?:in|inside|on)\s+(.+?)(?:\s+(?:app|application|window|browser))?)?\s*[.!?]?\s*$/i;
 const GMAIL_COMPOSE_INTENT_RE = /^\s*(?:please\s+)?(?:open\s+)?(?:(compose|draft|write|send)\s+(?:a\s+)?(?:gmail|email|message)|gmail\s+compose)([\s\S]*)$/i;
 const WORDPRESS_ADMIN_RE = new RegExp(String.raw`^\s*(?:please\s+)?(?:open|show|go\s+to|launch)\s+(?:wordpress|wp|wp-admin|wordpress\s+admin)(?:\s+(?:dashboard|admin))?(?:\s+(?:for|on|at)\s+(${URL_TARGET_PATTERN}))?(?:\s+(?:in|inside|on)\s+(.+?)(?:\s+(?:app|application|window|browser))?)?\s*[.!?]?\s*$`, 'i');
-const WORDPRESS_SECTION_RE = new RegExp(String.raw`^\s*(?:please\s+)?(?:open|show|go\s+to|launch)\s+(?:(?:the\s+)?(?:wordpress|wp)\s+)?(dashboard|admin|posts?|all\s+posts|new\s+post|add\s+new\s+post|pages?|all\s+pages|new\s+page|add\s+new\s+page|media(?:\s+library)?|comments?|plugins?|themes?|users?|settings|categories|tags)(?:\s+(?:in|inside|on)\s+(?:wordpress|wp))?(?:\s+(?:for|on|at)\s+(${URL_TARGET_PATTERN}))?(?:\s+(?:in|inside|on)\s+(.+?)(?:\s+(?:app|application|window|browser))?)?\s*[.!?]?\s*$`, 'i');
+const WORDPRESS_SECTION_RE = new RegExp(String.raw`^\s*(?:please\s+)?(?:open|show|go\s+to|launch)\s+(?:(?:the\s+)?(?:wordpress|wp|wp[-\s]?admin)\s+)?(dashboard|admin|posts?|all\s+posts|new\s+post|add\s+new\s+post|pages?|all\s+pages|new\s+page|add\s+new\s+page|media(?:\s+library)?|comments?|plugins?|themes?|users?|settings|categories|tags|dealer\s+inspire(?:\s+settings)?|di\s+slides?|dealer\s+inspire\s+slides?|new\s+di\s+slide|new\s+dealer\s+inspire\s+slide|add\s+new\s+di\s+slide|add\s+new\s+dealer\s+inspire\s+slide|di\s+sliders?|inventory|inventory\s+settings|special\s+offers?|fixed\s+ops|wallet|personalizer|events?|staff|forms?|third\s+party\s+integrations?|ldm\s+seo\s+toolbox|reload\s+cache)(?:\s+(?:in|inside|on)\s+(?:wordpress|wp|wp[-\s]?admin))?(?:\s+(?:for|on|at)\s+(${URL_TARGET_PATTERN}))?(?:\s+(?:in|inside|on)\s+(.+?)(?:\s+(?:app|application|window|browser))?)?\s*[.!?]?\s*$`, 'i');
 const WORDPRESS_NEW_CONTENT_RE = new RegExp(String.raw`^\s*(?:please\s+)?(?:create|make|start|open)\s+(?:a\s+)?(?:new\s+)?(?:wordpress|wp)\s+(post|page)(?:\s+(?:for|on|at)\s+(${URL_TARGET_PATTERN}))?(?:\s+(?:in|inside|on)\s+(.+?)(?:\s+(?:app|application|window|browser))?)?\s*[.!?]?\s*$`, 'i');
 const PRESS_KEYS_IN_APP_RE = /^\s*(?:please\s+)?(?:press|hit|tap)\s+(.+?)\s+(?:in|inside|on)\s+(.+?)(?:\s+(?:app|application|window))?\s*[.!?]?\s*$/i;
 const PRESS_KEYS_FRONTMOST_RE = /^\s*(?:please\s+)?(?:press|hit|tap)\s+(.+?)\s+(?:in|inside|on)\s+(?:the\s+)?(?:current|active|frontmost)\s+(?:app|application|window)\s*[.!?]?\s*$/i;
@@ -300,6 +309,7 @@ const WAIT_RE = new RegExp(String.raw`^\s*(?:please\s+)?(?:wait|pause|sleep)(?:\
 const WINDOW_RESIZE_RE = /^\s*(?:please\s+)?resize\s+(?:(.+?)\s+)?window\s+(?:to|at)\s+(\d{2,5})\s*x\s*(\d{2,5})\s*[.!?]?\s*$/i;
 const WINDOW_MANAGE_RE = /^\s*(?:please\s+)?(minimi[sz]e|unminimi[sz]e|maximi[sz]e|zoom|raise|focus)\s+(?:(active|frontmost|current)\s+)?(?:(.+?)\s+)?window\s*[.!?]?\s*$/i;
 const LAUNCH_APP_RE = /^\s*(?:please\s+)?(?:open|launch|start|fire\s+up)\s+(.+?)(?:\s+(?:app|application|program))?(?:\s+(?:on|in)\s+(?:my\s+)?(?:computer|mac|desktop))?\s*[.!?]?$/i;
+const COMPUTER_LAUNCH_APP_RE = /^\s*(?:please\s+)?(?:use\s+)?(?:(?:my|the)\s+)?(?:computer|mac|desktop)\s+(?:to\s+)?(?:open|launch|start|fire\s+up)\s+(.+?)(?:\s+(?:app|application|program))?\s*[.!?]?$/i;
 const FOCUS_APP_RE = /^\s*(?:please\s+)?(?:focus|switch\s+to|bring\s+(?:up|forward)|bring\s+.+?\s+to\s+(?:front|the\s+front))\s+(.+?)(?:\s+(?:app|application|window))?\s*[.!?]?$/i;
 const BRING_TO_FRONT_RE = /^\s*(?:please\s+)?bring\s+(.+?)\s+to\s+(?:front|the\s+front)\s*[.!?]?$/i;
 const OPEN_URL_RE = /^\s*(?:please\s+)?(?:open|visit|go\s+to|navigate\s+to|launch)\s+(https?:\/\/\S+|mailto:\S+|file:\/\/\S+)\s*$/i;
@@ -401,6 +411,10 @@ function cleanOptionalShortcutAppQuery(value: string | undefined): string | unde
 
 function looksLikeWebSurface(value: string): boolean {
   return /\b(website|webpage|site|page|tab|url|link|browser|wordpress|shopify|webflow|wix|squarespace|woocommerce|bigcommerce|framer|cms|admin panel|web app)\b/i.test(value);
+}
+
+function looksLikeLocalFileLaunchTarget(value: string): boolean {
+  return /(?:~\/|\.\/|\.\.\/|\/Users\/|\/|\.[A-Za-z0-9]{1,12}\b|\b(?:from|on|in|inside|under)\s+(?:my\s+)?(?:the\s+)?(?:desktop|downloads?|documents?|pictures?|photos?)\b)/i.test(String(value || ''));
 }
 
 function isBrowserAppQuery(value: string | undefined): boolean {
@@ -3765,6 +3779,16 @@ export function detectLocalComputerAwarenessIntent(message: string): LocalComput
   if (FILE_COPY_RE.test(text)) return { route: true, kind: 'file_copy', reason: 'local-file-copy' };
   if (FILE_TRASH_RE.test(text)) return { route: true, kind: 'file_trash', reason: 'local-file-trash' };
   if (FILE_MKDIR_RE.test(text)) return { route: true, kind: 'file_mkdir', reason: 'local-file-mkdir' };
+  const notesCreate = text.match(NOTES_CREATE_RE);
+  if (notesCreate) {
+    return {
+      route: true,
+      kind: 'notes_create',
+      appQuery: 'Notes',
+      text: (notesCreate[1] || '').trim(),
+      reason: 'local-notes-create',
+    };
+  }
   if (FILE_WRITE_TEXT_RE.test(text)) return { route: true, kind: 'file_write_text', reason: 'local-file-write-text' };
   if (FILE_STAT_RE.test(text)) return { route: true, kind: 'file_stat', reason: 'local-file-stat' };
   const findAndOpenFile = text.match(FILE_FIND_AND_OPEN_RE);
@@ -3778,6 +3802,22 @@ export function detectLocalComputerAwarenessIntent(message: string): LocalComput
       rootPath: normalizeFileSearchRoot(findAndOpenFile[2]),
       extensions: extension ? [extension] : undefined,
       reason: 'local-file-find-open',
+    };
+  }
+  const openFileFromRoot = text.match(FILE_OPEN_FROM_ROOT_RE);
+  if (openFileFromRoot?.[1] && openFileFromRoot[2]) {
+    if (/\b(?:wordpress|wp|media\s+library|upload|attach|publish|post)\b/i.test(openFileFromRoot[1])) {
+      return { route: false, kind: null, reason: 'file-open-from-root-suppressed-for-platform-upload' };
+    }
+    const query = cleanFileSearchQuery(openFileFromRoot[1]);
+    const extension = query.match(/\.([A-Za-z0-9]{1,12})$/)?.[1]?.toLowerCase();
+    return {
+      route: true,
+      kind: 'open_file_search_match',
+      query,
+      rootPath: normalizeFileSearchRoot(openFileFromRoot[2]),
+      extensions: extension ? [extension] : undefined,
+      reason: 'local-file-open-from-root',
     };
   }
   const googleDriveSearch = text.match(GOOGLE_DRIVE_FILE_SEARCH_RE);
@@ -3845,8 +3885,12 @@ export function detectLocalComputerAwarenessIntent(message: string): LocalComput
   if (bringToFront?.[1]) return { route: true, kind: 'focus_app', appQuery: cleanAppQuery(bringToFront[1]), reason: 'local-focus-app' };
   const focusApp = text.match(FOCUS_APP_RE);
   if (focusApp?.[1]) return { route: true, kind: 'focus_app', appQuery: cleanAppQuery(focusApp[1]), reason: 'local-focus-app' };
+  const computerLaunchApp = text.match(COMPUTER_LAUNCH_APP_RE);
+  if (computerLaunchApp?.[1] && !looksLikeWebSurface(computerLaunchApp[1]) && !looksLikeLocalFileLaunchTarget(computerLaunchApp[1]) && !/^(?:the\s+)?(?:file|image|photo|picture|document|folder)\b/i.test(computerLaunchApp[1].trim())) {
+    return { route: true, kind: 'launch_app', appQuery: cleanAppQuery(computerLaunchApp[1]), reason: 'local-launch-app' };
+  }
   const launchApp = text.match(LAUNCH_APP_RE);
-  if (launchApp?.[1] && !looksLikeWebSurface(launchApp[1]) && !/^(?:the\s+)?(?:file|image|photo|picture|document|folder)\b/i.test(launchApp[1].trim())) {
+  if (launchApp?.[1] && !looksLikeWebSurface(launchApp[1]) && !looksLikeLocalFileLaunchTarget(launchApp[1]) && !/^(?:the\s+)?(?:file|image|photo|picture|document|folder)\b/i.test(launchApp[1].trim())) {
     return { route: true, kind: 'launch_app', appQuery: cleanAppQuery(launchApp[1]), reason: 'local-launch-app' };
   }
   return { route: false, kind: null, reason: 'no-local-awareness-match' };
@@ -4151,6 +4195,22 @@ function normalizeWordPressSection(rawSection: string | undefined): string {
   if (section === 'category' || section === 'categories') return 'categories';
   if (section === 'tag' || section === 'tags') return 'tags';
   if (section === 'settings') return 'settings';
+  if (section === 'dealer inspire' || section === 'dealer inspire settings') return 'dealer_inspire';
+  if (section === 'di slide' || section === 'di slides' || section === 'dealer inspire slide' || section === 'dealer inspire slides') return 'di_slides';
+  if (section === 'new di slide' || section === 'new dealer inspire slide' || section === 'add new di slide' || section === 'add new dealer inspire slide') return 'new_di_slide';
+  if (section === 'di slider' || section === 'di sliders') return 'di_sliders';
+  if (section === 'inventory') return 'inventory';
+  if (section === 'inventory settings') return 'inventory_settings';
+  if (section === 'special offer' || section === 'special offers') return 'special_offers';
+  if (section === 'fixed ops') return 'fixed_ops';
+  if (section === 'wallet') return 'wallet';
+  if (section === 'personalizer') return 'personalizer';
+  if (section === 'event' || section === 'events') return 'events';
+  if (section === 'staff') return 'staff';
+  if (section === 'form' || section === 'forms') return 'forms';
+  if (section === 'third party integrations') return 'third_party_integrations';
+  if (section === 'ldm seo toolbox') return 'ldm_seo_toolbox';
+  if (section === 'reload cache') return 'reload_cache';
   return 'dashboard';
 }
 
@@ -4172,8 +4232,26 @@ function wordpressAdminUrl(rawSection: string | undefined, rawSite?: string): st
       settings: '/wp-admin/options-general.php',
       categories: '/wp-admin/edit-tags.php?taxonomy=category',
       tags: '/wp-admin/edit-tags.php?taxonomy=post_tag',
+      dealer_inspire: '/wp/wp-admin/admin.php?page=dealerinspire-settings',
+      di_slides: '/wp/wp-admin/edit.php?post_type=di_slide',
+      new_di_slide: '/wp/wp-admin/post-new.php?post_type=di_slide',
+      di_sliders: '/wp/wp-admin/edit.php?post_type=di_slider',
+      inventory: '/wp/wp-admin/edit.php?post_type=inventory&page=inventory_listview',
+      inventory_settings: '/wp/wp-admin/edit.php?post_type=inventory&page=inventory_settings',
+      special_offers: '/wp/wp-admin/edit.php?post_type=special_offers',
+      fixed_ops: '/wp/wp-admin/edit.php?post_type=fixed_op',
+      wallet: '/wp/wp-admin/edit.php?post_type=wallet',
+      personalizer: '/wp/wp-admin/edit.php?post_type=personalizer',
+      events: '/wp/wp-admin/edit.php?post_type=events',
+      staff: '/wp/wp-admin/edit.php?post_type=staff',
+      forms: '/wp/wp-admin/admin.php?page=gf_entries',
+      third_party_integrations: '/wp/wp-admin/admin.php?page=third-party-integrations',
+      ldm_seo_toolbox: '/wp/wp-admin/admin.php?page=lst-slug',
+      reload_cache: '/wp/wp-admin/admin-post.php?action=empty_cache',
     };
-    return `${base}${selfHostedPaths[section] || selfHostedPaths.dashboard}`;
+    const path = selfHostedPaths[section] || selfHostedPaths.dashboard;
+    const adjustedPath = base.endsWith('/wp') && path.startsWith('/wp/') ? path.slice(3) : path;
+    return `${base}${adjustedPath}`;
   }
 
   const wordpressComUrls: Record<string, string> = {
@@ -4676,6 +4754,8 @@ export function renderLocalComputerAwarenessIntent(intent: LocalComputerAwarenes
       return `wait ${Math.max(1, Math.round((intent.durationMs || 1000) / 1000))} seconds`;
     case 'wait_for_app':
       return `wait for ${intent.appQuery || 'the app'} to open for ${Math.max(1, Math.round((intent.durationMs || 8000) / 1000))} seconds`;
+    case 'notes_create':
+      return `create a note saying ${JSON.stringify(intent.text || '')} in ${intent.appQuery || 'Notes'}`;
     default:
       return intent.reason;
   }
@@ -4747,6 +4827,7 @@ export function getLocalComputerAwarenessRisk(intent: LocalComputerAwarenessInte
     case 'file_trash':
     case 'file_mkdir':
     case 'file_write_text':
+    case 'notes_create':
       return 'review';
     default:
       return 'safe';

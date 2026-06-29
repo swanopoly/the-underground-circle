@@ -38,6 +38,25 @@ function assertHas(message: string, expected: OpenSwanToolName, profile?: Agenti
   );
 }
 
+function assertToolIndexAtMost(message: string, expected: OpenSwanToolName, maxIndex: number, profile?: AgenticCodingProfile) {
+  const tools = toolsFor(message, profile);
+  const index = tools.indexOf(expected);
+  assert(
+    index >= 0 && index <= maxIndex,
+    `"${message}" keeps ${expected} within first ${maxIndex + 1} tools`,
+    `index=${index} saw ${tools.join(', ')}`,
+  );
+}
+
+function assertNotHas(message: string, unexpected: OpenSwanToolName, profile?: AgenticCodingProfile) {
+  const tools = toolsFor(message, profile);
+  assert(
+    !tools.includes(unexpected),
+    `"${message}" does not recommend ${unexpected}`,
+    `saw ${tools.join(', ')}`,
+  );
+}
+
 function main() {
   assertHas(
     'tell me all the tabs I have open on my web browser',
@@ -204,12 +223,55 @@ function main() {
     'browser.screenshot',
   );
   assertHas(
+    'list Dealer Inspire DI Slides in wp-admin',
+    'wp.discover_types',
+  );
+  assertHas(
+    'list Dealer Inspire DI Slides in wp-admin',
+    'wp.list_posts',
+  );
+  assertToolIndexAtMost(
+    'Log into WordPress wp-admin and install the SEO plugin after approval',
+    'browser.wp_admin_source_intelligence',
+    4,
+  );
+  assertHas(
+    'Log into WordPress wp-admin with my saved credentials and install the SEO plugin after approval',
+    'browser.fill_credential_field',
+  );
+  assertToolIndexAtMost(
+    'Quick Edit Dealer Inspire DI Slide Promaster expiration_date in wp-admin after approval',
+    'browser.wp_admin_source_intelligence',
+    4,
+  );
+  assertToolIndexAtMost(
+    'Upload banner.jpg and create a Dealer Inspire DI Slide after approval',
+    'browser.wp_admin_source_intelligence',
+    4,
+  );
+  assertHas(
+    'Upload banner.jpg and create a Dealer Inspire DI Slide after approval',
+    'wp.create_slide',
+  );
+  assertHas(
+    'Update Dealer Inspire DI Slide Promaster expiration_date after approval',
+    'wp.update_post',
+  );
+  assertHas(
     'log into Shopify and update this product page after I approve',
     'vault.resolve_for_task',
   );
   assertHas(
     'log into Shopify and update this product page after I approve',
     'browser.verification_state',
+  );
+  assertHas(
+    'log into Shopify and update this product page after I approve',
+    'browser.fill_credential_field',
+  );
+  assertNotHas(
+    'log into Shopify and update this product page after I approve',
+    'browser.wp_admin_source_intelligence',
   );
   assertHas(
     'the desktop/browser_tabs endpoint returns 404 in the local bridge',

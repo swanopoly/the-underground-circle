@@ -19,6 +19,8 @@ export type EngineeringCadOperation =
   | 'draft_2d_geometry'
   | 'update_dimensions_layers'
   | 'model_or_bim_edit'
+  | 'matlab_compute_simulation'
+  | 'matlab_code_test_review'
   | 'export_plot'
   | 'batch_convert_or_translate';
 
@@ -94,8 +96,15 @@ function isEngineeringCadTask(task: string): boolean {
 function detectOperations(task: string): EngineeringCadOperation[] {
   const text = normalize(task);
   const operations: EngineeringCadOperation[] = [];
+  const isMatlab = /\b(matlab|mathworks|simulink|simscape|stateflow|mlx|slx)\b|\.(?:m|mlx|slx|mdl)\b/i.test(text);
   if (/\b(inspect|measure|dimension check|verify|review|check|audit|units?|scale|tolerance|clearance|area|length|count)\b/i.test(text)) {
     operations.push('inspect_measure');
+  }
+  if (isMatlab && /\b(simulink|simscape|stateflow|simulate|simulation|solver|model|block|plant|control system|signal|plot|analysis|optimi[sz]e|fit|train|predict|dataset|matrix|numerical|compute|calculation)\b/i.test(text)) {
+    operations.push('matlab_compute_simulation');
+  }
+  if (isMatlab && /\b(script|function|live script|mlx|code|debug|fix|test|unit test|runtests|app designer|toolbox|package|class|refactor|review|static analysis|code analyzer)\b/i.test(text)) {
+    operations.push('matlab_code_test_review');
   }
   if (/\b(create|draw|draft|floor plan|site plan|shop drawing|technical drawing|2d|polyline|linework|wall|room|revision cloud|detail|title block)\b/i.test(text)) {
     operations.push('draft_2d_geometry');
@@ -103,7 +112,7 @@ function detectOperations(task: string): EngineeringCadOperation[] {
   if (/\b(layer|block|dimensions?|annotation|label|title block|sheet|view|paper space|model space|style|linetype|lineweight)\b/i.test(text)) {
     operations.push('update_dimensions_layers');
   }
-  if (/\b(model|part|assembly|component|body|sketch|extrude|loft|feature|parameter|bim|family|revit|fusion|solidworks|inventor|rhino|cam|toolpath)\b/i.test(text)) {
+  if (!isMatlab && /\b(model|part|assembly|component|body|sketch|extrude|loft|feature|parameter|bim|family|revit|fusion|solidworks|inventor|rhino|cam|toolpath)\b/i.test(text)) {
     operations.push('model_or_bim_edit');
   }
   if (/\b(export|plot|publish|print|pdf|dwg|dxf|step|stp|iges|igs|stl|sat|save as|render|output)\b/i.test(text)) {
@@ -112,7 +121,10 @@ function detectOperations(task: string): EngineeringCadOperation[] {
   if (/\b(batch|bulk|folder of|many files|convert|translate|automation api|server|cloud|pipeline|rendition)\b/i.test(text)) {
     operations.push('batch_convert_or_translate');
   }
-  return operations.length ? unique(operations).slice(0, 6) : ['inspect_measure'];
+  if (isMatlab && !operations.includes('matlab_compute_simulation') && !operations.includes('matlab_code_test_review')) {
+    operations.push('matlab_compute_simulation');
+  }
+  return operations.length ? unique(operations).slice(0, 7) : ['inspect_measure'];
 }
 
 function operationLabel(operation: EngineeringCadOperation): string {
@@ -121,6 +133,8 @@ function operationLabel(operation: EngineeringCadOperation): string {
     draft_2d_geometry: 'Draft or revise 2D CAD geometry',
     update_dimensions_layers: 'Update dimensions, layers, annotations, or title blocks',
     model_or_bim_edit: 'Edit model, assembly, component, or BIM element state',
+    matlab_compute_simulation: 'Run MATLAB/Simulink computation, analysis, or simulation',
+    matlab_code_test_review: 'Build, debug, test, or review MATLAB code/apps',
     export_plot: 'Export, plot, publish, or save CAD deliverable',
     batch_convert_or_translate: 'Batch convert or translate design files',
   };
@@ -129,6 +143,7 @@ function operationLabel(operation: EngineeringCadOperation): string {
 
 function riskForOperation(operation: EngineeringCadOperation): EngineeringCadOperationRisk {
   if (operation === 'inspect_measure') return 'read_only';
+  if (operation === 'matlab_compute_simulation' || operation === 'matlab_code_test_review') return 'review';
   if (operation === 'export_plot' || operation === 'batch_convert_or_translate' || operation === 'model_or_bim_edit') return 'high';
   return 'review';
 }
@@ -143,6 +158,26 @@ function sourceRefsForPlan(task: string): AppAutomationResearchRef[] {
 }
 
 function commonObserveSteps(targetName: string): EngineeringCadRunbookStep[] {
+  if (/matlab|simulink/i.test(targetName)) {
+    return [
+      step('observe', 'Resolve MATLAB project and data files', `Verify the staged MATLAB project/folder, source .m/.mlx/.slx files, datasets, and intended output folder before opening ${targetName}.`, {
+        tool: 'desktop.file_stat',
+        evidence: ['project/source files exist', 'datasets and output folder grants known', 'working folder is scoped'],
+      }),
+      step('observe', 'Confirm MATLAB session and project state', `Launch or focus ${targetName}, then confirm the active window, current folder/project, command window/editor state, and MATLAB version/toolbox context before running code.`, {
+        tool: 'desktop.window_state',
+        evidence: ['active app identity', 'current project/folder', 'version/toolbox evidence when available'],
+      }),
+      step('observe', 'Inspect command/editor/UI state', 'Read accessibility/menu state for command window, editor tabs, Simulink model windows, dialogs, and app/toolbox panels before typing or clicking.', {
+        tool: 'desktop.read_a11y_tree',
+        evidence: ['command/editor/model state', 'unique control/menu identity'],
+      }),
+      step('observe', 'Capture figure/model proof state', 'Capture a screenshot when figures, Simulink models, scopes, or app windows are part of the proof.', {
+        tool: 'desktop.screenshot',
+        evidence: ['figure/model/app visual proof', 'selected model or editor tab when visible'],
+      }),
+    ];
+  }
   return [
     step('observe', 'Resolve source and output files', `Verify the staged CAD/model source, sidecar/xref folder, and intended output folder before opening ${targetName}.`, {
       tool: 'desktop.file_stat',
@@ -289,6 +324,74 @@ function buildRunbook(task: string, operation: EngineeringCadOperation): Enginee
       failClosedConditions: ['target entity ambiguous', 'worksharing/model lock unclear', 'units/tolerance unknown', 'no app-native adapter for requested mutation'],
       fallbackBuildoutTrigger: 'If the app lacks a verified model/BIM adapter, build the smallest app-specific adapter with official docs and a smoke before retry.',
       userVisibleSummary: 'Model/BIM edits require app-native adapter evidence and explicit approval before mutation.',
+      sourceRefs,
+    };
+  }
+
+  if (operation === 'matlab_compute_simulation') {
+    return {
+      targetName,
+      operation,
+      label: operationLabel(operation),
+      risk,
+      controlSurface,
+      requiredInputs: ['MATLAB project/current folder', 'MATLAB version and installed toolboxes', 'input data/model files', 'expected outputs, tolerances, and assumptions'],
+      approvalBefore: ['running generated MATLAB code with file writes, external data access, long compute, or model mutation', 'editing Simulink/Simscape/Stateflow models', 'exporting plots, reports, models, or datasets'],
+      steps: [
+        ...common,
+        step('observe', 'Detect MATLAB capabilities', 'Use MATLAB MCP/tooling when available to detect installed toolboxes and constrain generated code to available products.', {
+          tool: 'MATLAB MCP detect_matlab_toolboxes',
+          evidence: ['MATLAB version', 'installed toolbox list', 'unavailable toolbox blockers'],
+        }),
+        approvalStep('Computation and simulation can run generated code, mutate models, or write artifacts; request approval with inputs, outputs, and assumptions.'),
+        step('act', 'Execute bounded MATLAB computation', 'Prefer MATLAB MCP evaluate/run-file tools or a scoped MATLAB script. Run one analysis/simulation step at a time and preserve command output.', {
+          tool: 'MATLAB MCP evaluate_matlab_code/run_matlab_file',
+          approvalRequired: true,
+          evidence: ['code/script path', 'command output', 'warnings/errors', 'runtime assumptions'],
+        }),
+        step('verify', 'Verify numerical and visual outputs', 'Check numerical results, plots/figures, Simulink simulation status, warnings, and output files before completion.', {
+          tool: 'desktop.file_stat',
+          evidence: ['result values with units/tolerance', 'plot/model proof', 'output file_stat when files are written'],
+        }),
+      ],
+      successCriteria: ['MATLAB version/toolboxes are known', 'code ran with captured output', 'results are checked against requested units/tolerances/assumptions', 'written outputs are verified'],
+      failClosedConditions: ['required toolbox unavailable', 'input data/model file missing', 'solver assumptions or units unclear', 'generated code errors remain unresolved', 'approval missing for side effects'],
+      fallbackBuildoutTrigger: 'If MATLAB MCP or a scoped script route is unavailable, build the smallest MATLAB execution adapter/skill with official MathWorks refs and smoke coverage before retry.',
+      userVisibleSummary: 'MATLAB/Simulink analysis runs through MCP/script execution with toolbox detection, captured output, and result proof.',
+      sourceRefs,
+    };
+  }
+
+  if (operation === 'matlab_code_test_review') {
+    return {
+      targetName,
+      operation,
+      label: operationLabel(operation),
+      risk,
+      controlSurface,
+      requiredInputs: ['MATLAB project/current folder', 'target .m/.mlx/.slx files', 'release/toolbox requirements', 'test or acceptance criteria'],
+      approvalBefore: ['writing or replacing MATLAB source, tests, app files, or models', 'running generated code with side effects', 'installing packages/toolboxes', 'exporting artifacts'],
+      steps: [
+        ...common,
+        step('act', 'Check MATLAB code before running', 'Use MATLAB MCP static analysis or the MATLAB Code Analyzer to catch syntax/style/API issues before execution.', {
+          tool: 'MATLAB MCP check_matlab_code',
+          evidence: ['static analysis output', 'release/toolbox compatibility notes'],
+        }),
+        approvalStep('Source/test/app/model edits and generated-code execution need approval with a scoped diff/output plan.'),
+        step('act', 'Run MATLAB tests or script', 'Prefer MATLAB MCP run_matlab_test_file/run_matlab_file and iterate on failures with the smallest code change.', {
+          tool: 'MATLAB MCP run_matlab_test_file/run_matlab_file',
+          approvalRequired: true,
+          evidence: ['test output', 'pass/fail summary', 'warnings/errors'],
+        }),
+        step('verify', 'Verify code, app, or model deliverable', 'Re-run static checks/tests, verify generated files, and capture app/figure/model proof when relevant.', {
+          tool: 'desktop.file_stat',
+          evidence: ['final check/test pass', 'changed file_stat', 'visual proof for apps/figures/models'],
+        }),
+      ],
+      successCriteria: ['static checks are clean or justified', 'tests or runnable scripts pass', 'changed files/artifacts are scoped and verified', 'remaining limitations are explicit'],
+      failClosedConditions: ['no MATLAB session/toolbox proof', 'tests cannot run', 'API behavior is guessed without MathWorks refs or a reproduced failure', 'approval missing for writes or generated-code execution'],
+      fallbackBuildoutTrigger: 'If generic prompting fails on MATLAB APIs, build/refine a MATLAB skill that captures the observed failure mode, then rerun checks/tests.',
+      userVisibleSummary: 'MATLAB code and app work is checked, run, tested, and iterated with official MCP/skill guidance.',
       sourceRefs,
     };
   }

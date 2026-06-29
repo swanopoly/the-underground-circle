@@ -25,7 +25,16 @@ import {
   resolveAgentDevelopmentTaskRoute,
   summarizeRelevantAgentDevelopmentStandards,
 } from '../src/lib/agentDevelopmentStandards';
-import { getArticle, searchArticles } from '../src/lib/wikiData';
+import {
+  buildWikiKnowledgeBundle,
+  buildWikiSearchResponse,
+  getArticle,
+  getWikiArticleBuilderPrompts,
+  getWikiArticleLearningLoop,
+  getWikiFuturePaths,
+  getWikiResearchInsights,
+  searchArticles,
+} from '../src/lib/wikiData';
 
 function assert(condition: unknown, label: string, detail?: string): void {
   if (!condition) {
@@ -79,6 +88,50 @@ for (const standard of AGENT_DEVELOPMENT_STANDARD_DOCS) {
     assert(text.includes(requiredText), `article ${standard.wikiArticleId} includes ${requiredText}`);
   }
 }
+
+const noMatchWikiResponse = buildWikiSearchResponse('zzzzzzzz-no-match');
+const oldWikiLabel = ['Knowledge', 'Wiki'].join(' ');
+assert(noMatchWikiResponse.includes('**Wiki Search:**'), 'wiki search no-match response uses Wiki label');
+assert(!noMatchWikiResponse.includes(oldWikiLabel), 'wiki search no-match response omits old wiki label');
+
+const matchedWikiResponse = buildWikiSearchResponse('MCP');
+assert(matchedWikiResponse.includes('**Wiki Search: "MCP"**'), 'wiki search match response uses Wiki label');
+assert(!matchedWikiResponse.includes(oldWikiLabel), 'wiki search match response omits old wiki label');
+
+const noMatchWikiBundle = buildWikiKnowledgeBundle('zzzzzzzz-no-match');
+assert(noMatchWikiBundle.includes('but the Wiki covers'), 'wiki knowledge bundle uses Wiki fallback label');
+assert(!noMatchWikiBundle.includes(oldWikiLabel), 'wiki knowledge bundle omits old wiki label');
+
+const futurePaths = getWikiFuturePaths();
+assert(futurePaths.length >= 5, 'wiki future paths expose inspiration journeys');
+for (const path of futurePaths) {
+  assert(path.title.length > 0, `future path has title: ${path.id}`);
+  assert(path.outcome.length > 0, `future path has outcome: ${path.id}`);
+  assert(path.articleIds.some(articleId => Boolean(getArticle(articleId))), `future path has valid articles: ${path.id}`);
+}
+
+const researchInsights = getWikiResearchInsights();
+assert(researchInsights.length >= 7, 'wiki research insights expose researched learning upgrades');
+for (const insight of researchInsights) {
+  assert(insight.sourceUrl.startsWith('https://'), `research insight has source url: ${insight.id}`);
+  assert(insight.addToWiki.length > 0, `research insight has wiki action: ${insight.id}`);
+  assert(insight.userAction.length > 0, `research insight has user action: ${insight.id}`);
+}
+
+const articleLearningLoop = getWikiArticleLearningLoop('future-cities-epcot-systems');
+assert(articleLearningLoop.length === 4, 'wiki article learning loop exposes four learning passes');
+assert(articleLearningLoop.some(item => item.label === 'Recall'), 'wiki article learning loop includes recall');
+assert(articleLearningLoop.some(item => item.label === 'Transfer'), 'wiki article learning loop includes transfer');
+assert(articleLearningLoop.some(item => item.label === 'Project'), 'wiki article learning loop includes project');
+assert(articleLearningLoop.some(item => item.label === 'Future'), 'wiki article learning loop includes future');
+assert(articleLearningLoop.every(item => item.sourceUrl.startsWith('https://')), 'wiki article learning loop keeps research source urls');
+
+const builderPrompts = getWikiArticleBuilderPrompts('future-cities-epcot-systems');
+assert(builderPrompts.length === 3, 'wiki article builder prompts expose imagine/build/question flow');
+assert(builderPrompts.some(item => item.label === 'Imagine'), 'wiki article builder prompts include imagine prompt');
+assert(builderPrompts.some(item => item.label === 'Build'), 'wiki article builder prompts include build prompt');
+assert(builderPrompts.some(item => item.label === 'Question'), 'wiki article builder prompts include question prompt');
+assert(builderPrompts.every(item => item.articleIds.includes('future-cities-epcot-systems')), 'wiki article builder prompts retain source article');
 
 for (const route of AGENT_DEVELOPMENT_TASK_ROUTES) {
   const standards = getStandardsForTaskType(route.taskType);

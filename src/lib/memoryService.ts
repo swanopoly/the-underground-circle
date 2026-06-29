@@ -14,6 +14,7 @@ import {
   type MemoryScope, type MemoryKind, type MemoryEntry,
 } from './agentRunSystem';
 import { decideSoulMemoryRouting, getAgentSoulInfo, getMemorySoulKey } from './agentSoulMemory';
+import { wrapUntrusted } from './untrustedContent';
 
 export type MemoryNamespace =
   | 'startup_bundle'
@@ -460,8 +461,9 @@ export function formatSoulWisdomBlock(entry: SoulWisdomEntry | null): string {
   const sourceSuffix = entry.sourceKind === 'synthesized' ? ' • distilled from active memory' : '';
   const header = `## ${title} wisdom in this circle${dateStr ? ` (updated ${dateStr})` : ''}${sourceSuffix}`;
   // Wisdom bodies are distilled from circle memories (member/model-authored)
-  // — untrusted (rule 5). Fence at source so every caller inherits it.
-  return `${header}\n<untrusted_quoted>\n${entry.body.trim()}\n</untrusted_quoted>`;
+  // — untrusted (rule 5). wrapUntrusted fences + strips any embedded fence
+  // markers so the body can't break out of the fence.
+  return wrapUntrusted(entry.body, { heading: header });
 }
 
 async function synthesizeSoulWisdomFromMemories(opts: {
@@ -1056,10 +1058,10 @@ export async function retrieveForTurn(opts: {
     return `- [${m.memory_kind}] ${m.title}: ${m.content}${reason}`;
   }).join('\n');
   // Retrieved memory is untrusted (rule 5): a circle member or an external
-  // source may have written content into it. Fence it so the model treats the
-  // recalled text as data, not instructions. The header stays outside the
-  // fence so the section label remains readable.
-  const formatted = `${header}\n<untrusted_quoted>\n${body}\n</untrusted_quoted>`;
+  // source may have written content into it. wrapUntrusted fences it (so the
+  // model treats recalled text as data) and strips embedded fence markers so
+  // a member's memory can't break out. Header stays outside the fence.
+  const formatted = body.trim() ? wrapUntrusted(body, { heading: header }) : '';
 
   return { memories: kept, formatted };
 }

@@ -49,6 +49,9 @@ export function summarizeVerificationCheck(check: OpenSwanVerificationCheck, res
   if (result.status === 'manual_required') {
     return `${check.label}: manual review required`;
   }
+  if (result.status === 'not_applicable') {
+    return `${check.label}: not applicable (no automatic verification for this task)`;
+  }
   return `${check.label}: planned`;
 }
 

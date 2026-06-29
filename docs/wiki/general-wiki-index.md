@@ -1,6 +1,6 @@
 # General Wiki Index
 
-Last updated: 2026-06-08
+Last updated: 2026-06-22
 
 ## Purpose
 
@@ -50,6 +50,7 @@ These are time-bound reports that capture what is current:
 - [agent-memory-ui-and-compaction-2026-04-08.md](/Users/cswanson/the-underground-circle/docs/wiki/agent-memory-ui-and-compaction-2026-04-08.md)
 - [semantic-memory-retrieval-and-privacy-2026-04-08.md](/Users/cswanson/the-underground-circle/docs/wiki/semantic-memory-retrieval-and-privacy-2026-04-08.md)
 - [agent-memory-review-notes-2026-04-08.md](/Users/cswanson/the-underground-circle/docs/wiki/agent-memory-review-notes-2026-04-08.md)
+- [chat-and-task-automation-deep-research-2026-06-22.md](/Users/cswanson/the-underground-circle/docs/wiki/chat-and-task-automation-deep-research-2026-06-22.md)
 - [agentic-computer-app-automation-2026-05-29.md](/Users/cswanson/the-underground-circle/docs/wiki/agentic-computer-app-automation-2026-05-29.md)
 - [agent-tool-contracts-and-evals-2026-05-29.md](/Users/cswanson/the-underground-circle/docs/wiki/agent-tool-contracts-and-evals-2026-05-29.md)
 - [nikola-tesla-projects-planetary-impact-2026-06-01.md](/Users/cswanson/the-underground-circle/docs/wiki/nikola-tesla-projects-planetary-impact-2026-06-01.md)

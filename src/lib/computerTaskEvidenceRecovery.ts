@@ -16,9 +16,36 @@ export type ComputerTaskEvidenceFailureArea =
   | 'user_unblock'
   | 'unknown';
 
+/**
+ * AR: the next-best confidently-launchable app to switch to when the chosen
+ * app can't be opened (from the route's structured `recoveryFallback`).
+ */
+export interface ComputerTaskRecoveryAppFallback {
+  displayName: string;
+  surface?: 'desktop' | 'browser';
+  openVia?: string;
+  openTarget?: string;
+  reason?: string;
+  availability?: 'installed' | 'maybe' | 'web';
+}
+
 export interface ComputerTaskEvidenceRecoveryInput {
   contract?: ComputerTaskEvidenceContract | null;
   appRouteDecision?: ComputerTaskAppRouteDecisionInput | null;
+  /**
+   * AR: the app the user explicitly named (e.g. "pixelmator"), so an
+   * unavailable-app failure reads "you asked for Pixelmator" instead of a
+   * generic "missing app capability". Optional/additive.
+   */
+  namedAppIntent?: string | null;
+  /**
+   * AR: the next-best confidently-launchable app to switch to when the chosen
+   * app can't open. When present and the failure is app-availability (not a
+   * user-only auth/verification blocker), recovery recommends switching to it
+   * and retrying — turning a "go install the app" dead-end into a one-tap
+   * continuation. Optional/additive.
+   */
+  appFallback?: ComputerTaskRecoveryAppFallback | null;
   /**
    * Generic app-adapter-gap contract for the target app. When the failure is on
    * an unfamiliar/not-pre-configured app, this lets recovery prescribe
@@ -127,6 +154,14 @@ export interface ComputerTaskEvidenceRecoveryContext {
   evidenceReadiness?: ComputerTaskEvidenceRecoveryReadiness | null;
   /** Research-first buildout guidance for an unfamiliar app (when an app-adapter-gap is supplied). */
   appCapabilityResearch?: AppCapabilityRecoveryResearch | null;
+  /**
+   * AR: when the chosen app can't be opened and a confidently-launchable
+   * alternative exists, the alternative to switch to (drives the
+   * "switch & retry" recovery option). Null otherwise.
+   */
+  appFallback?: ComputerTaskRecoveryAppFallback | null;
+  /** AR: the user-named app, echoed so consumers can surface intent in copy. */
+  namedAppIntent?: string | null;
 }
 
 function clean(value: unknown, max = 1_200): string {
@@ -321,6 +356,42 @@ function reasonForArea(
   }
 }
 
+// AR: app-availability failures (the chosen app can't be opened) — distinct
+// from auth/verification blockers, which switching apps would NOT solve.
+const APP_UNAVAILABLE_RE = /\b(app not installed|isn'?t installed|no longer installed|not available|could ?n'?t (launch|open|start)|failed to (launch|open|start)|license (expired|invalid|missing)|not licensed|screen recording permission|accessibility permission)\b/i;
+const AUTH_VERIFICATION_RE = /\b(mfa|2fa|two[- ]factor|captcha|verification code|one[- ]time|otp|login wall|sign ?in|sign ?up|password|credential|account)\b/i;
+
+function describeFallbackOpen(fallback: ComputerTaskRecoveryAppFallback): string {
+  if (fallback.surface === 'browser' || fallback.availability === 'web') return 'open it in the browser';
+  return 'launch it on the desktop';
+}
+
+/**
+ * AR: decide whether to offer "switch to the fallback app and retry" instead
+ * of a "go install the app / ask the user" dead-end. Offered only when:
+ *  - a confidently-launchable fallback exists (web, or confirmed-installed
+ *    desktop — never another unconfirmed 'maybe');
+ *  - the failure is about the APP being unavailable (not an auth/verification
+ *    blocker, which switching photo editors wouldn't fix);
+ *  - the route decision didn't already demand a specific user action/approval.
+ */
+function resolveAppFallbackSwitch(
+  input: ComputerTaskEvidenceRecoveryInput,
+  area: ComputerTaskEvidenceFailureArea,
+  text: string,
+  routeDecision?: ComputerTaskEvidenceRecoveryAppRouteDecision | null,
+): ComputerTaskRecoveryAppFallback | null {
+  const fallback = input.appFallback || null;
+  if (!fallback || !fallback.displayName) return null;
+  const launchable = fallback.availability === 'web' || fallback.availability === 'installed' || fallback.surface === 'browser';
+  if (!launchable) return null;
+  if (routeDecision?.status === 'needs_approval' || routeDecision?.status === 'needs_user_action') return null;
+  // Switching apps cannot resolve a website auth/verification wall.
+  if (AUTH_VERIFICATION_RE.test(text) && !APP_UNAVAILABLE_RE.test(text)) return null;
+  const isAppUnavailable = area === 'capability_gap' || APP_UNAVAILABLE_RE.test(text);
+  return isAppUnavailable ? fallback : null;
+}
+
 function requiresUserAction(
   area: ComputerTaskEvidenceFailureArea,
   text: string,
@@ -495,9 +566,14 @@ export function diagnoseComputerTaskEvidenceFailure(
     routeDecision: appRouteDecision,
   });
   const gap = input.appAdapterGap || null;
-  const userActionRequired = requiresUserAction(area, text, appRouteDecision);
-  const connectedAgentAllowed = allowsConnectedAgent(area, text, contract, appRouteDecision);
-  const retryAllowed = allowsRetry(area, userActionRequired, connectedAgentAllowed, appRouteDecision);
+  // AR: a confidently-launchable fallback turns "the chosen app isn't
+  // available" from a user-action / buildout dead-end into a switch-and-retry.
+  const appFallbackSwitch = resolveAppFallbackSwitch(input, area, text, appRouteDecision);
+  const userActionRequired = appFallbackSwitch ? false : requiresUserAction(area, text, appRouteDecision);
+  const connectedAgentAllowed = appFallbackSwitch ? false : allowsConnectedAgent(area, text, contract, appRouteDecision);
+  const retryAllowed = appFallbackSwitch
+    ? true
+    : allowsRetry(area, userActionRequired, connectedAgentAllowed, appRouteDecision);
   const requiredFreshEvidence = unique([
     ...contract.freshEvidenceRequired,
     ...(appRouteDecision?.missingConfirmations.map((item) => `App route confirmation: ${item}`) || []),
@@ -531,10 +607,30 @@ export function diagnoseComputerTaskEvidenceFailure(
     ...(gap ? gap.researchPlan.slice(0, 2).map((item) => `Research before guessing: ${item}`) : []),
     area === 'unknown' ? 'No exact contract rule matched; recover conservatively.' : null,
   ], 6);
-  const recommended = recommendedOptionId({ retryAllowed, userActionRequired, connectedAgentAllowed });
-  const requiredEvidence = toolRequirementsForContract(area, contract);
+  const recommended = appFallbackSwitch
+    ? 'retry_with_fresh_evidence'
+    : recommendedOptionId({ retryAllowed, userActionRequired, connectedAgentAllowed });
+  const named = appFallbackSwitch ? clean(input.namedAppIntent, 80) : '';
+  const reason = appFallbackSwitch
+    ? `${named ? `You asked to use ${named}, but it isn't available here. ` : "The chosen app couldn't be opened here. "}${appFallbackSwitch.displayName} can do this task (${describeFallbackOpen(appFallbackSwitch)}), so recovery can switch there instead of stopping.`
+    : reasonForArea(area, contract, appRouteDecision);
+  const resumeInstruction = appFallbackSwitch
+    ? `Switch to ${appFallbackSwitch.displayName} — ${describeFallbackOpen(appFallbackSwitch)}${appFallbackSwitch.openTarget ? ` (${appFallbackSwitch.openTarget})` : ''} — and complete the task there with fresh observation. If ${appFallbackSwitch.displayName} also fails, stop and ask the user.`
+    : resumeInstructionFor({
+        area,
+        contract,
+        routeDecision: appRouteDecision,
+        retryAllowed,
+        userActionRequired,
+        connectedAgentAllowed,
+        requiredFreshEvidence,
+        gap,
+      });
+  // AR: a switch-and-retry re-grounds on the fallback's surface — it does NOT
+  // need the capability_gap buildout smokes, so request normal fresh evidence.
+  const requiredEvidence = toolRequirementsForContract(appFallbackSwitch ? 'fresh_evidence' : area, contract);
   // Unfamiliar app capability gap: research the control surface before buildout.
-  if (gap && area === 'capability_gap') {
+  if (!appFallbackSwitch && gap && area === 'capability_gap') {
     requiredEvidence.unshift(requirement(
       'app-control-research',
       'research.search',
@@ -548,7 +644,7 @@ export function diagnoseComputerTaskEvidenceFailure(
     kind: contract.kind,
     taskFamily: contract.taskFamily,
     failureArea: area,
-    reason: reasonForArea(area, contract, appRouteDecision),
+    reason,
     matchedRules,
     requiredFreshEvidence,
     requiredEvidence,
@@ -560,16 +656,9 @@ export function diagnoseComputerTaskEvidenceFailure(
     userActionRequired,
     connectedAgentAllowed,
     recommendedOptionId: recommended,
-    resumeInstruction: resumeInstructionFor({
-      area,
-      contract,
-      routeDecision: appRouteDecision,
-      retryAllowed,
-      userActionRequired,
-      connectedAgentAllowed,
-      requiredFreshEvidence,
-      gap,
-    }),
+    resumeInstruction,
+    appFallback: appFallbackSwitch,
+    namedAppIntent: clean(input.namedAppIntent, 80) || null,
     appCapabilityResearch: gap
       ? {
           missingTool: gap.missingBridgeTools[0] || '',

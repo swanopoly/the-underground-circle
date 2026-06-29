@@ -2,6 +2,8 @@ import { supabase } from './supabase';
 import {
   createSecondBrainNote,
   createSecondBrainLink,
+  getSecondBrainUnavailableMessage,
+  rememberSecondBrainStorageError,
   updateSecondBrainNote,
   type SecondBrainNote,
 } from './secondBrain';
@@ -119,6 +121,8 @@ interface DynamicItem {
   parentSectionKey: string;
 }
 
+export const SECOND_BRAIN_SITE_MAP_AGENT_STATUSES = ['building', 'idle'] as const;
+
 async function loadActiveMissions(circleId: string): Promise<DynamicItem[]> {
   const { data } = await supabase
     .from('circle_missions')
@@ -169,7 +173,7 @@ async function loadCircleAgents(circleId: string): Promise<DynamicItem[]> {
     .from('circle_office_agents')
     .select('id, display_name, agent_type, status, description')
     .eq('circle_id', circleId)
-    .in('status', ['active', 'idle'])
+    .in('status', [...SECOND_BRAIN_SITE_MAP_AGENT_STATUSES])
     .order('created_at', { ascending: false })
     .limit(10);
   if (!data?.length) return [];
@@ -181,7 +185,7 @@ async function loadCircleAgents(circleId: string): Promise<DynamicItem[]> {
       `Status: ${a.status}`,
     ].filter(Boolean).join('\n'),
     tags: ['agent', a.agent_type || 'custom', 'office'],
-    importance: a.status === 'active' ? 0.78 : 0.62,
+    importance: a.status === 'building' ? 0.78 : 0.62,
     parentSectionKey: 'office',
   }));
 }
@@ -193,14 +197,24 @@ async function upsertSiteMapNote(
   userId: string,
   key: string,
   fields: { title: string; content: string; tags: string[]; importance: number },
-): Promise<{ note: SecondBrainNote | null; wasNew: boolean }> {
-  const { data: existing } = await supabase
+): Promise<{ note: SecondBrainNote | null; wasNew: boolean; error?: string }> {
+  const unavailable = getSecondBrainUnavailableMessage();
+  if (unavailable) return { note: null, wasNew: false, error: unavailable };
+
+  const { data: existing, error: existingError } = await supabase
     .from('circle_second_brain_notes')
     .select('id')
     .eq('circle_id', circleId)
     .eq('created_by', userId)
     .contains('metadata', { siteMapKey: key })
     .maybeSingle();
+
+  if (existingError) {
+    if (rememberSecondBrainStorageError(existingError)) {
+      return { note: null, wasNew: false, error: existingError.message };
+    }
+    return { note: null, wasNew: false, error: existingError.message };
+  }
 
   if (existing?.id) {
     const result = await updateSecondBrainNote(existing.id, {
@@ -209,7 +223,7 @@ async function upsertSiteMapNote(
       tags: fields.tags,
       importance: fields.importance,
     });
-    return { note: result.note, wasNew: false };
+    return { note: result.note, wasNew: false, error: result.error };
   }
 
   const result = await createSecondBrainNote({
@@ -228,7 +242,7 @@ async function upsertSiteMapNote(
       mappedAt: new Date().toISOString(),
     },
   });
-  return { note: result.note, wasNew: true };
+  return { note: result.note, wasNew: true, error: result.error };
 }
 
 // ─── Main export ──────────────────────────────────────────────────────────────
@@ -249,6 +263,9 @@ export async function autoMapSiteToSecondBrain(
   let created = 0, updated = 0, linked = 0;
 
   try {
+    const unavailable = getSecondBrainUnavailableMessage();
+    if (unavailable) return { created, updated, linked, error: unavailable };
+
     // ── 1. Create/update static app sections ──
     const sectionNoteMap = new Map<string, string>(); // key → note id
     const total = SITE_SECTIONS.length;
@@ -262,6 +279,9 @@ export async function autoMapSiteToSecondBrain(
         tags: section.tags,
         importance: section.importance,
       });
+      if (!note && getSecondBrainUnavailableMessage()) {
+        return { created, updated, linked, error: getSecondBrainUnavailableMessage() || 'Second brain storage is unavailable.' };
+      }
       if (note) {
         sectionNoteMap.set(section.key, note.id);
         wasNew ? created++ : updated++;
@@ -281,7 +301,7 @@ export async function autoMapSiteToSecondBrain(
         const pairKey = [fromId, toId].sort().join(':');
         if (linkedPairs.has(pairKey)) continue;
         linkedPairs.add(pairKey);
-        await createSecondBrainLink({
+        const linkResult = await createSecondBrainLink({
           circleId,
           fromNoteId: fromId,
           toNoteId: toId,
@@ -289,7 +309,10 @@ export async function autoMapSiteToSecondBrain(
           strength: 0.75,
           reason: `${section.key} ↔ ${targetKey}`,
         });
-        linked++;
+        if (linkResult.unavailable) {
+          return { created, updated, linked, error: linkResult.error || 'Second brain storage is unavailable.' };
+        }
+        if (linkResult.link) linked++;
         await pause(40);
       }
     }
@@ -312,11 +335,14 @@ export async function autoMapSiteToSecondBrain(
         tags: item.tags,
         importance: item.importance,
       });
+      if (!note && getSecondBrainUnavailableMessage()) {
+        return { created, updated, linked, error: getSecondBrainUnavailableMessage() || 'Second brain storage is unavailable.' };
+      }
       if (note) {
         wasNew ? created++ : updated++;
         const parentId = sectionNoteMap.get(item.parentSectionKey);
         if (parentId) {
-          await createSecondBrainLink({
+          const linkResult = await createSecondBrainLink({
             circleId,
             fromNoteId: parentId,
             toNoteId: note.id,
@@ -324,7 +350,10 @@ export async function autoMapSiteToSecondBrain(
             strength: 0.82,
             reason: `Discovered from ${item.parentSectionKey}`,
           });
-          linked++;
+          if (linkResult.unavailable) {
+            return { created, updated, linked, error: linkResult.error || 'Second brain storage is unavailable.' };
+          }
+          if (linkResult.link) linked++;
         }
       }
       await pause(60);

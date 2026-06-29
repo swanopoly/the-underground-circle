@@ -119,7 +119,7 @@ function WikiLinkCard({ onPress }: { onPress: () => void }) {
         onHoverIn={() => setHovered(true)}
         onHoverOut={() => setHovered(false)}
         accessibilityRole="button"
-        accessibilityLabel="Browse Knowledge Wiki"
+        accessibilityLabel="Browse Wiki"
         style={[s.wikiCard, hovered && s.wikiCardHover]}
       >
         <View style={s.wikiAccent} />
@@ -128,7 +128,7 @@ function WikiLinkCard({ onPress }: { onPress: () => void }) {
             <Text style={s.wikiIconText}>{'W'}</Text>
           </View>
           <View style={s.wikiTitleWrap}>
-            <Text style={s.wikiTitle}>Knowledge Wiki</Text>
+            <Text style={s.wikiTitle}>Wiki</Text>
             <Text style={s.wikiSubtitle}>Deep dive into AI, technology, science, cities, and systems</Text>
           </View>
           <Text style={s.wikiArrow}>{'-->'}</Text>

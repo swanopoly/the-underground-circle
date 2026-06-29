@@ -73,7 +73,7 @@ function baseSourceRefs(route: ChatComputerRequestRoute): AppAutomationResearchR
       ? 'adobe_indesign'
       : /adobe|creative cloud/i.test(context)
         ? 'adobe_creative_cloud'
-        : /\b(auto\s*cad|autocad|civil\s*3d|fusion\s*360|solid\s*works|solidworks|revit|rhino(?:ceros)?|inventor|free\s*cad|freecad|libre\s*cad|librecad|qcad|sketch\s*up|sketchup|cad|dwg|dxf|rvt|rfa|sldprt|sldasm|slddrw|f3d|f3z|3dm|engineering drawing|technical drawing|floor plan|site plan|shop drawing|bim)\b/i.test(context)
+        : /\b(auto\s*cad|autocad|civil\s*3d|fusion\s*360|solid\s*works|solidworks|matlab|mathworks|simulink|simscape|revit|rhino(?:ceros)?|inventor|free\s*cad|freecad|libre\s*cad|librecad|qcad|sketch\s*up|sketchup|cad|dwg|dxf|rvt|rfa|sldprt|sldasm|slddrw|mlx|slx|f3d|f3z|3dm|engineering drawing|technical drawing|floor plan|site plan|shop drawing|bim)\b/i.test(context)
           ? 'engineering_cad_app'
         : route.kind === 'desktop_app' || route.kind === 'hybrid'
           ? 'generic_native_app'
@@ -153,7 +153,7 @@ function desktopContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceC
   const context = `${target} ${route.bestPath || ''} ${route.computerPreview.detail || ''}`;
   const isPhotoshop = /photoshop/i.test(context);
   const isInDesign = /indesign/i.test(context);
-  const isCad = /\b(auto\s*cad|autocad|civil\s*3d|fusion\s*360|solid\s*works|solidworks|revit|rhino(?:ceros)?|inventor|free\s*cad|freecad|libre\s*cad|librecad|qcad|sketch\s*up|sketchup|cad|dwg|dxf|rvt|rfa|sldprt|sldasm|slddrw|f3d|f3z|3dm|engineering drawing|technical drawing|floor plan|site plan|shop drawing|bim)\b/i.test(context);
+  const isCad = /\b(auto\s*cad|autocad|civil\s*3d|fusion\s*360|solid\s*works|solidworks|matlab|mathworks|simulink|simscape|revit|rhino(?:ceros)?|inventor|free\s*cad|freecad|libre\s*cad|librecad|qcad|sketch\s*up|sketchup|cad|dwg|dxf|rvt|rfa|sldprt|sldasm|slddrw|mlx|slx|f3d|f3z|3dm|engineering drawing|technical drawing|floor plan|site plan|shop drawing|bim)\b/i.test(context);
   return {
     schemaVersion: 1,
     kind: route.kind === 'hybrid' ? 'hybrid' : 'desktop_app',
@@ -163,7 +163,7 @@ function desktopContract(route: ChatComputerRequestRoute): ComputerTaskEvidenceC
       'confirm app/window identity and active document identity before mutation',
       isPhotoshop ? 'capture Photoshop document status and layer/selection/mask inventory' : null,
       isInDesign ? 'capture InDesign document status plus layer/text/link/font or preflight inventory' : null,
-      isCad ? 'capture CAD document/model state, units, scale, layers, command prompt/menu state, and drawing/model screenshot before mutation' : null,
+      isCad ? 'capture engineering document/model/project state, units/toolboxes, scale/layers/configuration, command prompt/menu state, and drawing/model/MATLAB proof before mutation' : null,
       !isPhotoshop && !isInDesign ? 'capture app/window state, accessibility tree, menu inventory, and screenshot before mutation' : null,
       'resolve exact staged source file/package and output destination',
       'record chosen control surface and why stronger deterministic routes were unavailable',

@@ -80,6 +80,50 @@ function assertRoute(
   pass(`${route.kind}/${route.appStrategy?.id || 'no-strategy'}: ${input}`);
 }
 
+function assertLocalFileActionTool(input: string, expectedTool: string, expectedApprovalRequired?: boolean) {
+  const route = buildChatComputerRequestRoute(input);
+  const tools = route?.actionItems?.map((item) => item.tool) || [];
+  if (route?.kind !== 'local_file') {
+    fail(`${input} expected local_file route for ${expectedTool}, got ${route?.kind || 'none'}`);
+    return;
+  }
+  if (!tools.includes(expectedTool)) {
+    fail(`${input} expected action item ${expectedTool}, got ${tools.join(', ') || 'none'}`);
+    return;
+  }
+  if (expectedApprovalRequired !== undefined && route?.approvalRequired !== expectedApprovalRequired) {
+    fail(`${input} expected approvalRequired=${expectedApprovalRequired}, got ${route?.approvalRequired}`);
+    return;
+  }
+  const actionItem = route?.actionItems?.find((item) => item.tool === expectedTool);
+  if (expectedApprovalRequired !== undefined && actionItem?.requiresApproval !== expectedApprovalRequired) {
+    fail(`${input} expected ${expectedTool} action requiresApproval=${expectedApprovalRequired}, got ${String(actionItem?.requiresApproval)}`);
+    return;
+  }
+  pass(`local file action ${expectedTool}: ${input}`);
+}
+
+function assertWpActionTool(input: string, actionId: string, expected: string | string[]) {
+  const route = buildChatComputerRequestRoute(input);
+  const item = route?.actionItems?.find((candidate) => candidate.id === actionId);
+  const allowed = Array.isArray(expected) ? expected : [expected];
+  if (!item || !allowed.includes(item.tool)) {
+    fail(`${input} expected ${actionId} via ${allowed.join(' or ')}, got ${item?.tool || 'none'}`);
+    return;
+  }
+  pass(`WordPress ${actionId} uses ${item.tool}: ${input}`);
+}
+
+function assertWpNoContentMutationExecute(input: string) {
+  const route = buildChatComputerRequestRoute(input);
+  const execute = route?.actionItems?.find((item) => item.id === 'execute-wordpress-admin-step');
+  if (execute && /^wp\.(update_post|create_slide|upload_media|trash_post)$/.test(execute.tool)) {
+    fail(`${input} should not expose content mutation execute tool for admin/session-only work, got ${execute.tool}`);
+    return;
+  }
+  pass(`WordPress admin/session route avoids content mutation execute tool: ${input}`);
+}
+
 assertRoute(
   'Open Photoshop and generate a background then save png',
   {
@@ -101,14 +145,61 @@ assertRoute(
     kind: 'desktop_app',
     strategyId: 'creative_layout_control',
     pipelineId: 'creative_layout_design',
-    risk: 'safe',
-    approvalRequired: false,
-    designApp: 'Adobe Photoshop',
+    risk: 'review',
+    approvalRequired: true,
     routeId: 'browser',
-    routeDecisionStatus: 'needs_observation',
-    minTools: ['desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory'],
+    evidenceTarget: 'Adobe Photoshop',
+    minTools: ['desktop.file_search', 'desktop.file_stat', 'desktop.photoshop_document_status', 'desktop.photoshop_export_proof'],
   },
 );
+
+assertRoute(
+  'on the desktop open pearsoncdjr-img in photoshop and save it as a png',
+  {
+    kind: 'local_file',
+    strategyId: 'file_readonly',
+    pipelineId: 'local_files',
+    risk: 'safe',
+    approvalRequired: false,
+    routeId: 'browser',
+    evidenceTarget: 'Local files',
+    minTools: ['desktop.convert_image', 'desktop.file_search', 'desktop.file_stat'],
+  },
+);
+
+const pearsonPngRoute = buildChatComputerRequestRoute('on the desktop open pearsoncdjr-img in photoshop and save it as a png');
+if (pearsonPngRoute?.designExecutionPipeline) {
+  fail('pearson image conversion should not attach Photoshop design execution pipeline');
+} else {
+  pass('pearson image conversion skips Photoshop design execution pipeline');
+}
+if (pearsonPngRoute?.evidenceContract?.observeBefore.some((item) => /Photoshop document status|layer/i.test(item))) {
+  fail('pearson image conversion should not require Photoshop document/layer evidence');
+} else {
+  pass('pearson image conversion uses file evidence instead of Photoshop layer evidence');
+}
+if (!pearsonPngRoute?.actionItems?.some((item) => item.tool === 'desktop.convert_image')) {
+  fail('pearson image conversion should expose desktop.convert_image as an actionable item');
+} else {
+  pass('pearson image conversion exposes direct conversion action item');
+}
+if (!pearsonPngRoute?.actionItems?.some((item) => item.id === 'verify-local-output' && item.tool === 'desktop.file_stat')) {
+  fail('pearson image conversion should verify output with file_stat action item');
+} else {
+  pass('pearson image conversion exposes output verification action item');
+}
+
+const pearsonPrompt = buildChatComputerRequestRoutePromptBlock('on the desktop open pearsoncdjr-img in photoshop and save it as a png') || '';
+if (
+  !pearsonPrompt.includes('Actionable desktop items:') ||
+  !pearsonPrompt.includes('desktop.convert_image') ||
+  !pearsonPrompt.includes('Execute actionable items in order') ||
+  pearsonPrompt.includes('Ready to verify')
+) {
+  fail('pearson prompt should encode ordered actionable desktop items without readiness handoff');
+} else {
+  pass('pearson prompt encodes ordered actionable desktop items');
+}
 
 assertRoute(
   'Open this InDesign file and make changes for a marketing banner with different layers',
@@ -137,7 +228,217 @@ assertRoute(
     routeDecisionTaskFamily: 'file/save/export work',
     evidenceTarget: 'Ableton Live',
     evidenceTaskFamily: 'file/save/export work',
-    minTools: ['office.list_agents', 'agent.build_app_capability', 'desktop.read_a11y_tree'],
+    minTools: ['office.list_agents', 'tools.search', 'research.search', 'fetch_url', 'agent.build_app_capability', 'desktop.read_a11y_tree'],
+  },
+);
+
+assertRoute(
+  'Log into WordPress wp-admin and install the SEO plugin after approval',
+  {
+    kind: 'browser',
+    strategyId: 'credentialed_browser',
+    pipelineId: 'website_platform_admin',
+    risk: 'external_side_effect',
+    approvalRequired: true,
+    routeId: 'browser',
+    minTools: ['wp.discover_types', 'wp.list_posts', 'vault.resolve_for_task', 'browser.wp_admin_source_intelligence', 'browser.dom_snapshot', 'approvals.request'],
+  },
+);
+
+assertRoute(
+  'install plugin in wp-admin',
+  {
+    kind: 'browser',
+    strategyId: 'credentialed_browser',
+    pipelineId: 'website_platform_admin',
+    risk: 'external_side_effect',
+    approvalRequired: true,
+    routeId: 'browser',
+    minTools: ['wp.discover_types', 'wp.list_posts', 'vault.resolve_for_task', 'browser.wp_admin_source_intelligence', 'browser.dom_snapshot', 'approvals.request'],
+  },
+);
+
+assertRoute(
+  'Open WordPress media library and upload logo.png from Desktop',
+  {
+    kind: 'browser',
+    strategyId: 'browser_file_transfer',
+    pipelineId: 'local_files',
+    risk: 'external_side_effect',
+    approvalRequired: true,
+    routeId: 'browser',
+    minTools: ['wp.upload_media', 'desktop.file_search', 'desktop.file_stat', 'browser.upload_file', 'browser.wp_admin_source_intelligence', 'browser.dom_snapshot'],
+  },
+);
+
+assertRoute(
+  'Upload banner.jpg and create a Dealer Inspire DI Slide, assign it to StellantisUS-1920x600, and set expiration_date to June 30 after approval',
+  {
+    kind: 'browser',
+    strategyId: 'browser_file_transfer',
+    pipelineId: 'wordpress_cms',
+    risk: 'external_side_effect',
+    approvalRequired: true,
+    routeId: 'browser',
+    minTools: ['wp.discover_types', 'wp.list_posts', 'wp.create_slide', 'desktop.file_stat', 'browser.wp_admin_source_intelligence', 'browser.dom_snapshot', 'approvals.request'],
+  },
+);
+
+const wordpressAdminPrompt = buildChatComputerRequestRoutePromptBlock('Log into WordPress wp-admin and install the SEO plugin after approval') || '';
+if (!wordpressAdminPrompt.includes('WordPress Admin Browser Workflow') || !wordpressAdminPrompt.includes('REST') || !wordpressAdminPrompt.includes('wp-admin') || !wordpressAdminPrompt.includes('browser.wp_admin_source_intelligence')) {
+  fail('WordPress admin prompt should include REST-first/wp-admin fallback guidance');
+} else {
+  pass('WordPress admin prompt includes REST-first/wp-admin/source-intelligence guidance');
+}
+
+const wordpressPluginRoute = buildChatComputerRequestRoute('install plugin in wp-admin');
+const wordpressPluginActionIds = wordpressPluginRoute?.actionItems?.map((item) => item.id) || [];
+for (const expectedActionId of [
+  'resolve-wordpress-admin',
+  'verify-wordpress-session',
+  'inspect-wordpress-admin-source',
+  'pause-for-wordpress-approval',
+  'execute-wordpress-admin-step',
+  'verify-wordpress-result',
+]) {
+  if (!wordpressPluginActionIds.includes(expectedActionId)) {
+    fail(`WordPress plugin route should include action item ${expectedActionId}; got ${wordpressPluginActionIds.join(', ')}`);
+  }
+}
+if (wordpressPluginActionIds.length >= 5) {
+  pass('WordPress plugin route exposes ordered admin action items');
+}
+const wordpressPluginInspectAction = wordpressPluginRoute?.actionItems?.find((item) => item.id === 'inspect-wordpress-admin-source');
+if (wordpressPluginInspectAction?.tool !== 'browser.wp_admin_source_intelligence') {
+  fail(`WordPress plugin route should inspect with browser.wp_admin_source_intelligence, got ${wordpressPluginInspectAction?.tool || 'none'}`);
+} else {
+  pass('WordPress plugin route uses source intelligence before wp-admin UI actions');
+}
+const wordpressPluginVerifyAction = wordpressPluginRoute?.actionItems?.find((item) => item.id === 'verify-wordpress-result');
+if (wordpressPluginVerifyAction?.tool !== 'browser.wp_admin_source_intelligence') {
+  fail(`WordPress plugin route should verify with browser.wp_admin_source_intelligence, got ${wordpressPluginVerifyAction?.tool || 'none'}`);
+} else {
+  pass('WordPress plugin route uses source intelligence for result verification');
+}
+assertWpActionTool('install plugin in wp-admin', 'execute-wordpress-admin-step', ['browser.click_role', 'browser.fill_field']);
+
+assertRoute(
+  'Open wp-admin for WordPress and stop at the dashboard',
+  {
+    kind: 'browser',
+    strategyId: 'credentialed_browser',
+    pipelineId: 'website_platform_admin',
+    risk: 'external_side_effect',
+    approvalRequired: true,
+    routeId: 'browser',
+    minTools: ['browser.open_url', 'browser.verification_state', 'vault.resolve_for_task', 'browser.wp_admin_source_intelligence', 'browser.dom_snapshot', 'approvals.request'],
+  },
+);
+assertWpActionTool('Open wp-admin for WordPress and stop at the dashboard', 'resolve-wordpress-admin', 'browser.open_url');
+assertWpActionTool('Open wp-admin for WordPress and stop at the dashboard', 'verify-wordpress-result', 'browser.wp_admin_source_intelligence');
+assertWpNoContentMutationExecute('Open wp-admin for WordPress and stop at the dashboard');
+
+const wpLogin = 'Sign into the WordPress dashboard and verify the wp-admin session';
+assertRoute(wpLogin, {
+  kind: 'browser',
+  strategyId: 'credentialed_browser',
+  pipelineId: 'website_platform_admin',
+  risk: 'external_side_effect',
+  approvalRequired: true,
+  routeId: 'browser',
+  minTools: ['vault.resolve_for_task', 'browser.wp_admin_source_intelligence', 'browser.dom_snapshot', 'approvals.request'],
+});
+if (!buildChatComputerRequestRoute(wpLogin)?.alwaysConfirmFloor?.includes('login')) fail('WordPress login should carry always-confirm login floor');
+else pass('WordPress login carries always-confirm login floor');
+assertWpNoContentMutationExecute(wpLogin);
+
+const wpUploadFeatured = 'Upload hero-image.jpg from Desktop to WordPress media library and attach it as the homepage featured image after approval';
+assertRoute(wpUploadFeatured, {
+  kind: 'browser',
+  strategyId: 'browser_file_transfer',
+  pipelineId: 'local_files',
+  risk: 'external_side_effect',
+  approvalRequired: true,
+  routeId: 'browser',
+  minTools: ['wp.upload_media', 'desktop.file_search', 'desktop.file_stat', 'browser.upload_file', 'browser.wp_admin_source_intelligence', 'browser.dom_snapshot', 'approvals.request'],
+});
+assertWpActionTool(wpUploadFeatured, 'execute-wordpress-admin-step', 'wp.upload_media');
+assertWpActionTool(wpUploadFeatured, 'verify-wordpress-result', 'browser.wp_admin_source_intelligence');
+
+const wpAdminPageUpdate = 'Edit the About page in wp-admin and save it as draft after approval';
+assertRoute(wpAdminPageUpdate, {
+  kind: 'browser',
+  strategyId: 'credentialed_browser',
+  pipelineId: 'website_platform_admin',
+  risk: 'external_side_effect',
+  approvalRequired: true,
+  routeId: 'browser',
+  minTools: ['wp.update_post', 'browser.wp_admin_source_intelligence', 'browser.dom_snapshot', 'approvals.request'],
+});
+assertWpActionTool(wpAdminPageUpdate, 'execute-wordpress-admin-step', 'wp.update_post');
+
+const wpDiCreate = 'Create a Dealer Inspire DI Slide called Promaster Sale and set expiration_date to June 30 after approval';
+assertRoute(wpDiCreate, {
+  kind: 'browser',
+  strategyId: 'credentialed_browser',
+  pipelineId: 'wordpress_cms',
+  risk: 'external_side_effect',
+  approvalRequired: true,
+  routeId: 'browser',
+  minTools: ['wp.discover_types', 'wp.list_posts', 'wp.create_slide', 'browser.wp_admin_source_intelligence', 'browser.dom_snapshot', 'approvals.request'],
+});
+assertWpActionTool(wpDiCreate, 'execute-wordpress-admin-step', 'wp.create_slide');
+
+for (const input of [
+  'Activate the Akismet plugin in WordPress after approval',
+  'Open the WordPress customizer and change the theme colors after approval',
+  'Add jane@example.com as an Editor user in WordPress after approval',
+  'Change the site title in WordPress settings after approval',
+  'Update the WooCommerce product price for SKU ABC after approval',
+]) {
+  assertRoute(input, {
+    kind: 'browser',
+    strategyId: 'credentialed_browser',
+    pipelineId: 'website_platform_admin',
+    risk: 'external_side_effect',
+    approvalRequired: true,
+    routeId: 'browser',
+    minTools: ['browser.wp_admin_source_intelligence', 'browser.dom_snapshot', 'approvals.request'],
+  });
+  assertWpActionTool(input, 'execute-wordpress-admin-step', ['browser.click_role', 'browser.fill_field']);
+  assertWpActionTool(input, 'verify-wordpress-result', 'browser.wp_admin_source_intelligence');
+}
+
+const dealerInspirePrompt = buildChatComputerRequestRoutePromptBlock('Update the Dealer Inspire DI Slide Promaster expiration_date in Quick Edit after approval') || '';
+if (!dealerInspirePrompt.includes('DI Slides') || !dealerInspirePrompt.includes('expiration_date') || !dealerInspirePrompt.includes('Quick Edit')) {
+  fail('Dealer Inspire WordPress prompt should include DI Slides, Quick Edit, and expiration_date guidance');
+} else {
+  pass('Dealer Inspire WordPress prompt includes DI-specific guidance');
+}
+
+const dealerInspireUpdateRoute = buildChatComputerRequestRoute('Update the Dealer Inspire DI Slide Promaster expiration_date in Quick Edit after approval');
+if (!dealerInspireUpdateRoute?.recommendedTools.includes('wp.update_post')) {
+  fail('Dealer Inspire update route should recommend wp.update_post');
+} else if (!dealerInspireUpdateRoute.recommendedTools.includes('browser.wp_admin_source_intelligence')) {
+  fail('Dealer Inspire update route should recommend browser.wp_admin_source_intelligence');
+} else if (!dealerInspireUpdateRoute.actionItems?.some((item) => item.tool === 'wp.update_post')) {
+  fail('Dealer Inspire update route should use wp.update_post for the primary admin action');
+} else if (!dealerInspireUpdateRoute.actionItems?.some((item) => item.id === 'inspect-wordpress-admin-source' && item.tool === 'browser.wp_admin_source_intelligence')) {
+  fail('Dealer Inspire update route should inspect wp-admin source with browser.wp_admin_source_intelligence');
+} else {
+  pass('Dealer Inspire update route exposes wp.update_post plus source intelligence');
+}
+
+assertRoute(
+  'I want chat to open any app, figure out how to use it by itself, research what it needs, and do the requested task',
+  {
+    kind: 'desktop_app',
+    strategyId: 'universal_app_control',
+    risk: 'review',
+    approvalRequired: true,
+    routeDecisionStatus: 'needs_observation',
+    evidenceTarget: 'Generic App Navigator',
+    minTools: ['desktop.launch_app', 'desktop.window_state', 'tools.search', 'research.search', 'fetch_url', 'agent.build_app_capability'],
   },
 );
 
@@ -151,6 +452,19 @@ assertRoute(
     approvalRequired: true,
     routeDecisionStatus: 'needs_observation',
     minTools: ['desktop.read_a11y_tree', 'desktop.file_stat', 'approvals.request'],
+  },
+);
+
+assertRoute(
+  'Open MATLAB and build a Simulink model, run the simulation, and export plots after approval',
+  {
+    kind: 'desktop_app',
+    strategyId: 'engineering_cad_control',
+    pipelineId: 'desktop_app_control',
+    risk: 'review',
+    approvalRequired: true,
+    routeDecisionStatus: 'needs_observation',
+    minTools: ['desktop.read_a11y_tree', 'desktop.file_stat', 'research.search', 'fetch_url', 'agent.build_app_capability', 'approvals.request'],
   },
 );
 
@@ -178,6 +492,40 @@ assertRoute(
     routeDecisionStatus: null,
     minTools: ['desktop.file_search'],
   },
+);
+
+assertLocalFileActionTool(
+  'Open Finder and rename landscaping-img.png on my desktop to landscaping-img-1.png',
+  'desktop.file_rename',
+  true,
+);
+
+assertLocalFileActionTool(
+  'copy landscaping-img.png on my desktop to landscaping-img-copy.png',
+  'desktop.file_copy',
+  true,
+);
+
+assertLocalFileActionTool(
+  'trash landscaping-img.png from my desktop',
+  'desktop.file_trash',
+  true,
+);
+
+assertLocalFileActionTool(
+  'Open TextEdit and make a file on my desktop called notes.txt with hello',
+  'desktop.file_write_text',
+  true,
+);
+
+assertLocalFileActionTool(
+  'Open Preview and show ~/Downloads/report.pdf',
+  'desktop.open_path',
+);
+
+assertLocalFileActionTool(
+  'Open Finder Downloads',
+  'desktop.open_path',
 );
 
 const pureImageRoute = buildChatComputerRequestRoute('Generate an image of a neon swan');
@@ -256,6 +604,52 @@ if (
   pass('credentialed browser prompt encodes approval without desktop auto-prep');
 }
 
+// ── E4: data transfer & precision rules in the route prompt block ────────────
+{
+  // Desktop/app route carries the rules block, alongside (not displacing)
+  // the floor/constraint lines.
+  const desktopTask = "delete every file in the old-projects folder on my desktop, no need to ask me";
+  const desktopRoute = buildChatComputerRequestRoute(desktopTask);
+  const desktopPrompt = buildChatComputerRequestRoutePromptBlock(desktopTask) || '';
+  if (!desktopRoute || (desktopRoute.kind !== 'desktop_app' && desktopRoute.kind !== 'local_file' && desktopRoute.kind !== 'hybrid')) {
+    fail(`E4: expected a desktop-side route for the rules test (got ${desktopRoute?.kind})`);
+  } else if (
+    !desktopPrompt.includes('Data transfer & precision rules (desktop/app surfaces):') ||
+    !desktopPrompt.includes('Never read precise strings') ||
+    !desktopPrompt.includes('set_element_value / fill_field / paste') ||
+    !desktopPrompt.includes('Prefer typed editing surfaces') ||
+    !desktopPrompt.includes('Prefer keyboard shortcuts over coordinate clicks') ||
+    !desktopPrompt.includes('reading the field value back')
+  ) {
+    fail('E4: desktop-side route prompt should carry all five data-transfer rules');
+  } else pass('E4: desktop-side route prompt carries the data-transfer rules block');
+  if (!desktopPrompt.includes('Always-confirm floor (HARD policy)')) {
+    fail('E4: rules block must not displace the always-confirm floor line');
+  } else pass('E4: floor line unaffected by the rules block');
+
+  const indesignPrompt = buildChatComputerRequestRoutePromptBlock('Open InDesign and export high quality pdf as brochure.pdf') || '';
+  if (!indesignPrompt.includes('Data transfer & precision rules (desktop/app surfaces):')) {
+    fail('E4: desktop app (InDesign) route prompt should carry the rules block');
+  } else pass('E4: desktop app route prompt carries the rules block');
+
+  // Pure cloud-browser route does NOT carry the block — the edge loop owns
+  // its own transfer rules.
+  const browserTask = 'go to acme.com in the browser and read the pricing page';
+  const browserRoute = buildChatComputerRequestRoute(browserTask);
+  const browserPrompt = buildChatComputerRequestRoutePromptBlock(browserTask) || '';
+  if (!browserRoute || browserRoute.kind !== 'browser') {
+    fail(`E4: expected a pure browser route for the absence test (got ${browserRoute?.kind})`);
+  } else if (browserPrompt.includes('Data transfer & precision rules')) {
+    fail('E4: pure cloud-browser route prompt must NOT carry the rules block');
+  } else pass('E4: pure browser route prompt omits the rules block');
+
+  // Constraint lines coexist with the rules block on desktop routes.
+  const constrainedPrompt = buildChatComputerRequestRoutePromptBlock("rename the files in my Documents folder but don't delete anything") || '';
+  if (constrainedPrompt.includes('Data transfer & precision rules') && !constrainedPrompt.includes('User constraint')) {
+    fail('E4: constraint lines should survive next to the rules block');
+  } else pass('E4: constraint lines coexist with the rules block');
+}
+
 const blockedRoute = buildChatComputerRequestRoute('Open Photoshop and generate a background then save png');
 const blockedPrompt = blockedRoute
   ? formatChatComputerTaskAutonomyPromptBlock({
@@ -292,6 +686,15 @@ if (!abletonRoute?.notes.some((note) => note.includes('for file/save/export work
   pass('unfamiliar app route notes preserve the task-family label');
 }
 
+const anyAppPrompt = buildChatComputerRequestRoutePromptBlock('I want chat to open any app, figure out how to use it by itself, research what it needs, and do the requested task') || '';
+if (!anyAppPrompt.includes('Professional app autonomy')) {
+  fail('any-app route prompt should include the professional app autonomy rule');
+} else if (!anyAppPrompt.includes('research the official control surface') || !anyAppPrompt.includes('build a reusable adapter')) {
+  fail('any-app route prompt should name research and reusable buildout');
+} else {
+  pass('any-app route prompt includes professional autonomy');
+}
+
 // ── Operative known-app routing (recall) ─────────────────────────────────────
 // Common apps named behind an operative prefix (in/using/with/open/use) now
 // route into the computer path even without an "app" suffix or a whitelisted
@@ -317,6 +720,20 @@ for (const recallCase of [
   } else {
     fail(`recall: "${recallCase}" should route into the computer path (lost the evidence contract)`);
   }
+}
+
+const stagedTransferRecall = buildChatComputerRequestRoute('download the report from the portal, then import it into the spreadsheet app');
+if (
+  stagedTransferRecall?.kind === 'hybrid' &&
+  stagedTransferRecall.recommendedTools.includes('desktop.launch_app') &&
+  stagedTransferRecall.recommendedTools.includes('desktop.window_state')
+) {
+  pass('recall: staged browser download into spreadsheet app routes as hybrid with desktop tools');
+} else {
+  fail(`recall: staged browser download into spreadsheet app should be hybrid with desktop tools (got ${JSON.stringify({
+    kind: stagedTransferRecall?.kind,
+    tools: stagedTransferRecall?.recommendedTools,
+  })})`);
 }
 
 // ── Precision ─────────────────────────────────────────────────────────────────
@@ -497,6 +914,317 @@ for (const precisionCase of [
   if (payVerdict.blocked || !payVerdict.floorConfirmRequired || payVerdict.floorCategory !== 'pay') {
     fail(`floor gate: "Buy now" click should require pay confirmation (got ${JSON.stringify(payVerdict)})`);
   } else pass('floor gate: purchase click requires pay confirmation');
+}
+
+// ─── T7 UX: sticky "always allow" scopes — downgrade rules on the route ─────
+
+{
+  const {
+    ALWAYS_CONFIRM_FLOOR,
+  } = require('../src/lib/chatComputerRequestRouter') as typeof import('../src/lib/chatComputerRequestRouter');
+  const {
+    createStickyScope,
+    setActiveStickyScopes,
+    STICKY_FLOOR_CATEGORIES,
+    formatStickyScopeAppliedNotice,
+  } = require('../src/lib/computerGrantGate') as typeof import('../src/lib/computerGrantGate');
+
+  // The router floor and the sticky exclusion list are the same object —
+  // they can never drift apart.
+  if (ALWAYS_CONFIRM_FLOOR !== STICKY_FLOOR_CATEGORIES) {
+    fail('sticky: ALWAYS_CONFIRM_FLOOR must be the canonical STICKY_FLOOR_CATEGORIES list');
+  } else pass('sticky: router floor re-exports the sticky floor list');
+
+  const mk = (scopeKind: 'site' | 'app', scopeKey: string, cats: any[]) => {
+    const created = createStickyScope({ scopeKind, scopeKey, allowedCategories: cats, grantedByUserId: 'user_1' });
+    if (!created.ok) throw new Error(`smoke scope creation failed: ${created.error}`);
+    return created.scope;
+  };
+
+  const APPROVAL_TASK = 'go to acme.com and publish the draft post';
+
+  // Baseline: external-side-effect browser task requires approval, no sticky stamp.
+  const baseline = buildChatComputerRequestRoute(APPROVAL_TASK);
+  if (!baseline || !baseline.approvalRequired || baseline.stickyScopeApplied) {
+    fail(`sticky: baseline publish task must require approval with no sticky stamp (got approval=${baseline?.approvalRequired}, sticky=${JSON.stringify(baseline?.stickyScopeApplied)})`);
+  } else pass('sticky: baseline publish task requires approval');
+
+  // Full coverage on a matching site (www + case variant) downgrades approval
+  // and stamps + notices the route.
+  const publishScope = mk('site', 'WWW.Acme.com', ['publish', 'upload']);
+  const downgraded = buildChatComputerRequestRoute(APPROVAL_TASK, { stickyScopes: [publishScope] });
+  if (!downgraded || downgraded.approvalRequired || downgraded.stickyScopeApplied?.scopeKey !== 'acme.com') {
+    fail(`sticky: covered publish task should downgrade approval (approval=${downgraded?.approvalRequired}, sticky=${JSON.stringify(downgraded?.stickyScopeApplied)})`);
+  } else pass('sticky: full coverage downgrades approval and stamps the route');
+  const notice = formatStickyScopeAppliedNotice({ scopeKey: 'acme.com' });
+  if (!downgraded?.notes.some((note) => note.includes(notice))) {
+    fail(`sticky: route notes must carry the standing-grant notice (got ${JSON.stringify(downgraded?.notes)})`);
+  } else pass('sticky: route notes carry the visible standing-grant notice');
+
+  // Partial coverage never downgrades: task needs publish+send, scope covers publish.
+  const partial = buildChatComputerRequestRoute('go to acme.com, publish the draft post and send the newsletter email', { stickyScopes: [publishScope] });
+  if (!partial || !partial.approvalRequired || partial.stickyScopeApplied) {
+    fail('sticky: partial coverage must keep approval required');
+  } else pass('sticky: partial coverage keeps approval required');
+
+  // Wrong site never downgrades.
+  const wrongSite = buildChatComputerRequestRoute('go to other.com and publish the draft post', { stickyScopes: [publishScope] });
+  if (!wrongSite || !wrongSite.approvalRequired || wrongSite.stickyScopeApplied) {
+    fail('sticky: non-matching site must keep approval required');
+  } else pass('sticky: non-matching site keeps approval required');
+
+  // Floor categories are NEVER downgraded — even by a maliciously crafted
+  // scope object that claims to allow them.
+  const malicious = { ...publishScope, allowedCategories: ['publish', 'pay', 'login', 'delete', 'grant'] as any };
+  for (const { msg, cat } of [
+    { msg: 'go to acme.com and buy the standing desk in my cart', cat: 'pay' },
+    { msg: 'log into acme.com and publish the draft post', cat: 'login' },
+    { msg: 'go to acme.com and delete every old draft post', cat: 'delete' },
+  ]) {
+    const route = buildChatComputerRequestRoute(msg, { stickyScopes: [malicious] });
+    if (!route) { fail(`sticky floor: "${msg}" should still build a route`); continue; }
+    if (!route.approvalRequired || route.stickyScopeApplied) {
+      fail(`sticky floor: ${cat} task must never be downgraded by a sticky scope (approval=${route.approvalRequired})`);
+    } else pass(`sticky floor: ${cat} task is never downgraded`);
+  }
+
+  // Explicit "ask me" intent and user ask-before constraints are never overridden.
+  const explicitAsk = buildChatComputerRequestRoute('go to acme.com and publish the draft post but ask me before publishing it', { stickyScopes: [publishScope] });
+  if (!explicitAsk || !explicitAsk.approvalRequired || explicitAsk.stickyScopeApplied) {
+    fail('sticky: ask-before constraint must override a standing grant');
+  } else pass('sticky: user ask-before constraint overrides the grant');
+
+  // Expired and revoked scopes never downgrade.
+  const expired = { ...publishScope, expiresAtIso: '2020-01-01T00:00:00Z' };
+  const revoked = { ...publishScope, revoked: { atIso: new Date().toISOString(), byUserId: 'user_1' } };
+  for (const [label, scope] of [['expired', expired], ['revoked', revoked]] as const) {
+    const route = buildChatComputerRequestRoute(APPROVAL_TASK, { stickyScopes: [scope as any] });
+    if (!route || !route.approvalRequired || route.stickyScopeApplied) {
+      fail(`sticky: ${label} scope must not downgrade approval`);
+    } else pass(`sticky: ${label} scope does not downgrade`);
+  }
+
+  // App scope covers a desktop-app mutation on the named app.
+  const notionScope = mk('app', 'Notion', ['publish', 'save']);
+  const appRoute = buildChatComputerRequestRoute('in the Notion app, publish the meeting notes page', { stickyScopes: [notionScope] });
+  if (!appRoute || appRoute.approvalRequired || appRoute.stickyScopeApplied?.scopeKey !== 'notion') {
+    fail(`sticky: app scope should downgrade the matching app task (approval=${appRoute?.approvalRequired}, sticky=${JSON.stringify(appRoute?.stickyScopeApplied)})`);
+  } else pass('sticky: app scope downgrades the matching desktop-app task');
+
+  // Prompt block carries the standing-grant line plus the floor reminder.
+  setActiveStickyScopes([publishScope]);
+  const promptWithGrant = buildChatComputerRequestRoutePromptBlock(APPROVAL_TASK) || '';
+  setActiveStickyScopes([]);
+  if (!promptWithGrant.includes('Standing grant applied') || !promptWithGrant.includes('still requires fresh confirmation')) {
+    fail('sticky: prompt block should carry the standing-grant line + floor reminder');
+  } else pass('sticky: prompt block carries grant line via hydrated registry');
+
+  // Persisted-route optionality: routes without the field parse/round-trip,
+  // and a stamped route survives JSON round-trip with the stamp intact.
+  const plain = JSON.parse(JSON.stringify(baseline)) as typeof baseline;
+  if (plain && plain.stickyScopeApplied !== null && plain.stickyScopeApplied !== undefined) {
+    fail('sticky: route without a grant must keep an empty stickyScopeApplied after round-trip');
+  } else pass('sticky: route without grant round-trips clean');
+  delete (plain as any).stickyScopeApplied;
+  if ((plain as any).stickyScopeApplied !== undefined || !plain.approvalRequired) {
+    fail('sticky: pre-T7 persisted route (field absent) must stay readable');
+  } else pass('sticky: pre-T7 persisted route without the field stays readable');
+  const stamped = JSON.parse(JSON.stringify(downgraded)) as typeof downgraded;
+  if (stamped?.stickyScopeApplied?.scopeId !== publishScope.id) {
+    fail('sticky: stamped route must round-trip the applied scope');
+  } else pass('sticky: stamped route round-trips the applied scope');
+}
+
+// ─── Wave-2: task→best-app resolution on the route ───────────────────────────
+
+{
+  const {
+    buildAppOpenStepLines,
+    getAppResolutionContext,
+    parseAppOverrideChoice,
+    setAppResolutionContext,
+  } = require('../src/lib/chatComputerRequestRouter') as typeof import('../src/lib/chatComputerRequestRouter');
+
+  // Unhydrated registry fails honest: bridge offline → known-good web app
+  // wins, and the route is CREATED for the app-workbench task.
+  setAppResolutionContext({ bridgeOnline: false });
+  const webRoute = buildChatComputerRequestRoute('edit this photo');
+  if (!webRoute || !webRoute.appResolution) {
+    fail('resolution: "edit this photo" should create a route with an app resolution');
+  } else {
+    if (webRoute.appResolution.best.appId !== 'photopea' || webRoute.appResolution.best.surface !== 'browser') {
+      fail(`resolution: offline-bridge photo edit should pick Photopea in the browser (got ${webRoute.appResolution.best.appId}/${webRoute.appResolution.best.surface})`);
+    } else pass('resolution: bridge-offline photo edit honestly picks the web app');
+    if (webRoute.kind !== 'browser') fail(`resolution: route kind should follow the resolver surface (got ${webRoute.kind})`);
+    else pass('resolution: route kind follows the resolver surface');
+    const firstStep = webRoute.selectedPipeline?.solutionSteps[0] || '';
+    if (!/^Open Photopea in the browser/.test(firstStep)) {
+      fail(`resolution: open-first step should lead the solution steps (got "${firstStep}")`);
+    } else pass('resolution: open-app step leads the solution steps');
+  }
+
+  // Hydrated registry with Photoshop installed → desktop app wins, the
+  // open-first steps launch + wait, and the open tools ride recommendedTools.
+  setAppResolutionContext({
+    bridgeOnline: true,
+    installedApps: ['adobe photoshop 2025', 'pixelmator pro'],
+    runningApps: [],
+  });
+  const desktopRoute = buildChatComputerRequestRoute('edit this photo');
+  if (!desktopRoute || !desktopRoute.appResolution) {
+    fail('resolution: hydrated "edit this photo" should resolve');
+  } else {
+    if (desktopRoute.appResolution.best.appId !== 'adobe-photoshop' || desktopRoute.appResolution.best.surface !== 'desktop') {
+      fail(`resolution: installed Photoshop should win (got ${desktopRoute.appResolution.best.appId}/${desktopRoute.appResolution.best.surface})`);
+    } else pass('resolution: installed Photoshop wins for photo editing');
+    if (desktopRoute.kind !== 'desktop_app') fail(`resolution: installed pick should route desktop_app (got ${desktopRoute.kind})`);
+    else pass('resolution: installed pick routes desktop_app');
+    const steps = desktopRoute.selectedPipeline?.solutionSteps || [];
+    if (!/^Open .*launch it on the desktop first/.test(steps[0] || '') || !/Wait for .*ready and frontmost/.test(steps[1] || '')) {
+      fail(`resolution: desktop open-first steps should be launch + wait (got ${JSON.stringify(steps.slice(0, 2))})`);
+    } else pass('resolution: desktop open-first steps are launch + wait');
+    if (!desktopRoute.recommendedTools.includes('desktop.launch_app') || !desktopRoute.recommendedTools.includes('desktop.wait_for_app')) {
+      fail('resolution: open-plan tool names should ride recommendedTools');
+    } else pass('resolution: open-plan tools ride recommendedTools');
+    if (desktopRoute.appResolution.alternativesSummary.length === 0 || desktopRoute.appResolution.alternativesSummary.length > 3) {
+      fail(`resolution: alternatives summary should carry 1-3 entries (got ${desktopRoute.appResolution.alternativesSummary.length})`);
+    } else pass('resolution: alternatives summary is bounded');
+    if (!desktopRoute.notes.some((note) => note.startsWith('App choice:'))) {
+      fail('resolution: route notes should carry the app-choice note');
+    } else pass('resolution: route notes carry the app choice');
+  }
+
+  // Prompt block carries the compact App choice line with the switch path,
+  // and the floor/constraint lines coexist untouched next to it.
+  const promptWithChoice = buildChatComputerRequestRoutePromptBlock('edit this photo') || '';
+  if (!promptWithChoice.includes('App choice: Adobe Photoshop') || !promptWithChoice.includes('If the user objects, switch to:')) {
+    fail('resolution: prompt block should carry the App choice line with alternatives');
+  } else pass('resolution: prompt block carries the App choice line');
+  const constrainedChoicePrompt = buildChatComputerRequestRoutePromptBlock("edit this photo but don't upload it anywhere") || '';
+  if (!constrainedChoicePrompt.includes('App choice: Adobe Photoshop') || !constrainedChoicePrompt.includes('User constraint (HARD)')) {
+    fail('resolution: constraint lines must coexist with the App choice line');
+  } else pass('resolution: constraint lines coexist with the App choice line');
+  const floorChoicePrompt = buildChatComputerRequestRoutePromptBlock('edit this photo and then delete the original file') || '';
+  if (!floorChoicePrompt.includes('App choice: Adobe Photoshop') || !floorChoicePrompt.includes('Always-confirm floor (HARD policy)')) {
+    fail('resolution: floor line must coexist with the App choice line');
+  } else pass('resolution: floor line coexists with the App choice line');
+
+  // Preferred app for the category beats the default ranking.
+  setAppResolutionContext({
+    bridgeOnline: true,
+    installedApps: ['adobe photoshop 2025', 'gimp'],
+    preferredAppByCategory: { photo_editing: 'gimp' },
+  });
+  const preferredRoute = buildChatComputerRequestRoute('edit this photo');
+  if (preferredRoute?.appResolution?.best.appId !== 'gimp') {
+    fail(`resolution: preferred app should win the category (got ${preferredRoute?.appResolution?.best.appId || 'none'})`);
+  } else pass('resolution: preferred app wins the category');
+
+  // ─── AR2: availability + named-app intent + structured recovery fallback ──
+  // Installed pick carries availability 'installed' on the route.
+  setAppResolutionContext({ bridgeOnline: true, installedApps: ['adobe photoshop 2025'] });
+  const installedRoute = buildChatComputerRequestRoute('edit this photo');
+  if (installedRoute?.appResolution?.best.availability !== 'installed') {
+    fail(`AR2: confirmed-installed route best should carry availability 'installed' (got ${installedRoute?.appResolution?.best.availability})`);
+  } else pass('AR2: confirmed-installed pick carries availability=installed');
+
+  // Named app, bridge online but no install probe → best is a 'maybe' the
+  // contract must verify, namedAppIntent is preserved, and the structured
+  // recoveryFallback is a confidently-launchable (web) alternative.
+  setAppResolutionContext({ bridgeOnline: true });
+  const namedRoute = buildChatComputerRequestRoute('edit this photo in photoshop');
+  if (!namedRoute?.appResolution) {
+    fail('AR2: named-app route should resolve an app choice');
+  } else {
+    const ar = namedRoute.appResolution;
+    if (!ar.explicitAppNamed || !ar.namedAppIntent || !/photoshop/i.test(ar.namedAppIntent)) {
+      fail(`AR2: namedAppIntent should preserve the user's named app (got ${ar.namedAppIntent})`);
+    } else pass('AR2: namedAppIntent preserves the user-named app');
+    if (ar.best.availability !== 'maybe') {
+      fail(`AR2: unprobed named desktop app best should be 'maybe' (got ${ar.best.availability})`);
+    } else pass('AR2: unprobed named desktop best is availability=maybe');
+    if (!ar.recoveryFallback) {
+      fail('AR2: a structured recoveryFallback should be present');
+    } else if (ar.recoveryFallback.appId === ar.best.appId) {
+      fail('AR2: recoveryFallback must not be the chosen best app');
+    } else if (ar.recoveryFallback.availability !== 'web' && ar.recoveryFallback.availability !== 'installed') {
+      fail(`AR2: recoveryFallback should be confidently launchable (got ${ar.recoveryFallback.availability})`);
+    } else pass('AR2: structured recoveryFallback is a confidently-launchable alternative');
+  }
+
+  // Restore the gimp-preferred context the downstream registry-getter test
+  // depends on (this block re-set the context several times above).
+  setAppResolutionContext({
+    bridgeOnline: true,
+    installedApps: ['adobe photoshop 2025', 'gimp'],
+    preferredAppByCategory: { photo_editing: 'gimp' },
+  });
+
+  // Override parse: verb-anchored, same-category, known alias only.
+  const previous = desktopRoute?.appResolution || null;
+  const override = parseAppOverrideChoice('use GIMP instead', previous);
+  if (!override || override.appId !== 'gimp' || override.category !== 'photo_editing') {
+    fail(`override: "use GIMP instead" should parse to gimp/photo_editing (got ${JSON.stringify(override)})`);
+  } else pass('override: "use GIMP instead" parses');
+  if (!parseAppOverrideChoice('switch to Photopea', previous)) fail('override: "switch to Photopea" should parse');
+  else pass('override: "switch to Photopea" parses');
+  for (const miss of [
+    'use your best judgment',
+    'use Excel instead', // wrong category for photo_editing
+    'I prefer GIMP generally speaking, but whatever works for this',
+    'switch to the dark theme',
+  ]) {
+    if (parseAppOverrideChoice(miss, previous)) fail(`override: "${miss}" must NOT parse`);
+    else pass(`override: "${miss.slice(0, 34)}…" stays unparsed`);
+  }
+  if (parseAppOverrideChoice('use GIMP instead', null)) fail('override: no previous resolution → never parses');
+  else pass('override: no previous resolution never parses');
+
+  // Registry getter round-trips what the setter stored.
+  if (getAppResolutionContext().preferredAppByCategory?.photo_editing !== 'gimp') {
+    fail('registry: getter should reflect the hydrated context');
+  } else pass('registry: getter reflects the hydrated context');
+
+  // Reset to the fail-honest default for everything below.
+  setAppResolutionContext({ bridgeOnline: false });
+
+  // Explicit-URL tasks skip resolution entirely (direct browser routing).
+  const urlRoute = buildChatComputerRequestRoute('Go to example.com and download the latest invoice');
+  if (!urlRoute || urlRoute.appResolution) {
+    fail(`resolution: explicit-URL task must skip resolution (got ${JSON.stringify(urlRoute?.appResolution || null)})`);
+  } else pass('resolution: explicit-URL task skips resolution');
+
+  // No-resolution tasks are unchanged: no stamp, same shape as before.
+  const fileRoute = buildChatComputerRequestRoute('Search files in Downloads for invoice');
+  if (!fileRoute || fileRoute.appResolution) fail('resolution: file-search route must carry no app resolution');
+  else pass('resolution: no-resolution task unchanged');
+
+  // Conversational categories never CREATE a route (precision guarantee).
+  if (buildChatComputerRequestRoute('take notes on this meeting')) {
+    fail('resolution: conversational "take notes" must not create a computer route');
+  } else pass('resolution: conversational category does not create a route');
+
+  // Persisted-route round-trip: the optional field survives JSON, and a
+  // route missing the field stays readable (pre-wave-2 rows).
+  if (webRoute) {
+    const persisted = JSON.parse(JSON.stringify(webRoute)) as typeof webRoute;
+    if (persisted.appResolution?.best.appId !== 'photopea' || persisted.appResolution.openStepLines.length === 0) {
+      fail('resolution: appResolution must survive a JSON round-trip');
+    } else pass('resolution: appResolution survives persistence round-trip');
+    delete (persisted as any).appResolution;
+    if ((persisted as any).appResolution !== undefined || !persisted.bestPath) {
+      fail('resolution: pre-wave-2 persisted route (field absent) must stay readable');
+    } else pass('resolution: persisted route without the field stays readable');
+  }
+
+  // Open-step-line builder maps every openVia to a human-readable line.
+  const focusLines = buildAppOpenStepLines({
+    appId: 'adobe-photoshop', displayName: 'Adobe Photoshop', openVia: 'desktop_launch',
+    openTarget: 'Adobe Photoshop 2025', surface: 'desktop', reason: 'installed on this Mac; already running', running: true,
+  });
+  if (!/^Focus Adobe Photoshop/.test(focusLines[0] || '') || focusLines.length !== 2) {
+    fail(`resolution: running app should focus (not relaunch) then wait (got ${JSON.stringify(focusLines)})`);
+  } else pass('resolution: running app open-steps focus instead of relaunching');
 }
 
 if (failures > 0) {

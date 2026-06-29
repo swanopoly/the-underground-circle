@@ -1225,6 +1225,11 @@ const server = http.createServer(async (req, res) => {
   // Requires: `op` CLI installed + OP_SERVICE_ACCOUNT_TOKEN env var set
   // Returns: { ok: true, fields: { username: "...", password: "..." } }
   if (url === '/secrets' && req.method === 'POST') {
+    if (!isDesktopTokenValid(req)) {
+      res.writeHead(401, CORS);
+      res.end(JSON.stringify({ ok: false, error: 'Missing or invalid desktop token. Pair first via POST /desktop/pair.' }));
+      return;
+    }
     let body = '';
     req.on('data', c => { body += c; if (body.length > 8000) req.destroy(); });
     req.on('end', () => {
@@ -1238,6 +1243,44 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      // Defense-in-depth: reject shell-metacharacter / flag-injection values
+      // before they ever reach the `op` CLI. Mirrors isSafeOpArg in
+      // src/lib/opSecretArg.ts (kept inline — the bridge has no build step).
+      // The op invocations below use execFileSync (no shell), so spaces in
+      // op:// URIs are harmless; this guard only blocks true injection vectors.
+      const isSafeOpArg = (v, kind) => {
+        if (typeof v !== 'string') return false;
+        if (v.length === 0 || v.length > 512) return false;
+        if (v.startsWith('-')) return false;
+        if (kind === 'uri' && !v.startsWith('op://')) return false;
+        // Spaces are safe (execFileSync below uses argv, no shell); 1Password
+        // vault/item names commonly contain spaces. Reject only true shell
+        // metacharacters + control chars.
+        return !/["'`$;&|<>(){}\\\t\n\r]/.test(v);
+      };
+      if (uri != null && !isSafeOpArg(uri, 'uri')) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid credential reference' }));
+        return;
+      }
+      if (item != null && !isSafeOpArg(item, 'identifier')) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid credential reference' }));
+        return;
+      }
+      if (vault != null && !isSafeOpArg(vault, 'identifier')) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid credential reference' }));
+        return;
+      }
+      if (fields != null) {
+        if (!Array.isArray(fields) || !fields.every(f => isSafeOpArg(f, 'identifier'))) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid credential reference' }));
+          return;
+        }
+      }
+
       // Check if op CLI is available
       try { execSync('op --version', { timeout: 5000, stdio: 'pipe' }); } catch {
         res.writeHead(500, CORS);
@@ -1249,14 +1292,16 @@ const server = http.createServer(async (req, res) => {
         let result;
         if (uri) {
           // Direct op:// URI resolution: op read "op://vault/item/field"
-          const out = execSync(`op read "${uri}"`, { timeout: 10000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+          // execFileSync — argv, no shell interpolation.
+          const out = execFileSync('op', ['read', uri], { timeout: 10000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
           result = { value: out };
         } else {
-          // Item get with specific fields
-          const vaultFlag = vault ? ` --vault "${vault}"` : '';
-          const fieldsFlag = fields?.length ? ` --fields "${fields.join(',')}"` : '';
-          const cmd = `op item get "${item}"${vaultFlag}${fieldsFlag} --format json`;
-          const out = execSync(cmd, { timeout: 10000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+          // Item get with specific fields — execFileSync argv form.
+          const args = ['item', 'get', item];
+          if (vault) args.push('--vault', vault);
+          if (fields?.length) args.push('--fields', fields.join(','));
+          args.push('--format', 'json');
+          const out = execFileSync('op', args, { timeout: 10000, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
           const data = JSON.parse(out);
           // Normalize: if fields were requested, data is an array of {id, value, label}
           if (Array.isArray(data)) {
@@ -2266,9 +2311,9 @@ const server = http.createServer(async (req, res) => {
       platform: process.platform,
       supported: process.platform === 'darwin',
       tools: process.platform === 'darwin'
-        ? ['launch', 'focus', 'type', 'keys', 'running_apps', 'browser_tabs', 'window_state', 'clipboard', 'clipboard_write', 'clipboard_clear',
+        ? ['launch', 'focus', 'type', 'keys', 'running_apps', 'installed_apps', 'app_installed', 'browser_tabs', 'window_state', 'clipboard', 'clipboard_write', 'clipboard_clear',
            'file_list', 'file_read', 'file_search', 'file_stat', 'file_write', 'file_rename', 'file_write_text', 'file_copy', 'file_trash', 'file_mkdir', 'shortcuts_list', 'shortcuts_run', 'window_manage', 'mouse_move', 'mouse_click', 'mouse_down', 'mouse_up', 'mouse_drag', 'mouse_scroll',
-           'paste_text',
+           'paste_text', 'notes_create', 'applescript', 'convert_image',
            'menu_click', 'indesign_find_change', 'indesign_batch_find_change', 'indesign_document_status', 'indesign_text_inventory', 'indesign_set_layer_state', 'indesign_update_text_layer', 'indesign_batch_update_text_layers', 'indesign_relink_asset', 'indesign_export_proof', 'indesign_package_document',
            'photoshop_document_status', 'photoshop_layer_inventory', 'photoshop_set_layer_state', 'photoshop_update_text_layer', 'photoshop_place_asset', 'photoshop_export_proof',
            'screenshot', 'wait_for_app', 'open_url', 'open_path', 'stage_attachment', 'stage_attachment_manifest', 'click_at', 'screen_size',
@@ -2325,6 +2370,71 @@ const server = http.createServer(async (req, res) => {
           .filter(Boolean);
         res.writeHead(200, CORS);
         res.end(JSON.stringify({ ok: true, apps }));
+      });
+      return;
+    }
+
+    // `/desktop/installed-apps` — enumerate installed applications so
+    // task→app resolution can answer "is Photoshop actually installed?"
+    // before planning a launch. Spotlight (`mdfind`) is the richer source
+    // (catches apps outside the standard folders); it gets a short probe
+    // timeout and falls back to a top-level directory listing of the
+    // standard app roots. Apps don't churn, so results are cached
+    // server-side for 5 minutes.
+    if (url === '/desktop/installed-apps' && req.method === 'GET') {
+      if (shouldUseInstalledAppsCache(installedAppsCache, Date.now(), INSTALLED_APPS_CACHE_TTL_MS)) {
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({ ...installedAppsCache.payload, cached: true }));
+        return;
+      }
+      const respond = (payload) => {
+        installedAppsCache.ts = Date.now();
+        installedAppsCache.payload = payload;
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify(payload));
+      };
+      const respondFromFs = () => {
+        const { apps, truncated } = dedupeInstalledAppEntries(listTopLevelMacAppBundles(), INSTALLED_APPS_MAX);
+        respond({ ok: true, apps, source: 'fs', truncated });
+      };
+      // Spotlight probe: bounded at 1.5s. On a healthy index this returns
+      // in well under a second; a disabled/rebuilding index times out and
+      // we silently use the directory listing instead.
+      execFile('mdfind', ["kMDItemKind == 'Application'"], { timeout: 1500, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+        if (err) { respondFromFs(); return; }
+        const entries = parseInstalledAppsFromMdfindOutput(stdout);
+        if (entries.length === 0) { respondFromFs(); return; }
+        const { apps, truncated } = dedupeInstalledAppEntries(entries, INSTALLED_APPS_MAX);
+        respond({ ok: true, apps, source: 'spotlight', truncated });
+      });
+      return;
+    }
+
+    // `/desktop/app-installed?name=` — cheap point query for a single app.
+    // `open -Ra <name>` exits 0 iff LaunchServices can resolve the app and
+    // does NOT launch it. The name is passed to execFile as a literal argv
+    // entry (no shell ever parses it), and the charset gate rejects shell
+    // metacharacters before we get anywhere near a process spawn.
+    if (url === '/desktop/app-installed' && req.method === 'GET') {
+      const parsed = new URL(req.url, 'http://localhost');
+      const name = validateInstalledAppQueryName(parsed.searchParams.get('name'));
+      if (!name) {
+        res.writeHead(400, CORS);
+        res.end(JSON.stringify({ ok: false, error: 'Invalid app name. Letters, numbers, spaces, . - _ ( ) only, max 120 chars.' }));
+        return;
+      }
+      execFile('open', ['-Ra', name], { timeout: 4000 }, (err) => {
+        // Fuzzy resolution catches "Photoshop" → "Adobe Photoshop 2025"
+        // even when the exact LaunchServices name check fails.
+        const resolved = resolveInstalledMacApp(name);
+        const installed = !err || !!resolved;
+        res.writeHead(200, CORS);
+        res.end(JSON.stringify({
+          ok: true,
+          appName: name,
+          installed,
+          ...(resolved ? { resolvedName: resolved.name, appPath: resolved.appPath } : {}),
+        }));
       });
       return;
     }
@@ -2388,6 +2498,197 @@ const server = http.createServer(async (req, res) => {
         if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err.message })); return; }
         res.writeHead(200, CORS);
         res.end(JSON.stringify({ ok: true }));
+      });
+      return;
+    }
+
+    // Create a note in the macOS Notes app via AppleScript. The note body is
+    // passed as an argv item (`on run argv`) and dispatched with execFile (no
+    // shell), so arbitrary content — quotes, newlines, shell metacharacters —
+    // needs no escaping and cannot inject. Notes launches itself if closed.
+    // `/desktop/convert_image` — DETERMINISTIC image format conversion via
+    // sips (no GUI, no modal dialogs). This is the reliable path for "save/
+    // convert/export this image as PNG/JPG/…": Photoshop scripting for export
+    // times out on color-profile / format modal dialogs, so simple format
+    // conversions should never depend on it. Resolves a bare basename
+    // ("pearsoncdjr-img") across the user's standard image folders (Desktop,
+    // Downloads, Documents, Pictures) so the model doesn't need the full path.
+    if (url === '/desktop/convert_image' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const source = String(parsed?.source || '').trim();
+        const formatRaw = String(parsed?.format || 'png').trim().toLowerCase();
+        const FORMAT_MAP = { png: 'png', jpg: 'jpeg', jpeg: 'jpeg', tiff: 'tiff', tif: 'tiff', gif: 'gif', bmp: 'bmp', heic: 'heic' };
+        const format = FORMAT_MAP[formatRaw];
+        if (!source) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'source (file path or name) is required' })); return; }
+        if (!format) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: `unsupported format "${formatRaw}". Use png, jpg, tiff, gif, bmp, or heic.` })); return; }
+        // Resolve the source path. Reject anything outside the home dir.
+        const home = os.homedir();
+        const roots = ['Desktop', 'Downloads', 'Documents', 'Pictures'].map((d) => path.join(home, d));
+        const isImage = (f) => /\.(png|jpe?g|tiff?|gif|bmp|heic|webp)$/i.test(f);
+        let srcPath = null;
+        const expanded = source.startsWith('~') ? path.join(home, source.slice(1)) : source;
+        const grantTargets = path.isAbsolute(expanded) ? [expanded] : roots;
+        for (const target of grantTargets) {
+          const grant = requireLocalFileAccessGrant(req, parsedUrl, target, 'write');
+          if (!grant.ok) { res.writeHead(grant.status, CORS); res.end(JSON.stringify({ ok: false, error: grant.error })); return; }
+        }
+        if (path.isAbsolute(expanded) && fs.existsSync(expanded) && fs.statSync(expanded).isFile()) {
+          srcPath = expanded;
+        } else {
+          // Treat `source` as a basename (with or without extension) and search
+          // the standard roots. Exact name first, then name + any image ext.
+          const base = path.basename(source);
+          const baseNoExt = base.replace(/\.[^.]+$/, '');
+          const sourceHasExtension = /\.[^.]+$/.test(base);
+          const matches = [];
+          for (const root of roots) {
+            let entries; try { entries = fs.readdirSync(root); } catch { continue; }
+            for (const e of entries) {
+              if (e === base || (!sourceHasExtension && e.replace(/\.[^.]+$/, '') === baseNoExt && isImage(e))) {
+                matches.push(path.join(root, e));
+              }
+            }
+          }
+          if (matches.length > 1) {
+            res.writeHead(409, CORS);
+            res.end(JSON.stringify({ ok: false, error: `multiple images matched "${source}"; provide the full path before converting.`, errorCode: 'ambiguous_file_match', matches }));
+            return;
+          }
+          if (matches.length === 1) srcPath = matches[0];
+        }
+        if (!srcPath) { res.writeHead(404, CORS); res.end(JSON.stringify({ ok: false, error: `could not find an image named "${source}" on the Desktop, Downloads, Documents, or Pictures. Provide a full path.`, errorCode: 'file_not_found' })); return; }
+        const realSrc = fs.realpathSync(srcPath);
+        if (!realSrc.startsWith(home + path.sep)) { res.writeHead(403, CORS); res.end(JSON.stringify({ ok: false, error: 'source must be inside your home folder.' })); return; }
+        const sourceGrant = requireLocalFileAccessGrant(req, parsedUrl, realSrc, 'write');
+        if (!sourceGrant.ok) { res.writeHead(sourceGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: sourceGrant.error })); return; }
+        // Output: same dir, basename + correct extension. If the converted name
+        // would equal the source, suffix with the format so we never clobber.
+        const ext = format === 'jpeg' ? 'jpg' : format;
+        const dir = path.dirname(realSrc);
+        const outputGrant = requireLocalFileAccessGrant(req, parsedUrl, dir, 'write');
+        if (!outputGrant.ok) { res.writeHead(outputGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: outputGrant.error })); return; }
+        const stem = path.basename(realSrc).replace(/\.[^.]+$/, '');
+        let outPath = path.join(dir, `${stem}.${ext}`);
+        if (path.resolve(outPath) === path.resolve(realSrc)) outPath = path.join(dir, `${stem}-${ext}.${ext}`);
+        if (fs.existsSync(outPath) && path.resolve(outPath) !== path.resolve(realSrc)) {
+          let counter = 1;
+          let candidate = path.join(dir, `${stem}-${ext}-${counter}.${ext}`);
+          while (fs.existsSync(candidate) && counter < 100) {
+            counter += 1;
+            candidate = path.join(dir, `${stem}-${ext}-${counter}.${ext}`);
+          }
+          if (fs.existsSync(candidate)) {
+            res.writeHead(409, CORS);
+            res.end(JSON.stringify({ ok: false, error: `could not choose a non-conflicting output path for "${source}".`, errorCode: 'output_conflict' }));
+            return;
+          }
+          outPath = candidate;
+        }
+        execFile('sips', ['-s', 'format', format, realSrc, '--out', outPath], { timeout: 30000, maxBuffer: 1024 * 1024 }, (err, _stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr && String(stderr).trim()) || err.message }));
+            return;
+          }
+          let bytes = 0;
+          try {
+            const sourceStat = fs.statSync(realSrc);
+            const outputStat = fs.statSync(outPath);
+            if ((outputStat.uid !== sourceStat.uid || outputStat.gid !== sourceStat.gid) && typeof fs.chownSync === 'function') {
+              fs.chownSync(outPath, sourceStat.uid, sourceStat.gid);
+            }
+            bytes = fs.statSync(outPath).size;
+          } catch {
+            try { bytes = fs.statSync(outPath).size; } catch {}
+          }
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, sourcePath: realSrc, outputPath: outPath, format: ext, bytes }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/notes_create' && req.method === 'POST') {
+      readJsonBody(req, 40 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const text = String(parsed?.text ?? '');
+        const title = String(parsed?.title ?? '').trim();
+        if (!text.trim() && !title) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'text is required' })); return; }
+        if (text.length > 20_000) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: 'text too long (max 20000 chars)' })); return; }
+        // Notes derives the title from the first line of the body; when a title
+        // is supplied, prepend it so the note is named as requested.
+        const noteBody = title && text.trim() ? `${title}\n${text}` : (title || text);
+        const scriptLines = [
+          'on run argv',
+          'set noteBody to item 1 of argv',
+          'tell application "Notes"',
+          'activate',
+          'set newNote to make new note with properties {body:noteBody}',
+          'set noteName to name of newNote',
+          'end tell',
+          'return noteName',
+          'end run',
+        ];
+        const args = [];
+        for (const line of scriptLines) { args.push('-e', line); }
+        args.push('--', noteBody);
+        execFile('osascript', args, { timeout: 8000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr && String(stderr).trim()) || err.message }));
+            return;
+          }
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, title: String(stdout || '').trim(), chars: noteBody.length }));
+        });
+      });
+      return;
+    }
+
+    // `/desktop/applescript` — general AppleScript executor (the native
+    // script surface for ANY scriptable Mac app, so the agent can "research
+    // how, then do it" without a per-app adapter). Same safety model as
+    // notes_create: each line is passed as a separate `-e`, params arrive as
+    // `on run argv` items dispatched with execFile (no shell), so arbitrary
+    // user content needs no escaping and cannot inject. Bounded size/timeout.
+    if (url === '/desktop/applescript' && req.method === 'POST') {
+      readJsonBody(req, 40 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const scriptLines = Array.isArray(parsed?.scriptLines)
+          ? parsed.scriptLines.map((l) => String(l)).filter((l) => l.length > 0)
+          : [];
+        const scriptArgs = Array.isArray(parsed?.args)
+          ? parsed.args.map((a) => String(a)).slice(0, 16)
+          : [];
+        if (scriptLines.length === 0) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'scriptLines (non-empty array of AppleScript lines) is required' }));
+          return;
+        }
+        if (scriptLines.join('\n').length > 10_000) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'script too long (max 10000 chars)' }));
+          return;
+        }
+        if (scriptArgs.some((a) => a.length > 20_000)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'arg too long (max 20000 chars each)' }));
+          return;
+        }
+        const osaArgs = [];
+        for (const line of scriptLines) { osaArgs.push('-e', line); }
+        if (scriptArgs.length > 0) { osaArgs.push('--', ...scriptArgs); }
+        execFile('osascript', osaArgs, { timeout: 15000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr && String(stderr).trim()) || err.message }));
+            return;
+          }
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({ ok: true, output: String(stdout || '').trim() }));
+        });
       });
       return;
     }
@@ -3093,6 +3394,7 @@ end tell`;
           return;
         }
         const resolved = resolveInstalledMacApp(appName);
+        const targetName = resolved?.name || appName;
         const launchDone = (err) => {
           if (err) {
             const msg = /not found/i.test(err.message) ? 'app_not_found' : err.message;
@@ -3103,16 +3405,38 @@ end tell`;
           res.writeHead(200, CORS);
           res.end(JSON.stringify({
             ok: true,
-            appName: resolved?.name || appName,
+            appName: targetName,
             requestedAppName: appName,
             appPath: resolved?.appPath,
           }));
         };
-        if (resolved?.appPath) {
-          execFile('open', [resolved.appPath], { timeout: 5000 }, launchDone);
-        } else {
-          exec(`open -a ${shellSingleQuote(appName)}`, { timeout: 5000 }, launchDone);
-        }
+        const doLaunch = () => {
+          if (resolved?.appPath) {
+            execFile('open', [resolved.appPath], { timeout: 5000 }, launchDone);
+          } else {
+            exec(`open -a ${shellSingleQuote(appName)}`, { timeout: 5000 }, launchDone);
+          }
+        };
+        // Idempotent launch: if the target app is ALREADY frontmost, skip the
+        // `open` so a retrying/blocked task can't keep yanking it to the front
+        // (the "keeps opening" churn). Fail-open — any error in the check just
+        // proceeds to a normal launch, so this never blocks a real launch.
+        const frontmostScript = 'tell application "System Events" to get name of first application process whose frontmost is true';
+        exec(`osascript -e ${shellSingleQuote(frontmostScript)}`, { timeout: 2500 }, (probeErr, stdout) => {
+          const frontmost = String(stdout || '').trim().toLowerCase();
+          if (!probeErr && frontmost && frontmost === targetName.toLowerCase()) {
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({
+              ok: true,
+              appName: targetName,
+              requestedAppName: appName,
+              appPath: resolved?.appPath,
+              alreadyFrontmost: true,
+            }));
+            return;
+          }
+          doLaunch();
+        });
       });
       return;
     }
@@ -4698,34 +5022,63 @@ end tell`;
     // want to start typing ONLY after the app is actually ready for
     // input, not just after `open` forked.
     if (url === '/desktop/screenshot' && req.method === 'GET') {
-      const tmpFile = path.join(os.tmpdir(), `uc-screenshot-${Date.now()}.png`);
-      const flags = '-T0 -x';  // no delay, silent (no camera sound)
-      exec(`screencapture ${flags} ${shellSingleQuote(tmpFile)}`, { timeout: 5000 }, (err) => {
-        if (err) {
-          res.writeHead(500, CORS);
+      // E3 — optional `region=x1,y1,x2,y2` query param crops the capture
+      // via `screencapture -R` so the pixel rung can re-observe a small
+      // target at full resolution (zoom) before a coordinate click.
+      const screenshotParams = new URL(req.url, 'http://localhost').searchParams;
+      const regionParam = (screenshotParams.get('region') || '').trim();
+      const captureScreenshot = (regionArgs, regionEcho) => {
+        const tmpFile = path.join(os.tmpdir(), `uc-screenshot-${Date.now()}.png`);
+        const flags = ['-T0', '-x', ...(regionArgs || [])].join(' ');  // no delay, silent (no camera sound)
+        exec(`screencapture ${flags} ${shellSingleQuote(tmpFile)}`, { timeout: 5000 }, (err) => {
+          if (err) {
+            res.writeHead(500, CORS);
+            res.end(JSON.stringify({
+              ok: false,
+              error: /permission/i.test(err.message)
+                ? 'Screen Recording permission required. Grant it in System Settings → Privacy & Security → Screen Recording for whichever Terminal is running the bridge.'
+                : err.message,
+            }));
+            return;
+          }
+          try {
+            const buf = fs.readFileSync(tmpFile);
+            const b64 = buf.toString('base64');
+            try { fs.unlinkSync(tmpFile); } catch {}
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({
+              ok: true,
+              mimeType: 'image/png',
+              sizeBytes: buf.length,
+              base64: b64,
+              ...(regionEcho ? { region: regionEcho } : {}),
+            }));
+          } catch (readErr) {
+            res.writeHead(500, CORS);
+            res.end(JSON.stringify({ ok: false, error: `read screenshot file: ${readErr.message}` }));
+          }
+        });
+      };
+      if (!regionParam) {
+        captureScreenshot(null, null);
+        return;
+      }
+      // Bounds-check the region against the real screen size. The lookup
+      // fails OPEN (shape-only validation) — a Finder scripting hiccup
+      // must not break region captures; screencapture clamps internally.
+      resolveScreenSizeForRegionCheck((screenWidth, screenHeight) => {
+        const validated = validateScreenshotRegion(regionParam, screenWidth, screenHeight);
+        if (!validated.ok) {
+          res.writeHead(200, CORS);
           res.end(JSON.stringify({
             ok: false,
-            error: /permission/i.test(err.message)
-              ? 'Screen Recording permission required. Grant it in System Settings → Privacy & Security → Screen Recording for whichever Terminal is running the bridge.'
-              : err.message,
+            error: validated.error,
+            errorCode: validated.errorCode || 'invalid_input',
+            ...(screenWidth && screenHeight ? { screenWidth, screenHeight } : {}),
           }));
           return;
         }
-        try {
-          const buf = fs.readFileSync(tmpFile);
-          const b64 = buf.toString('base64');
-          try { fs.unlinkSync(tmpFile); } catch {}
-          res.writeHead(200, CORS);
-          res.end(JSON.stringify({
-            ok: true,
-            mimeType: 'image/png',
-            sizeBytes: buf.length,
-            base64: b64,
-          }));
-        } catch (readErr) {
-          res.writeHead(500, CORS);
-          res.end(JSON.stringify({ ok: false, error: `read screenshot file: ${readErr.message}` }));
-        }
+        captureScreenshot(validated.captureArgs, validated.region);
       });
       return;
     }
@@ -4770,11 +5123,12 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
           return;
         }
+        const targetPath = expandDesktopPath(validated.path);
         const resolved = appName ? resolveInstalledMacApp(appName) : null;
         const targetAppName = resolved?.name || appName || null;
         const openArgs = targetAppName
-          ? ['-a', resolved?.appPath || targetAppName, validated.path]
-          : [validated.path];
+          ? ['-a', resolved?.appPath || targetAppName, targetPath]
+          : [targetPath];
         execFile('open', openArgs, { timeout: 5000 }, (err) => {
           if (err) {
             res.writeHead(400, CORS);
@@ -4782,7 +5136,7 @@ end tell`;
             return;
           }
           res.writeHead(200, CORS);
-          res.end(JSON.stringify({ ok: true, path: validated.path, appName: targetAppName }));
+          res.end(JSON.stringify({ ok: true, path: targetPath, appName: targetAppName }));
         });
       });
       return;
@@ -4973,6 +5327,17 @@ end tell`;
       const appName = parsed.searchParams.get('app') || '';
       const maxDepth = Math.max(1, Math.min(10, Number(parsed.searchParams.get('max_depth') || 6)));
       const maxNodes = Math.max(20, Math.min(400, Number(parsed.searchParams.get('max_nodes') || 150)));
+      // E2 — pruned targeting slices: `target` is the label the caller is
+      // trying to act on; `slice` selects 'interactive' (pruned) vs 'full'.
+      // Default is 'interactive' WHEN a target is present, otherwise the
+      // legacy full tree — no-target reads are unchanged.
+      const targetParam = String(parsed.searchParams.get('target') || '').trim().slice(0, 200);
+      const sliceParamRaw = String(parsed.searchParams.get('slice') || '').trim().toLowerCase();
+      const sliceMode = sliceParamRaw === 'full'
+        ? 'full'
+        : sliceParamRaw === 'interactive'
+          ? 'interactive'
+          : (targetParam ? 'interactive' : 'full');
       const helperPath = path.join(__dirname, 'bin', 'uc-ax-helper');
       if (!fs.existsSync(helperPath)) {
         res.writeHead(503, CORS);
@@ -4991,9 +5356,43 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'helper failed').toString().slice(0, 500) }));
           return;
         }
-        // Helper emits a single JSON line on stdout; forward verbatim.
+        // Helper emits a single JSON line on stdout. Parse it so we can
+        // slice + index; if it isn't parseable (or is an error payload),
+        // forward verbatim exactly as before.
+        const raw = stdout.toString().trim();
+        let payload = null;
+        try { payload = JSON.parse(raw); } catch { payload = null; }
+        if (!payload || payload.ok === false || !payload.tree || typeof payload.tree !== 'object') {
+          res.writeHead(200, CORS);
+          res.end(raw);
+          return;
+        }
+        if (sliceMode === 'interactive') {
+          const sliced = sliceA11yTreeForTarget(payload.tree, targetParam, A11Y_SLICE_MAX_NODES);
+          payload.tree = sliced.tree;
+          payload.slice = 'interactive';
+          payload.target = targetParam || null;
+          payload.total_nodes = sliced.totalNodes;
+          payload.sliced_nodes = sliced.keptNodes;
+          payload.slice_marker = sliced.marker;
+        }
+        // E2 — SoM indexes: number every returned node ([#1], [#2], …)
+        // and remember index → dotted-path for this pid so click/set-value
+        // can act on `elementIndex` against the LAST tree read.
+        const indexed = assignA11yNodeIndexes(payload.tree);
+        const generation = ++a11yIndexGenerationCounter;
+        payload.index_generation = generation;
+        const pidNum = Number(payload.pid || 0);
+        if (pidNum > 0) {
+          rememberA11yIndexMap(pidNum, {
+            app: String(payload.app || appName || ''),
+            generation,
+            indexToPath: indexed.indexToPath,
+            at: Date.now(),
+          });
+        }
         res.writeHead(200, CORS);
-        res.end(stdout.toString().trim());
+        res.end(JSON.stringify(payload));
       });
       return;
     }
@@ -5007,10 +5406,23 @@ end tell`;
       readJsonBody(req, 1024, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
         const pid = Number(parsed?.pid || 0);
-        const pathStr = String(parsed?.path || '');
+        let pathStr = String(parsed?.path || '');
+        // E2 — SoM index targeting: `elementIndex` resolves to the dotted
+        // path from the LAST indexed tree read for this pid. Structured
+        // errors: `no_indexed_tree` (never read) / `index_stale` (tree
+        // re-read since the index was issued).
+        if (pid && !pathStr && Number(parsed?.elementIndex || 0) > 0) {
+          const resolved = resolveA11yElementIndex(pid, Number(parsed.elementIndex), parsed?.indexGeneration);
+          if (!resolved.ok) {
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify(resolved.body));
+            return;
+          }
+          pathStr = resolved.path;
+        }
         if (!pid || !pathStr) {
           res.writeHead(400, CORS);
-          res.end(JSON.stringify({ ok: false, error: 'pid (number) and path (string) required' }));
+          res.end(JSON.stringify({ ok: false, error: 'pid (number) and path (string) or elementIndex (number) required' }));
           return;
         }
         // Light validation so we don't pass arbitrary shell fragments.
@@ -5025,14 +5437,21 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'uc-ax-helper not compiled.' }));
           return;
         }
-        execFile(helperPath, ['click', '--pid', String(pid), '--path', pathStr], { timeout: 5000 }, (err, stdout, stderr) => {
-          if (err && !stdout) {
-            res.writeHead(500, CORS);
-            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'click failed').toString().slice(0, 300) }));
+        const expectApp = typeof parsed?.expectApp === 'string' ? parsed.expectApp.trim() : '';
+        resolveAppPidForStalenessCheck(expectApp, (currentPid) => {
+          if (currentPid && currentPid !== pid) {
+            writeA11yPathStale(res, CORS, expectApp, pid, currentPid);
             return;
           }
-          res.writeHead(200, CORS);
-          res.end(stdout.toString().trim());
+          execFile(helperPath, ['click', '--pid', String(pid), '--path', pathStr], { timeout: 5000 }, (err, stdout, stderr) => {
+            if (err && !stdout) {
+              res.writeHead(500, CORS);
+              res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'click failed').toString().slice(0, 300) }));
+              return;
+            }
+            res.writeHead(200, CORS);
+            res.end(stdout.toString().trim());
+          });
         });
       });
       return;
@@ -5042,16 +5461,26 @@ end tell`;
       readJsonBody(req, 40 * 1024, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
         const pid = Number(parsed?.pid);
-        const p = String(parsed?.path || '').trim();
+        let p = String(parsed?.path || '').trim();
         const text = String(parsed?.text ?? '');
         if (!Number.isInteger(pid) || pid <= 0) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'pid required' }));
           return;
         }
+        // E2 — SoM index targeting (see /desktop/click_element).
+        if (!p && Number(parsed?.elementIndex || 0) > 0) {
+          const resolved = resolveA11yElementIndex(pid, Number(parsed.elementIndex), parsed?.indexGeneration);
+          if (!resolved.ok) {
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify(resolved.body));
+            return;
+          }
+          p = resolved.path;
+        }
         if (!/^[0-9]+(\.[0-9]+)*$/.test(p)) {
           res.writeHead(400, CORS);
-          res.end(JSON.stringify({ ok: false, error: 'path must be dotted integers' }));
+          res.end(JSON.stringify({ ok: false, error: 'path must be dotted integers (or pass elementIndex from the last indexed tree read)' }));
           return;
         }
         if (text.length === 0 || text.length > 20_000) {
@@ -5065,14 +5494,21 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'uc-ax-helper not compiled. Run npm run bridge once after installing Xcode CLT.' }));
           return;
         }
-        execFile(helper, ['set-value', '--pid', String(pid), '--path', p, '--text', text], { timeout: 7000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
-          if (err) {
-            res.writeHead(400, CORS);
-            res.end(JSON.stringify({ ok: false, error: (stderr || stdout || err.message || 'set value failed').toString().slice(0, 500) }));
+        const expectApp = typeof parsed?.expectApp === 'string' ? parsed.expectApp.trim() : '';
+        resolveAppPidForStalenessCheck(expectApp, (currentPid) => {
+          if (currentPid && currentPid !== pid) {
+            writeA11yPathStale(res, CORS, expectApp, pid, currentPid);
             return;
           }
-          res.writeHead(200, CORS);
-          res.end(stdout.toString().trim() || JSON.stringify({ ok: true, method: 'ax_set_value', chars: text.length }));
+          execFile(helper, ['set-value', '--pid', String(pid), '--path', p, '--text', text], { timeout: 7000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+            if (err) {
+              res.writeHead(400, CORS);
+              res.end(JSON.stringify({ ok: false, error: (stderr || stdout || err.message || 'set value failed').toString().slice(0, 500) }));
+              return;
+            }
+            res.writeHead(200, CORS);
+            res.end(stdout.toString().trim() || JSON.stringify({ ok: true, method: 'ax_set_value', chars: text.length }));
+          });
         });
       });
       return;
@@ -5111,6 +5547,7 @@ end tell`;
     try {
       if (p === '/browser/open_url' && req.method === 'POST') return browserBridge.handleOpenUrl(req, res, CORS);
       if (p === '/browser/dom_snapshot' && req.method === 'GET') return browserBridge.handleDomSnapshot(req, res, CORS, parsedUrl);
+      if (p === '/browser/page_source' && req.method === 'GET') return browserBridge.handlePageSource(req, res, CORS, parsedUrl);
       if (p === '/browser/verification_state' && req.method === 'GET') return browserBridge.handleVerificationState(req, res, CORS);
       if (p === '/browser/click_role' && req.method === 'POST') return browserBridge.handleClickRole(req, res, CORS);
       if (p === '/browser/fill' && req.method === 'POST') return browserBridge.handleFill(req, res, CORS);
@@ -5158,13 +5595,287 @@ function readJsonBody(req, maxBytes, callback) {
   req.on('error', (err) => { if (!destroyed) callback(null, err.message); });
 }
 
+/* UC_SMOKE_EXTRACT_START shellSingleQuote */
 function shellSingleQuote(s) {
   // POSIX shell single-quote escape: close, escape quote, reopen.
   return `'${String(s).replace(/'/g, "'\\''")}'`;
 }
+/* UC_SMOKE_EXTRACT_END shellSingleQuote */
 
 function escapeAppleScriptString(s) {
   return String(s ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+// ── A11y PID-staleness guard (UC-1 hardening) ───────────────────────────
+//
+// AX element paths from /desktop/a11y_tree are only valid within the
+// process they were read from. If the app restarted between the tree
+// read and a click/set-value, the same PID may now belong to nothing
+// (helper fails loudly — fine) or, worse, paths resolve inside a NEW
+// process instance with a different layout. When the caller passes the
+// app name (`expectApp`) alongside the tree-read `pid`, we resolve the
+// app's CURRENT unix id and refuse to act on a mismatch with a
+// structured `a11y_path_stale` error instead of clicking a wrong
+// element. Fail-open by design: if the lookup itself fails (app name
+// mismatch between AX and System Events, osascript error), we proceed
+// — the guard must never become a new way to break working clicks.
+function resolveAppPidForStalenessCheck(appName, cb) {
+  const cleaned = String(appName || '').trim().slice(0, 120);
+  if (!cleaned || process.platform !== 'darwin') { cb(null); return; }
+  const script = `tell application "System Events" to get unix id of first application process whose name is "${escapeAppleScriptString(cleaned)}"`;
+  exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 4000 }, (err, stdout) => {
+    if (err) { cb(null); return; }
+    const pid = Number(String(stdout || '').trim());
+    cb(Number.isFinite(pid) && pid > 0 ? pid : null);
+  });
+}
+
+function writeA11yPathStale(res, CORS, expectApp, treePid, currentPid) {
+  res.writeHead(200, CORS);
+  res.end(JSON.stringify({
+    ok: false,
+    error: `a11y path stale: ${expectApp} is now PID ${currentPid} but the accessibility tree was read from PID ${treePid}. Element paths from the old tree are invalid.`,
+    errorCode: 'a11y_path_stale',
+    treePid,
+    currentPid,
+    recoveryHint: 'Re-read the accessibility tree for this app, then act using the fresh element paths.',
+  }));
+}
+
+// ── E2: targeting-oriented a11y tree slices + SoM node indexes ──────────
+//
+// Research-backed (docs/EXECUTION_LADDER_RESEARCH_2026-06-11.md #4): raw
+// tree dumps hurt — send pruned slices for TARGETING; keep the full tree
+// behind an explicit `slice:"full"` request. The slice keeps actionable-
+// role nodes, label/value matches for the caller's `target` string (plus
+// ±2 siblings for context), and the ancestor chains needed to keep the
+// pruned tree structurally valid, capped at ~120 nodes.
+//
+// The pure functions below are extracted from this file's source and
+// executed directly by scripts/a11y-tree-smoketest.ts and
+// scripts/desktop-bridge-smoketest.ts (UC_SMOKE_EXTRACT markers), so the
+// smokes exercise the REAL implementations. Keep them self-contained:
+// no closure over module state.
+
+const A11Y_SLICE_MAX_NODES = 120;
+
+/* UC_SMOKE_EXTRACT_START sliceA11yTreeForTarget */
+function sliceA11yTreeForTarget(tree, target, maxKeptNodes) {
+  const cap = Math.max(20, Math.min(250, Number(maxKeptNodes) || 120));
+  const ACTIONABLE_ROLE = /button|menu|checkbox|radio|tab\b|link|textfield|text field|textarea|text area|combobox|combo box|popup|cell|row|slider|incrementor|search|disclosure|toolbar/i;
+  // Flatten with parent/sibling bookkeeping so we can re-attach ancestor
+  // chains and ±2 siblings around target matches.
+  const flat = [];
+  const entryByNode = new Map();
+  (function walk(node, parent, siblingIndex) {
+    if (!node || typeof node !== 'object') return;
+    const entry = { node, parent, siblingIndex };
+    flat.push(entry);
+    entryByNode.set(node, entry);
+    const children = Array.isArray(node.children) ? node.children : [];
+    for (let i = 0; i < children.length; i += 1) walk(children[i], entry, i);
+  })(tree, null, 0);
+  const totalNodes = flat.length;
+
+  const cleanedTarget = String(target || '').toLowerCase().replace(/[^\w\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+  const targetTokens = cleanedTarget.split(' ').filter((token) => token.length >= 2);
+  const nodeText = (node) =>
+    `${node.label || ''} ${node.value || ''}`.toLowerCase().replace(/[^\w\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+  const matchesTarget = (node) => {
+    if (!cleanedTarget) return false;
+    const text = nodeText(node);
+    if (!text) return false;
+    if (text.includes(cleanedTarget)) return true;
+    return targetTokens.some((token) => text.includes(token));
+  };
+
+  const kept = new Set();
+  const keepWithAncestors = (entry) => {
+    let cursor = entry;
+    while (cursor && !kept.has(cursor)) {
+      kept.add(cursor);
+      cursor = cursor.parent;
+    }
+  };
+
+  // Phase 1 — target matches + ±2 siblings + ancestor chains (highest
+  // priority; bounded by the cap so a pathological match-everything
+  // target can't blow the budget).
+  for (const entry of flat) {
+    if (kept.size >= cap) break;
+    if (!matchesTarget(entry.node)) continue;
+    keepWithAncestors(entry);
+    const siblings = entry.parent && Array.isArray(entry.parent.node.children) ? entry.parent.node.children : [];
+    for (let offset = -2; offset <= 2; offset += 1) {
+      if (offset === 0) continue;
+      const sibling = siblings[entry.siblingIndex + offset];
+      const siblingEntry = sibling ? entryByNode.get(sibling) : null;
+      if (siblingEntry) keepWithAncestors(siblingEntry);
+    }
+  }
+
+  // Phase 2 — actionable-role nodes in document order until the cap.
+  for (const entry of flat) {
+    if (kept.size >= cap) break;
+    if (kept.has(entry)) continue;
+    if (ACTIONABLE_ROLE.test(String(entry.node.role || ''))) keepWithAncestors(entry);
+  }
+
+  // Always keep the root so the slice stays a tree.
+  const rootEntry = flat[0] || null;
+  if (rootEntry) kept.add(rootEntry);
+
+  const rebuild = (entry) => {
+    const sourceChildren = Array.isArray(entry.node.children) ? entry.node.children : [];
+    const children = [];
+    for (const child of sourceChildren) {
+      const childEntry = entryByNode.get(child);
+      if (childEntry && kept.has(childEntry)) children.push(rebuild(childEntry));
+    }
+    const copy = Object.assign({}, entry.node);
+    delete copy.children;
+    if (children.length) copy.children = children;
+    return copy;
+  };
+
+  const slicedTree = rootEntry ? rebuild(rootEntry) : tree;
+  const keptNodes = kept.size;
+  const targetLabel = String(target || '').slice(0, 80);
+  const marker = `[slice: ${keptNodes} of ${totalNodes} nodes — matching "${targetLabel}" + interactive elements; request slice:"full" for everything]`;
+  return { tree: slicedTree, totalNodes, keptNodes, marker };
+}
+/* UC_SMOKE_EXTRACT_END sliceA11yTreeForTarget */
+
+/* UC_SMOKE_EXTRACT_START assignA11yNodeIndexes */
+function assignA11yNodeIndexes(tree) {
+  // SoM-style stable indexes: number nodes 1..N in document order and
+  // return index → dotted-path. Deterministic for identical trees, so
+  // observation-hash caching stays coherent.
+  const indexToPath = {};
+  let next = 1;
+  (function walk(node) {
+    if (!node || typeof node !== 'object') return;
+    node.index = next;
+    indexToPath[next] = String(node.id || '');
+    next += 1;
+    for (const child of (Array.isArray(node.children) ? node.children : [])) walk(child);
+  })(tree);
+  return { indexToPath, count: next - 1 };
+}
+/* UC_SMOKE_EXTRACT_END assignA11yNodeIndexes */
+
+// index → path maps for the LAST tree read per pid. Bounded; element
+// actions resolve `elementIndex` against this and fail closed with
+// `no_indexed_tree` / `index_stale` rather than guessing.
+const A11Y_INDEX_STATE_MAX_PIDS = 8;
+const a11yIndexStateByPid = new Map();
+let a11yIndexGenerationCounter = 0;
+
+function rememberA11yIndexMap(pid, entry) {
+  a11yIndexStateByPid.set(pid, entry);
+  if (a11yIndexStateByPid.size > A11Y_INDEX_STATE_MAX_PIDS) {
+    let oldestPid = null;
+    let oldestAt = Infinity;
+    for (const [cachedPid, cached] of a11yIndexStateByPid) {
+      if (cached.at < oldestAt) { oldestAt = cached.at; oldestPid = cachedPid; }
+    }
+    if (oldestPid !== null && oldestPid !== pid) a11yIndexStateByPid.delete(oldestPid);
+  }
+}
+
+function resolveA11yElementIndex(pid, elementIndex, indexGeneration) {
+  return resolveA11yElementIndexFromEntry(a11yIndexStateByPid.get(pid) || null, pid, elementIndex, indexGeneration);
+}
+
+/* UC_SMOKE_EXTRACT_START resolveA11yElementIndexFromEntry */
+function resolveA11yElementIndexFromEntry(entry, pid, elementIndex, indexGeneration) {
+  if (!entry) {
+    return {
+      ok: false,
+      body: {
+        ok: false,
+        error: `no indexed accessibility tree has been read for pid ${pid} in this bridge session — read the a11y tree first, then act on its [#N] indexes.`,
+        errorCode: 'no_indexed_tree',
+        recoveryHint: 'Read the accessibility tree for this app first; element indexes are only valid against the latest tree read.',
+      },
+    };
+  }
+  const generation = Number(indexGeneration || 0);
+  if (generation > 0 && generation !== entry.generation) {
+    return {
+      ok: false,
+      body: {
+        ok: false,
+        error: `element index ${elementIndex} came from tree read generation ${generation}, but the tree for pid ${pid} was re-read since (latest generation ${entry.generation}). Indexes from the old read are invalid.`,
+        errorCode: 'index_stale',
+        recoveryHint: 'Re-read the accessibility tree and act on the fresh [#N] indexes.',
+      },
+    };
+  }
+  const resolvedPath = entry.indexToPath[elementIndex];
+  if (!resolvedPath) {
+    return {
+      ok: false,
+      body: {
+        ok: false,
+        error: `element index ${elementIndex} is not present in the latest indexed tree for pid ${pid} — the tree was re-read since the index was issued, or the index never existed.`,
+        errorCode: 'index_stale',
+        recoveryHint: 'Re-read the accessibility tree and act on the fresh [#N] indexes.',
+      },
+    };
+  }
+  return { ok: true, path: resolvedPath };
+}
+/* UC_SMOKE_EXTRACT_END resolveA11yElementIndexFromEntry */
+
+// ── E3: region-zoom screenshot helpers ──────────────────────────────────
+
+/* UC_SMOKE_EXTRACT_START validateScreenshotRegion */
+function validateScreenshotRegion(regionParam, screenWidth, screenHeight) {
+  // Region format: "x1,y1,x2,y2" (corner-to-corner, screen pixels).
+  // Bounds are validated against the real screen size when known
+  // (pass 0/0 to skip — the size lookup fails open).
+  const raw = String(regionParam || '').trim();
+  if (!raw) return { ok: false, error: 'region required as "x1,y1,x2,y2"' };
+  const parts = raw.split(',').map((value) => Number(value.trim()));
+  if (parts.length !== 4 || parts.some((value) => !Number.isInteger(value) || value < 0)) {
+    return { ok: false, error: 'region must be four non-negative integers "x1,y1,x2,y2"' };
+  }
+  const [x1, y1, x2, y2] = parts;
+  if (x2 <= x1 || y2 <= y1) {
+    return { ok: false, error: 'region must satisfy x2 > x1 and y2 > y1 (corner-to-corner, not width/height)' };
+  }
+  if (x2 - x1 < 8 || y2 - y1 < 8) {
+    return { ok: false, error: 'region too small — minimum 8x8 px' };
+  }
+  const width = Number(screenWidth) || 0;
+  const height = Number(screenHeight) || 0;
+  if (width > 0 && height > 0 && (x1 >= width || y1 >= height || x2 > width || y2 > height)) {
+    return {
+      ok: false,
+      error: `region [${x1},${y1},${x2},${y2}] exceeds the screen bounds ${width}x${height}`,
+      errorCode: 'region_out_of_bounds',
+    };
+  }
+  return {
+    ok: true,
+    region: [x1, y1, x2, y2],
+    captureArgs: [`-R${x1},${y1},${x2 - x1},${y2 - y1}`],
+  };
+}
+/* UC_SMOKE_EXTRACT_END validateScreenshotRegion */
+
+/** Screen size for region bounds validation. Fails OPEN (0,0 → shape-only
+ *  validation): a Finder scripting hiccup must never break captures. */
+function resolveScreenSizeForRegionCheck(cb) {
+  if (process.platform !== 'darwin') { cb(0, 0); return; }
+  const script = 'tell application "Finder" to get bounds of window of desktop';
+  exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 2000 }, (err, stdout) => {
+    if (err) { cb(0, 0); return; }
+    const parts = String(stdout || '').trim().split(',').map((s) => Number(s.trim())).filter((n) => Number.isFinite(n));
+    if (parts.length !== 4) { cb(0, 0); return; }
+    cb(parts[2] - parts[0], parts[3] - parts[1]);
+  });
 }
 
 const MAC_APP_SEARCH_ROOTS = [
@@ -5176,6 +5887,94 @@ const MAC_APP_SEARCH_ROOTS = [
 const macAppResolveCache = new Map();
 const runningInDesignResolveCache = new Map();
 const runningPhotoshopResolveCache = new Map();
+
+// ── Installed-application enumeration (/desktop/installed-apps) ─────────
+//
+// Server-side 5-min cache — installed apps don't churn, and the Spotlight
+// probe + directory walk are not free. The pure helpers below carry
+// UC_SMOKE_EXTRACT markers so scripts/desktop-bridge-smoketest.ts executes
+// the REAL implementations. Keep them self-contained: no closure over
+// module state.
+
+const INSTALLED_APPS_MAX = 400;
+const INSTALLED_APPS_CACHE_TTL_MS = 5 * 60 * 1000;
+const installedAppsCache = { ts: 0, payload: null };
+
+/* UC_SMOKE_EXTRACT_START shouldUseInstalledAppsCache */
+function shouldUseInstalledAppsCache(cache, nowMs, ttlMs) {
+  if (!cache || !cache.payload) return false;
+  const age = Number(nowMs) - Number(cache.ts || 0);
+  // Negative age means a clock jump backwards — treat as stale, refresh.
+  return age >= 0 && age < Number(ttlMs);
+}
+/* UC_SMOKE_EXTRACT_END shouldUseInstalledAppsCache */
+
+/* UC_SMOKE_EXTRACT_START validateInstalledAppQueryName */
+function validateInstalledAppQueryName(name) {
+  // Same charset gate as /desktop/launch — anything outside it (quotes,
+  // semicolons, slashes, backticks, $, newlines) is rejected before any
+  // process spawn, so hostile names like `Foo"; rm -rf "/` never reach
+  // exec. The check itself is defense-in-depth: the caller uses execFile
+  // (literal argv, no shell) anyway.
+  const cleaned = String(name || '').trim();
+  if (!cleaned || cleaned.length > 120) return null;
+  if (!/^[A-Za-z0-9 .\-_()]+$/.test(cleaned)) return null;
+  return cleaned;
+}
+/* UC_SMOKE_EXTRACT_END validateInstalledAppQueryName */
+
+/* UC_SMOKE_EXTRACT_START parseInstalledAppsFromMdfindOutput */
+function parseInstalledAppsFromMdfindOutput(stdout) {
+  const entries = [];
+  for (const line of String(stdout || '').split(/\r?\n/)) {
+    const appPath = line.trim();
+    if (!appPath || !/\.app$/i.test(appPath)) continue;
+    // Skip helper bundles nested inside another .app (Spotlight reports
+    // some embedded helpers as Applications).
+    if (/\.app\//i.test(appPath)) continue;
+    const base = appPath.slice(appPath.lastIndexOf('/') + 1).replace(/\.app$/i, '').trim();
+    if (!base) continue;
+    entries.push({ name: base, path: appPath });
+  }
+  return entries;
+}
+/* UC_SMOKE_EXTRACT_END parseInstalledAppsFromMdfindOutput */
+
+/* UC_SMOKE_EXTRACT_START dedupeInstalledAppEntries */
+function dedupeInstalledAppEntries(entries, maxApps) {
+  const cap = Math.max(1, Math.min(400, Number(maxApps) || 400));
+  const seen = new Set();
+  const apps = [];
+  let truncated = false;
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const name = String((entry && entry.name) || '').replace(/\.app$/i, '').trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (apps.length >= cap) { truncated = true; break; }
+    const path = String((entry && entry.path) || '').trim();
+    apps.push(path ? { name, path } : { name });
+  }
+  apps.sort((a, b) => a.name.localeCompare(b.name));
+  return { apps, truncated };
+}
+/* UC_SMOKE_EXTRACT_END dedupeInstalledAppEntries */
+
+/** Top-level .app bundles under the standard roots — the fs fallback source. */
+function listTopLevelMacAppBundles() {
+  const entries = [];
+  for (const root of MAC_APP_SEARCH_ROOTS) {
+    let dirents;
+    try { dirents = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
+    for (const dirent of dirents) {
+      if (!/\.app$/i.test(dirent.name)) continue;
+      if (!dirent.isDirectory() && !dirent.isSymbolicLink()) continue;
+      entries.push({ name: dirent.name.replace(/\.app$/i, ''), path: path.join(root, dirent.name) });
+    }
+  }
+  return entries;
+}
 
 function normalizeMacAppName(value) {
   return String(value || '')

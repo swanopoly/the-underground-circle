@@ -27,6 +27,8 @@ export type DesktopBridgeError =
   | 'auth_required'
   | 'token_rejected'
   | 'file_not_found'
+  | 'ambiguous_file_match'
+  | 'output_conflict'
   | 'missing_permission'
   | 'network_error'
   | 'server_error'
@@ -36,6 +38,19 @@ export type DesktopBridgeError =
   // Callers should either prompt the user to rebuild (npm run bridge)
   // or fall back to vision-grounded tools (screenshot + click_at).
   | 'helper_missing'
+  // Browser locator (role+name/selector) resolved to more than one
+  // element and no explicit `nth` disambiguator was provided. The
+  // result carries `matches` + `candidates` so the model can pick one.
+  | 'ambiguous_locator'
+  // Client-side pre-mutation check found a CAPTCHA/MFA/human-check on
+  // the current page. Pause and hand the gate to the user — never bypass.
+  | 'verification_gate'
+  // The AX tree came back empty twice (one bounded retry already
+  // happened). Fall back to the screenshot + coordinate path.
+  | 'a11y_tree_empty'
+  // The app's current PID no longer matches the PID the tree was read
+  // from — element paths are stale. Re-read the tree before acting.
+  | 'a11y_path_stale'
   | 'unknown';
 
 export interface DesktopHealth {

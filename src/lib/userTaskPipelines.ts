@@ -501,24 +501,31 @@ export const USER_TASK_PIPELINES: UserTaskPipelineDefinition[] = [
     id: 'wordpress_cms',
     title: 'WordPress And CMS',
     category: 'business',
-    description: 'Draft, edit, schedule, publish, list, or manage WordPress/CMS content.',
-    matchers: [/\b(wordpress|wp admin|cms|blog|post|page|featured image|categories|tags|draft|publish|schedule)\b/i],
+    description: 'Draft, edit, schedule, publish, list, or manage WordPress/CMS content, including Dealer Inspire WordPress admin surfaces.',
+    matchers: [/\b(wordpress|wp admin|cms|blog|post|page|featured image|categories|tags|draft|publish|schedule|dealer\s+inspire|dealerinspire|di\s+slides?|di_slide|flavor_di_slides|quick edit|expiration(?:_date)?|admin\.php|reload cache)\b/i],
     routeId: 'wordpress',
     executionKind: 'run_command_handler',
     risk: 'external_side_effect',
     defaultCommand: '/wp status',
-    preferredSurfaces: ['wordpress_api', 'browser_bridge', 'vault'],
-    recommendedTools: ['wp.list_posts', 'wp.create_slide', 'browser.open_url', 'vault.resolve_for_task', 'approvals.request'],
+    preferredSurfaces: ['wordpress_api', 'wp_admin_browser', 'browser_bridge', 'vault'],
+    recommendedTools: ['wp.discover_types', 'wp.list_posts', 'wp.upload_media', 'wp.create_slide', 'wp.update_post', 'browser.open_url', 'browser.wp_admin_source_intelligence', 'browser.dom_snapshot', 'browser.upload_file', 'vault.resolve_for_task', 'vault.runbook', 'approvals.request'],
+    executionRequirements: [
+      'Use browser.wp_admin_source_intelligence before wp-admin UI decisions so bounded redacted admin facts guide the task.',
+    ],
     solutionSteps: [
-      'Resolve site connection and content target.',
-      'Use API tools when possible; use browser automation for admin-only flows.',
+      'Resolve site URL, wp-admin URL, credentials, role/capability, and content/admin target.',
+      'Use API tools for posts, pages, taxonomies, media, and custom post types when possible.',
+      'For Dealer Inspire and wp-admin pages, use browser.wp_admin_source_intelligence before UI decisions so SwanBot/OpenSwan sees bounded redacted admin facts instead of raw HTML.',
+      'For Dealer Inspire, discover DI custom post types such as di_slide/flavor_di_slides, parse current admin DOM/source facts, and verify slider, image, expiration, status, order, and cache outcomes.',
+      'Use wp-admin browser automation for dashboard-only flows: Gutenberg/editor panels, plugins, themes, users, menus, settings, WooCommerce, forms, and plugin pages.',
       'Draft before publish unless the user explicitly asks to go live.',
-      'Verify public URL or admin status after action.',
+      'Stop for MFA/CAPTCHA/security checks and never expose raw credentials.',
+      'Verify REST result, admin status, media URL, public URL, or screenshot after action.',
     ],
     completionCriteria: ['CMS content is drafted, updated, scheduled, listed, or published with proof.'],
-    approvalTriggers: ['Publish, delete, schedule, credential use, or public site changes.'],
+    approvalTriggers: ['Credential use, publish, delete, schedule, public site changes, plugin/theme changes, settings/users/roles changes, media uploads, DI slide slider/status/expiration/order/cache changes, WooCommerce writes.'],
     persistenceTargets: ['cms_trace', 'approval', 'chat_message'],
-    exampleQuestions: ['Draft a WordPress post.', 'Edit this page.', 'Schedule the blog for tomorrow.'],
+    exampleQuestions: ['Draft a WordPress post.', 'Edit this page.', 'Upload this file to the media library.', 'Log into wp-admin and update a plugin setting.', 'Create a Dealer Inspire DI Slide with this banner and expiration date.'],
   },
   {
     id: 'website_platform_admin',
@@ -1544,7 +1551,10 @@ function scorePipeline(message: string, pipeline: UserTaskPipelineDefinition): U
   if (pipeline.id === 'bridge_troubleshooting' && /\b(can'?t|cannot|unable|blocked|offline|not connected|not working|not running)\b.*\b(tabs?|chrome|safari|browser|desktop|computer)\b/i.test(text)) score += 4;
   if (pipeline.id === 'bridge_troubleshooting' && !/\b(can'?t|cannot|unable|blocked|offline|not connected|not working|not running|bridge|cors|404|unknown \/desktop endpoint)\b/i.test(text)) score -= 3;
   if (pipeline.id === 'wordpress_cms' && /\bwordpress|wp admin|blog post\b/i.test(text)) score += 3;
+  if (pipeline.id === 'wordpress_cms' && /\b(dealer\s+inspire|dealerinspire|di\s+slides?|di_slide|flavor_di_slides|quick edit|expiration(?:_date)?|reload cache|wp-admin|admin\.php)\b/i.test(text)) score += 6;
+  if (pipeline.id === 'wordpress_cms' && /\b(slide|slider|banner|image|media|upload|attach)\b/i.test(text) && /\b(dealer\s+inspire|dealerinspire|di\s+slides?|di_slide|flavor_di_slides)\b/i.test(text)) score += 3;
   if (pipeline.id === 'wordpress_cms' && /\b(shopify|webflow|wix|squarespace|woocommerce|bigcommerce|framer|godaddy|site builder|website builder|store admin)\b/i.test(text)) score -= 4;
+  if (pipeline.id === 'desktop_app_control' && /\b(dealer\s+inspire|dealerinspire|di\s+slides?|di_slide|flavor_di_slides|wp-admin|wordpress)\b/i.test(text)) score -= 6;
   if (pipeline.id === 'website_platform_admin' && /\b(shopify|webflow|wix|squarespace|woocommerce|bigcommerce|framer|godaddy|site builder|website builder|ecommerce|store admin)\b/i.test(text)) score += 5;
   if (
     pipeline.id === 'website_platform_admin' &&

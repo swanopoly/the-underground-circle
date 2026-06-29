@@ -69,7 +69,7 @@ const OPERATIVE_KNOWN_APP_RE = new RegExp(
       'powerpoint', 'excel', 'keynote', 'outlook', 'onenote',
       'microsoft\\s+word', 'ms\\s+word', 'google\\s+(?:docs|sheets|slides|drive)',
       // CAD / engineering / audio production
-      'autocad', 'solidworks', 'fusion\\s*360', 'revit', 'sketchup',
+      'autocad', 'solidworks', 'fusion\\s*360', 'matlab', 'simulink', 'revit', 'sketchup',
       'ableton', 'pro\\s+tools', 'fl\\s+studio', 'cubase',
       // dev / collaboration / desktop
       'notion', 'slack', 'discord', 'obsidian', 'xcode', 'finder',
@@ -171,11 +171,21 @@ function deterministicSequenceCapabilities(sequence: LocalComputerAwarenessInten
   return Array.from(capabilities);
 }
 
-const LOW_RISK_PHOTOSHOP_IMAGE_EXPORT_DISALLOWED_RE = /\b(?:generative|generate|ai\s+edit|fill|remove|delete|erase|crop|resize|retouch|replace|background|mask|selection|selected|highlighted|brush|layers?|text|headline|color|adjust|filter|blur|sharpen|harmonize|expand|create\s+canvas|new\s+document|overwrite|save\s+over|same\s+file|source|original|send|publish|upload|submit|email|post|pay|purchase|checkout)\b/i;
+const LOW_RISK_PHOTOSHOP_IMAGE_EXPORT_DISALLOWED_RE = /\b(?:generative|generate|ai\s+edit|fill|remove|delete|erase|crop|resize|retouch|replace|rename|renamed|name\s+it|call\s+it|background|mask|selection|selected|highlighted|brush|layers?|text|headline|color|adjust|filter|blur|sharpen|harmonize|expand|create\s+canvas|new\s+document|overwrite|save\s+over|same\s+file|source|original|send|publish|upload|submit|email|post|pay|purchase|checkout)\b/i;
 const LOW_RISK_PHOTOSHOP_IMAGE_EXPORT_FORMAT_RE = /(?:\.(?:png|jpe?g)\b|\b(?:png|jpe?g)\b|\bsave\s+for\s+web\b|\bweb\s+optimized\b|\boptimized\s+for\s+web\b)/i;
+const LOCAL_IMAGE_FORMAT_CONVERSION_RE = /\b(?:save|export|convert|make)\b[\s\S]{0,120}\b(?:(?:as|to|into)\s+)?(?:a\s+)?\.?(?:png|jpe?g|tiff?|gif|bmp|heic)\b/i;
+const LOCAL_IMAGE_SOURCE_RE = /\b(?:image|photo|picture|screenshot|img|jpg|jpeg|png|gif|webp|tiff?|bmp|heic|psd|psb|desktop|downloads?|documents?|pictures?|file)\b/i;
+const LOCAL_IMAGE_UNSUPPORTED_OUTPUT_TARGET_RE = /\b(?:rename|renamed|name\s+it|call\s+it)\b|\b(?:save|export)\s+(?:it|this|that|the\s+(?:image|file|photo|picture))?\s+as\s+(?!a\s+(?:png|jpe?g|tiff?|gif|bmp|heic)\b)["'`]?[A-Za-z0-9][A-Za-z0-9 ._@()+-]{0,120}\.(?:png|jpe?g|tiff?|gif|bmp|heic)\b/i;
+const LOCAL_IMAGE_NAMED_OUTPUT_RE = /\b(?:(?:as|to|into)\s+)?(?:a\s+)?\.?(?:png|jpe?g|tiff?|gif|bmp|heic)\b[\s\S]{0,80}\b(?:named|called|name\s+it|call\s+it)\b/i;
+
+export interface DirectLocalImageFormatConversionTask {
+  source: string;
+  format: 'png' | 'jpg' | 'jpeg' | 'tiff' | 'gif' | 'bmp' | 'heic';
+}
 
 export function isLowRiskLocalImageExportTask(task: string): boolean {
   const text = String(task || '').trim();
+  if (isDirectLocalImageFormatConversionTask(text)) return true;
   if (!/\bphotoshop\b/i.test(text)) return false;
   if (!/\b(?:save|export)\b/i.test(text) || !LOW_RISK_PHOTOSHOP_IMAGE_EXPORT_FORMAT_RE.test(text)) return false;
   if (LOW_RISK_PHOTOSHOP_IMAGE_EXPORT_DISALLOWED_RE.test(text)) return false;
@@ -233,6 +243,94 @@ export function isLowRiskLocalImageExportTask(task: string): boolean {
   return allowed && hasPhotoshopSurface && hasSaveForWeb && hasSafeFilename;
 }
 
+export function isLocalImageExportProofTask(task: string): boolean {
+  const text = String(task || '').trim();
+  if (isDirectLocalImageFormatConversionTask(text)) return true;
+  if (
+    LOCAL_IMAGE_SOURCE_RE.test(text)
+    && /\b(?:save|export|convert|make)\b/i.test(text)
+    && /(?:\.(?:png|jpe?g|tiff?|gif|bmp|heic)\b|\b\.?(?:png|jpe?g|tiff?|gif|bmp|heic)\b)/i.test(text)
+  ) {
+    return true;
+  }
+  return /\bphotoshop\b/i.test(text)
+    && /\b(?:save|export)\b/i.test(text)
+    && LOW_RISK_PHOTOSHOP_IMAGE_EXPORT_FORMAT_RE.test(text);
+}
+
+export function isDirectLocalImageFormatConversionTask(task: string): boolean {
+  const text = String(task || '').trim();
+  if (!text) return false;
+  if (!LOCAL_IMAGE_FORMAT_CONVERSION_RE.test(text)) return false;
+  if (!LOCAL_IMAGE_SOURCE_RE.test(text)) return false;
+  if (LOW_RISK_PHOTOSHOP_IMAGE_EXPORT_DISALLOWED_RE.test(text)) return false;
+  if (LOCAL_IMAGE_UNSUPPORTED_OUTPUT_TARGET_RE.test(text)) return false;
+  if (LOCAL_IMAGE_NAMED_OUTPUT_RE.test(text)) return false;
+  return /\b(?:open|resolve|find|locate|use|take|grab|save|export|convert|make)\b/i.test(text);
+}
+
+function normalizeImageFormat(value: string): DirectLocalImageFormatConversionTask['format'] | null {
+  const lower = String(value || '').trim().toLowerCase().replace(/^\./, '');
+  if (lower === 'png') return 'png';
+  if (lower === 'jpg') return 'jpg';
+  if (lower === 'jpeg') return 'jpeg';
+  if (lower === 'tif' || lower === 'tiff') return 'tiff';
+  if (lower === 'gif') return 'gif';
+  if (lower === 'bmp') return 'bmp';
+  if (lower === 'heic') return 'heic';
+  return null;
+}
+
+function cleanDirectImageSourceCandidate(value: string): string | null {
+  let source = String(value || '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .trim()
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^(?:the|a|an)\s+(?:file|image|photo|picture)?\s*/i, '')
+    .replace(/\s+(?:from|on|in)\s+(?:my\s+)?(?:the\s+)?(?:desktop|downloads?|documents?|pictures?)\s*$/i, '')
+    .replace(/\s+(?:that'?s|that is)\s+(?:on|in)\s+(?:the\s+)?(?:desktop|downloads?|documents?|pictures?)\s*$/i, '')
+    .replace(/\s+(?:on|in)\s+(?:the\s+)?(?:desktop|downloads?|documents?|pictures?)\s*$/i, '')
+    .replace(/[.,;:]+$/g, '')
+    .trim();
+
+  if (!source) return null;
+  if (/^(?:image|photo|picture|screenshot|file|desktop|downloads?|documents?|pictures?)$/i.test(source)) return null;
+  if (/\b(?:photoshop|preview|photos)\b/i.test(source)) return null;
+  return source.slice(0, 240);
+}
+
+export function extractDirectLocalImageFormatConversionTask(task: string): DirectLocalImageFormatConversionTask | null {
+  const text = String(task || '').trim();
+  if (!isDirectLocalImageFormatConversionTask(text)) return null;
+
+  const formatMatch =
+    text.match(/\b(?:as|to|into)\s+(?:a\s+)?(\.?(?:png|jpe?g|tiff?|gif|bmp|heic))\b/i) ||
+    text.match(/\b(?:make|convert|save|export)\s+(?:it|this|that|the\s+(?:image|file|photo|picture))\s+(?:(?:as|to|into)\s+)?(?:a\s+)?(\.?(?:png|jpe?g|tiff?|gif|bmp|heic))\b/i);
+  const format = normalizeImageFormat(formatMatch?.[1] || '');
+  if (!format) return null;
+
+  const quoted = Array.from(text.matchAll(/["'`]([^"'`]{1,220})["'`]/g))
+    .map((match) => cleanDirectImageSourceCandidate(match[1] || ''))
+    .find(Boolean);
+  if (quoted) return { source: quoted, format };
+
+  const explicitPath = text.match(/((?:~\/|\/|(?:desktop|downloads|documents|pictures|photos|movies|music)\/)[^\n\r:*?"<>|]{1,260}\.(?:png|jpe?g|tiff?|gif|bmp|heic|webp|psd|psb))\b/i);
+  const pathSource = cleanDirectImageSourceCandidate(explicitPath?.[1] || '');
+  if (pathSource) return { source: pathSource, format };
+
+  const openSource = text.match(/\b(?:open|use|find|locate|resolve|grab|take)\s+(?:the\s+)?(?:file\s+|image\s+|photo\s+|picture\s+)?(.{1,180}?)(?:\s+(?:in|with|using)\s+(?:adobe\s+)?(?:photoshop|preview|photos)\b|\s+(?:and\s+)?(?:save|export|convert|make)\b|\s+(?:as|to|into)\b|$)/i);
+  const openCandidate = cleanDirectImageSourceCandidate(openSource?.[1] || '');
+  if (openCandidate) return { source: openCandidate, format };
+
+  const conversionSource = text.match(/\b(?:convert|export|save|make)\s+(?:the\s+)?(?:file\s+|image\s+|photo\s+|picture\s+)?(.{1,180}?)(?:\s+(?:as|to|into)\s+(?:a\s+)?\.?(?:png|jpe?g|tiff?|gif|bmp|heic)\b)/i);
+  const conversionCandidate = cleanDirectImageSourceCandidate(conversionSource?.[1] || '');
+  if (conversionCandidate) return { source: conversionCandidate, format };
+
+  return null;
+}
+
 export function planComputerTaskPreview(task: string): ComputerTaskPlanPreview {
   const text = String(task || '').trim().toLowerCase();
   const localComputerIntent = detectLocalComputerAwarenessIntent(task);
@@ -259,6 +357,15 @@ export function planComputerTaskPreview(task: string): ComputerTaskPlanPreview {
       detail: 'Describe the computer task and the planner will infer whether it is primarily browser, file, app, or hybrid work.',
       requiredCapabilities: [],
     };
+  }
+
+  if (isDirectLocalImageFormatConversionTask(task)) {
+    return finalize({
+      kind: /\b(?:photoshop|preview|photos|open)\b/i.test(text) ? 'hybrid_task' : 'file_task',
+      label: 'Direct image format conversion',
+      detail: 'This request is a bounded local image conversion. Resolve the source file and use desktop.convert_image via the bridge instead of opening Photoshop export dialogs.',
+      requiredCapabilities: ['file_search', 'file_read', 'file_write'],
+    });
   }
 
   const appResearch = matchesAny(text, [

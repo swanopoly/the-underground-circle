@@ -52,6 +52,16 @@ function assertPromptIncludes(input: string, expected: string[]) {
   fail(`${input} prompt missing ${missing.join(', ')}\n${block}`);
 }
 
+function assertPromptExcludes(input: string, unexpected: string[]) {
+  const block = buildUserTaskPipelinePromptBlock(input, { limit: 4 }) || '';
+  const present = unexpected.filter((item) => block.includes(item));
+  if (present.length === 0) {
+    pass(`prompt excludes: ${input}`);
+    return;
+  }
+  fail(`${input} prompt unexpectedly included ${present.join(', ')}\n${block}`);
+}
+
 assertPipeline('How good are you at Photoshop?', 'capability_explanation');
 assertPipeline('Tell me all the tabs I have open in Chrome right now', 'desktop_awareness');
 assertPipeline('The desktop/browser_tabs endpoint returns 404 in the local bridge', 'bridge_troubleshooting');
@@ -118,7 +128,9 @@ assertDecisionIncludes('Investigate the Cloudflare outage, inspect logs, and cre
 assertPromptIncludes('Book a flight to New York next Friday under $500', ['Execution requirements:', 'Explicit approval before booking']);
 assertPromptIncludes('Check AWS logs and rollback the failed deploy after approval', ['Execution requirements:', 'Read-only diagnostics before mutations']);
 assertPromptIncludes('Should I take this medication if I have chest pain?', ['Execution requirements:', 'Do not diagnose']);
+assertPromptIncludes('Log into WordPress wp-admin and install the SEO plugin after approval', ['Recommended tools:', 'browser.wp_admin_source_intelligence', 'bounded redacted admin facts']);
 assertPromptIncludes('Log into Shopify and update this product page after I approve', ['Recommended tools:', 'Vault credential grant resolved']);
+assertPromptExcludes('Log into Shopify and update this product page after I approve', ['browser.wp_admin_source_intelligence']);
 assertPromptIncludes('Make changes in InDesign for a marketing banner with different layers', ['Recommended tools:', 'desktop.indesign_document_status', 'desktop.indesign_package_document']);
 assertPromptIncludes('Open Photoshop and edit this image after I approve desktop control', ['Recommended tools:', 'desktop.photoshop_layer_inventory', 'desktop.photoshop_set_layer_state']);
 assertPromptIncludes('Open Premiere Pro and export this sequence after approval', ['Adobe Creative Cloud App Automation', 'agent.build_app_capability']);

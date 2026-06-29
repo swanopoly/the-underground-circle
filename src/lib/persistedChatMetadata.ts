@@ -1,6 +1,7 @@
 import type { ChatCommandDecision } from './chatCommandRegistry';
 import type { AgentPlanDraft } from './agentPlanMode';
 import type { BrowserPlanCardData, BrowserPlanEvent, BrowserSessionRecord } from './computerUse';
+import type { ChatAutomationPlanPreview } from './chatAutomationPlanPreview';
 import type {
   ChatComputerAppRouteDecisionSummary,
   ChatComputerHandoffMetadata,
@@ -80,6 +81,7 @@ export type PersistedChatBotMetadata = {
   recoveryOptions?: PersistedChatRecoveryOption[];
   recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
   computerHandoff?: ChatComputerHandoffMetadata | null;
+  chatAutomationPlanPreview?: ChatAutomationPlanPreview | null;
   modeOutcomeSummary?: {
     headline: string;
     bulletPoints?: string[];
@@ -227,6 +229,29 @@ function compactComputerRequestNotice(
     badges: (notice.badges || []).slice(0, mode === 'full' ? 5 : 3).map((value) => truncateText(String(value), 80)),
     proof: (notice.proof || []).slice(0, mode === 'full' ? 3 : 2).map((value) => truncateText(String(value), mode === 'tiny' ? 120 : 220)),
     hiddenReason: notice.hiddenReason ? truncateText(String(notice.hiddenReason), maxDetail) : null,
+    appChoiceLine: notice.appChoiceLine ? truncateText(String(notice.appChoiceLine), mode === 'tiny' ? 180 : 260) : null,
+    appChoice: notice.appChoice
+      ? {
+          visibility: notice.appChoice.visibility === 'user' ? 'user' : 'hidden',
+          selectedAppId: truncateText(String(notice.appChoice.selectedAppId || ''), 80),
+          selectedAppName: truncateText(String(notice.appChoice.selectedAppName || ''), 120),
+          selectedSurface: notice.appChoice.selectedSurface === 'desktop' ? 'desktop' : 'browser',
+          openVia: notice.appChoice.openVia === 'desktop_launch' || notice.appChoice.openVia === 'url_scheme'
+            ? notice.appChoice.openVia
+            : 'browser_url',
+          availability: notice.appChoice.availability === 'installed' || notice.appChoice.availability === 'maybe' || notice.appChoice.availability === 'web'
+            ? notice.appChoice.availability
+            : undefined,
+          reason: truncateText(String(notice.appChoice.reason || ''), maxDetail),
+          line: truncateText(String(notice.appChoice.line || notice.appChoiceLine || ''), mode === 'tiny' ? 180 : 260),
+          alternatives: compactStringList(notice.appChoice.alternatives, mode === 'full' ? 3 : 2, 80),
+          switchHint: notice.appChoice.switchHint ? truncateText(String(notice.appChoice.switchHint), 160) : null,
+          explicitAppNamed: notice.appChoice.explicitAppNamed === true,
+          namedAppIntent: notice.appChoice.namedAppIntent ? truncateText(String(notice.appChoice.namedAppIntent), 100) : null,
+          openStepLines: compactStringList(notice.appChoice.openStepLines, mode === 'full' ? 3 : 2, 120),
+          recoveryFallbackName: notice.appChoice.recoveryFallbackName ? truncateText(String(notice.appChoice.recoveryFallbackName), 120) : null,
+        }
+      : null,
     // Plan preview (D1) — persisted only in full mode and bounded hard so
     // message rows stay small; tiny/minimal drop it (the formatted text the
     // user saw is already in the message body).
@@ -326,10 +351,64 @@ function hasPersistedMetadata(metadata?: PersistedChatBotMetadata): boolean {
     (metadata.recoveryOptions?.length || 0) > 0 ||
     !!metadata.recoveryReliability ||
     !!metadata.computerHandoff ||
+    !!metadata.chatAutomationPlanPreview ||
     !!metadata.modeOutcomeSummary?.headline ||
     !!metadata.observedEval ||
     !!metadata.routing
   );
+}
+
+function compactChatAutomationPlanPreview(
+  preview?: ChatAutomationPlanPreview | null,
+  mode: 'full' | 'minimal' = 'full',
+): ChatAutomationPlanPreview | undefined {
+  if (!preview || typeof preview !== 'object') return undefined;
+  const itemLimit = mode === 'full' ? 5 : 3;
+  const evidencePanel = preview.evidencePanel && typeof preview.evidencePanel === 'object'
+    ? {
+        kind: truncateText(String(preview.evidencePanel.kind || ''), 40),
+        targetLabel: truncateText(String(preview.evidencePanel.targetLabel || ''), mode === 'full' ? 100 : 70),
+        taskFamilyLabel: truncateText(String(preview.evidencePanel.taskFamilyLabel || ''), mode === 'full' ? 100 : 70),
+        observeBefore: compactStringList(preview.evidencePanel.observeBefore, mode === 'full' ? 4 : 2, mode === 'full' ? 150 : 90),
+        actionabilityChecks: compactStringList(preview.evidencePanel.actionabilityChecks, mode === 'full' ? 4 : 2, mode === 'full' ? 150 : 90),
+        approvalBefore: compactStringList(preview.evidencePanel.approvalBefore, mode === 'full' ? 4 : 2, mode === 'full' ? 150 : 90),
+        proofAfter: compactStringList(preview.evidencePanel.proofAfter, mode === 'full' ? 4 : 2, mode === 'full' ? 150 : 90),
+        failClosedRules: compactStringList(preview.evidencePanel.failClosedRules, mode === 'full' ? 4 : 2, mode === 'full' ? 150 : 90),
+        freshEvidenceRequired: compactStringList(preview.evidencePanel.freshEvidenceRequired, mode === 'full' ? 3 : 1, mode === 'full' ? 150 : 90),
+        sourceRefs: Array.isArray(preview.evidencePanel.sourceRefs)
+          ? preview.evidencePanel.sourceRefs.slice(0, mode === 'full' ? 3 : 1).map((ref: any) => ({
+              title: truncateText(String(ref?.title || 'source reference'), 80),
+              url: truncateText(String(ref?.url || ''), 180),
+            })).filter((ref) => ref.url)
+          : [],
+      }
+    : undefined;
+  return {
+    title: truncateText(String(preview.title || 'Plan'), 80),
+    intentLabel: truncateText(String(preview.intentLabel || ''), mode === 'full' ? 160 : 90),
+    routeLabel: truncateText(String(preview.routeLabel || 'direct'), 60),
+    surfaceLabel: truncateText(String(preview.surfaceLabel || ''), mode === 'full' ? 160 : 90),
+    mode: preview.mode,
+    riskLabel: truncateText(String(preview.riskLabel || ''), 80),
+    riskTone: preview.riskTone,
+    approvalLabel: truncateText(String(preview.approvalLabel || ''), mode === 'full' ? 180 : 100),
+    approvalRequired: preview.approvalRequired === true,
+    evidence: compactStringList(preview.evidence, itemLimit, mode === 'full' ? 160 : 90),
+    recovery: compactStringList(preview.recovery, mode === 'full' ? 4 : 2, mode === 'full' ? 180 : 100),
+    tools: compactStringList(preview.tools, itemLimit, 100),
+    chips: Array.isArray(preview.chips)
+      ? preview.chips.slice(0, itemLimit).map((chip: any) => ({
+          label: truncateText(String(chip?.label || ''), 70),
+          tone: chip?.tone === 'safe'
+            || chip?.tone === 'review'
+            || chip?.tone === 'danger'
+            || chip?.tone === 'neutral'
+            ? chip.tone
+            : 'neutral',
+        })).filter((chip) => chip.label)
+      : [],
+    evidencePanel,
+  };
 }
 
 // Highest-risk / proof-bearing operations first, so a tight slice at a low
@@ -863,6 +942,7 @@ function compactPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
     recoveryOptions: compactRecoveryOptions(metadata.recoveryOptions, 5),
     recoveryReliability: compactRecoveryReliability(metadata.recoveryReliability),
     computerHandoff: compactComputerHandoff(metadata.computerHandoff),
+    chatAutomationPlanPreview: compactChatAutomationPlanPreview(metadata.chatAutomationPlanPreview),
     modeOutcomeSummary: metadata.modeOutcomeSummary,
     observedEval: metadata.observedEval,
     routing: metadata.routing,
@@ -958,6 +1038,7 @@ function minimalPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
     recoveryOptions: compactRecoveryOptions(metadata.recoveryOptions, 3),
     recoveryReliability: compactRecoveryReliability(metadata.recoveryReliability, 'minimal'),
     computerHandoff: compactComputerHandoff(metadata.computerHandoff, 'minimal'),
+    chatAutomationPlanPreview: compactChatAutomationPlanPreview(metadata.chatAutomationPlanPreview, 'minimal'),
     modeOutcomeSummary: metadata.modeOutcomeSummary,
     observedEval: metadata.observedEval ? {
       outcome: (metadata.observedEval as any).outcome,
@@ -1009,6 +1090,7 @@ export function formatPersistedChatBotMessage(
         recoveryOptions: compactRecoveryOptions(metadata.recoveryOptions, 5),
         recoveryReliability: compactRecoveryReliability(metadata.recoveryReliability),
         computerHandoff: compactComputerHandoff(metadata.computerHandoff),
+        chatAutomationPlanPreview: compactChatAutomationPlanPreview(metadata.chatAutomationPlanPreview),
       }
     : undefined;
 

@@ -1,19 +1,31 @@
 import { storage } from './storage';
 import {
+  acknowledgeComputerTaskNotifications,
+  appendComputerTaskNotification,
+  appendComputerTaskSurfaceEscalations,
   buildComputerTaskChecklistCard,
   buildComputerTaskStateSteps,
+  compactComputerTaskActionTrace,
   compactComputerTaskCheckpointRecovery,
   compactComputerTaskCheckpointEvidenceReadiness,
   compactComputerTaskComplexityPlan,
+  compactComputerTaskNotifications,
   compactComputerTaskPendingQuestions,
+  compactComputerTaskSurfaceEscalations,
+  computerTaskNotificationSnapshot,
+  deriveComputerTaskNotification,
   evaluateComputerTaskCheckpointEvidenceReadiness,
+  fireComputerTaskWebNotification,
   formatComputerTaskChecklistCard,
   listOpenComputerTaskQuestions,
+  listUnacknowledgedComputerTaskNotifications,
   markComputerTaskCheckpointRecoveryObserved,
   resolveComputerTaskPendingQuestion,
   upsertComputerTaskPendingQuestion,
+  COMPUTER_TASK_NOTIFICATION_GLYPHS,
   type ComputerTaskCapabilityBuildout,
   type ComputerTaskCapabilityBuildoutStatus,
+  type ComputerTaskNotification,
   type ComputerTaskPendingQuestion,
   type ComputerTaskPhase,
   type ComputerTaskStateCheckpoint,
@@ -21,24 +33,38 @@ import {
   type ComputerTaskStateRecord,
   type ComputerTaskStateStep,
   type ComputerTaskStepStatus,
+  type ComputerTaskSurfaceEscalationBreadcrumb,
 } from './computerTaskStateModel';
 
 export {
+  acknowledgeComputerTaskNotifications,
+  appendComputerTaskNotification,
+  appendComputerTaskSurfaceEscalations,
   buildComputerTaskChecklistCard,
   buildComputerTaskStateSteps,
+  compactComputerTaskActionTrace,
   compactComputerTaskCheckpointRecovery,
   compactComputerTaskCheckpointEvidenceReadiness,
   compactComputerTaskComplexityPlan,
+  compactComputerTaskNotifications,
   compactComputerTaskPendingQuestions,
+  compactComputerTaskSurfaceEscalations,
+  computerTaskNotificationSnapshot,
+  deriveComputerTaskNotification,
   evaluateComputerTaskCheckpointEvidenceReadiness,
+  fireComputerTaskWebNotification,
   formatComputerTaskChecklistCard,
   listOpenComputerTaskQuestions,
+  listUnacknowledgedComputerTaskNotifications,
   markComputerTaskCheckpointRecoveryObserved,
   resolveComputerTaskPendingQuestion,
   upsertComputerTaskPendingQuestion,
+  COMPUTER_TASK_NOTIFICATION_GLYPHS,
 };
 
 export type {
+  ComputerTaskActionTrace,
+  ComputerTaskActionTraceStep,
   ComputerTaskCapabilityBuildout,
   ComputerTaskCapabilityBuildoutStatus,
   ComputerTaskCheckpointEvidenceObservation,
@@ -46,6 +72,9 @@ export type {
   ComputerTaskChecklistCard,
   ComputerTaskChecklistNeedsYouItem,
   ComputerTaskChecklistStage,
+  ComputerTaskNotification,
+  ComputerTaskNotificationKind,
+  ComputerTaskNotificationSnapshot,
   ComputerTaskPendingQuestion,
   ComputerTaskPhase,
   ComputerTaskStateCheckpoint,
@@ -55,6 +84,7 @@ export type {
   ComputerTaskStateRecord,
   ComputerTaskStateStep,
   ComputerTaskStepStatus,
+  ComputerTaskSurfaceEscalationBreadcrumb,
 } from './computerTaskStateModel';
 
 const STORAGE_PREFIX = 'computer_task_state_v1';
@@ -222,6 +252,14 @@ function normalizeRecord(raw: string | null): ComputerTaskStateRecord | null {
           : null,
       ),
       pendingQuestions: compactComputerTaskPendingQuestions(parsed.pendingQuestions),
+      // D6 notifications: persisted-compatible — old records without the
+      // field normalize to an empty list.
+      notifications: compactComputerTaskNotifications(parsed.notifications),
+      // E1 escalation breadcrumbs: same persisted-compat discipline (≤3).
+      surfaceEscalations: compactComputerTaskSurfaceEscalations(parsed.surfaceEscalations),
+      // L2 action trace: persisted-compatible — old records without the
+      // field normalize to null; bounded ≤40 redacted actions.
+      actionTrace: compactComputerTaskActionTrace(parsed.actionTrace),
       updatedAt: String(parsed.updatedAt || nowIso()),
     };
   } catch {
@@ -234,8 +272,33 @@ export async function loadComputerTaskState(circleId: string, threadId?: string 
 }
 
 export async function saveComputerTaskState(record: ComputerTaskStateRecord): Promise<void> {
+  // E1 breadcrumb carry-over: ChatTab's persist path rebuilds the record
+  // from scratch on every phase transition and does not know about the
+  // surfaceEscalations field (it stays `undefined` there). Like the D6
+  // notification carry-over, the durable copy must survive those rewrites —
+  // so when the caller did not provide the field, preserve what is already
+  // stored for the SAME task (a new task text starts a clean trail).
+  // L2 action trace gets the same carry-over treatment: rebuilt records
+  // that don't know about the field must not wipe the persisted trace.
+  let surfaceEscalations = record.surfaceEscalations;
+  let actionTrace = record.actionTrace;
+  if (surfaceEscalations === undefined || actionTrace === undefined) {
+    let previous: ComputerTaskStateRecord | null = null;
+    try {
+      previous = normalizeRecord(await storage.getItem(storageKey(record.circleId, record.threadId)));
+    } catch {}
+    const sameTask = !!previous && previous.task === record.task;
+    if (surfaceEscalations === undefined) {
+      surfaceEscalations = sameTask ? previous?.surfaceEscalations || [] : [];
+    }
+    if (actionTrace === undefined) {
+      actionTrace = sameTask ? previous?.actionTrace || null : null;
+    }
+  }
   await storage.setItem(storageKey(record.circleId, record.threadId), JSON.stringify({
     ...record,
+    surfaceEscalations,
+    actionTrace,
     updatedAt: record.updatedAt || nowIso(),
   }));
 }
@@ -257,9 +320,89 @@ export async function recordComputerTaskPendingQuestion(
   try {
     const record = await loadComputerTaskState(circleId, threadId);
     if (!record) return;
-    await saveComputerTaskState({
+    const next: ComputerTaskStateRecord = {
       ...record,
       pendingQuestions: upsertComputerTaskPendingQuestion(record.pendingQuestions, question),
+      updatedAt: nowIso(),
+    };
+    // D6: a NEW open question is a needs-you transition — append the
+    // notification so the walked-away user sees it on return.
+    const notification = deriveComputerTaskNotification(next, computerTaskNotificationSnapshot(record));
+    await saveComputerTaskState({
+      ...next,
+      notifications: appendComputerTaskNotification(record.notifications, notification),
+    });
+  } catch {}
+}
+
+/**
+ * D6/D8: a bounded stop handed back partial progress — persist a
+ * `partial_result` notification on the durable record so the user learns
+ * what WAS done without opening the console. Fire-and-forget safe.
+ */
+export async function recordComputerTaskPartialResultNotification(
+  circleId: string,
+  threadId: string | null | undefined,
+  args: { summary: string; runId?: string | null },
+): Promise<void> {
+  try {
+    if (!args.summary?.trim()) return;
+    const record = await loadComputerTaskState(circleId, threadId);
+    if (!record) return;
+    const notification = deriveComputerTaskNotification(
+      { ...record, runId: args.runId || record.runId || null },
+      computerTaskNotificationSnapshot(record),
+      { partialResultSummary: args.summary },
+    );
+    if (!notification) return;
+    await saveComputerTaskState({
+      ...record,
+      notifications: appendComputerTaskNotification(record.notifications, notification),
+      updatedAt: nowIso(),
+    });
+  } catch {}
+}
+
+/**
+ * D6: mark every persisted notification acknowledged (banner dismissed or
+ * console opened). Returns the updated record so callers can refresh their
+ * mount-loaded copy. Never throws.
+ */
+export async function acknowledgeComputerTaskNotificationsState(
+  circleId: string,
+  threadId?: string | null,
+): Promise<ComputerTaskStateRecord | null> {
+  try {
+    const record = await loadComputerTaskState(circleId, threadId);
+    if (!record) return null;
+    if (!record.notifications?.some((item) => !item.acknowledged)) return record;
+    const next = { ...acknowledgeComputerTaskNotifications(record), updatedAt: nowIso() };
+    await saveComputerTaskState(next);
+    return next;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * E1 follow-up: persist surface-escalation breadcrumbs from a runtime result
+ * onto the durable record ("↳ switched to screenshot control: a11y tree
+ * empty"). Merge is deduped and bounded ≤3 (oldest dropped) — same
+ * discipline as D6 notifications. No-op when no record exists yet.
+ * Fire-and-forget safe: never throws.
+ */
+export async function recordComputerTaskSurfaceEscalations(
+  circleId: string,
+  threadId: string | null | undefined,
+  escalations: Array<Partial<ComputerTaskSurfaceEscalationBreadcrumb>> | null | undefined,
+): Promise<void> {
+  try {
+    if (!escalations?.length) return;
+    const record = await loadComputerTaskState(circleId, threadId);
+    if (!record) return;
+    await saveComputerTaskState({
+      ...record,
+      surfaceEscalations: appendComputerTaskSurfaceEscalations(record.surfaceEscalations, escalations),
       updatedAt: nowIso(),
     });
   } catch {}

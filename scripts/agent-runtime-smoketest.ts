@@ -179,6 +179,35 @@ async function runDispatchCases() {
     assertEqual(outcome.status, 'completed', 'dispatch: completed after gate pass');
   }
 
+  // ─── dispatch: gate can enforce policy even when plan approval is false ─
+  {
+    let ran = false;
+    const outcome = await dispatchChatAutomationPlan(
+      makePlan({ approval: { required: false, reason: null } }),
+      {
+        handlers: {
+          run_openswan: async () => {
+            ran = true;
+            return { executionKind: 'run_openswan', status: 'completed', message: 'should not run' };
+          },
+        },
+        ctx: baseCtx,
+        approvalGate: async () => ({
+          pass: false,
+          deferred: {
+            approvalId: '',
+            message: 'blocked by category policy',
+            category: 'blocked_policy' as const,
+            retryable: false,
+          },
+        }),
+      },
+    );
+    assertEqual(ran, false, 'dispatch(C7): safe plan gate can prevent handler');
+    assertEqual(outcome.status, 'deferred', 'dispatch(C7): safe plan policy block defers');
+    assertEqual((outcome.data as any)?.approvalCategory, 'blocked_policy', 'dispatch(C7): safe plan policy category surfaced');
+  }
+
   // ─── dispatch: observer fires for every path ──────────────────────────
   {
     const seen: Array<{ planKind: string; outcomeStatus: ChatAutomationOutcome['status'] }> = [];

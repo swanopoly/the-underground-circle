@@ -9,6 +9,11 @@ export interface OfficeBridgeReadinessSnapshot {
   degraded: number;
   offline: number;
   activeSessions: number;
+  coreReady: boolean;
+  executionReady: boolean;
+  readyForAgentTasks: boolean;
+  optionalIssues: string[];
+  requiredIssue?: string;
   score: number;
   statusLabel: string;
   summary: string;
@@ -18,6 +23,14 @@ export interface OfficeBridgeReadinessSnapshot {
   actionDetail: string;
   results: BridgeProbeResult[];
 }
+
+const CORE_BRIDGE_NAME = 'openswan-proxy';
+const EXECUTION_BRIDGE_NAMES = new Set<BridgeProbeResult['name']>([
+  'claude-code',
+  'codex',
+  'gemini-cli',
+  'cursor',
+]);
 
 export function buildOfficeBridgeReadinessSnapshot(
   results: BridgeProbeResult[],
@@ -38,6 +51,11 @@ export function buildOfficeBridgeReadinessSnapshot(
       degraded: 0,
       offline: normalizedResults.length,
       activeSessions: 0,
+      coreReady: false,
+      executionReady: false,
+      readyForAgentTasks: false,
+      optionalIssues: normalizedResults.map(result => `${result.label}: disabled`),
+      requiredIssue: 'Local agent bridges are disabled in this runtime.',
       score: 0,
       statusLabel: 'BRIDGES DISABLED',
       summary: bridgeUnavailableSummary(opts.unavailableReason),
@@ -57,6 +75,11 @@ export function buildOfficeBridgeReadinessSnapshot(
       degraded: 0,
       offline: normalizedResults.length || 1,
       activeSessions: 0,
+      coreReady: false,
+      executionReady: false,
+      readyForAgentTasks: false,
+      optionalIssues: [],
+      requiredIssue: opts.error,
       score: 0,
       statusLabel: 'BRIDGE AUDIT FAILED',
       summary: opts.error,
@@ -71,6 +94,16 @@ export function buildOfficeBridgeReadinessSnapshot(
   const counts = countBridgeStatuses(normalizedResults);
   const total = normalizedResults.length;
   const activeSessions = normalizedResults.reduce((sum, result) => sum + Math.max(0, result.sessionCount ?? 0), 0);
+  const coreBridge = normalizedResults.find(result => result.name === CORE_BRIDGE_NAME);
+  const coreReady = coreBridge?.status === 'healthy';
+  const executionReady = normalizedResults.some(result => (
+    EXECUTION_BRIDGE_NAMES.has(result.name) && result.status === 'healthy'
+  ));
+  const readyForAgentTasks = coreReady && executionReady;
+  const requiredIssue = buildRequiredIssue(coreBridge, executionReady);
+  const optionalIssues = normalizedResults
+    .filter(result => result.status !== 'healthy' && !isRequiredBridgeIssue(result, coreReady, executionReady))
+    .map(result => `${result.label}: ${result.detail}`);
   const score = total > 0
     ? Math.round(((counts.healthy + counts.degraded * 0.5) / total) * 100)
     : 0;
@@ -84,6 +117,11 @@ export function buildOfficeBridgeReadinessSnapshot(
       degraded: 0,
       offline: 0,
       activeSessions,
+      coreReady,
+      executionReady,
+      readyForAgentTasks,
+      optionalIssues: [],
+      requiredIssue,
       score,
       statusLabel: 'NO BRIDGES CHECKED',
       summary: 'No bridge probe results are available yet.',
@@ -102,6 +140,11 @@ export function buildOfficeBridgeReadinessSnapshot(
       degraded: 0,
       offline: 0,
       activeSessions,
+      coreReady,
+      executionReady,
+      readyForAgentTasks,
+      optionalIssues,
+      requiredIssue,
       score,
       statusLabel: 'ALL BRIDGES READY',
       summary: activeSessions > 0
@@ -114,8 +157,36 @@ export function buildOfficeBridgeReadinessSnapshot(
     };
   }
 
-  const tone: OfficeBridgeReadinessTone = counts.offline > 0 ? 'danger' : 'warn';
-  const statusLabel = counts.offline > 0 ? 'BRIDGES NEED ATTENTION' : 'BRIDGES PARTIAL';
+  if (readyForAgentTasks) {
+    return {
+      available: true,
+      total,
+      healthy: counts.healthy,
+      degraded: counts.degraded,
+      offline: counts.offline,
+      activeSessions,
+      coreReady,
+      executionReady,
+      readyForAgentTasks,
+      optionalIssues,
+      requiredIssue,
+      score,
+      statusLabel: 'CORE BRIDGES READY',
+      summary: [
+        'OpenSwan and an execution bridge are ready',
+        `${counts.healthy}/${total} healthy`,
+        optionalIssues.length ? `${optionalIssues.length} optional issue${optionalIssues.length === 1 ? '' : 's'}` : null,
+      ].filter(Boolean).join(' · '),
+      tone: 'warn',
+      primaryIssue: optionalIssues[0],
+      actionLabel: 'Connect optional bridges',
+      actionDetail: optionalIssues[0] || 'Optional bridges can be repaired without blocking SwanBot work.',
+      results: normalizedResults,
+    };
+  }
+
+  const tone: OfficeBridgeReadinessTone = 'danger';
+  const statusLabel = 'BRIDGES NEED ATTENTION';
   const summary = [
     `${counts.healthy}/${total} healthy`,
     counts.degraded ? `${counts.degraded} degraded` : null,
@@ -129,13 +200,18 @@ export function buildOfficeBridgeReadinessSnapshot(
     degraded: counts.degraded,
     offline: counts.offline,
     activeSessions,
+    coreReady,
+    executionReady,
+    readyForAgentTasks,
+    optionalIssues,
+    requiredIssue,
     score,
     statusLabel,
     summary,
     tone,
-    primaryIssue: issue ? `${issue.label}: ${issue.detail}` : undefined,
-    actionLabel: counts.offline > 0 ? 'Start missing bridges' : 'Finish bridge setup',
-    actionDetail: issue?.hint || 'Refresh bridge health after repairing the affected bridge.',
+    primaryIssue: requiredIssue || (issue ? `${issue.label}: ${issue.detail}` : undefined),
+    actionLabel: 'Repair required bridge path',
+    actionDetail: requiredIssue || issue?.hint || 'Refresh bridge health after repairing the affected bridge.',
     results: normalizedResults,
   };
 }
@@ -148,6 +224,26 @@ function countBridgeStatuses(results: BridgeProbeResult[]): Record<BridgeStatus,
     },
     { healthy: 0, degraded: 0, offline: 0 },
   );
+}
+
+function buildRequiredIssue(
+  coreBridge: BridgeProbeResult | undefined,
+  executionReady: boolean,
+): string | undefined {
+  if (!coreBridge) return 'OpenSwan Proxy: not checked';
+  if (coreBridge.status !== 'healthy') return `${coreBridge.label}: ${coreBridge.detail}`;
+  if (!executionReady) return 'No execution bridge is healthy. Start Claude Code, Codex, Gemini CLI, or Cursor.';
+  return undefined;
+}
+
+function isRequiredBridgeIssue(
+  result: BridgeProbeResult,
+  coreReady: boolean,
+  executionReady: boolean,
+): boolean {
+  if (result.name === CORE_BRIDGE_NAME && !coreReady) return true;
+  if (!executionReady && EXECUTION_BRIDGE_NAMES.has(result.name)) return true;
+  return false;
 }
 
 function bridgeUnavailableSummary(reason: string | undefined): string {

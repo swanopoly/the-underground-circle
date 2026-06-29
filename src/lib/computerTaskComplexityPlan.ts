@@ -42,6 +42,38 @@ export interface ComputerTaskStage {
   handoff: string;
 }
 
+/**
+ * Wave-2 task→best-app choice threaded into the dispatch contract. Structural
+ * mirror of the route's `appResolution` summary (chatComputerRequestRouter)
+ * so callers pass it straight through — declared locally because this module
+ * sits BELOW the router in the import graph (the router imports the E4 rules
+ * from here) and must stay cycle-free and persisted-compatible.
+ */
+export interface ComputerTaskAppChoiceResolutionOption {
+  appId?: string;
+  displayName: string;
+  surface: 'desktop' | 'browser';
+  openVia: 'desktop_launch' | 'url_scheme' | 'browser_url';
+  openTarget: string;
+  reason: string;
+  /** AR: 'installed' | 'maybe' | 'web' — drives the fail-fast open contract. */
+  availability?: 'installed' | 'maybe' | 'web';
+}
+
+export interface ComputerTaskAppChoiceResolution {
+  category?: string;
+  best: ComputerTaskAppChoiceResolutionOption;
+  /** ≤3 entries, each "displayName — reason". */
+  alternativesSummary?: string[];
+  explicitAppNamed?: boolean;
+  /** Human-readable open-first steps from the route (≤3). */
+  openStepLines?: string[];
+  /** AR: the user-named app (when explicitAppNamed) so the contract can name it. */
+  namedAppIntent?: string | null;
+  /** AR: the structured next-best CONFIDENTLY-launchable fallback (not just alternatives[0]). */
+  recoveryFallback?: ComputerTaskAppChoiceResolutionOption | null;
+}
+
 export interface ComputerTaskComplexityPlan {
   level: ComputerTaskComplexityLevel;
   score: number;
@@ -49,6 +81,8 @@ export interface ComputerTaskComplexityPlan {
   checkpoints: ComputerTaskCheckpoint[];
   /** Ordered multi-surface stages (D4). Empty when the task is single-surface. */
   stages: ComputerTaskStage[];
+  /** Wave-2: app choice for the dispatch contract. Optional for persisted plans. */
+  appResolution?: ComputerTaskAppChoiceResolution | null;
   visibleNextSteps: string[];
 }
 
@@ -75,7 +109,7 @@ function hasDesktopSurface(task: string, preview: ComputerTaskPlanPreview): bool
     || preview.kind === 'hybrid_task'
     || includesAny(task, [
       'desktop', 'app', 'application', 'window', 'photoshop', 'indesign', 'illustrator',
-      'autocad', 'fusion 360', 'solidworks', 'revit', 'sketchup', 'blender', 'figma',
+      'autocad', 'fusion 360', 'solidworks', 'matlab', 'simulink', 'revit', 'sketchup', 'blender', 'figma',
     ]);
 }
 
@@ -123,7 +157,7 @@ function complexityScore(task: string, preview: ComputerTaskPlanPreview): { scor
     score += 3;
     reasons.push('human verification gate');
   }
-  if (matchesAny(task, [/\b(cad|autocad|fusion\s*360|solidworks|revit|engineering|dimension|units?|scale|drawing|model|photoshop|indesign|layers?|canvas|crop|retouch)\b/i])) {
+  if (matchesAny(task, [/\b(cad|autocad|fusion\s*360|solidworks|matlab|simulink|simscape|revit|engineering|dimension|units?|scale|drawing|model|simulation|toolbox|photoshop|indesign|layers?|canvas|crop|retouch)\b/i])) {
     score += 2;
     reasons.push('visual or precision desktop work');
   }
@@ -403,6 +437,12 @@ export function validateComputerTaskStageSurfaces(
 export function buildComputerTaskComplexityPlan(args: {
   task: string;
   preview: ComputerTaskPlanPreview;
+  /**
+   * Wave-2: the route's task→best-app resolution, when the caller has one.
+   * The plan builder otherwise only sees task text, so this rides in as an
+   * optional arg and surfaces in the dispatch block's app-choice contract.
+   */
+  appResolution?: ComputerTaskAppChoiceResolution | null;
 }): ComputerTaskComplexityPlan {
   const task = String(args.task || '').trim();
   const { score, reasons } = complexityScore(task, args.preview);
@@ -425,6 +465,7 @@ export function buildComputerTaskComplexityPlan(args: {
       ? checkpoints.filter((checkpoint) => ['scope-readiness', 'execute-in-small-steps', 'final-proof'].includes(checkpoint.id))
       : checkpoints,
     stages,
+    appResolution: args.appResolution ?? null,
     visibleNextSteps: stages.length >= 2
       ? stages.map((stage) => `Stage ${stage.ordinal}: ${stage.goal.slice(0, 60)}`).slice(0, 5)
       : checkpoints
@@ -434,12 +475,109 @@ export function buildComputerTaskComplexityPlan(args: {
   };
 }
 
+// ─── Data transfer & precision rules (E4) ───────────────────────────────────
+
+/**
+ * Non-visual transfer rules (E4, research finding #6): Operator-class agents
+ * corrupt complex strings (API keys, addresses, amounts) when they read them
+ * visually from screenshots, and visual text-editing errors compound. These
+ * rules are injected into desktop/app/hybrid execution prompts — browser-only
+ * cloud tasks already get equivalent rules from the edge-loop prompt. Pure
+ * string constants so persisted prompt blocks stay parse-compatible.
+ */
+export const DATA_TRANSFER_PRECISION_RULES: readonly string[] = [
+  'Never read precise strings (keys, codes, addresses, amounts, file paths) from a screenshot — copy them via clipboard or read the field value from the a11y tree/DOM.',
+  'Enter precise strings with set_element_value / fill_field / paste — never character-type them from visual memory.',
+  'Prefer typed editing surfaces (adapter, script, API) over GUI text editing when both exist.',
+  'Prefer keyboard shortcuts over coordinate clicks when a shortcut is known.',
+  'After entering a precise value, verify it by reading the field value back (a11y tree/DOM), not from a screenshot.',
+];
+
+/** Compact prompt block for the E4 rules — shared by route and dispatch prompts. */
+export function formatDataTransferPrecisionRulesBlock(): string {
+  return [
+    'Data transfer & precision rules (desktop/app surfaces):',
+    ...DATA_TRANSFER_PRECISION_RULES.map((rule) => `- ${rule}`),
+  ].join('\n');
+}
+
+/**
+ * True when the plan touches a desktop/app surface (checkpoints or stages) —
+ * the gate for injecting the E4 rules into the dispatch block. Browser-only
+ * plans return false: the cloud edge loop carries its own transfer rules.
+ */
+export function complexityPlanTouchesDesktopSurface(plan: ComputerTaskComplexityPlan | null | undefined): boolean {
+  if (!plan) return false;
+  return plan.checkpoints.some((checkpoint) => checkpoint.surface === 'desktop' || checkpoint.surface === 'app')
+    || plan.stages.some((stage) => stage.surface === 'desktop_app');
+}
+
+/**
+ * Wave-2 app-choice contract (~6 lines): open the chosen app FIRST, verify
+ * it is frontmost before acting, and fall back ONCE to the named best
+ * alternative before asking the user.
+ */
+/** "Photopea (full web app)" — how the contract names a structured fallback. */
+function describeFallbackOption(option: ComputerTaskAppChoiceResolutionOption): string {
+  const how = option.availability === 'web' || option.surface === 'browser'
+    ? 'open it in the browser'
+    : 'launch it on the desktop';
+  return `${option.displayName} (${how} — ${shortReason(option.reason)})`;
+}
+
+function shortReason(reason: string): string {
+  return String(reason || '').split(';')[0].trim().slice(0, 80);
+}
+
+function formatAppChoiceContractLines(resolution: ComputerTaskAppChoiceResolution): string[] {
+  const name = resolution.best.displayName;
+  const openLines = (resolution.openStepLines && resolution.openStepLines.length > 0
+    ? resolution.openStepLines
+    : [`Open ${name} via ${resolution.best.openVia.replace(/_/g, ' ')} (${resolution.best.openTarget}).`]
+  ).slice(0, 2);
+  // AR: prefer the structured, confidently-launchable fallback over a blind
+  // alternativesSummary[0] (which can itself be an unconfirmed desktop guess).
+  const structuredFallback = resolution.recoveryFallback
+    ? describeFallbackOption(resolution.recoveryFallback)
+    : null;
+  const fallback = structuredFallback
+    ?? ((resolution.alternativesSummary || []).map((alt) => String(alt || '').trim()).filter(Boolean)[0] || null);
+  // AR: a 'maybe' (bridge online, install unconfirmed) or explicitly-named app
+  // must be PROVEN to launch before task work — otherwise an "app not installed"
+  // failure surfaces deep in the task instead of at step zero.
+  const needsAvailabilityProof = resolution.best.availability === 'maybe'
+    || (resolution.explicitAppNamed === true && resolution.best.availability !== 'installed');
+  const lines = [
+    '### App choice contract',
+    `- Chosen app: ${name} (${resolution.best.reason}).`,
+    ...openLines.map((line) => `- Open first: ${line}`),
+  ];
+  if (needsAvailabilityProof) {
+    lines.push(
+      `- Confirm ${name} actually launched and is frontmost BEFORE any task work — its install is unconfirmed${resolution.namedAppIntent ? ` (you asked for ${resolution.namedAppIntent})` : ''}. A launch/not-installed failure is the fallback trigger, not an error to retry blind.`,
+    );
+  } else {
+    lines.push(`- Verify ${name} is frontmost and ready BEFORE any task action inside it.`);
+  }
+  lines.push(
+    fallback
+      ? `- If ${name} fails to open or be ready within the wait, fall back ONCE to ${fallback}; if that also fails, stop and ask the user.`
+      : `- If ${name} fails to open or be ready within the wait, stop and ask the user — there is no ranked alternative.`,
+  );
+  return lines;
+}
+
 export function formatComputerTaskComplexityDispatchBlock(plan: ComputerTaskComplexityPlan | null | undefined): string | null {
-  if (!plan || plan.level === 'simple') return null;
+  if (!plan) return null;
+  const appChoiceLines = plan.appResolution ? formatAppChoiceContractLines(plan.appResolution) : [];
+  // A simple task with an app choice still gets the open-first contract —
+  // opening the right app is step zero regardless of complexity.
+  if (plan.level === 'simple') return appChoiceLines.length > 0 ? appChoiceLines.join('\n') : null;
   const lines = [
     '## Complex Computer Task Checkpoints',
     `Complexity: ${plan.level} (score ${plan.score})${plan.reasons.length ? ` — ${plan.reasons.join(', ')}` : ''}`,
     'Run checkpoints in order. Do not skip observation, approval, verification, or recovery checkpoints.',
+    ...appChoiceLines,
   ];
   if (plan.stages.length >= 2) {
     lines.push('### Staged execution contract (multi-surface task)');
@@ -455,6 +593,9 @@ export function formatComputerTaskComplexityDispatchBlock(plan: ComputerTaskComp
     lines.push(`  Objective: ${checkpoint.objective}`);
     lines.push(`  Verify: ${checkpoint.verification.join(' | ')}`);
     lines.push(`  Stop if: ${checkpoint.stopConditions.join(' | ')}`);
+  }
+  if (complexityPlanTouchesDesktopSurface(plan)) {
+    lines.push(formatDataTransferPrecisionRulesBlock());
   }
   lines.push('Checkpoint rule: after each mutation, re-observe and verify before moving to the next checkpoint.');
   lines.push('User-output rule: show only approvals, final proof, or actionable blockers; keep internal checkpoint detail in metadata/archive unless debug is requested.');

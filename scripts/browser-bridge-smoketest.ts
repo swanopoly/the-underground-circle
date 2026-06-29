@@ -41,16 +41,33 @@ function renderBrowserTree(node: BrowserA11yNode, depth = 0, out: string[] = [])
   return out;
 }
 
+// Mirror of describeDomSnapshotTruncation in src/lib/browserBridge.ts:
+// when the bridge hit its node budget, the formatted output must end
+// with an explicit truncation line so the model narrows scope instead
+// of concluding the element doesn't exist.
+function describeDomSnapshotTruncation(d: { nodeCount: number; totalNodes?: number; truncated?: boolean }): string | null {
+  if (!d.truncated) return null;
+  const total = typeof d.totalNodes === 'number' && d.totalNodes > d.nodeCount
+    ? String(d.totalNodes)
+    : 'more';
+  return `[tree truncated: showing ${d.nodeCount} of ${total} nodes — refine with a selector or increase maxNodes]`;
+}
+
 function dispatchDomSnapshot(bridgeResult: { ok: boolean; data?: any; error?: string }) {
   if (!bridgeResult.ok || !bridgeResult.data) return bridgeResult;
   const d = bridgeResult.data;
-  const text = renderBrowserTree(d.tree).join('\n');
+  const lines = renderBrowserTree(d.tree);
+  const trailer = describeDomSnapshotTruncation(d);
+  if (trailer) lines.push(trailer);
+  const text = lines.join('\n');
   return {
     ok: true,
     data: {
       url: d.url,
       title: d.title,
       nodeCount: d.nodeCount,
+      totalNodes: typeof d.totalNodes === 'number' ? d.totalNodes : d.nodeCount,
+      snapshotTruncated: !!d.truncated,
       text: text.slice(0, 8192),
       truncated: text.length > 8192,
     },
@@ -155,6 +172,149 @@ function main() {
     assert(r.error === 'bridge offline', 'dispatch: error text');
   }
 
+  // ─── Snapshot truncation flag + explicit trailer line ───────────
+  {
+    const fake = {
+      ok: true,
+      data: {
+        url: 'https://big.example/',
+        title: 'Big page',
+        nodeCount: 150,
+        totalNodes: 1200,
+        truncated: true,
+        tree: { id: '0', role: 'main', children: [{ id: '0.0', role: 'heading', name: 'Big' }] } as BrowserA11yNode,
+      },
+    };
+    const r = dispatchDomSnapshot(fake);
+    assert((r as any).data.snapshotTruncated === true, 'truncation: flag surfaced');
+    assert((r as any).data.totalNodes === 1200, 'truncation: totalNodes surfaced');
+    const lastLine = (r as any).data.text.split('\n').pop();
+    assert(
+      lastLine === '[tree truncated: showing 150 of 1200 nodes — refine with a selector or increase maxNodes]',
+      'truncation: formatted output ends with explicit trailer',
+      lastLine,
+    );
+  }
+  {
+    // truncated:true but totalNodes missing (older bridge): "of more".
+    const note = describeDomSnapshotTruncation({ nodeCount: 150, truncated: true });
+    assert(note === '[tree truncated: showing 150 of more nodes — refine with a selector or increase maxNodes]', 'truncation: missing totalNodes degrades to "more"', String(note));
+  }
+  {
+    // Complete snapshot: no trailer at all.
+    const fake = {
+      ok: true,
+      data: {
+        url: 'https://small.example/',
+        title: 'Small',
+        nodeCount: 3,
+        totalNodes: 3,
+        truncated: false,
+        tree: { id: '0', role: 'main', children: [{ id: '0.0', role: 'heading', name: 'Small' }] } as BrowserA11yNode,
+      },
+    };
+    const r = dispatchDomSnapshot(fake);
+    assert(!(r as any).data.text.includes('[tree truncated'), 'truncation: complete snapshot has no trailer');
+    assert((r as any).data.snapshotTruncated === false, 'truncation: complete snapshot flag false');
+    assert(describeDomSnapshotTruncation({ nodeCount: 3, totalNodes: 3, truncated: false }) === null, 'truncation: helper returns null when complete');
+  }
+
+  // ─── Pre-mutation verification-gate auto-check ───────────────────
+  //
+  // Mirror of preMutationVerificationGate in src/lib/browserBridge.ts:
+  // mutating actions (click/fill/select/upload) consult
+  // verificationState() first; a detected gate blocks the action with
+  // a structured `verification_gate` error that tells the model to
+  // hand the gate to the user (never bypass). `skipVerificationCheck`
+  // proceeds; a failed check fails OPEN because the bridge server
+  // still runs its own guard before mutating.
+  {
+    const HINT = 'pause and ask the user to complete it — do not attempt to bypass';
+    type VState = { ok: boolean; data?: { verificationDetected?: boolean; gate?: { kind?: string; label?: string } | null; url?: string } };
+    const decideGate = (state: VState, skipVerificationCheck?: boolean) => {
+      if (skipVerificationCheck === true) return null;
+      if (!state.ok || !state.data?.verificationDetected) return null;
+      const kind = String(state.data.gate?.kind || 'verification');
+      const label = String(state.data.gate?.label || 'Human verification');
+      return {
+        ok: false as const,
+        error: `verification_gate: ${label} detected on ${state.data.url || 'the current page'} — ${HINT}.`,
+        errorCode: 'verification_gate' as const,
+        verificationGate: { kind, label, hint: HINT },
+      };
+    };
+
+    const gated: VState = {
+      ok: true,
+      data: { verificationDetected: true, gate: { kind: 'captcha', label: 'CAPTCHA / human verification' }, url: 'https://login.example/' },
+    };
+    const blocked = decideGate(gated);
+    assert(blocked !== null, 'verification gate: detected gate blocks the mutation');
+    assert(blocked!.errorCode === 'verification_gate', 'verification gate: structured errorCode');
+    assert(blocked!.verificationGate.kind === 'captcha', 'verification gate: kind passthrough');
+    assert(blocked!.error.includes('do not attempt to bypass'), 'verification gate: hint forbids bypass');
+    assert(blocked!.error.includes('https://login.example/'), 'verification gate: names the gated page');
+
+    assert(decideGate(gated, true) === null, 'verification gate: skipVerificationCheck proceeds');
+    assert(decideGate({ ok: true, data: { verificationDetected: false } }) === null, 'verification gate: clean page proceeds');
+    assert(decideGate({ ok: false }) === null, 'verification gate: check failure fails open (server still guards)');
+    const mfa = decideGate({ ok: true, data: { verificationDetected: true, gate: { kind: 'mfa', label: 'MFA / one-time verification code' } } });
+    assert(mfa !== null && mfa.verificationGate.kind === 'mfa', 'verification gate: mfa kind surfaced');
+    const bare = decideGate({ ok: true, data: { verificationDetected: true, gate: null } });
+    assert(bare !== null && bare.verificationGate.kind === 'verification', 'verification gate: missing gate detail degrades to generic kind');
+  }
+
+  // ─── ambiguous_locator passthrough (callBrowser mirror) ─────────
+  //
+  // Mirror of the callBrowser ok:false branch in src/lib/browserBridge.ts:
+  // the structured ambiguity payload must survive verbatim instead of
+  // being flattened by the generic failure classifier.
+  {
+    const normalizeAmbiguousCandidates = (value: unknown) => {
+      if (!Array.isArray(value)) return undefined;
+      const candidates = value
+        .filter((item) => item && typeof item === 'object')
+        .slice(0, 5)
+        .map((item: any) => {
+          const candidate: { role: string; name?: string; snippet?: string } = { role: String(item.role || 'unknown').slice(0, 60) };
+          if (typeof item.name === 'string' && item.name) candidate.name = item.name.slice(0, 120);
+          if (typeof item.snippet === 'string' && item.snippet) candidate.snippet = item.snippet.slice(0, 120);
+          return candidate;
+        });
+      return candidates.length > 0 ? candidates : undefined;
+    };
+    const passthrough = (json: any) => {
+      if (json?.errorCode === 'ambiguous_locator') {
+        return {
+          ok: false as const,
+          error: typeof json.error === 'string' ? json.error : 'ambiguous locator',
+          errorCode: 'ambiguous_locator' as const,
+          matches: Number.isFinite(Number(json.matches)) ? Number(json.matches) : undefined,
+          candidates: normalizeAmbiguousCandidates(json.candidates),
+        };
+      }
+      return null; // would fall through to describeBrowserBridgeFailure
+    };
+
+    const r = passthrough({
+      ok: false,
+      errorCode: 'ambiguous_locator',
+      error: 'ambiguous locator: 3 elements match "Edit". Pass nth (0-based) or a more specific selector to disambiguate.',
+      matches: 3,
+      candidates: [
+        { role: 'button', name: 'Edit profile', snippet: 'Edit' },
+        { role: 'button', name: 'Edit billing', snippet: 'Edit' },
+        { role: 'link', snippet: 'Edit settings' },
+      ],
+    });
+    assert(r !== null, 'ambiguous passthrough: structured branch taken');
+    assert(r!.errorCode === 'ambiguous_locator', 'ambiguous passthrough: code preserved (not reclassified)');
+    assert(r!.matches === 3, 'ambiguous passthrough: matches preserved');
+    assert(r!.candidates!.length === 3, 'ambiguous passthrough: candidates preserved');
+    assert(r!.candidates![2].role === 'link' && !('name' in r!.candidates![2]), 'ambiguous passthrough: nameless candidate keeps role only');
+    assert(passthrough({ ok: false, errorCode: 'timeout', error: 'Timeout' }) === null, 'ambiguous passthrough: other codes use the classifier path');
+  }
+
   // ─── Screenshot dispatch ────────────────────────────────────────
   {
     const fakeBridge = {
@@ -229,6 +389,32 @@ function main() {
     };
     assert(bridgeResult.requiredEvidence.includes('desktop.bridge_pairing'), 'failure result: pairing evidence is structured');
     assert(bridgeResult.recoveryHint.includes('Re-pair'), 'failure result: recovery hint is structured');
+  }
+
+  // Explicit ambiguous_locator code must now be preserved (not reclassified)
+  // and carry its dedicated hint, evidence, and retryability.
+  {
+    const failure = describeBrowserBridgeFailure(
+      'ambiguous locator: 3 elements match "Edit". Pass nth (0-based) or a more specific selector.',
+      'ambiguous_locator',
+    );
+    assert(failure.errorCode === 'ambiguous_locator', 'failure: explicit ambiguous_locator preserved');
+    assert(failure.recoveryHint.includes('nth'), 'failure: ambiguous recovery names nth disambiguation', failure.recoveryHint);
+    assert(failure.requiredEvidence.includes('browser.candidate_list'), 'failure: ambiguous requires candidate list', failure.requiredEvidence.join(','));
+    assert(failure.retryability === 'retry_after_evidence', 'failure: ambiguous retries after evidence', String(failure.retryability));
+  }
+  {
+    const failure = describeBrowserBridgeFailure('Cloudflare security check requires human verification.');
+    assert(failure.retryability === 'needs_user', 'failure: human verification needs user', String(failure.retryability));
+  }
+  {
+    const failure = describeBrowserBridgeFailure('page.goto: Timeout 30000ms exceeded while waiting for load');
+    assert(failure.retryability === 'retry_once', 'failure: navigation timeout retries once', String(failure.retryability));
+  }
+  {
+    const failure = describeBrowserBridgeFailure('verification_gate detected', 'verification_gate');
+    assert(failure.errorCode === 'verification_gate', 'failure: verification_gate preserved');
+    assert(failure.requiredEvidence.includes('user.complete_browser_verification'), 'failure: verification_gate requires user evidence');
   }
 
   if (failures > 0) {

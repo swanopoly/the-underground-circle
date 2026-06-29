@@ -15,6 +15,7 @@ import {
   formatComputerTaskEvidenceRecoveryForPrompt,
   type ComputerTaskAppRouteDecisionInput,
   type ComputerTaskEvidenceRecoveryContext,
+  type ComputerTaskRecoveryAppFallback,
 } from './computerTaskEvidenceRecovery';
 import { buildAppAdapterGapPlan } from './appAdapterGapContract';
 import type { ComputerTaskEvidenceContract } from './computerTaskEvidenceContract';
@@ -36,6 +37,8 @@ export interface ChatFailureRecoveryInput {
   source?: string | null;
   sessionId?: string | null;
   launchIfMissing?: boolean;
+  /** Explicit user approval to launch/use a connected agent for recovery (default off). */
+  approveConnectedAgentLaunch?: boolean;
   circleId?: string;
   userId?: string;
   selectedModel?: string | null;
@@ -43,6 +46,10 @@ export interface ChatFailureRecoveryInput {
   checkpointRecovery?: ComputerTaskCheckpointRecoveryContext | null;
   evidenceContract?: ComputerTaskEvidenceContract | null;
   appRouteDecision?: ComputerTaskAppRouteDecisionInput | null;
+  /** AR: the app the user named, so unavailable-app recovery can cite intent. */
+  namedAppIntent?: string | null;
+  /** AR: the structured next-best launchable app to switch to on an unavailable-app failure. */
+  appFallback?: ComputerTaskRecoveryAppFallback | null;
   evidenceRecovery?: ComputerTaskEvidenceRecoveryContext | null;
   recoveryFingerprint?: string | null;
   repeatCount?: number;
@@ -53,7 +60,10 @@ export interface ChatFailureRecoveryInput {
 export interface ChatFailureRecoveryResult {
   recovery: AgentFailureRecoveryStartResult;
   agentInput: AgentFailureRecoveryInput;
+  /** Terse, user-facing chat message: one-line reason + the single next action. */
   userMessage: string;
+  /** Full failure-recovery breakdown for archive/debug surfaces. Not shown in chat. */
+  detail: string;
   recoveryOptions: ChatFailureRecoveryOption[];
   archiveSummary: string;
   archiveTouched: string[];
@@ -737,7 +747,7 @@ function shouldInferComputerRouteForRecovery(input: ChatFailureRecoveryInput): b
     input.groundingSummary,
     input.preflightSummary,
   ].map((value) => clean(value, 1_000).toLowerCase()).join('\n');
-  return /\b(run_computer_task|computer_use|computer-use|computer task|use computer|browser_computer_use|desktop|browser|bridge|local file|file adapter|app task|photoshop|indesign|illustrator|adobe|autocad|cad|revit|solidworks|fusion\s*360|rhino|open this file|uploaded file)\b/i.test(text);
+  return /\b(run_computer_task|computer_use|computer-use|computer task|use computer|browser_computer_use|desktop|browser|bridge|local file|file adapter|app task|photoshop|indesign|illustrator|adobe|autocad|cad|revit|solidworks|fusion\s*360|matlab|simulink|simscape|rhino|open this file|uploaded file)\b/i.test(text);
 }
 
 function computerRouteInferenceCandidates(input: ChatFailureRecoveryInput): string[] {
@@ -758,7 +768,7 @@ function computerRouteInferenceCandidates(input: ChatFailureRecoveryInput): stri
   if (/\b(local file|file adapter|file_task|file search|file read|file write|download|upload|folder|path)\b/i.test(context)) {
     candidates.push(`Local file computer task: ${task}`);
   }
-  if (/\b(desktop|desktop_app|app task|app_adapter|bridge|window|a11y|accessibility|photoshop|indesign|illustrator|adobe|autocad|cad|revit|solidworks|fusion\s*360|rhino)\b/i.test(context)) {
+  if (/\b(desktop|desktop_app|app task|app_adapter|bridge|window|a11y|accessibility|photoshop|indesign|illustrator|adobe|autocad|cad|revit|solidworks|fusion\s*360|matlab|simulink|simscape|rhino)\b/i.test(context)) {
     candidates.push(`Desktop app computer task: ${task}`);
   }
   if (/\brun_computer_task|computer task|use computer\b/i.test(context)) {
@@ -782,6 +792,11 @@ function resolveEvidenceRecovery(input: ChatFailureRecoveryInput): ComputerTaskE
   return diagnoseComputerTaskEvidenceFailure({
     contract: input.evidenceContract || inferredRoute?.evidenceContract || null,
     appRouteDecision: input.appRouteDecision || inferredRoute?.appAutomationRouteDecision || null,
+    // AR: name the user's app + the structured launchable fallback so an
+    // unavailable-app failure becomes switch-and-retry, not a dead-end. Prefer
+    // explicit input (the live route had it); fall back to the inferred route.
+    namedAppIntent: input.namedAppIntent ?? inferredRoute?.appResolution?.namedAppIntent ?? null,
+    appFallback: input.appFallback ?? inferredRoute?.appResolution?.recoveryFallback ?? null,
     // Unfamiliar-app failures get research-first buildout guidance (self-gating:
     // null for non-app tasks, so browser/file/Adobe recovery is unchanged).
     appAdapterGap: buildAppAdapterGapPlan(input.task || '')?.contract || null,
@@ -820,7 +835,7 @@ export function buildChatFailureRecoveryVerificationPlan(input: ChatFailureRecov
     : /\b(browser_computer_use|computer_use|computer-use|browser|browserbase|stagehand|dom|aria|locator|selector|url|page|tab)\b/.test(contextText);
   const desktopSurface = evidenceKind
     ? evidenceKind === 'desktop_app' || evidenceKind === 'hybrid'
-    : /\b(desktop|desktop_app|app task|app_adapter|bridge|window|a11y|accessibility|photoshop|indesign|illustrator|adobe|autocad|cad|revit|solidworks|fusion\s*360|rhino|terminal)\b/.test(contextText);
+    : /\b(desktop|desktop_app|app task|app_adapter|bridge|window|a11y|accessibility|photoshop|indesign|illustrator|adobe|autocad|cad|revit|solidworks|fusion\s*360|matlab|simulink|simscape|rhino|terminal)\b/.test(contextText);
   const localFileSurface = evidenceKind
     ? evidenceKind === 'local_file'
     : /\b(local file|file adapter|file_task|file search|file read|file write|download|upload|folder|path|scoped path)\b/.test(contextText);
@@ -956,6 +971,7 @@ export function buildChatFailureRecoveryInput(input: ChatFailureRecoveryInput): 
     source: clean(input.source || 'main_chat_failure', 240),
     sessionId: clean(input.sessionId, 240) || undefined,
     launchIfMissing: input.launchIfMissing,
+    approveConnectedAgentLaunch: input.approveConnectedAgentLaunch === true,
     circleId: input.circleId,
     userId: input.userId,
   };
@@ -1198,6 +1214,37 @@ export function formatChatFailureRecoveryUserMessage(
   input: ChatFailureRecoveryInput,
   recovery: AgentFailureRecoveryStartResult,
 ): string {
+  // TERSE BY DESIGN (user feedback: "just do the task — don't dump so much
+  // info about why it couldn't"). The chat bubble gets only a one-line reason
+  // plus the single next action. The full classification / runbook /
+  // checkpoint / evidence diagnosis is preserved in the failure-recovery
+  // ARCHIVE metadata (buildChatFailureRecoveryArchive), and the actionable
+  // recovery choices render as interactive option cards — so none of that
+  // detail needs to crowd the message. `formatChatFailureRecoveryDetail`
+  // below remains for debug/archive surfaces that want the full breakdown.
+  const reason = clean(
+    (clean(input.failureMessage, 700) || 'the task could not be completed')
+      .split('\n').map((l) => l.trim()).find(Boolean) || 'the task could not be completed',
+    180,
+  );
+  if (recovery.ok) {
+    return `Couldn't finish: ${reason}\n${clean(recovery.message, 160) || 'Working on a fix.'}`;
+  }
+  const nextStep = selectActionableRunbookStep(recovery.runbook);
+  const next = nextStep
+    ? `Next: ${clean(nextStep, 160)} — or pick a recovery option below.`
+    : 'Pick a recovery option below, or rephrase the task.';
+  return `Couldn't finish: ${reason}\n${next}`;
+}
+
+/**
+ * The full, detailed failure-recovery breakdown (former chat message). Kept
+ * for archive/debug surfaces; the chat bubble uses the terse version above.
+ */
+export function formatChatFailureRecoveryDetail(
+  input: ChatFailureRecoveryInput,
+  recovery: AgentFailureRecoveryStartResult,
+): string {
   const failureText = clean(input.failureMessage, 700) || 'Unknown error';
   const actionText = recovery.recoveryAction ? ` Recovery action: \`${recovery.recoveryAction}\`.` : '';
   const classText = recovery.assessment?.failureClass ? ` Classified as \`${recovery.assessment.failureClass}\`.` : '';
@@ -1323,6 +1370,7 @@ export async function startChatFailureRecovery(input: ChatFailureRecoveryInput):
     recovery,
     agentInput,
     userMessage: formatChatFailureRecoveryUserMessage(normalizedInput, recovery),
+    detail: formatChatFailureRecoveryDetail(normalizedInput, recovery),
     recoveryOptions: buildChatFailureRecoveryOptions(normalizedInput, recovery),
     fingerprint,
     verificationPlan,

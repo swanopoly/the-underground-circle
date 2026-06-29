@@ -1,7 +1,10 @@
+import { isScriptableMacApp } from './scriptableMacApps';
+
 export type GenericAppNavigatorPhaseId =
   | 'identify_app'
   | 'observe_window'
   | 'inspect_semantic_tree'
+  | 'research_control_surface'
   | 'plan_semantic_action'
   | 'execute_bounded_step'
   | 'verify_or_buildout';
@@ -120,6 +123,9 @@ const KNOWN_CONFIGURED_APP_NAMES = new Set([
   'fusion 360',
   'solidworks',
   'solid works',
+  'matlab',
+  'mathworks',
+  'simulink',
   'revit',
   'rhino',
   'inventor',
@@ -273,8 +279,29 @@ export function shouldUseGenericAppNavigator(task: string): boolean {
     return true;
   }
   const inferred = inferGenericAppName(text);
-  if (!inferred || isKnownConfiguredAppName(inferred)) return false;
+  // Known-configured apps AND AppleScript-scriptable apps (Notes, Reminders,
+  // Calendar, …) have a deterministic native control surface, so they must
+  // NOT be routed through the unfamiliar-app / buildout path — that's what
+  // made "create a note" stall on "unknown app -> needs buildout".
+  if (!inferred || isKnownConfiguredAppName(inferred) || isScriptableMacApp(inferred)) return false;
   return /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over|click|type|paste|press|fill|set|create|make|build|edit|update|export|save|run)\b/i.test(text);
+}
+
+export function shouldUseProfessionalAppAutonomy(task: string): boolean {
+  const text = String(task || '');
+  if (!text.trim()) return false;
+  if (/\b(?:any app|all apps|whatever app|no matter what app|doesn'?t matter what app|figure out (?:how|by itself)|use the app like a professional)\b/i.test(text)) {
+    return true;
+  }
+  if (shouldUseGenericAppNavigator(text)) return true;
+  const inferred = inferGenericAppName(text);
+  const asksToOpenOrDrive = /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over)\b/i.test(text);
+  const asksForAppAction = /\b(?:add|create|make|build|edit|change|update|set|fill|enter|write|put|click|select|choose|type|paste|press|run|export|save|render|send|submit|publish|delete|remove|configure|enable|disable)\b/i.test(text);
+  if (inferred && asksToOpenOrDrive && asksForAppAction) return true;
+  return (
+    /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over)\b[\s\S]{0,90}\b(?:app|application|window|program)\b/i.test(text) ||
+    /\b(?:desktop app|native app|mac app|application)\b[\s\S]{0,120}\b(?:create|make|edit|update|export|save|click|type|paste|press|fill|run|do)\b/i.test(text)
+  );
 }
 
 export function buildGenericAppNavigatorPlan(
@@ -301,6 +328,7 @@ export function buildGenericAppNavigatorPlan(
       { id: 'identify_app', instruction: 'identify the target app, active window, requested file/project, output path, and task family' },
       { id: 'observe_window', instruction: 'collect fresh window state and screenshot only as evidence, not as the first mutation surface' },
       { id: 'inspect_semantic_tree', instruction: 'read the accessibility/control tree and menu inventory before click/type/menu actions' },
+      { id: 'research_control_surface', instruction: 'if the app/operation is unfamiliar, research the official automation/control surface before guessing shortcuts, menus, or coordinates' },
       { id: 'plan_semantic_action', instruction: 'choose one unique named control, menu item, field, or shortcut with a verification signal' },
       { id: 'execute_bounded_step', instruction: 'execute one bounded semantic step, then immediately verify state before continuing' },
       { id: 'verify_or_buildout', instruction: 'if generic control cannot prove progress, hand off a bounded app-capability buildout instead of guessing' },
@@ -314,6 +342,8 @@ export function buildGenericAppNavigatorPlan(
     ],
     actionLadder: [
       'reuse an existing app-specific adapter, runbook, plugin, script, browser DOM/CDP route, or file-format operation when available',
+      'search existing tool/recipe capability first, then research official vendor docs, app help, scripting dictionaries, command palettes, APIs, CLIs, URL schemes, plugins, or file formats before inventing an app-specific action',
+      'for scriptable macOS apps, prefer desktop.run_applescript with built-in recipes or researched on-run-argv programs before UI clicking',
       'use OS accessibility tree controls for uniquely named buttons, fields, checkboxes, dialogs, and menu items',
       'use desktop.menu_click for stable menu paths and desktop.set_element_value for named editable fields before typing',
       'use desktop.press_keys only after focus and expected target context are verified',
@@ -345,6 +375,7 @@ export function buildGenericAppNavigatorPlan(
       'desktop.wait_for_app',
       'desktop.window_state',
       'desktop.read_a11y_tree',
+      'desktop.run_applescript',
       'desktop.menu_click',
       'desktop.click_element',
       'desktop.set_element_value',
@@ -356,7 +387,9 @@ export function buildGenericAppNavigatorPlan(
       'desktop.file_search',
       'desktop.file_stat',
       'desktop.open_path',
+      'tools.search',
       'research.search',
+      'fetch_url',
       'office.list_agents',
       'agent.build_app_capability',
       'approvals.request',
@@ -395,6 +428,7 @@ export function formatGenericAppNavigatorPromptBlock(
     `Target app: ${plan.targetAppName}`,
     `Task family: ${plan.taskFamily} (${formatGenericAppTaskFamilyForUser(plan.taskFamily)})`,
     `Can navigate without a dedicated adapter: ${plan.canNavigateWithoutAdapter ? 'yes, through bounded semantic control' : 'no'}`,
+    `Phases: ${plan.phases.map((phase) => `${phase.id}=${phase.instruction}`).join(' | ')}`,
     `User effort policy: ${plan.userEffortPolicy.join(' | ')}`,
     `Observe first: ${plan.observeFirst.join(' | ')}`,
     `Action ladder: ${plan.actionLadder.join(' | ')}`,
@@ -406,5 +440,31 @@ export function formatGenericAppNavigatorPromptBlock(
     `Source refs: ${plan.sourceRefs.map((ref) => `${ref.label} (${ref.lastReviewedAt}) <${ref.url}>`).join(' | ')}`,
     'Visibility rule: hide internal route, picker, adapter, recovery, and status details on success; show only Done plus proof unless the user asks for diagnostics.',
     'Execution rule: take one bounded semantic step at a time, verify after each step, and call agent.build_app_capability instead of guessing when app-specific capability is missing.',
+  ].join('\n');
+}
+
+export function formatProfessionalAppAutonomyPromptBlock(task: string): string | null {
+  if (!shouldUseProfessionalAppAutonomy(task)) return null;
+  const context = buildGenericAppNavigatorRouteContext(task);
+  const plan = context.plan;
+  const target = plan.targetAppName;
+  const knownStatus = isScriptableMacApp(target)
+    ? 'scriptable macOS app'
+    : isKnownConfiguredAppName(target)
+      ? 'known configured app'
+      : 'unfamiliar or long-tail app';
+
+  return [
+    '## Professional App Autonomy',
+    `Target: ${target} (${knownStatus}); task family: ${context.taskFamilyLabel}`,
+    'Operating contract: do not make the user teach the app. Open or focus the app, observe real state, research the control surface when unfamiliar, act through the strongest deterministic surface, and verify proof.',
+    'Open/focus first: use desktop.launch_app or desktop.focus_app, then desktop.wait_for_app and desktop.window_state before typing, clicking, or pressing shortcuts.',
+    'Research-first rule: before an app-specific mutation, search existing tools/recipes, inspect app menus/help/command palettes, and use official vendor/platform docs via research.search or fetch_url when the control surface is not already known.',
+    'Control-surface order: app-native API/script/plugin/CLI/file-format operation -> browser DOM/CDP for web/Electron apps -> OS accessibility/menu/field controls -> one bounded screenshot/coordinate step only after fresh evidence.',
+    'Scriptable Mac rule: for Notes, Reminders, Calendar, Mail, Music, Finder, Messages, Safari, TextEdit, or any researched AppleScript-capable app, prefer desktop.run_applescript with user content in args, not inline script text.',
+    'Professional execution rule: take one bounded step, verify state, then continue; never chain blind actions from memory, screenshots, or guessed shortcuts.',
+    'Buildout rule: if the task needs a missing adapter/recipe/bridge tool or a reusable professional workflow, call agent.build_app_capability with app name, task, researched control surface, source refs, required evidence, and smoke cases, then retry only after fresh observation.',
+    `Recommended tools: ${plan.recommendedTools.join(' | ')}`,
+    `Proof: ${plan.stopConditions.join(' | ')}`,
   ].join('\n');
 }

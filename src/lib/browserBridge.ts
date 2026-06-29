@@ -23,6 +23,11 @@ import { getBridgeUrl } from './bridgeEnvironment';
 import { describeBrowserBridgeFailure, type BrowserBridgeFailure } from './browserBridgeFailure';
 import { ensureDesktopBridgePaired } from './desktopBridge';
 import type { AutomationVerificationGate } from './desktopAutomationSafety';
+import {
+  buildWordPressAdminSourceTaskHints,
+  extractWordPressAdminSourceIntelligence,
+  type WordPressAdminSourceIntelligence,
+} from './wordpressAdminSourceIntelligence';
 
 const BRIDGE_PORT = 7778;
 const TOKEN_KEY = 'uc_desktop_bridge_token_v1';
@@ -43,6 +48,20 @@ function normalizeRequiredEvidence(value: unknown): string[] | undefined {
     .filter(Boolean)
     .slice(0, 8);
   return evidence.length > 0 ? evidence : undefined;
+}
+
+function normalizeAmbiguousCandidates(value: unknown): AmbiguousLocatorCandidate[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const candidates = value
+    .filter((item) => item && typeof item === 'object')
+    .slice(0, 5)
+    .map((item: any) => {
+      const candidate: AmbiguousLocatorCandidate = { role: String(item.role || 'unknown').slice(0, 60) };
+      if (typeof item.name === 'string' && item.name) candidate.name = item.name.slice(0, 120);
+      if (typeof item.snippet === 'string' && item.snippet) candidate.snippet = item.snippet.slice(0, 120);
+      return candidate;
+    });
+  return candidates.length > 0 ? candidates : undefined;
 }
 
 function parseBridgeErrorBody(text: string): { error?: string; errorCode?: string; recoveryHint?: string; requiredEvidence?: string[] } {
@@ -110,8 +129,53 @@ export interface DomSnapshotResult {
   url: string;
   title: string;
   nodeCount: number;
+  /** Total nodes the walk would have visited with unlimited budget.
+   *  Present on bridges that report it; equals nodeCount otherwise. */
+  totalNodes?: number;
+  /** True when the snapshot hit the node budget and dropped part of
+   *  the page. Callers must surface this so the model narrows scope
+   *  instead of concluding an element does not exist. */
+  truncated?: boolean;
   tree: BrowserA11yNode;
 }
+
+export interface BrowserPageSourceResult {
+  url: string;
+  title: string;
+  sourceLength: number;
+  truncated: boolean;
+  maxChars: number;
+  source: string;
+}
+
+export interface BrowserWordPressAdminSourceIntelligenceResult {
+  url: string;
+  title: string;
+  sourceLength: number;
+  sourceTruncated: boolean;
+  intelligence: WordPressAdminSourceIntelligence;
+  taskHints: string[];
+}
+
+/** One candidate from an ambiguous-locator error (≤5 are returned). */
+export interface AmbiguousLocatorCandidate {
+  role: string;
+  name?: string;
+  snippet?: string;
+}
+
+/**
+ * Browser action results can carry structured disambiguation /
+ * verification payloads on failure, on top of the shared
+ * `DesktopResult` shape:
+ *  - errorCode 'ambiguous_locator' → `matches` + `candidates`
+ *  - errorCode 'verification_gate' → `verificationGate`
+ */
+export type BrowserActionResult<T> = DesktopResult<T> & {
+  matches?: number;
+  candidates?: AmbiguousLocatorCandidate[];
+  verificationGate?: { kind: string; label?: string; hint: string };
+};
 
 export interface BrowserVerificationState {
   url: string;
@@ -169,6 +233,20 @@ async function callBrowser<T = unknown>(method: 'GET' | 'POST', pathname: string
     }
     const json = await res.json();
     if (!json?.ok) {
+      // Structured ambiguity errors carry machine-readable candidates;
+      // preserve them verbatim instead of flattening through the
+      // generic failure classifier (which would re-bucket the code).
+      if (json?.errorCode === 'ambiguous_locator') {
+        return {
+          ok: false,
+          error: typeof json.error === 'string' ? json.error : 'ambiguous locator',
+          errorCode: 'ambiguous_locator',
+          recoveryHint: typeof json.recoveryHint === 'string' ? json.recoveryHint : undefined,
+          requiredEvidence: normalizeRequiredEvidence(json.requiredEvidence),
+          matches: Number.isFinite(Number(json.matches)) ? Number(json.matches) : undefined,
+          candidates: normalizeAmbiguousCandidates(json.candidates),
+        } as BrowserActionResult<T>;
+      }
       const failure = describeBrowserBridgeFailure(json?.error || 'bridge returned ok:false', json?.errorCode);
       return browserFailureResult(failure, {
         recoveryHint: typeof json?.recoveryHint === 'string' ? json.recoveryHint : undefined,
@@ -227,6 +305,45 @@ export async function domSnapshot(opts?: { maxNodes?: number; interestingOnly?: 
   return callBrowser('GET', `/browser/dom_snapshot${qs ? `?${qs}` : ''}`);
 }
 
+async function pageSource(opts?: { maxChars?: number }): Promise<DesktopResult<BrowserPageSourceResult>> {
+  const params = new URLSearchParams();
+  if (typeof opts?.maxChars === 'number') params.set('max_chars', String(opts.maxChars));
+  const qs = params.toString();
+  return callBrowser('GET', `/browser/page_source${qs ? `?${qs}` : ''}`);
+}
+
+export async function readWordPressAdminSourceIntelligence(opts?: {
+  maxChars?: number;
+  maxMenuItems?: number;
+  maxRows?: number;
+}): Promise<DesktopResult<BrowserWordPressAdminSourceIntelligenceResult>> {
+  const source = await pageSource({ maxChars: opts?.maxChars });
+  if (!source.ok || !source.data) {
+    return {
+      ok: false,
+      error: source.error || 'Browser page source failed',
+      errorCode: source.errorCode,
+      recoveryHint: source.recoveryHint,
+      requiredEvidence: source.requiredEvidence,
+    };
+  }
+  const intelligence = extractWordPressAdminSourceIntelligence(source.data.source, {
+    maxMenuItems: opts?.maxMenuItems,
+    maxRows: opts?.maxRows,
+  });
+  return {
+    ok: true,
+    data: {
+      url: source.data.url,
+      title: source.data.title,
+      sourceLength: source.data.sourceLength,
+      sourceTruncated: source.data.truncated,
+      intelligence,
+      taskHints: buildWordPressAdminSourceTaskHints(intelligence),
+    },
+  };
+}
+
 /**
  * Checks the current browser page for CAPTCHA, anti-bot, Cloudflare,
  * MFA, or other human verification gates. This is intentionally
@@ -237,12 +354,57 @@ export async function verificationState(): Promise<DesktopResult<BrowserVerifica
   return callBrowser('GET', '/browser/verification_state');
 }
 
+const VERIFICATION_GATE_HINT =
+  'pause and ask the user to complete it — do not attempt to bypass';
+
+/**
+ * Cheap auto-check that runs before every mutating browser action
+ * (click/fill/select/upload). If the current page shows a human
+ * verification gate (CAPTCHA / MFA / bot check / login challenge),
+ * the mutation is refused with a structured `verification_gate`
+ * error so the model pauses and hands the gate to the user — same
+ * fail-to-the-human rule as the D5 takeover pattern; bypassing is
+ * never attempted. Pass `skipVerificationCheck: true` for the rare
+ * legitimate case (e.g. the user just confirmed they completed the
+ * gate and the leftover challenge markup is inert).
+ *
+ * Fail-open on check errors: if `verificationState()` itself fails,
+ * the action proceeds — the bridge server still runs its own
+ * verification guard before mutating, so this never weakens safety.
+ */
+async function preMutationVerificationGate<T>(skipVerificationCheck?: boolean): Promise<BrowserActionResult<T> | null> {
+  if (skipVerificationCheck === true) return null;
+  let state: DesktopResult<BrowserVerificationState>;
+  try {
+    state = await verificationState();
+  } catch {
+    return null;
+  }
+  if (!state.ok || !state.data?.verificationDetected) return null;
+  const gate = state.data.gate;
+  const kind = String(gate?.kind || 'verification');
+  const label = String(gate?.label || 'Human verification');
+  return {
+    ok: false,
+    error: `verification_gate: ${label} detected on ${state.data.url || 'the current page'} — ${VERIFICATION_GATE_HINT}.`,
+    errorCode: 'verification_gate',
+    recoveryHint: `${label} (${kind}) is blocking this page: ${VERIFICATION_GATE_HINT}. Re-check verificationState after the user confirms it is done.`,
+    requiredEvidence: ['browser.verification_state', 'user.complete_browser_verification'],
+    verificationGate: { kind, label, hint: VERIFICATION_GATE_HINT },
+  };
+}
+
 /**
  * Click an element by ARIA role + accessible name — Playwright's
  * canonical `getByRole(role, { name })` path. Prefer this over
  * raw CSS selectors because it survives design changes. When the
  * page has no useful accessible name, pass `selector` instead and
  * the bridge routes through `page.locator(selector)`.
+ *
+ * If the locator matches more than one element and no `nth` is
+ * given, the bridge refuses to act and returns errorCode
+ * `ambiguous_locator` with `matches` + up to 5 `candidates` —
+ * retry with the right 0-based `nth` (or a tighter selector).
  */
 export async function clickRole(args: {
   role: string;
@@ -253,13 +415,22 @@ export async function clickRole(args: {
    *  works. Explicit `selector` is preferred. */
   selector?: string;
   exact?: boolean;
+  /** 0-based index to disambiguate when the locator matches
+   *  multiple elements. Without it, multi-match returns
+   *  `ambiguous_locator` instead of clicking the first match. */
   nth?: number;
   timeoutMs?: number;
   taskContext?: string;
-}): Promise<DesktopResult<{ role: string; name?: string }>> {
+  /** Skip the pre-mutation verification-gate check. Only for the
+   *  rare legit case — never to bypass a live gate. */
+  skipVerificationCheck?: boolean;
+}): Promise<BrowserActionResult<{ role: string; name?: string }>> {
   const role = String(args.role || '').trim();
   if (!role) return browserFailureResult(describeBrowserBridgeFailure('role required', 'invalid_input'));
-  return callBrowser('POST', '/browser/click_role', args);
+  const gate = await preMutationVerificationGate<{ role: string; name?: string }>(args.skipVerificationCheck);
+  if (gate) return gate;
+  const { skipVerificationCheck: _skip, ...body } = args;
+  return callBrowser('POST', '/browser/click_role', body);
 }
 
 /**
@@ -276,16 +447,23 @@ export async function fillField(args: {
   text: string;
   submit?: boolean;
   exact?: boolean;
+  /** 0-based disambiguator for multi-match locators — see clickRole. */
+  nth?: number;
   timeoutMs?: number;
   taskContext?: string;
-}): Promise<DesktopResult<{ chars: number }>> {
+  /** Skip the pre-mutation verification-gate check. See clickRole. */
+  skipVerificationCheck?: boolean;
+}): Promise<BrowserActionResult<{ chars: number }>> {
   if (typeof args.text !== 'string') {
     return browserFailureResult(describeBrowserBridgeFailure('text required', 'invalid_input'));
   }
   if (args.text.length > 4000) {
     return browserFailureResult(describeBrowserBridgeFailure('text too long (max 4000)', 'invalid_input'));
   }
-  return callBrowser('POST', '/browser/fill', args);
+  const gate = await preMutationVerificationGate<{ chars: number }>(args.skipVerificationCheck);
+  if (gate) return gate;
+  const { skipVerificationCheck: _skip, ...body } = args;
+  return callBrowser('POST', '/browser/fill', body);
 }
 
 /** Select an option in a native select/combobox field. */
@@ -295,13 +473,20 @@ export async function selectOption(args: {
   selector?: string;
   value: string;
   exact?: boolean;
+  /** 0-based disambiguator for multi-match locators — see clickRole. */
+  nth?: number;
   timeoutMs?: number;
   taskContext?: string;
-}): Promise<DesktopResult<{ value: string }>> {
+  /** Skip the pre-mutation verification-gate check. See clickRole. */
+  skipVerificationCheck?: boolean;
+}): Promise<BrowserActionResult<{ value: string }>> {
   if (typeof args.value !== 'string' || !args.value.trim()) {
     return browserFailureResult(describeBrowserBridgeFailure('value required', 'invalid_input'));
   }
-  return callBrowser('POST', '/browser/select', { role: args.role || 'combobox', ...args });
+  const gate = await preMutationVerificationGate<{ value: string }>(args.skipVerificationCheck);
+  if (gate) return gate;
+  const { skipVerificationCheck: _skip, ...body } = args;
+  return callBrowser('POST', '/browser/select', { role: args.role || 'combobox', ...body });
 }
 
 /** Upload a local file into a browser file input or file chooser. */
@@ -315,13 +500,18 @@ export async function uploadFile(args: {
   exact?: boolean;
   timeoutMs?: number;
   taskContext?: string;
-}): Promise<DesktopResult<{ filePath: string; fileName: string; sizeBytes: number; method: string }>> {
+  /** Skip the pre-mutation verification-gate check. See clickRole. */
+  skipVerificationCheck?: boolean;
+}): Promise<BrowserActionResult<{ filePath: string; fileName: string; sizeBytes: number; method: string }>> {
   const filePath = String(args.filePath || '').trim();
   if (!filePath) return browserFailureResult(describeBrowserBridgeFailure('filePath required', 'invalid_input'));
   if (filePath.length > 1024 || /[\x00-\x1f]/.test(filePath)) {
     return browserFailureResult(describeBrowserBridgeFailure('invalid filePath', 'invalid_input'));
   }
-  return callBrowser('POST', '/browser/upload_file', { ...args, filePath });
+  const gate = await preMutationVerificationGate<{ filePath: string; fileName: string; sizeBytes: number; method: string }>(args.skipVerificationCheck);
+  if (gate) return gate;
+  const { skipVerificationCheck: _skip, ...body } = args;
+  return callBrowser('POST', '/browser/upload_file', { ...body, filePath });
 }
 
 /** Press a single key or combo via Playwright's keyboard.press. */
@@ -340,6 +530,35 @@ export async function screenshot(opts?: { fullPage?: boolean }): Promise<Desktop
 /** Close the browser context (not usually needed — it persists across requests). */
 export async function closeBrowser(): Promise<DesktopResult<{ closed: boolean }>> {
   return callBrowser('POST', '/browser/close');
+}
+
+/**
+ * Builds the explicit truncation trailer for a DOM snapshot, or null
+ * when the snapshot is complete. Formatters must append this line so
+ * the model knows the page continues beyond the budget — without it,
+ * a missing element in the rendered tree reads as "does not exist"
+ * instead of "narrow the scope or raise maxNodes".
+ */
+export function describeDomSnapshotTruncation(
+  result: Pick<DomSnapshotResult, 'nodeCount' | 'totalNodes' | 'truncated'>,
+): string | null {
+  if (!result.truncated) return null;
+  const total = typeof result.totalNodes === 'number' && result.totalNodes > result.nodeCount
+    ? String(result.totalNodes)
+    : 'more';
+  return `[tree truncated: showing ${result.nodeCount} of ${total} nodes — refine with a selector or increase maxNodes]`;
+}
+
+/**
+ * Render a full DOM snapshot: flattened tree plus the explicit
+ * truncation trailer when the node budget was hit. Prefer this over
+ * calling renderBrowserTree directly so truncation never gets lost.
+ */
+export function renderDomSnapshot(result: DomSnapshotResult): string {
+  const lines = renderBrowserTree(result.tree);
+  const trailer = describeDomSnapshotTruncation(result);
+  if (trailer) lines.push(trailer);
+  return lines.join('\n');
 }
 
 /**

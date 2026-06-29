@@ -120,15 +120,33 @@ assert.equal(autocadPlan.targetId, 'engineering_cad_app');
 assert(autocadPlan.targetName.includes('AutoCAD'));
 assert.equal(autocadPlan.candidates[0]?.id, 'autocad_lisp_dotnet_api');
 assert(autocadPlan.candidates.some((surface) => surface.id === 'autodesk_aps_automation_api'));
+assert(autocadPlan.candidates.some((surface) => surface.id === 'autodesk_ai_mcp_assistant'));
 assert(autocadPlan.sourceRefs.some((ref) => ref.label.includes('AutoLISP')));
+assert(autocadPlan.sourceRefs.some((ref) => ref.label.includes('AutoCAD .NET API')));
+assert(autocadPlan.sourceRefs.some((ref) => ref.label.includes('Autodesk MCP Servers')));
 assert(autocadPlan.sourceRefs.some((ref) => ref.url.includes('aps.autodesk.com/developer/overview/autocad-api')));
 assert(autocadPlan.failSafeRules.some((rule) => rule.includes('coordinate actions only')));
 assert(autocadPlan.promptHints.some((hint) => hint.includes('Official refs reviewed')));
+
+const autodeskAiPlan = buildAppAutomationControlSurfacePlan('Use Autodesk MCP servers and Autodesk Assistant in Fusion to inspect the design and suggest a manufacturing-ready feature workflow.');
+assert.equal(autodeskAiPlan.targetId, 'engineering_cad_app');
+assert.equal(autodeskAiPlan.candidates[0]?.id, 'autodesk_ai_mcp_assistant');
+assert(autodeskAiPlan.sourceRefs.some((ref) => ref.label.includes('Autodesk Assistant')));
+assert(autodeskAiPlan.sourceRefs.some((ref) => ref.label.includes('Autodesk neural CAD')));
 
 const solidworksPlan = buildAppAutomationControlSurfacePlan('Use SOLIDWORKS to update this part dimension and export STEP after approval.');
 assert.equal(solidworksPlan.targetId, 'engineering_cad_app');
 assert.equal(solidworksPlan.candidates[0]?.id, 'solidworks_com_api');
 assert(solidworksPlan.sourceRefs.some((ref) => ref.label.includes('SOLIDWORKS API')));
+assert(solidworksPlan.sourceRefs.some((ref) => ref.label.includes('SOLIDWORKS macros')));
+
+const matlabPlan = buildAppAutomationControlSurfacePlan('Open MATLAB and build a Simulink model, run the simulation, test the script, and export plots after approval.');
+assert.equal(matlabPlan.targetId, 'engineering_cad_app');
+assert.equal(matlabPlan.targetName, 'MATLAB / Simulink');
+assert.equal(matlabPlan.candidates[0]?.id, 'matlab_mcp_agentic_toolkit');
+assert(matlabPlan.sourceRefs.some((ref) => ref.label.includes('MATLAB MCP Core Server')));
+assert(matlabPlan.sourceRefs.some((ref) => ref.label.includes('MATLAB Agentic Toolkit')));
+assert(matlabPlan.sourceRefs.some((ref) => ref.label.includes('MATLAB AI skill')));
 
 const rhinoPlan = buildAppAutomationControlSurfacePlan('Open Rhino and put selected curves on a new layer, then export the 3DM proof.');
 assert.equal(rhinoPlan.targetId, 'engineering_cad_app');

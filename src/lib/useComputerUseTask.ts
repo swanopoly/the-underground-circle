@@ -13,6 +13,8 @@ import { useCallback, useRef, useState } from 'react';
 import { startComputerUseAgent, type AgentHandle } from './computerUseAgent';
 import { resolveComputerUseCreds } from './computerUseCreds';
 import {
+  fireComputerTaskWebNotification,
+  recordComputerTaskPartialResultNotification,
   recordComputerTaskPendingQuestion,
   resolveComputerTaskPendingQuestionState,
 } from './computerTaskState';
@@ -73,6 +75,7 @@ export interface ComputerUseTaskState {
     extractedData?: unknown | null;
   } | null;
   errorMessage: string | null;
+  rawErrorMessage?: string | null;
 }
 
 const EMPTY_STATE: ComputerUseTaskState = {
@@ -88,7 +91,18 @@ const EMPTY_STATE: ComputerUseTaskState = {
   pendingConfirmation: null,
   result: null,
   errorMessage: null,
+  rawErrorMessage: null,
 };
+
+function sanitizeComputerUseErrorMessage(message: string | null | undefined): string {
+  const text = String(message || '').trim();
+  if (!text) return 'Computer Use could not finish. Technical details were saved for recovery.';
+  if (/^cancel/i.test(text)) return text;
+  if (!/\b(?:HTTP\s+\d{3}|supabase|edge function|fetch failed|Failed to fetch|NetworkError|TypeError|ECONN|ETIMEDOUT|EADDR|JWT|Bearer|postgres|PostgREST|stack|functions\/v1|computer-use-agent|Browserbase.*(?:error|failed)|Anthropic.*(?:error|failed))\b/i.test(text)) {
+    return text;
+  }
+  return 'Computer Use could not finish. Technical details were saved for recovery.';
+}
 
 export function useComputerUseTask(circleId: string, userId?: string, threadId?: string | null) {
   const [state, setState] = useState<ComputerUseTaskState>(EMPTY_STATE);
@@ -182,6 +196,12 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
         // made so far. Populate `result` with the partial summary so the
         // card shows what WAS done; the matching onError that follows sets
         // the error status + message.
+        // D6: persist the partial-result notification on the durable record
+        // so a walked-away user learns about the bounded stop on return.
+        void recordComputerTaskPartialResultNotification(circleId, threadId, {
+          summary,
+          runId: runId || runIdRef.current,
+        });
         setState((prev) => ({
           ...prev,
           runId: runId || prev.runId,
@@ -199,6 +219,13 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
       },
       onResult: ({ summary, iterations, tokens, findings, extractedData, runId }) => {
         persistQuestionResolved(null); // task finished — expire any open question
+        // D6 progressive enhancement: page hidden + permission already
+        // granted → native web notification. Silent no-op otherwise.
+        fireComputerTaskWebNotification({
+          kind: 'completed',
+          title: 'Computer task finished',
+          body: summary || task,
+        });
         setState((prev) => ({
           ...prev,
           status: 'done',
@@ -209,7 +236,13 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
       },
       onError: (msg) => {
         persistQuestionResolved(null); // task errored — expire any open question
-        setState((prev) => ({ ...prev, status: 'error', errorMessage: msg }));
+        const visibleError = sanitizeComputerUseErrorMessage(msg);
+        fireComputerTaskWebNotification({
+          kind: 'failed',
+          title: 'Computer task failed',
+          body: visibleError || task,
+        });
+        setState((prev) => ({ ...prev, status: 'error', errorMessage: visibleError, rawErrorMessage: msg }));
         handleRef.current = null;
       },
     });

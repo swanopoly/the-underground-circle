@@ -182,4 +182,52 @@ const blockedCandidate = validateDesktopAIModalCandidate({
 
 assert.equal(blockedCandidate.action, 'stop', 'guardrails block unsafe AI candidate clicks');
 
+// Regression: a normal app MAIN window (Notes) with a toolbar of buttons and
+// content roles (outline/splitgroup/scrollarea) must NOT be treated as a
+// modal — previously its toolbar was read as "popup options" and halted every
+// desktop task at step 1 with "popup needs a decision".
+const notesMainWindowTree: DesktopAIModalNode = {
+  id: '0',
+  role: 'AXApplication',
+  label: 'Notes',
+  children: [
+    {
+      id: '0.1',
+      role: 'AXWindow',
+      label: 'Notes – 15 notes',
+      children: [
+        { id: '0.1.1', role: 'AXSplitGroup', children: [
+          { id: '0.1.1.1', role: 'AXScrollArea', children: [
+            { id: '0.1.1.1.1', role: 'AXOutline', label: 'Folders', children: [
+              { id: '0.1.1.1.1.1', role: 'AXRow', children: [{ id: '0.1.1.1.1.1.1', role: 'AXStaticText', label: 'Notes, 15 notes' }] },
+            ] },
+          ] },
+        ] },
+        { id: '0.1.2', role: 'AXButton', label: 'New Note' },
+        { id: '0.1.3', role: 'AXButton', label: 'Format' },
+        { id: '0.1.4', role: 'AXButton', label: 'Checklist' },
+        { id: '0.1.5', role: 'AXButton', label: 'Table' },
+        { id: '0.1.6', role: 'AXButton', label: 'Share' },
+      ],
+    },
+  ],
+};
+
+assert.equal(
+  extractDesktopAIModalObservation(notesMainWindowTree, 'Notes'),
+  null,
+  'a normal app main window (Notes, with outline/splitgroup + toolbar) is not a modal',
+);
+assert.equal(
+  decideDesktopAIModalAction({ root: notesMainWindowTree, app: 'Notes', task: 'create a note that says hi' }),
+  null,
+  'no blocking decision is raised for a normal app window — the task proceeds',
+);
+
+// The existing decision trees must still register as modals so real popups are
+// still caught (no false-negatives from the fix).
+assert.ok(extractDesktopAIModalObservation(replaceExistingTree, 'Adobe Photoshop'), 'overwrite dialog (window, no content) still a modal');
+assert.ok(extractDesktopAIModalObservation(passwordTree, 'Keychain Access'), 'credential dialog (AXDialog) still a modal');
+assert.ok(extractDesktopAIModalObservation(unknownTree, 'Example App'), 'unknown choice dialog (window, no content) still a modal');
+
 console.log('All desktop AI modal advisor smoke cases passed.');

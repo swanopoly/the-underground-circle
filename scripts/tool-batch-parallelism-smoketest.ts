@@ -28,27 +28,12 @@ process.env.EXPO_PUBLIC_SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '
 process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || 'tool-batch-smoke-anon-key';
 
 const NATIVE_STUBS = new Set(['react-native', '@react-native-async-storage/async-storage']);
-const STUB_SOURCE = `
-export const Platform = { OS: 'web', select: (obj) => (obj ? (obj.web !== undefined ? obj.web : obj.default) : undefined) };
-export const AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
-export const Dimensions = { get: () => ({ width: 1280, height: 800, scale: 2, fontScale: 1 }) };
-export const NativeModules = {};
-export const StyleSheet = { create: (s) => s, flatten: (s) => s };
-const asyncStorageStub = {
-  getItem: async () => null, setItem: async () => {}, removeItem: async () => {},
-  multiGet: async () => [], multiSet: async () => {}, multiRemove: async () => {}, getAllKeys: async () => [],
-};
-export default asyncStorageStub;
-`;
+const STUB_URL = new URL('./native-module-stub.mjs', import.meta.url).href;
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (NATIVE_STUBS.has(specifier)) return { url: `stub:${specifier}`, shortCircuit: true };
+    if (NATIVE_STUBS.has(specifier)) return { url: STUB_URL, shortCircuit: true };
     return nextResolve(specifier, context);
-  },
-  load(url, context, nextLoad) {
-    if (url.startsWith('stub:')) return { format: 'module', source: STUB_SOURCE, shortCircuit: true };
-    return nextLoad(url, context);
   },
 });
 
@@ -174,6 +159,14 @@ async function checkRealCatalogPolicies() {
   assert.equal(fileWrite.approvalMode, 'ask', 'desktop.file_write_text stays HITL-gated');
   assert.equal(isParallelEligibleToolPolicy(fileWrite), false, "'ask' desktop write is never parallel-eligible");
 
+  // Bounded image conversion writes a new local image next to the source, but
+  // avoids the generic Photoshop/Preview save dialog and is auto-approved.
+  const convertImage = runtime.getOpenSwanToolParallelPolicy('desktop.convert_image');
+  assert.deepEqual(convertImage.readsFrom, ['desktop_files'], 'desktop.convert_image reads desktop_files');
+  assert.deepEqual(convertImage.mutationTargets, ['desktop_files'], 'desktop.convert_image writes desktop_files');
+  assert.equal(convertImage.approvalMode, 'auto', 'desktop.convert_image is auto-approved');
+  assert.equal(isParallelEligibleToolPolicy(convertImage), true, 'desktop.convert_image can run without the approval gate');
+
   // Browser mutation → browser_page.
   const click = runtime.getOpenSwanToolParallelPolicy('browser.click_role');
   assert.deepEqual(click.mutationTargets, ['browser_page'], 'browser.click_role writes browser_page');
@@ -190,6 +183,7 @@ async function checkRealCatalogPolicies() {
   assert.deepEqual(runtime.getOpenSwanToolParallelPolicy('skills.manage').mutationTargets, ['circle_skills'], 'skills.manage writes circle_skills');
   assert.deepEqual(runtime.getOpenSwanToolParallelPolicy('messages.create').mutationTargets, ['circle_messages'], 'messages.create writes circle_messages');
   assert.deepEqual(runtime.getOpenSwanToolParallelPolicy('wp.create_slide').mutationTargets, ['wordpress'], 'wp.create_slide writes wordpress');
+  assert.deepEqual(runtime.getOpenSwanToolParallelPolicy('wp.update_post').mutationTargets, ['wordpress'], 'wp.update_post writes wordpress');
 
   // A mutating tool with no domain entry stays a barrier (no targets).
   const checkIn = runtime.getOpenSwanToolParallelPolicy('check_ins.log');

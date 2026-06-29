@@ -39,6 +39,11 @@ import {
   jsonResponse,
   resolveUserModelApiKey,
 } from "../_shared/edge.ts";
+import {
+  SWANBOT_MAX_CLIENT_TOOL_RESULTS,
+  validateSwanBotResumeToolResults,
+  type SwanBotResumeToolResult,
+} from "../_shared/swanbot-continuation.ts";
 // Canonical edge-side Anthropic client — routes pricing + cache accounting +
 // claude_api_usage logging through one module so the dashboard shows real
 // numbers. See docs/AGENTS_ROADMAP.md §6 Rule #3.
@@ -1164,7 +1169,7 @@ const TOOLS: ToolDef[] = [
   {
     name: "approvals.resolve",
     description:
-      "Marks a pending approval as approved or rejected. Typically invoked by a human operator through the UI — the agent rarely calls this itself, but it can for auto-approved reviews.",
+      "Unavailable to model-side tools. Human approval resolution must happen through the signed UI or another out-of-band operator path.",
     input_schema: {
       type: "object",
       properties: {
@@ -1174,32 +1179,11 @@ const TOOLS: ToolDef[] = [
       required: ["approvalId", "status"],
       additionalProperties: false,
     },
-    handler: async (input, { supabase, circleId, userId }) => {
-      const args = (input || {}) as { approvalId?: string; status?: string };
-      const approvalId = String(args.approvalId || "").trim();
-      if (!approvalId) return { ok: false, error: "approvalId required" };
-      if (args.status !== "approved" && args.status !== "rejected") {
-        return { ok: false, error: "status must be 'approved' or 'rejected'" };
-      }
-      // Scope guard: approval must belong to this circle.
-      const { data: row, error: rowErr } = await supabase
-        .from("agent_run_approvals")
-        .select("id, circle_id, status")
-        .eq("id", approvalId)
-        .maybeSingle();
-      if (rowErr) return { ok: false, error: rowErr.message };
-      if (!row || row.circle_id !== circleId) return { ok: false, error: "approval not found in this circle" };
-      if (row.status !== "pending") return { ok: false, error: `approval already ${row.status}` };
-      const { error } = await supabase
-        .from("agent_run_approvals")
-        .update({
-          status: args.status,
-          resolved_by: userId,
-          resolved_at: new Date().toISOString(),
-        })
-        .eq("id", approvalId);
-      if (error) return { ok: false, error: error.message };
-      return { ok: true, data: { approvalId, status: args.status } };
+    handler: async () => {
+      return {
+        ok: false,
+        error: "approvals.resolve is disabled for SwanBot model-side tools; use the approval UI or signed operator flow",
+      };
     },
   },
 
@@ -1311,6 +1295,7 @@ const TOOLS: ToolDef[] = [
           vault: { type: "string" },
         },
         required: ["siteUrl", "onePasswordItem"],
+        additionalProperties: false,
       },
     },
     {
@@ -1327,12 +1312,13 @@ const TOOLS: ToolDef[] = [
           status: { type: "string", description: "draft | publish | private | any." },
         },
         required: ["siteUrl", "onePasswordItem"],
+        additionalProperties: false,
       },
     },
     {
       name: "wp.upload_media",
       description:
-        "Uploads a file from Supabase Storage to the WordPress media library. External side-effect — request HITL approval first via `approvals.request` with approvalKind='publish'.",
+        "Uploads a file from Supabase Storage to the WordPress media library. External side-effect. SwanBot's client runtime requires an exact approved HITL gate before execution; if missing, it creates a pending approval and does not touch WordPress.",
       input_schema: {
         type: "object" as const,
         properties: {
@@ -1343,12 +1329,57 @@ const TOOLS: ToolDef[] = [
           mimeType: { type: "string" },
         },
         required: ["siteUrl", "onePasswordItem", "storagePath", "fileName"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "wp.update_post",
+      description:
+        "Updates an existing WordPress post, page, or custom post type item by ID. Use after wp.discover_types and wp.list_posts for known IDs, including DI Slides. External side-effect. SwanBot's client runtime requires an exact approved HITL gate before execution; if missing, it creates a pending approval and does not touch WordPress.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          siteUrl: { type: "string" },
+          onePasswordItem: { type: "string" },
+          postId: { type: "integer", minimum: 1 },
+          postType: { type: "string", description: "REST base/post type, e.g. posts, pages, di_slide, flavor_di_slides." },
+          title: { type: "string" },
+          content: { type: "string" },
+          status: { type: "string", enum: ["draft", "publish", "private", "pending", "future"] },
+          slug: { type: "string" },
+          excerpt: { type: "string" },
+          date: { type: "string" },
+          featuredMedia: { type: "integer", minimum: 0 },
+          menuOrder: { type: "integer" },
+          meta: { type: "object" },
+        },
+        required: ["siteUrl", "onePasswordItem", "postId"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "wp.trash_post",
+      description:
+        "Moves an existing WordPress post, page, or custom post type item to trash as a restorable soft-delete. Use only after wp.discover_types/wp.list_posts confirms the exact postId and expected item. External destructive side-effect. SwanBot's client runtime requires an exact approved HITL gate before execution; if missing, it creates a pending approval and does not touch WordPress. Never use for permanent delete.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          siteUrl: { type: "string", description: "WordPress site root, e.g. https://example.com." },
+          onePasswordItem: { type: "string", description: "1Password item that stores WordPress credentials." },
+          postId: { type: "integer", minimum: 1, description: "Existing WordPress item ID to move to trash." },
+          postType: { type: "string", description: "REST base/post type, e.g. posts, pages, di_slide, flavor_di_slides. Defaults to posts." },
+          expectedTitle: { type: "string", description: "Observed title or title fragment for the approval reviewer to confirm." },
+          reason: { type: "string", description: "Short reason shown to the approver for moving this item to trash." },
+          vault: { type: "string", description: "Optional 1Password vault override." },
+        },
+        required: ["siteUrl", "onePasswordItem", "postId"],
+        additionalProperties: false,
       },
     },
     {
       name: "wp.create_slide",
       description:
-        "Uploads an image and creates a DI Slides slide in one step. External side-effect — request HITL approval first.",
+        "Uploads an image and creates a DI Slides slide in one step. Defaults to draft. External side-effect. SwanBot's client runtime requires an exact approved HITL gate before execution; if missing, it creates a pending approval and does not touch WordPress.",
       input_schema: {
         type: "object" as const,
         properties: {
@@ -1358,10 +1389,11 @@ const TOOLS: ToolDef[] = [
           fileName: { type: "string" },
           mimeType: { type: "string" },
           title: { type: "string" },
-          status: { type: "string", enum: ["draft", "publish"] },
-          slideType: { type: "string", description: "CPT slug. Defaults to 'flavor_di_slides'." },
+          status: { type: "string", enum: ["draft", "publish"], description: "Defaults to draft when omitted." },
+          slideType: { type: "string", description: "CPT slug discovered from wp.discover_types, e.g. di_slide or flavor_di_slides." },
         },
         required: ["siteUrl", "onePasswordItem", "storagePath", "fileName"],
+        additionalProperties: false,
       },
     },
   ].map((spec) => ({
@@ -1376,7 +1408,7 @@ const TOOLS: ToolDef[] = [
 
   // ─── M2: Desktop automation (client-delegated) ────────────────────────
   //
-  // These 11 tools target the user's local Claude Code bridge at
+  // These tools target the user's local Claude Code bridge at
   // localhost:7778. The edge function can't reach that bridge — it runs
   // on Supabase's servers — so each tool is marked `clientOnly: true`.
   // When the model invokes any of these, `runLoop` returns a
@@ -1436,6 +1468,21 @@ const TOOLS: ToolDef[] = [
           restoreClipboard: { type: "boolean", description: "Defaults true." },
         },
         required: ["text"],
+      },
+    },
+    {
+      name: "desktop.run_applescript",
+      description:
+        "Drive scriptable macOS apps through AppleScript, the app-native automation surface. Prefer this over UI clicking for Notes, Reminders, Calendar, Mail, Music, Finder, Messages, Safari, TextEdit, and similar scriptable apps. Use built-in recipes with intent='create_note' and params { body, title? } or intent='create_reminder' and params { text, listName? }; or pass researched scriptLines as an `on run argv` program with dynamic/user content in args, never inlined into script text. Max 10000 chars of script and 16 args.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          intent: { type: "string", enum: ["create_note", "create_reminder"], description: "Built-in recipe to run. Omit when supplying scriptLines." },
+          params: { type: "object", description: "Recipe params: { body, title? } for create_note; { text, listName? } for create_reminder." },
+          scriptLines: { type: "array", items: { type: "string" }, description: "AppleScript lines for an `on run argv` program. Pass user content via args and read it with `item N of argv`." },
+          args: { type: "array", items: { type: "string" }, description: "Arguments for `on run argv`, in order (max 16)." },
+          summary: { type: "string", description: "One-line description of the effect for approval and proof." },
+        },
       },
     },
     {
@@ -1503,6 +1550,48 @@ const TOOLS: ToolDef[] = [
         type: "object" as const,
         properties: { path: { type: "string" } },
         required: ["path"],
+      },
+    },
+    {
+      name: "desktop.file_search",
+      description:
+        "Searches filenames and small text-file contents under one or more local folders. Read-only and bounded. Use to find files before opening, converting, uploading, or editing them when the exact path is unknown. Requires one-time local file verification for the browser session.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          rootPath: { type: "string", description: "Single folder to search under. Defaults to ~ when omitted." },
+          rootPaths: { type: "array", items: { type: "string" }, description: "Multiple folders to search under (alternative to rootPath)." },
+          query: { type: "string", description: "Filename or content keywords to match." },
+          maxResults: { type: "number", description: "Max matches to return." },
+          maxFiles: { type: "number", description: "Max files to scan before stopping." },
+          maxDepth: { type: "number", description: "Max folder depth to descend." },
+          includeContent: { type: "boolean", description: "Also match inside small text-file contents." },
+          extensions: { type: "array", items: { type: "string" }, description: "Restrict matches to these extensions, e.g. [\"png\", \"pdf\", \"indd\"]." },
+        },
+        required: ["query"],
+      },
+    },
+    {
+      name: "desktop.file_stat",
+      description:
+        "Checks whether a local path exists and returns bounded metadata such as kind, size, and modified time. Read-only. Use after desktop.file_search and after exports/conversions before reporting success.",
+      input_schema: {
+        type: "object" as const,
+        properties: { path: { type: "string", description: "Absolute or ~-relative path to inspect." } },
+        required: ["path"],
+      },
+    },
+    {
+      name: "desktop.convert_image",
+      description:
+        "Convert/save/export an image to another format (PNG, JPG, TIFF, GIF, BMP, HEIC) reliably via macOS sips with no GUI or dialogs. Prefer this for any \"save/convert/export this image as <format>\" task instead of scripting Photoshop/Preview. `source` may be a full path or just the file name, such as \"pearsoncdjr-img\"; the bridge resolves it across Desktop, Downloads, Documents, and Pictures and writes the converted file next to the source. If the user also wants the image opened in a specific app, additionally call desktop.launch_app or desktop.open_path.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          source: { type: "string", description: "Image file path or bare file name to convert." },
+          format: { type: "string", enum: ["png", "jpg", "jpeg", "tiff", "gif", "bmp", "heic"], description: "Target format. Defaults to png." },
+        },
+        required: ["source"],
       },
     },
     {
@@ -1670,6 +1759,20 @@ const TOOLS: ToolDef[] = [
       },
     },
     {
+      name: "browser.wp_admin_source_intelligence",
+      description:
+        "Reads the current local browser page source and returns only bounded, redacted WordPress/Dealer Inspire admin facts and task hints. Use before wp-admin tasks such as DI Slides, pages, media, plugin settings, or Dealer Inspire workflows. Never returns raw HTML, nonce values, API keys, credentials, or email payloads.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          maxChars: { type: "integer", minimum: 10000, maximum: 300000, description: "Default 180000. Raw source is parsed locally and not returned." },
+          maxMenuItems: { type: "integer", minimum: 1, maximum: 120, description: "Maximum admin menu/custom post type entries to summarize." },
+          maxRows: { type: "integer", minimum: 1, maximum: 50, description: "Maximum current list-table rows to summarize." },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
       name: "browser.verification_state",
       description:
         "Read-only check for CAPTCHA, anti-bot, Cloudflare, MFA, or human verification on the current browser page. If detected, pause automation and ask the user to complete it manually before continuing.",
@@ -1710,12 +1813,14 @@ const TOOLS: ToolDef[] = [
     {
       name: "browser.fill_credential_field",
       description:
-        "Safely fills a browser field with a login credential from 1Password without returning the raw secret to the model. Use for username/email/password fields during user-approved login flows. Never use for OTP, MFA, CAPTCHA, bot checks, or 'not a robot' controls — pause for the human instead.",
+        "Safely fills a browser field with a login credential from 1Password without returning the raw secret to the model. Use for username/email/password fields during user-approved login flows, and pass siteUrl or expectedOrigin whenever known so the local browser can verify it is on the approved origin before fetching the secret. Never use for OTP, MFA, CAPTCHA, bot checks, or 'not a robot' controls — pause for the human instead.",
       input_schema: {
         type: "object" as const,
         properties: {
           item: { type: "string", description: "1Password item name (for example, 'WordPress Admin')." },
           vault: { type: "string", description: "Optional 1Password vault name." },
+          siteUrl: { type: "string", description: "Expected site URL for origin binding before the saved credential is fetched and filled." },
+          expectedOrigin: { type: "string", description: "Expected browser origin or hostname, e.g. https://example.com or example.com. Overrides siteUrl when provided." },
           credentialField: { type: "string", enum: ["username", "email", "password"], description: "Field to fetch and fill." },
           role: { type: "string", description: "Usually 'textbox'. Omit only if using selector." },
           name: { type: "string", description: "Accessible field name/label." },
@@ -1782,10 +1887,10 @@ const TOOL_GROUPS: Record<string, string[]> = {
   messages: ["messages.create", "approvals.request"],
   rooms: ["rooms.list", "rooms.create", "rooms.send_message", "workspace.create_room", "workspace.apply_artifacts", "workspace.open_preview", "approvals.request"],
   workspace: ["workspace.create_room", "workspace.apply_artifacts", "workspace.open_preview", "verification.typecheck", "verification.tests", "verification.lint", "approvals.request"],
-  approvals: ["approvals.list", "approvals.request", "approvals.resolve"],
-  browser: ["browser.open_url", "browser.dom_snapshot", "browser.verification_state", "browser.click_role", "browser.fill_field", "browser.fill_credential_field", "browser.press_key", "browser.screenshot", "approvals.request"],
-  desktop: ["desktop.launch_app", "desktop.focus_app", "desktop.type_text", "desktop.paste_text", "desktop.press_keys", "desktop.menu_click", "desktop.list_running_apps", "desktop.wait_for_app", "desktop.screenshot", "desktop.open_url", "desktop.open_path", "desktop.click_at", "desktop.mouse_move", "desktop.mouse_click", "desktop.mouse_down", "desktop.mouse_up", "desktop.mouse_drag", "desktop.mouse_scroll", "desktop.screen_size", "desktop.read_a11y_tree", "desktop.click_element", "desktop.set_element_value", "approvals.request"],
-  wordpress: ["wp.discover_types", "wp.list_posts", "wp.upload_media", "wp.create_slide", "browser.open_url", "browser.dom_snapshot", "browser.verification_state", "browser.click_role", "browser.fill_field", "browser.fill_credential_field", "approvals.request"],
+  approvals: ["approvals.list", "approvals.request"],
+  browser: ["browser.open_url", "browser.dom_snapshot", "browser.wp_admin_source_intelligence", "browser.verification_state", "browser.click_role", "browser.fill_field", "browser.fill_credential_field", "browser.press_key", "browser.screenshot", "approvals.request"],
+  desktop: ["fetch_url", "desktop.launch_app", "desktop.focus_app", "desktop.type_text", "desktop.paste_text", "desktop.run_applescript", "desktop.press_keys", "desktop.menu_click", "desktop.list_running_apps", "desktop.wait_for_app", "desktop.screenshot", "desktop.open_url", "desktop.open_path", "desktop.file_search", "desktop.file_stat", "desktop.convert_image", "desktop.click_at", "desktop.mouse_move", "desktop.mouse_click", "desktop.mouse_down", "desktop.mouse_up", "desktop.mouse_drag", "desktop.mouse_scroll", "desktop.screen_size", "desktop.read_a11y_tree", "desktop.click_element", "desktop.set_element_value", "approvals.request"],
+  wordpress: ["wp.discover_types", "wp.list_posts", "browser.wp_admin_source_intelligence", "wp.upload_media", "wp.create_slide", "wp.update_post", "wp.trash_post", "browser.open_url", "browser.dom_snapshot", "browser.verification_state", "browser.click_role", "browser.fill_field", "browser.fill_credential_field", "approvals.request"],
   credentials: ["credentials.get", "browser.fill_credential_field", "browser.verification_state", "approvals.request"],
   rewards: ["rewards.summary", "rewards.leaderboard", "getMemberStatus", "check_ins.list", "tasks.list"],
   verification: ["verification.typecheck", "verification.tests", "verification.lint"],
@@ -1814,7 +1919,8 @@ function selectToolsForTurn(userMessage: string, mode: Mode): ToolDef[] {
   if (/\b(room|workspace|artifact|preview|file|code|build|typecheck|test|lint|component|screen|page)\b/.test(text)) addToolNames(selected, TOOL_GROUPS.workspace);
   if (/\b(browser|chrome|safari|website|web app|form|click|fill|login|sign in|tab|url|captcha|cloudflare|verification|not a robot)\b/.test(text)) addToolNames(selected, TOOL_GROUPS.browser);
   if (/\b(desktop|computer|mac|app|launch|focus|window|clipboard|screenshot|screen|finder|terminal|keyboard|mouse|photoshop|photo shop|illustrator|lightroom|premiere|after effects|figma|canva|blender|image editor|photo editor|image editing|photo editing|retouch|mockup)\b/.test(text)) addToolNames(selected, TOOL_GROUPS.desktop);
-  if (/\b(wordpress|wp-|wp |post|page|media|slide|publish|draft|cms)\b/.test(text)) addToolNames(selected, TOOL_GROUPS.wordpress);
+  if (/(?:^|\s)(?:~\/|\/users\/|\/downloads?\/|\/desktop\/)|\b(files?|folders?|finder|desktop|downloads?|documents?|pictures?|photos?|local path|open path)\b|\b[A-Za-z0-9][A-Za-z0-9 ._@()+-]{0,120}\.(?:png|jpe?g|gif|webp|tiff?|bmp|heic|pdf|txt|md|json|csv|docx?|xlsx?|pptx?|psd|psb|indd|idml|zip)\b/i.test(text)) addToolNames(selected, TOOL_GROUPS.desktop);
+  if (/\b(wordpress|wp-|wp |post|page|media|slide|publish|draft|cms|dealer inspire|dealerinspire|di_slide|flavor_di_slides|di slides?|quick edit|expiration_date|admin\.php|reload cache)\b/.test(text)) addToolNames(selected, TOOL_GROUPS.wordpress);
   if (/\b(credential|credentials|password|username|email|1password|vault|secret)\b/.test(text)) addToolNames(selected, TOOL_GROUPS.credentials);
   if (/\b(score|scores|points|xp|badge|badges|leaderboard|rank|ranking|streak|karma)\b/.test(text)) addToolNames(selected, TOOL_GROUPS.rewards);
   if (/\b(typecheck|tests?|lint|verify|verification|ci|smoke)\b/.test(text)) addToolNames(selected, TOOL_GROUPS.verification);
@@ -1862,12 +1968,12 @@ async function buildFrozenBlock(
     // because screenshots are the most familiar pattern. Making the
     // order explicit cuts token spend + misclicks.
     "1. For ON-SCREEN app automation, prefer **desktop.read_a11y_tree + desktop.click_element** (semantic selectors, ~75% cheaper per step, stable under resize/theme changes). For named text fields, prefer **desktop.set_element_value** from the a11y tree before click+paste. Use **desktop.menu_click** before coordinates when the action exists in the app menu. Use **desktop.paste_text** for long/multiline text, and **desktop.mouse_down + desktop.mouse_up** only for held interactions such as dragging handles, painting, selecting, or scrubbing.",
-    "2. For WEB automation, prefer **browser.dom_snapshot + browser.click_role / browser.fill_field** (ARIA-backed selectors, same benefits).",
+    "2. For WEB automation, prefer **browser.dom_snapshot + browser.click_role / browser.fill_field** (ARIA-backed selectors, same benefits). For WordPress/wp-admin or Dealer Inspire work, use **wp.discover_types / wp.list_posts / wp.update_post** for supported REST operations and call **browser.wp_admin_source_intelligence** before wp-admin UI decisions so only bounded redacted admin facts reach the model.",
     "3. Fall back to **desktop.screenshot + desktop.click_at** (vision) ONLY when: the a11y tree doesn't contain the target after two reads, the app is a canvas/image editor (Photoshop, Figma, games), OR `desktop.click_element` returns a path-not-found error. Say out loud that you're switching to vision so the user can audit the fallback.",
     "4. Before any click_at/mouse_click/mouse_down/mouse_drag call, always call desktop.screenshot or desktop.screen_size first and describe what you see — the model (you) should reason about coordinates from the image, never guess blind.",
     "5. Before browser clicks/fills on login, signup, checkout, admin, or suspicious pages, call browser.verification_state. If CAPTCHA, bot verification, MFA, or 'not a robot' is detected, DO NOT click or solve it; tell the user to complete it manually and wait for confirmation.",
     "6. For risky writes (publish, external_send, file_write, browser_action), call approvals.request FIRST with a `payload` containing `{ tool, app, label, url }` so the HITL banner renders a human-readable action line instead of raw args.",
-    "7. For login forms, prefer browser.fill_credential_field over credentials.get so raw passwords are never returned to the model. Never print secrets.",
+    "7. For login forms, prefer browser.fill_credential_field over credentials.get so raw passwords are never returned to the model. Pass siteUrl or expectedOrigin whenever known so the browser can verify the approved origin before filling. Never print secrets.",
     "8. Use only the tools listed below. If a capability is missing from this turn's focused tool list, explain the needed capability rather than inventing a tool call.",
     "9. Deterministic-first orchestration: when the user gives explicit desktop/browser steps, execute the concrete tool sequence instead of replacing it with free-form model advice. Use model reasoning only at decision points: ambiguous visual target, selector missing after observation, creative artifact generation, summarization of observed state, or recovery after two failed deterministic attempts.",
     "10. Creative/model handoff: if the task needs a generated image, design asset, prompt rewrite, or visual concept, produce a concrete artifact or route to the available image/model tool when present. If this turn's focused tools do not include image generation, say what tool/key is needed and provide a ready-to-run prompt rather than claiming the runtime cannot help.",
@@ -1962,6 +2068,7 @@ async function anthropicTurn(args: {
 // ─── Loop ───────────────────────────────────────────────────────────────────
 
 const MAX_ITERATIONS = 5;
+const SWANBOT_CONTINUATION_MAX_AGE_MS = 10 * 60 * 1000;
 
 // ─── M2: client-delegated tool call return shape ────────────────────────────
 //
@@ -2001,8 +2108,49 @@ type RunContinuation = {
   systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }>;
   toolNames?: string[];
   pendingToolUseIds: string[];
+  serverToolResults?: SwanBotResumeToolResult[];
+  continuationCount?: number;
   pausedAt: string;
 };
+
+type SwanBotV2FinalStopReason = "end_turn" | "max_tokens" | "client_pending" | "error";
+
+function classifySwanBotV2FinalStopReason(args: {
+  kind: "pending" | "terminal";
+  hitMax: boolean;
+  modelStopReason?: string | null;
+}): SwanBotV2FinalStopReason {
+  if (args.kind === "pending") return "client_pending";
+  if (args.hitMax) return "max_tokens";
+
+  const reason = String(args.modelStopReason || "").trim().toLowerCase();
+  switch (reason) {
+    case "end_turn":
+    case "stop_sequence":
+      return "end_turn";
+    case "max_tokens":
+      return "max_tokens";
+    default:
+      return "error";
+  }
+}
+
+function terminalRunLoopError(
+  text: string,
+  iterations: number,
+  toolCalls: any[],
+  usage: UsageBreakdown,
+): RunLoopTerminal {
+  return {
+    kind: "terminal",
+    text,
+    iterations,
+    stopReason: "error",
+    hitMax: false,
+    toolCalls,
+    usage,
+  };
+}
 
 const SENSITIVE_TOOL_NAMES = new Set(["credentials.get"]);
 const SENSITIVE_KEY_RE = /(password|passcode|secret|token|api[_-]?key|authorization|cookie|session|totp|otp|private[_-]?key)/i;
@@ -2047,6 +2195,104 @@ function sanitizeContinuationForStorage(cont: RunContinuation): RunContinuation 
   };
 }
 
+function parseIsoTimestampMs(value: unknown): number | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function isContinuationStale(cont: RunContinuation): boolean {
+  const pausedAtMs = parseIsoTimestampMs(cont.pausedAt);
+  if (pausedAtMs === null) return true;
+  return Date.now() - pausedAtMs > SWANBOT_CONTINUATION_MAX_AGE_MS;
+}
+
+function getLastAssistantToolUseIds(messages: AgentMessage[]): string[] {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    const ids = message.content
+      .filter((block): block is Extract<ContentBlock, { type: "tool_use" }> => block.type === "tool_use")
+      .map((block) => block.id);
+    if (ids.length > 0) return ids;
+  }
+  return [];
+}
+
+function mergeContinuationToolResults(
+  cont: RunContinuation,
+  clientResults: SwanBotResumeToolResult[],
+): SwanBotResumeToolResult[] {
+  const byId = new Map<string, SwanBotResumeToolResult>();
+  for (const result of [...(cont.serverToolResults || []), ...clientResults]) {
+    byId.set(result.tool_use_id, result);
+  }
+  const ordered: SwanBotResumeToolResult[] = [];
+  for (const id of getLastAssistantToolUseIds(cont.messages)) {
+    const result = byId.get(id);
+    if (result) ordered.push(result);
+  }
+  for (const result of byId.values()) {
+    if (!ordered.some((existing) => existing.tool_use_id === result.tool_use_id)) {
+      ordered.push(result);
+    }
+  }
+  return ordered;
+}
+
+async function executeEdgeToolUse(args: {
+  use: Extract<ContentBlock, { type: "tool_use" }>;
+  def: ToolDef | undefined;
+  iter: number;
+  ctx: ToolContext;
+  runId: string | null;
+  toolCalls: any[];
+  supabase: SupabaseEdgeClient;
+}): Promise<{ block: ContentBlock; resumeResult: SwanBotResumeToolResult }> {
+  const { use, def, iter, ctx, runId, toolCalls, supabase } = args;
+  const started = Date.now();
+  if (runId) {
+    void supabase.from("agent_run_events").insert({
+      run_id: runId,
+      kind: "tool_call_start",
+      payload: { iteration: iter, tool: use.name, tool_use_id: use.id, input: use.input },
+    });
+  }
+  let result: ToolResult;
+  if (!def) {
+    result = { ok: false, error: `Tool "${use.name}" is not registered.` };
+  } else {
+    try {
+      result = await def.handler(use.input, ctx);
+    } catch (e) {
+      result = { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+  const durationMs = Date.now() - started;
+  toolCalls.push({ toolName: use.name, toolUseId: use.id, ok: result.ok, durationMs, error: result.ok ? undefined : result.error });
+  if (runId) {
+    void supabase.from("agent_run_events").insert({
+      run_id: runId,
+      kind: "tool_call_result",
+      payload: { iteration: iter, tool: use.name, tool_use_id: use.id, ok: result.ok, duration_ms: durationMs, ...(result.ok ? {} : { error: result.error }) },
+    });
+  }
+  const content = JSON.stringify(result);
+  return {
+    block: {
+      type: "tool_result",
+      tool_use_id: use.id,
+      content,
+      is_error: !result.ok,
+    },
+    resumeResult: {
+      tool_use_id: use.id,
+      content,
+      is_error: !result.ok,
+    },
+  };
+}
+
 async function runLoop(args: {
   apiKey: string;
   model: string;
@@ -2063,7 +2309,7 @@ async function runLoop(args: {
   /** Tool results the client reported back for the previous pending
    *  turn. Injected as a `user` message with `tool_result` blocks
    *  before the next Anthropic turn. */
-  resumeToolResults?: Array<{ tool_use_id: string; content: string; is_error?: boolean }>;
+  resumeToolResults?: SwanBotResumeToolResult[];
 }): Promise<RunLoopTerminal | RunLoopPending> {
   const { apiKey, model, userMessage, mode, targetAgentName, supabase, circleId, userId, runId, resumeFrom, resumeToolResults } = args;
   const activeTools = resumeFrom
@@ -2144,25 +2390,65 @@ async function runLoop(args: {
     const uses = turn.content.filter((b): b is Extract<ContentBlock, { type: "tool_use" }> => b.type === "tool_use");
 
     // ── M2: short-circuit on clientOnly tools ─────────────────────────
-    // If ANY pending tool use is client-only, we can't dispatch on the
-    // edge — we have to pause, serialise state, and return to the HTTP
-    // handler so the client can execute. Mixed batches (some server,
-    // some client) are also treated as fully-client — the edge fn
-    // snapshots before running server tools, the client handles the
-    // whole batch. Keeps the protocol one-way simple.
-    const anyClientOnly = uses.some((u) => activeTools.find((t) => t.name === u.name)?.clientOnly === true);
-    if (anyClientOnly) {
+    // Client-only tools must run on the app/desktop side. If Anthropic
+    // returns a mixed batch, run the server tools here first and persist
+    // those results in the continuation. The client receives only the
+    // true client-only calls, then resume merges both result sets in the
+    // original assistant tool-use order.
+    const clientUses = uses.filter((u) => activeTools.find((t) => t.name === u.name)?.clientOnly === true);
+    const serverUses = uses.filter((u) => activeTools.find((t) => t.name === u.name)?.clientOnly !== true);
+    if (clientUses.length > 0) {
+      if (!runId) {
+        return terminalRunLoopError(
+          "Cannot pause for client-side tools because the run was not persisted.",
+          iter,
+          toolCalls,
+          usageTotal,
+        );
+      }
+      if (clientUses.length > SWANBOT_MAX_CLIENT_TOOL_RESULTS) {
+        return terminalRunLoopError(
+          `Too many client-side tool calls (${clientUses.length}).`,
+          iter,
+          toolCalls,
+          usageTotal,
+        );
+      }
+      const continuationCount = (resumeFrom?.continuationCount || 0) + 1;
+      if (continuationCount > MAX_ITERATIONS) {
+        return terminalRunLoopError(
+          "Too many client-side continuation rounds.",
+          iter,
+          toolCalls,
+          usageTotal,
+        );
+      }
+
+      const serverToolResults: SwanBotResumeToolResult[] = [];
+      for (const use of serverUses) {
+        const def = activeTools.find((t) => t.name === use.name);
+        const { resumeResult } = await executeEdgeToolUse({
+          use,
+          def,
+          iter,
+          ctx,
+          runId,
+          toolCalls,
+          supabase,
+        });
+        serverToolResults.push(resumeResult);
+      }
       // Mark the pending client tools in the event log so telemetry
       // sees them. Actual tool_call_result events land on resume.
       if (runId) {
-        for (const use of uses) {
+        for (const use of clientUses) {
           void supabase.from("agent_run_events").insert({
             run_id: runId, kind: "client_tool_call_pending",
             payload: { iteration: iter, tool: use.name, tool_use_id: use.id, input: use.input },
           });
         }
       }
-      const clientToolCalls = uses.map((u) => ({ id: u.id, name: u.name, input: u.input }));
+      const clientToolCalls = clientUses.map((u) => ({ id: u.id, name: u.name, input: u.input }));
       const continuation: RunContinuation = {
         iter,                           // resume from SAME iteration — the loop re-calls Anthropic with the
                                          // tool results injected as the next user message, and the loop body
@@ -2175,7 +2461,9 @@ async function runLoop(args: {
         targetAgentName,
         systemBlocks,
         toolNames: activeTools.map((tool) => tool.name),
-        pendingToolUseIds: uses.map((u) => u.id),
+        pendingToolUseIds: clientUses.map((u) => u.id),
+        serverToolResults,
+        continuationCount,
         pausedAt: new Date().toISOString(),
       };
       return {
@@ -2191,37 +2479,16 @@ async function runLoop(args: {
     const resultBlocks: ContentBlock[] = [];
     for (const use of uses) {
       const def = activeTools.find((t) => t.name === use.name);
-      const started = Date.now();
-      if (runId) {
-        void supabase.from("agent_run_events").insert({
-          run_id: runId, kind: "tool_call_start",
-          payload: { iteration: iter, tool: use.name, tool_use_id: use.id, input: use.input },
-        });
-      }
-      let result: ToolResult;
-      if (!def) {
-        result = { ok: false, error: `Tool "${use.name}" is not registered.` };
-      } else {
-        try {
-          result = await def.handler(use.input, ctx);
-        } catch (e) {
-          result = { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-      }
-      const durationMs = Date.now() - started;
-      toolCalls.push({ toolName: use.name, toolUseId: use.id, ok: result.ok, durationMs, error: result.ok ? undefined : result.error });
-      if (runId) {
-        void supabase.from("agent_run_events").insert({
-          run_id: runId, kind: "tool_call_result",
-          payload: { iteration: iter, tool: use.name, tool_use_id: use.id, ok: result.ok, duration_ms: durationMs, ...(result.ok ? {} : { error: result.error }) },
-        });
-      }
-      resultBlocks.push({
-        type: "tool_result",
-        tool_use_id: use.id,
-        content: JSON.stringify(result),
-        is_error: !result.ok,
+      const { block } = await executeEdgeToolUse({
+        use,
+        def,
+        iter,
+        ctx,
+        runId,
+        toolCalls,
+        supabase,
       });
+      resultBlocks.push(block);
     }
 
     messages.push({ role: "user", content: resultBlocks });
@@ -2258,13 +2525,16 @@ Deno.serve(async (req: Request) => {
   // Body shape for resume: { continuationRunId, toolResults, circleId, userId }
   // circleId + userId still required for auth/ownership check. Mode /
   // model / message / targetAgent all pulled from the saved snapshot.
-  const isContinuation = typeof body.continuationRunId === "string" && Array.isArray(body.toolResults);
+  const isContinuation = typeof body.continuationRunId === "string";
 
   const message: string | undefined = body.message;
   const circleId: string | undefined = body.circleId;
   const userId: string | undefined = body.userId;
   if (!circleId || !userId) {
     return errResponse(400, "missing_fields", "circleId, userId required");
+  }
+  if (isContinuation && !Array.isArray(body.toolResults)) {
+    return errResponse(400, "invalid_tool_results", "toolResults must be an array");
   }
   if (!isContinuation && !message) {
     return errResponse(400, "missing_fields", "message required (or use continuationRunId + toolResults)");
@@ -2299,13 +2569,13 @@ Deno.serve(async (req: Request) => {
   let targetAgentName: string;
   let runId: string | null = null;
   let resumeFrom: RunContinuation | undefined;
-  let resumeToolResults: Array<{ tool_use_id: string; content: string; is_error?: boolean }> | undefined;
+  let resumeToolResults: SwanBotResumeToolResult[] | undefined;
 
   if (isContinuation) {
     // Load the continuation snapshot + verify ownership.
     const { data: runRow, error: runErr } = await supabase
       .from("agent_runs")
-      .select("id, user_id, circle_id, metadata, status")
+      .select("id, user_id, circle_id, metadata, status, final_stop_reason")
       .eq("id", body.continuationRunId)
       .maybeSingle();
     if (runErr || !runRow) {
@@ -2318,17 +2588,36 @@ Deno.serve(async (req: Request) => {
     if (!cont) {
       return errResponse(400, "no_pending_continuation", "that run has no saved continuation");
     }
+    if (runRow.status !== "running" || runRow.final_stop_reason !== "client_pending") {
+      return errResponse(409, "continuation_closed", "that run is no longer waiting for client-side tool results");
+    }
+    if (isContinuationStale(cont)) {
+      const metadata = (runRow.metadata || {}) as Record<string, unknown>;
+      const restMetadata = { ...metadata };
+      delete restMetadata.continuation;
+      await supabase.from("agent_runs").update({
+        status: "failed",
+        final_stop_reason: "error",
+        completed_at: new Date().toISOString(),
+        metadata: {
+          ...restMetadata,
+          version: "swanbot-v2-ai",
+          staleContinuation: true,
+          staleContinuationPausedAt: cont.pausedAt,
+        },
+      }).eq("id", runRow.id);
+      return errResponse(409, "continuation_stale", "that saved continuation expired; start a fresh run");
+    }
     mode = cont.mode;
     model = cont.model;
     targetAgentName = cont.targetAgentName;
     runId = runRow.id as string;
     resumeFrom = cont;
-    // Normalise incoming tool results into the content-block shape.
-    resumeToolResults = (body.toolResults as Array<any>).map((r) => ({
-      tool_use_id: String(r.tool_use_id || r.id || ""),
-      content: typeof r.content === "string" ? r.content : JSON.stringify(r.content ?? {}),
-      is_error: !!r.is_error,
-    })).filter((r) => r.tool_use_id);
+    const validatedResults = validateSwanBotResumeToolResults(body.toolResults, cont.pendingToolUseIds || []);
+    if (!validatedResults.ok) {
+      return errResponse(400, "invalid_tool_results", validatedResults.error);
+    }
+    resumeToolResults = mergeContinuationToolResults(cont, validatedResults.results);
   } else {
     const modeInput = (body.mode || "talk") as string;
     mode = (["talk","build","plan","execute","review","research","support","design"] as Mode[])
@@ -2364,9 +2653,19 @@ Deno.serve(async (req: Request) => {
 
     // ── M2 pending response ────────────────────────────────────────────
     if (result.kind === "pending") {
+      const finalStopReason = classifySwanBotV2FinalStopReason({
+        kind: "pending",
+        hitMax: false,
+        modelStopReason: null,
+      });
       // Persist continuation snapshot so the resume request can pick up.
       if (runId) {
         await supabase.from("agent_runs").update({
+          // AR4/G2: the run is genuinely paused on a client-delegated tool, not
+          // terminal — tag it so the readiness gate's stop-reason breakdown
+          // does not silently inflate the apparent end_turn rate. Status stays
+          // as-is (still "running"); only the reason field is added.
+          final_stop_reason: finalStopReason,
           metadata: {
             version: "swanbot-v2-ai",
             targetAgent: targetAgentName,
@@ -2392,16 +2691,22 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    const finalStopReason = classifySwanBotV2FinalStopReason({
+      kind: "terminal",
+      hitMax: result.hitMax,
+      modelStopReason: result.stopReason,
+    });
+    const terminalStatus = finalStopReason === "end_turn" ? "completed" : "failed";
     if (runId) {
       await supabase.from("agent_runs").update({
         tool_calls: result.toolCalls,
         iteration_count: result.iterations,
-        final_stop_reason: result.stopReason,
-        status: result.hitMax ? "failed" : "completed",
+        final_stop_reason: finalStopReason,
+        status: terminalStatus,
         completed_at: new Date().toISOString(),
         // Clear the continuation blob on terminal completion — the run
         // isn't paused anymore, don't confuse later dashboards.
-        metadata: { version: "swanbot-v2-ai", targetAgent: targetAgentName },
+        metadata: { version: "swanbot-v2-ai", targetAgent: targetAgentName, rawStopReason: result.stopReason },
       }).eq("id", runId);
     }
 
@@ -2415,8 +2720,8 @@ Deno.serve(async (req: Request) => {
       agentName: targetAgentName,
       source: "system",
       sourceDetail: "swanbot-v2-ai",
-      activityType: result.hitMax ? "task_failed" : "message_out",
-      status: result.hitMax ? "failed" : "completed",
+      activityType: terminalStatus === "failed" ? "task_failed" : "message_out",
+      status: terminalStatus,
       title: summariseRunTitle(message ?? "", result.text, mode),
       body: formatToolTraceSummary(result.toolCalls),
       metadata: {
@@ -2424,7 +2729,8 @@ Deno.serve(async (req: Request) => {
         mode,
         model,
         iterations: result.iterations,
-        stopReason: result.stopReason,
+        stopReason: finalStopReason,
+        rawStopReason: result.stopReason,
         toolCallCount: result.toolCalls?.length ?? 0,
         usage: result.usage,
       },
@@ -2446,7 +2752,8 @@ Deno.serve(async (req: Request) => {
       text: result.text,
       runId,
       iterations: result.iterations,
-      stopReason: result.stopReason,
+      stopReason: finalStopReason,
+      rawStopReason: result.stopReason,
       hitMaxIterations: result.hitMax,
       toolCalls: result.toolCalls,
       usage: result.usage,
@@ -2459,6 +2766,9 @@ Deno.serve(async (req: Request) => {
     if (runId) {
       await supabase.from("agent_runs").update({
         status: "failed",
+        // AR4/G2: tag errored runs so the readiness gate counts them as
+        // "error" rather than missing — matches the kind:"error" event below.
+        final_stop_reason: "error",
         completed_at: new Date().toISOString(),
         metadata: { error: msg, version: "swanbot-v2-ai" },
       }).eq("id", runId);

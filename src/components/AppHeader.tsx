@@ -33,7 +33,7 @@ const MENU_ENTRIES: MenuEntry[] = [
   { label: 'Friends',       icon: '⁘', flatIcon: 'friends',       screen: 'Friends' },
   { label: 'Organizations', icon: '▣', flatIcon: 'organizations', screen: 'OrgList' },
   { label: 'Schools',       icon: '△', flatIcon: 'schools',       screen: 'Schools' },
-  { label: 'Knowledge Wiki', icon: '◈', flatIcon: 'wiki',         screen: 'Wiki' },
+  { label: 'Wiki', icon: '◈', flatIcon: 'wiki',         screen: 'Wiki' },
   'divider',
   { label: 'Agents',        icon: '⬡', flatIcon: 'agents',        screen: 'Agents' },
   { label: 'Marketplace',   icon: '🛍', flatIcon: 'integrations',  screen: 'Integrations' },

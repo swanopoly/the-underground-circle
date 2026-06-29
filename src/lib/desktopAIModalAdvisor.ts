@@ -99,11 +99,30 @@ function nodeText(node: DesktopAIModalNode): string {
   return cleanText(`${node.role || ''} ${node.label || ''} ${node.value || ''}`);
 }
 
+// Roles that ARE a modal/blocking surface on their own.
+const MODAL_ROLES = /^(dialog|sheet|popover|alert)$/;
+// Roles that mark a normal MAIN application window (sidebar/editor/content
+// surface). A bare `window` carrying any of these is the app itself, not a
+// blocking modal — a real alert/confirm window has none of them.
+const MAIN_WINDOW_CONTENT_ROLES = /^(outline|splitgroup|webarea|tabgroup|textarea|grid|table|browser)$/;
+
 function looksLikeModal(root: DesktopAIModalNode): boolean {
   const nodes = flattenModalNodes(root).slice(0, 260);
-  const hasModalRole = nodes.some((node) => /dialog|sheet|popover|window/.test(normalizeRole(node.role)));
-  const buttonCount = nodes.filter((node) => isButton(node) && cleanText(node.label || node.value)).length;
-  return hasModalRole && buttonCount > 0;
+  const hasButton = nodes.some((node) => isButton(node) && cleanText(node.label || node.value));
+  if (!hasButton) return false;
+
+  // A genuine modal role (dialog/sheet/popover/alert) with any button is a modal.
+  if (nodes.some((node) => MODAL_ROLES.test(normalizeRole(node.role)))) return true;
+
+  // A bare top-level `window` is the app's MAIN window, not a modal. Only treat
+  // it as one when it lacks main-window content roles — otherwise normal app
+  // windows (Notes, Finder, editors) whose toolbars expose buttons get
+  // mistaken for a blocking popup, which previously halted every desktop task
+  // at step 1 ("popup needs a decision"). Real save/overwrite/permission
+  // dialogs are AXSheet/AXDialog (caught above) or content-free windows.
+  const hasWindow = nodes.some((node) => normalizeRole(node.role) === 'window');
+  if (!hasWindow) return false;
+  return !nodes.some((node) => MAIN_WINDOW_CONTENT_ROLES.test(normalizeRole(node.role)));
 }
 
 function visibleModalText(root: DesktopAIModalNode): string {

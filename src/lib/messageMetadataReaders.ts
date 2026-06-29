@@ -1,4 +1,5 @@
 import type { BrowserPlanCardData, BrowserPlanEvent, BrowserSessionRecord } from './computerUse';
+import type { ChatAutomationPlanPreview } from './chatAutomationPlanPreview';
 import type { ChatComputerHandoffMetadata } from './chatComputerHandoffContext';
 import type { ChatCommandDecision } from './chatCommandRegistry';
 import type { OpenSwanMemoryRecommendation, PromptMemoryReference } from './memoryService';
@@ -65,6 +66,11 @@ export function readMessageComputerHandoff(metadata: UnknownMetadata): ChatCompu
   return value && typeof value === 'object' ? value as ChatComputerHandoffMetadata : undefined;
 }
 
+export function readMessageChatAutomationPlanPreview(metadata: UnknownMetadata): ChatAutomationPlanPreview | undefined {
+  const value = metadata?.chatAutomationPlanPreview;
+  return value && typeof value === 'object' ? value as ChatAutomationPlanPreview : undefined;
+}
+
 export function readPersistedChatBotMessageFields(content: string | null | undefined): PersistedChatBotMetadata {
   return readPersistedChatBotMetadata(content) || {};
 }
@@ -82,6 +88,7 @@ export type HydratedPersistedBotFields = {
   browserSessions?: BrowserSessionRecord[];
   recoveryOptions?: PersistedChatRecoveryOption[];
   computerHandoff?: ChatComputerHandoffMetadata;
+  chatAutomationPlanPreview?: ChatAutomationPlanPreview;
   commandDecisions?: ChatCommandDecision[];
   modeOutcomeSummary?: {
     headline: string;
@@ -108,6 +115,7 @@ export function buildHydratedPersistedBotFields(
     browserSessions: metadata.browserSessions || undefined,
     recoveryOptions: metadata.recoveryOptions || undefined,
     computerHandoff: metadata.computerHandoff || undefined,
+    chatAutomationPlanPreview: metadata.chatAutomationPlanPreview || undefined,
     commandDecisions: metadata.commandDecisions || undefined,
     modeOutcomeSummary: metadata.modeOutcomeSummary?.headline ? {
       headline: metadata.modeOutcomeSummary.headline,

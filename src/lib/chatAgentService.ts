@@ -1,5 +1,6 @@
 import { formatPersistedChatBotMessage } from './chatAgentIdentity';
 import type { AgentPlanDraft } from './agentPlanMode';
+import type { ChatAutomationPlanPreview } from './chatAutomationPlanPreview';
 import type { ChatCommandDecision } from './chatCommandRegistry';
 import type { ChatComputerHandoffMetadata } from './chatComputerHandoffContext';
 import type { BrowserPlanCardData, BrowserPlanEvent, BrowserSessionRecord } from './computerUse';
@@ -76,6 +77,7 @@ export function persistMainChatBotMessageWithRetry(params: {
   recoveryOptions?: PersistedChatRecoveryOption[];
   recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
   computerHandoff?: ChatComputerHandoffMetadata | null;
+  chatAutomationPlanPreview?: ChatAutomationPlanPreview | null;
   modeOutcomeSummary?: {
     headline: string;
     bulletPoints?: string[];
@@ -114,6 +116,7 @@ export function persistMainChatBotMessageWithRetry(params: {
     recoveryOptions,
     recoveryReliability,
     computerHandoff,
+    chatAutomationPlanPreview,
     modeOutcomeSummary,
     observedEval,
     routing,
@@ -149,6 +152,7 @@ export function persistMainChatBotMessageWithRetry(params: {
           recoveryOptions,
           recoveryReliability,
           computerHandoff,
+          chatAutomationPlanPreview,
           modeOutcomeSummary,
           observedEval,
           routing,
@@ -202,6 +206,7 @@ export function updateMainChatBotMessageWithRetry(params: {
   recoveryOptions?: PersistedChatRecoveryOption[];
   recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
   computerHandoff?: ChatComputerHandoffMetadata | null;
+  chatAutomationPlanPreview?: ChatAutomationPlanPreview | null;
   modeOutcomeSummary?: {
     headline: string;
     bulletPoints?: string[];
@@ -237,6 +242,7 @@ export function updateMainChatBotMessageWithRetry(params: {
     recoveryOptions,
     recoveryReliability,
     computerHandoff,
+    chatAutomationPlanPreview,
     modeOutcomeSummary,
     observedEval,
     routing,
@@ -268,6 +274,7 @@ export function updateMainChatBotMessageWithRetry(params: {
         recoveryOptions,
         recoveryReliability,
         computerHandoff,
+        chatAutomationPlanPreview,
         modeOutcomeSummary,
         observedEval,
         routing,

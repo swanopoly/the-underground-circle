@@ -22,12 +22,14 @@
  *   | trusted     | mutating, open-world (default)       | ask, external_send |
  *   | trusted     | mutating, openWorldHint === false    | ask, privileged_action |
  *
- * Trust seam: `circle_mcp_servers` (supabase/migrations/20260319_mcp_servers.sql)
- * has NO trusted/verified column today, so every runtime caller resolves
- * `trusted: false` and every MCP tool fails closed to `ask`. The
- * `McpBridgeServer.trusted?: boolean` field is the documented seam for a
- * future `trusted boolean default false` column (or an allowlist surface) —
- * until that exists, nothing should pass `true` except tests.
+ * Trust source: `circle_mcp_servers` (supabase/migrations/20260319_mcp_servers.sql)
+ * has no trusted/verified column, so per-server trust lives in
+ * `circles.settings.mcpTrustedServerIds` via `src/lib/circleMcpTrustSettings.ts`
+ * (default: empty = all untrusted = fail closed). The Office MCP panel
+ * (`src/screens/circles/tabs/office/McpPanel.tsx`) is the deliberate review
+ * surface that flips it. `getMcpToolsForCircle` resolves that list when the
+ * caller doesn't pass `trustedServerIds` explicitly; a trust-read failure
+ * silently resolves to "nothing trusted".
  *
  * Like openswanBridge, this file does NOT:
  *   - Register tools anywhere (no registry writes, no live wiring). Callers
@@ -76,10 +78,10 @@ export type McpBridgeServer = {
   id: string;
   name: string;
   /**
-   * Trust seam. `circle_mcp_servers` has no trust/verified column, so ALL
-   * current callers resolve this to false (or leave it undefined) and every
-   * tool fails closed. Only a deliberate future trust surface (DB column +
-   * review UX) should ever set this true.
+   * Trust flag. Resolved from `circles.settings.mcpTrustedServerIds`
+   * (see `circleMcpTrustSettings.ts`), which only the MCP management UI
+   * flips after an explicit warning. Undefined/false ⇒ every tool on the
+   * server fails closed to 'ask'.
    */
   trusted?: boolean;
 };
@@ -275,7 +277,7 @@ export function fenceUntrustedMcpText(
 ): { text: string; truncated: boolean } {
   // Neutralize embedded fence tags (open and close) before wrapping, so
   // server output cannot break out of the fence.
-  let body = String(text ?? '').replace(/<(\/?)untrusted_quoted>/gi, '[$1untrusted_quoted-tag-removed]');
+  let body = String(text ?? '').replace(/<\s*(\/?)\s*untrusted_quoted\s*>/gi, '[$1untrusted_quoted-tag-removed]');
   let truncated = false;
   if (body.length > maxChars) {
     const omitted = body.length - maxChars;
@@ -454,6 +456,105 @@ export function buildMcpAgentTools(args: BuildMcpAgentToolsArgs): AgentToolDefin
 }
 
 // ---------------------------------------------------------------------------
+// 5. Legacy approval-gate adapter (typed-core session runtime)
+// ---------------------------------------------------------------------------
+
+/**
+ * The session runtime's `opts.onToolApproval` contract (the same gate that
+ * approves catalog 'ask' tools — see `OpenSwanRunCallbacks`).
+ */
+export type LegacyChatToolApprovalGate = (
+  call: { name: string; input: any },
+) => Promise<'approve' | 'reject'>;
+
+/**
+ * Adapts the session runtime's legacy `{name, input} → approve|reject` gate
+ * into the bridge's `McpToolApprovalGate`, so MCP approvals render through
+ * the SAME UX as catalog 'ask' tools. The server identity and derived policy
+ * are mapped into the payload the gate shows: `name` is the namespaced
+ * `mcp__<slug>__<tool>` and `input` leads with `mcp_server` / `mcp_tool` /
+ * `approval_kind` / `policy_reason` before the model's `arguments`.
+ *
+ * No try/catch needed here: `buildMcpAgentTools` already converts a gate
+ * throw into a fail-closed rejection.
+ */
+export function adaptLegacyToolApprovalGate(gate: LegacyChatToolApprovalGate): McpToolApprovalGate {
+  return async (req) => {
+    const decision = await gate({
+      name: req.toolName,
+      input: {
+        mcp_server: req.serverName,
+        mcp_tool: req.mcpToolName,
+        approval_kind: req.policy.approvalKind || 'privileged_action',
+        policy_reason: req.policy.reason,
+        arguments: req.input ?? {},
+      },
+    });
+    if (decision === 'approve') return { decision: 'approve' };
+    return {
+      decision: 'reject',
+      reason: `User declined MCP tool "${req.mcpToolName}" on server "${req.serverName}".`,
+    };
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 6. Pure merge into a catalog tool set (bounding + ordering + collisions)
+// ---------------------------------------------------------------------------
+
+/** Per-turn cap on MCP tools appended to a catalog tool set. */
+export const MAX_MCP_TOOLS_PER_TURN = 20;
+
+export type MergeMcpToolsResult = {
+  /** Catalog tools first (untouched order), then the appended MCP tools. */
+  tools: AgentToolDefinition[];
+  /** Names of MCP tools that made it into `tools`. */
+  appended: string[];
+  /**
+   * MCP tool names that collided with a catalog tool name. Namespacing makes
+   * this impossible unless a catalog tool starts using the `mcp__` prefix —
+   * asserted anyway: colliders are skipped, never shadowed.
+   */
+  skippedCollisions: string[];
+  /** MCP tool names dropped by the per-turn cap (deterministic tail). */
+  overflow: string[];
+};
+
+/**
+ * Pure merge of bridge MCP tools into an existing catalog tool set:
+ *  - MCP tools are sorted by name (deterministic regardless of fetch order),
+ *  - name collisions with catalog tools are skipped (never shadowed),
+ *  - the appended set is bounded to `maxMcpTools` with the overflow reported.
+ */
+export function mergeMcpToolsIntoCatalog(
+  catalogTools: AgentToolDefinition[],
+  mcpTools: AgentToolDefinition[],
+  maxMcpTools: number = MAX_MCP_TOOLS_PER_TURN,
+): MergeMcpToolsResult {
+  const catalogNames = new Set(catalogTools.map((tool) => tool.name));
+  const sorted = [...mcpTools].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const appendedTools: AgentToolDefinition[] = [];
+  const appended: string[] = [];
+  const skippedCollisions: string[] = [];
+  const overflow: string[] = [];
+  const seen = new Set<string>();
+  for (const tool of sorted) {
+    if (catalogNames.has(tool.name) || seen.has(tool.name)) {
+      skippedCollisions.push(tool.name);
+      continue;
+    }
+    if (appendedTools.length >= Math.max(0, maxMcpTools)) {
+      overflow.push(tool.name);
+      continue;
+    }
+    seen.add(tool.name);
+    appendedTools.push(tool);
+    appended.push(tool.name);
+  }
+  return { tools: [...catalogTools, ...appendedTools], appended, skippedCollisions, overflow };
+}
+
+// ---------------------------------------------------------------------------
 // Circle-level fetch wrapper (the only impure entry point)
 // ---------------------------------------------------------------------------
 
@@ -461,12 +562,23 @@ export type GetMcpToolsForCircleOpts = {
   approvalGate?: McpToolApprovalGate;
   maxResultChars?: number;
   /**
-   * Future trust seam: ids of servers a deliberate review surface has marked
-   * trusted. `circle_mcp_servers` has no trust column today, so no runtime
-   * caller passes this — every server stays untrusted and every tool is
-   * approval-gated (fail closed).
+   * Ids of servers the circle's deliberate trust surface has marked trusted
+   * (`circles.settings.mcpTrustedServerIds`). When omitted, they are read
+   * via `circleMcpTrustSettings.getTrustedMcpServerIds` — a read failure
+   * silently resolves to "nothing trusted" (fail closed).
    */
   trustedServerIds?: string[];
+  /**
+   * Test seam: the impure dependencies, injectable so smoke tests can drive
+   * the WHOLE path without loading `mcpClient`/`supabase`. Runtime callers
+   * never pass this.
+   */
+  deps?: {
+    listMcpServers?: (circleId: string) => Promise<Array<{ id: string; name: string }>>;
+    fetchAllMcpTools?: (circleId: string) => Promise<McpTool[]>;
+    callMcpTool?: (serverId: string, toolName: string, args: unknown) => Promise<unknown>;
+    getTrustedServerIds?: (circleId: string) => Promise<string[]>;
+  };
 };
 
 /**
@@ -475,19 +587,40 @@ export type GetMcpToolsForCircleOpts = {
  * decide where these tools are exposed, and 'ask' tools without an injected
  * approval gate fail closed at call time.
  *
- * `mcpClient` (and through it the live supabase client) is loaded lazily so
- * this module stays importable from pure smoke tests.
+ * `mcpClient` / `circleMcpTrustSettings` (and through them the live supabase
+ * client) are loaded lazily so this module stays importable from pure smoke
+ * tests.
  */
 export async function getMcpToolsForCircle(
   circleId: string,
   opts?: GetMcpToolsForCircleOpts,
 ): Promise<AgentToolDefinition[]> {
-  const { listMcpServers, fetchAllMcpTools } = await import('./mcpClient');
+  const deps = opts?.deps;
+  const needClient = !deps?.listMcpServers || !deps?.fetchAllMcpTools || !deps?.callMcpTool;
+  const client = needClient ? await import('./mcpClient') : null;
+  const listServers = deps?.listMcpServers || client!.listMcpServers;
+  const fetchTools = deps?.fetchAllMcpTools || client!.fetchAllMcpTools;
+  const callTool = deps?.callMcpTool
+    || (async (serverId: string, toolName: string, callArgs: unknown) => client!.callMcpTool(serverId, toolName, callArgs));
+
+  // Trust resolution: explicit opts win; otherwise the circle-settings trust
+  // store. Any failure → empty = all servers untrusted = every tool 'ask'.
+  let trustedServerIds = opts?.trustedServerIds;
+  if (!trustedServerIds) {
+    try {
+      const getIds = deps?.getTrustedServerIds
+        || (await import('./circleMcpTrustSettings')).getTrustedMcpServerIds;
+      trustedServerIds = await getIds(circleId);
+    } catch {
+      trustedServerIds = [];
+    }
+  }
+
   const [serverRecords, tools] = await Promise.all([
-    listMcpServers(circleId),
-    fetchAllMcpTools(circleId),
+    listServers(circleId),
+    fetchTools(circleId),
   ]);
-  const trusted = new Set(opts?.trustedServerIds || []);
+  const trusted = new Set(trustedServerIds || []);
   const servers: McpBridgeServer[] = serverRecords.map((s) => ({
     id: s.id,
     name: s.name,
@@ -498,9 +631,6 @@ export async function getMcpToolsForCircle(
     servers,
     approvalGate: opts?.approvalGate,
     maxResultChars: opts?.maxResultChars,
-    callTool: async (serverId, toolName, callArgs) => {
-      const { callMcpTool } = await import('./mcpClient');
-      return callMcpTool(serverId, toolName, callArgs);
-    },
+    callTool,
   });
 }

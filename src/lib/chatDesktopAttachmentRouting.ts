@@ -105,6 +105,7 @@ export function inferDesktopAppForAttachment(
     return 'AutoCAD';
   }
   if (['f3d', 'f3z'].includes(ext) || requestMentions(request, /\bfusion\s*360\b/)) return 'Fusion 360';
+  if (['m', 'mlx', 'slx', 'mdl'].includes(ext) || requestMentions(request, /\bmatlab\b|\bsimulink\b|\bsimscape\b/)) return 'MATLAB';
   if (['fcstd'].includes(ext)) return 'FreeCAD';
   if (['sldprt', 'sldasm', 'slddrw'].includes(ext) || requestMentions(request, /\bsolid\s*works\b|\bsolidworks\b/)) return 'SOLIDWORKS';
   if (['rvt', 'rfa', 'rte'].includes(ext) || requestMentions(request, /\brevit\b/)) return 'Revit';
@@ -217,7 +218,7 @@ export function shouldRouteAttachedFilesToDesktop(
   if (!attachments.some(isDesktopOpenableAttachment)) return false;
   if (includesAny(request, [
     'indesign', 'in design', 'photoshop', 'illustrator', 'premiere', 'after effects', 'acrobat',
-    'autocad', 'auto cad', 'fusion 360', 'solidworks', 'solid works', 'revit', 'sketchup', 'sketch up',
+    'autocad', 'auto cad', 'fusion 360', 'solidworks', 'solid works', 'matlab', 'simulink', 'simscape', 'revit', 'sketchup', 'sketch up',
     'rhino', 'rhinoceros', 'inventor', 'blender', 'freecad', 'librecad', 'qcad', 'maya', 'cinema 4d', 'figma',
   ])) {
     return true;

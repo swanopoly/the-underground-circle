@@ -211,6 +211,77 @@ if (photoshopRoute) {
   }
 }
 
+// ─── Wave-2: one-line app choice on the visible notice ───────────────────────
+
+{
+  const { setAppResolutionContext } =
+    require('../src/lib/chatComputerRequestRouter') as typeof import('../src/lib/chatComputerRequestRouter');
+
+  // Hydrated context with Photoshop installed → visible approval notice
+  // carries exactly one "Using <app> (<why>) — say 'use <alt>' to switch" line.
+  setAppResolutionContext({ bridgeOnline: true, installedApps: ['adobe photoshop 2025'] });
+  const resolvedRoute = buildChatComputerRequestRoute('edit this photo');
+  if (!resolvedRoute || !resolvedRoute.appResolution) {
+    fail('app choice: hydrated photo edit should route with an app resolution');
+  } else {
+    const notice = buildChatComputerRequestUserNotice(resolvedRoute);
+    const formatted = formatChatComputerRequestUserNotice(notice);
+    expect(
+      Boolean(notice.appChoiceLine && /^Using Adobe Photoshop/.test(notice.appChoiceLine)),
+      `app choice: notice should carry the Using line (got ${notice.appChoiceLine || 'none'})`,
+    );
+    expect(notice.appChoice?.visibility === 'user', 'app choice: chip should be user-visible even when notice visibility changes');
+    expect(/^Adobe Photoshop/.test(notice.appChoice?.selectedAppName || ''), 'app choice: chip should carry the selected app name');
+    expect(notice.appChoice?.selectedSurface === 'desktop', 'app choice: chip should carry the selected app surface');
+    expect((notice.appChoice?.alternatives.length || 0) > 0, 'app choice: chip should carry bounded alternatives');
+    expect(
+      Boolean(notice.appChoiceLine?.includes('say "use ') && notice.appChoiceLine.includes('" to switch')),
+      'app choice: Using line should name the cheapest switch path',
+    );
+    if (notice.visibility === 'user') {
+      expect(formatted.includes(notice.appChoiceLine || '~'), 'app choice: visible notice should render the Using line');
+      expect((formatted.match(/Using Adobe Photoshop/g) || []).length === 1, 'app choice: the Using line appears exactly once');
+    } else {
+      expect(formatted === '', 'app choice: hidden notice formats empty even with an app choice');
+    }
+    const compact = summarizeChatComputerRequestUserNotice(resolvedRoute);
+    expect(Boolean((compact as any).appChoiceLine), 'app choice: compact summary carries the line for persistence');
+    expect(/^Adobe Photoshop/.test((compact as any).appChoice?.selectedAppName || ''), 'app choice: compact summary carries structured selected app');
+    expect((compact as any).appChoice?.alternativeCount > 0, 'app choice: compact summary carries alternative count');
+    pass('app choice: visible notice carries one compact Using line');
+  }
+
+  // Quiet tasks still keep the full notice/body quiet, but the separate app
+  // choice chip remains visible so the user can redirect the selected app.
+  setAppResolutionContext({ bridgeOnline: false });
+  const quietResolved = buildChatComputerRequestRoute('edit this photo');
+  if (quietResolved?.appResolution && !quietResolved.approvalRequired) {
+    const quietNotice = buildChatComputerRequestUserNotice(quietResolved);
+    if (quietNotice.visibility === 'hidden') {
+      expect(formatChatComputerRequestUserNotice(quietNotice) === '', 'app choice: quiet resolved route formats to empty');
+      expect(quietNotice.appChoice?.visibility === 'user', 'app choice: quiet resolved route still exposes app chip');
+      expect(Boolean(quietNotice.appChoiceLine), 'app choice: quiet resolved route still stores the Using line');
+      pass('app choice: quiet tasks keep the full notice hidden but expose app choice');
+    } else {
+      expect(Boolean(quietNotice.appChoiceLine), 'app choice: visible resolved route carries the line');
+      pass('app choice: resolved route notice is visibility-consistent');
+    }
+  }
+
+  // Routes without a resolution have no line, and persisted notices missing
+  // the optional field still format (pre-wave-2 rows).
+  const plainRoute = buildChatComputerRequestRoute('Search files in Downloads for invoice');
+  if (plainRoute) {
+    const plainNotice = buildChatComputerRequestUserNotice(plainRoute);
+    expect(plainNotice.appChoiceLine === null, 'app choice: no resolution → no Using line');
+    const legacyNotice = JSON.parse(JSON.stringify(plainNotice));
+    delete (legacyNotice as any).appChoiceLine;
+    delete (legacyNotice as any).appChoice;
+    expect(typeof formatChatComputerRequestUserNotice(legacyNotice) === 'string', 'app choice: pre-wave-2 persisted notice still formats');
+    pass('app choice: notices without the field stay compatible');
+  }
+}
+
 if (failures > 0) {
   console.error(`\n${failures} chat computer request UX smoke failure(s)`);
   process.exit(1);

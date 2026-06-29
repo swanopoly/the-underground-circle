@@ -57,6 +57,9 @@ import MessageCitations from './chat/MessageCitations';
 import QuickActionDock from './chat/QuickActionDock';
 import AutomationProposalCard from './chat/AutomationProposalCard';
 import { parseAutomationRequest, type AutomationProposal } from '../../../lib/automationChatBuilder';
+import { loadChatAutomationDecisions } from '../../../lib/chatAutomationDecisions';
+import { buildOpenSwanAutomationInitialTask } from '../../../lib/openswanAutomationLaunch';
+import { buildRepeatedFlowAutomationProposals } from '../../../lib/chatAutomationSuggestions';
 import {
   buildMultiAgentDispatchPrompt,
   formatMultiAgentHelp,
@@ -83,6 +86,7 @@ import AssignPickerCard, { type AssignPickerAgent } from './chat/AssignPickerCar
 import BridgeDiagCard from './chat/BridgeDiagCard';
 import PreflightBlockersCard, { type PreflightBlockerItem } from './chat/PreflightBlockersCard';
 import QuickReplyChips from './chat/QuickReplyChips';
+import ChatAutomationPlanCard from './chat/ChatAutomationPlanCard';
 import { probeBridges, type BridgeProbeResult } from '../../../lib/bridgeHealthDiag';
 import { getBridgeUrl } from '../../../lib/bridgeEnvironment';
 import { ensureBridgeToken, bridgeAuthHeaders } from '../../../lib/bridgeAuth';
@@ -140,6 +144,7 @@ import ChatCostFooter from '../../../components/ChatCostFooter';
 import DesktopBridgeStatusChip from '../../../components/DesktopBridgeStatusChip';
 import WebSearchStatusChip from '../../../components/WebSearchStatusChip';
 import RunApprovalBanner from '../../../components/RunApprovalBanner';
+import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
 import RecordingBadge from '../../../components/RecordingBadge';
 import { useComputerUseTask } from '../../../lib/useComputerUseTask';
 import { resolveComputerUseConfirmation } from '../../../lib/computerUseConfirmations';
@@ -179,6 +184,8 @@ import {
   updateMainChatBotMessageWithRetry,
 } from '../../../lib/chatAgentService';
 import { buildChatAutomationPlan, type ChatAutomationPlan } from '../../../lib/chatAutomationPlanner';
+import { buildChatAutomationPlanPreview, type ChatAutomationPlanPreview } from '../../../lib/chatAutomationPlanPreview';
+import { createHitlApprovalGate } from '../../../lib/chatApprovalGate';
 import { recallForClarification, reconstructClarificationAnswer } from '../../../lib/chatGapFill';
 import { analyzeBuildBrief } from '../../../lib/buildBriefQuality';
 import {
@@ -206,11 +213,11 @@ import {
   buildInDesignBannerClarification,
   buildPhotoshopGenerativeFillClarification,
   detectLocalComputerAwarenessIntent,
-  looksLikeLocalComputerAwarenessRequest,
 } from '../../../lib/localComputerAwarenessIntent';
 import type { PredictiveChatCommand } from '../../../lib/predictiveChatCommands';
-import { dispatchChatAutomationPlan } from '../../../lib/runChatAutomationPlan';
-import { createChatTransportHandlers } from '../../../lib/chatTransportHandlers';
+import { dispatchChatAutomationPlan, type ChatAutomationOutcome, type ChatClarificationResumeStore } from '../../../lib/runChatAutomationPlan';
+import { createChatTransportHandlers, getOutcomeStateRequests, type ChatTransportStateRequests } from '../../../lib/chatTransportHandlers';
+import { chooseChatTerminalTransport, looksLikeTerminalActionRequest as looksLikeActionRequest } from '../../../lib/chatTerminalTransportPolicy';
 import { attachPlanDecisionToRun } from '../../../lib/runChatAutomationPlanObserver';
 import { deriveChatActivityFlags, shapePersistedChatMessage } from '../../../lib/chatMessageShape';
 import {
@@ -257,24 +264,6 @@ import {
 } from '../../../lib/chatSessionProfile';
 import { isCodingGenerationRequest } from '../../../lib/codingWorkbench';
 
-/**
- * Loose detector for messages that probably need tool use.
- *
- * When the user says things like "create a room", "pause the automation",
- * "update the circle theme", the chat flow needs to fall through to the
- * `runOpenSwanSessionTurn` path (which enables the tool catalog). The
- * streaming fast-path has NO tools — so without this detector, BlackSwan
- * replies "I can't create rooms" even though it has the tool.
- *
- * Matches action-verb + app-noun pairs. False positives are cheap
- * (they just forgo streaming for one turn). False negatives are bad
- * (tools don't get called) so the regex is deliberately permissive.
- */
-const ACTION_INTENT_RE = /\b(create|make|add|new|start|rename|archive|unarchive|update|change|edit|set|toggle|pause|resume|raise|lower|bump|assign|unassign|remove|delete|pin|unpin|forget|log|mark|complete|switch|connect|disconnect|list|show|post|send)\b[^\n]{0,60}?\b(room|rooms|circle|agent|agent'?s?|mission|missions|task|tasks|memory|memories|automation|automations|automations?|check[\s-]?in|check[\s-]?ins|budget|cap|caps|theme|setting|settings|name|description|icon|vibe|spirit|appearance|public|private|accent|schedule|integration|integrations)\b/i;
-
-function looksLikeActionRequest(message: string): boolean {
-  return ACTION_INTENT_RE.test(message) || looksLikeLocalComputerAwarenessRequest(message);
-}
 import { runOpenSwanSessionTurn, type OpenSwanDelegatedAgentDescriptor } from '../../../lib/openswanSessionRuntime';
 import type { OpenSwanTaskPlan } from '../../../lib/openswanTaskPlanner';
 import type { OpenSwanToolEvent } from '../../../lib/openswanToolRuntime';
@@ -326,6 +315,8 @@ import type { ComputerTaskComplexityPlan } from '../../../lib/computerTaskComple
 import { prepareComputerTaskExecution, type ComputerTaskExecutionEnvelope } from '../../../lib/computerTaskExecution';
 import type { ComputerTaskGrantId } from '../../../lib/computerTaskGrants';
 import { executeComputerTaskWithAgent, refreshComputerTaskCapabilityBuildoutFromCodexSession } from '../../../lib/computerTaskRuntime';
+import { executeDirectImageConversionRequest } from '../../../lib/directImageConversionRuntime';
+import { executeDirectLocalFileRequest, routeHasDirectLocalFileActionItems } from '../../../lib/directLocalFileRuntime';
 import { listApiKeys } from '../../../lib/llmProviders';
 import {
   buildImplicitBusinessModelProfiles,
@@ -333,7 +324,7 @@ import {
   planBusinessModelForComputerTask,
 } from '../../../lib/businessModelProfiles';
 import { deriveGrantedScopesFromBrowserPermission, grantComputerTaskScopes, loadComputerTaskGrantIds } from '../../../lib/computerTaskGrantMemory';
-import { buildComputerTaskChecklistCard, buildComputerTaskStateSteps, clearComputerTaskState, compactComputerTaskCheckpointRecovery, compactComputerTaskComplexityPlan, loadComputerTaskState, markComputerTaskCheckpointRecoveryObserved, saveComputerTaskState, type ComputerTaskCapabilityBuildout, type ComputerTaskCheckpointEvidenceObservation, type ComputerTaskStateCheckpointRecovery, type ComputerTaskStateComplexity, type ComputerTaskStateGrounding, type ComputerTaskStateRecord } from '../../../lib/computerTaskState';
+import { acknowledgeComputerTaskNotificationsState, appendComputerTaskNotification, buildComputerTaskChecklistCard, buildComputerTaskStateSteps, clearComputerTaskState, compactComputerTaskCheckpointRecovery, compactComputerTaskComplexityPlan, computerTaskNotificationSnapshot, deriveComputerTaskNotification, listUnacknowledgedComputerTaskNotifications, loadComputerTaskState, markComputerTaskCheckpointRecoveryObserved, saveComputerTaskState, COMPUTER_TASK_NOTIFICATION_GLYPHS, type ComputerTaskCapabilityBuildout, type ComputerTaskCheckpointEvidenceObservation, type ComputerTaskStateCheckpointRecovery, type ComputerTaskStateComplexity, type ComputerTaskStateGrounding, type ComputerTaskStateRecord } from '../../../lib/computerTaskState';
 import {
   buildAgentAppCapabilityBuildoutStateHints,
   formatAgentAppCapabilityBuildoutForUser,
@@ -362,9 +353,21 @@ import {
   savePendingBotMessage,
   type PendingBotMessageRecord,
 } from '../../../lib/pendingBotMessages';
+import { useAgentApprovals } from '../../../services/hitlService';
 
 const OpenSwanConsole = React.lazy(() => import('../../../components/openswan/OpenSwanConsole'));
 const ComputerUseLiveCard = React.lazy(() => import('../../../components/ComputerUseLiveCard'));
+
+const IMMEDIATE_LOCAL_APP_FOLLOWUP_RE = /[,;]|\b(?:and|then|after|also|next)\b/i;
+
+function shouldRunImmediateLocalAppLaunch(message: string): boolean {
+  const text = String(message || '').trim();
+  if (!text) return false;
+  const intent = detectLocalComputerAwarenessIntent(text);
+  if (!intent.route || !intent.appQuery) return false;
+  if (intent.kind !== 'launch_app' && intent.kind !== 'focus_app') return false;
+  return !IMMEDIATE_LOCAL_APP_FOLLOWUP_RE.test(text);
+}
 
 const REACTIONS_LIST = ['🔥', '💪', '👊', '💯', '⚡', '🎯'];
 const BLACKSWAN_ID = 'blackswan';
@@ -492,6 +495,25 @@ function deriveSessionTitleFromMessage(content: string): string {
     .filter(Boolean);
 
   return chosen.length > 0 ? chosen.join(' ') : SESSION_FALLBACK_TITLE;
+}
+
+function appendCustomerSafeRecoveryMessage(message: string, recoveryMessage?: string | null): string {
+  const base = message.trim().replace(/\s+$/g, '');
+  const recovery = String(recoveryMessage || '').trim();
+  return recovery ? `${base}\n\n${recovery}` : base;
+}
+
+function isSupportOnlyComputerTaskWarning(warning: string): boolean {
+  return /\b(?:desktop\.[a-z_]+|\/desktop\/|stale_bridge|errorCode|MCP|endpoint|fetch failed|TypeError|ECONN|ETIMEDOUT|EADDR|unknown error|Desktop bridge .*failed)\b/i.test(String(warning || ''));
+}
+
+function sanitizeVisibleComputerTaskMessage(message: string, status: string): string {
+  const text = String(message || '').trim();
+  if (!text || status === 'completed') return text;
+  if (!/\b(?:desktop\.[a-z_]+|\/desktop\/|Desktop bridge|local bridge|unknown bridge error|errorCode|MCP|endpoint|fetch failed|TypeError|ECONN|ETIMEDOUT|EADDR|EACCES|EPERM|ENOENT|File or folder does not exist|Transport .*threw|Transport threw)\b/i.test(text)) {
+    return text;
+  }
+  return 'I could not finish that app or file action. Technical details were saved for recovery.';
 }
 
 function isAutoNamedSession(title: string | null | undefined): boolean {
@@ -633,6 +655,7 @@ function mapPersistedRowsToChatMessages(
       recoveryOptions: metadata?.recoveryOptions,
       recoveryReliability: metadata?.recoveryReliability || undefined,
       computerHandoff: metadata?.computerHandoff || undefined,
+      chatAutomationPlanPreview: metadata?.chatAutomationPlanPreview || undefined,
       routing: metadata?.routing || undefined,
       ...deriveChatActivityFlags(row.content),
     };
@@ -667,6 +690,7 @@ function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], 
       recoveryOptions: record.recoveryOptions as ChatFailureRecoveryOption[] | undefined,
       recoveryReliability: record.recoveryReliability as PersistedChatRecoveryReliabilitySummary | undefined,
       computerHandoff: record.computerHandoff as ChatComputerHandoffMetadata | undefined,
+      chatAutomationPlanPreview: record.chatAutomationPlanPreview as ChatAutomationPlanPreview | undefined,
       delegatedTo: record.delegatedTo,
       delegatedSubagents: record.delegatedSubagents,
       runId: record.runId,
@@ -792,6 +816,7 @@ type ChatMessage = {
   recoveryOptions?: ChatFailureRecoveryOption[];
   recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
   computerHandoff?: ChatComputerHandoffMetadata;
+  chatAutomationPlanPreview?: ChatAutomationPlanPreview | null;
   computerPreflightBlockers?: { task: string; items: PreflightBlockerItem[] };
   quickReplies?: string[];    // tappable suggested replies (e.g. clarification answers)
   delegatedTo?: string;       // subagent that handled this message
@@ -834,6 +859,7 @@ type ChatBotMessageExtra = {
   recoveryOptions?: ChatFailureRecoveryOption[];
   recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
   computerHandoff?: ChatComputerHandoffMetadata;
+  chatAutomationPlanPreview?: ChatAutomationPlanPreview | null;
   computerPreflightBlockers?: { task: string; items: PreflightBlockerItem[] };
   quickReplies?: string[];
   localOnly?: boolean;
@@ -1105,6 +1131,61 @@ function buildRecoveryReliabilityCard(summary?: PersistedChatRecoveryReliability
   };
 }
 
+function buildChatAppChoiceCard(handoff?: ChatComputerHandoffMetadata | null): {
+  selectedAppName: string;
+  surfaceLabel: string;
+  availabilityLabel: string;
+  reason: string;
+  switchHint: string | null;
+  alternatives: string[];
+  openStep: string | null;
+} | null {
+  const notice = handoff?.requestNotice;
+  const choice = notice?.appChoice;
+  if (choice && choice.visibility === 'user') {
+    const surfaceLabel = choice.selectedSurface === 'desktop' ? 'Desktop app' : 'Web app';
+    const availabilityLabel = choice.availability === 'installed'
+      ? 'Installed'
+      : choice.availability === 'maybe'
+        ? 'Bridge check'
+        : choice.availability === 'web'
+          ? 'Web ready'
+          : surfaceLabel;
+    return {
+      selectedAppName: choice.selectedAppName,
+      surfaceLabel,
+      availabilityLabel,
+      reason: choice.reason || 'best available app for this task',
+      switchHint: choice.switchHint,
+      alternatives: (choice.alternatives || []).slice(0, 3),
+      openStep: choice.openStepLines?.[0] || null,
+    };
+  }
+  const fallbackLine = notice?.appChoiceLine;
+  if (!fallbackLine) return null;
+  const selectedMatch = fallbackLine.match(/^Using\s+(.+?)(?:\s+\(|\.|$)/);
+  return {
+    selectedAppName: selectedMatch?.[1]?.trim() || 'Selected app',
+    surfaceLabel: handoff?.surface === 'desktop' ? 'Desktop app' : handoff?.surface === 'browser' ? 'Web app' : 'App task',
+    availabilityLabel: 'Selected',
+    reason: fallbackLine.replace(/^Using\s+.+?\s+\((.+?)\).*$/i, '$1'),
+    switchHint: /say\s+"use\s+(.+?)"/i.test(fallbackLine) ? fallbackLine.replace(/^.*?(say\s+"use\s+.+?").*$/i, '$1') : null,
+    alternatives: [],
+    openStep: null,
+  };
+}
+
+function stripChatAppChoiceLine(content: string, appChoiceLine?: string | null): string {
+  const target = String(appChoiceLine || '').trim();
+  if (!target) return content;
+  return String(content || '')
+    .split('\n')
+    .filter((line) => line.trim() !== target)
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function buildRecoveryOptionComposerPrompt(option: ChatFailureRecoveryOption, message?: ChatMessage): string {
   return formatChatFailureRecoveryOptionSelection(option, message ? {
     messageId: message.dbId || message.id,
@@ -1178,6 +1259,7 @@ function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRe
     recoveryOptions: message.recoveryOptions,
     recoveryReliability: message.recoveryReliability,
     computerHandoff: message.computerHandoff,
+    chatAutomationPlanPreview: message.chatAutomationPlanPreview,
     taskPlan: message.taskPlan,
     toolEvents: message.toolEvents,
     verificationResults: message.verificationResults,
@@ -1380,6 +1462,14 @@ async function base64FromChatMediaAttachment(attachment: ChatAttachment): Promis
   } catch {
     return null;
   }
+}
+
+function describeChatAutomationApproval(agentName: string, plan: ChatAutomationPlan): string {
+  const route = plan.execution.routeId ? ` (${plan.execution.routeId})` : '';
+  const command = String(plan.execution.commandText || '').replace(/\s+/g, ' ').trim();
+  const commandLine = command ? `: "${command.slice(0, 140)}"` : '';
+  const reason = plan.approval.required && plan.approval.reason ? ` ${plan.approval.reason}` : '';
+  return `Approve ${agentName} to run ${plan.execution.kind}${route}${commandLine}.${reason}`.trim();
 }
 
 export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleId: string; accentColor?: string }) {
@@ -1619,6 +1709,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [editingAgentName, setEditingAgentName] = useState(false);
   const [agentNameDraft, setAgentNameDraft] = useState('');
   const [agentAvatarUri, setAgentAvatarUri] = useState<string | null>(null);
+  const pendingHitlApprovals = useAgentApprovals(circleId);
+  const chatAutomationApprovalGate = useMemo(() => createHitlApprovalGate({
+    sessionKey: activeThreadId ? `chat::${activeThreadId}` : `chat::${circleId}`,
+    agentName,
+    timeoutSeconds: 15 * 60,
+    describe: (plan) => describeChatAutomationApproval(agentName, plan),
+  }), [activeThreadId, agentName, circleId]);
+  const automationSuggestionSeenRef = useRef<Set<string>>(new Set());
   const setAgentName = useCallback((name: string) => {
     const trimmed = name.trim() || MAIN_CHAT_AGENT_NAME;
     setAgentNameState(trimmed);
@@ -1667,7 +1765,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [pendingComputerUseApprovalSummary, setPendingComputerUseApprovalSummary] = useState('');
   const [pendingComputerUseGrantIds, setPendingComputerUseGrantIds] = useState<ComputerTaskGrantId[]>([]);
   const [pendingComputerUseOrigin, setPendingComputerUseOrigin] = useState<{ messageId: string; runId?: string | null; planId: string } | null>(null);
+  // T7 sticky allow scopes: the standing-grant scope id riding the pending
+  // browser plan, recorded as "used" only when the plan actually launches.
+  const [pendingComputerUseStickyScopeId, setPendingComputerUseStickyScopeId] = useState<string | null>(null);
   const [computerTaskState, setComputerTaskState] = useState<ComputerTaskStateRecord | null>(null);
+  // Wave-2 task→app resolution: the last route's app choice, kept so a
+  // follow-up "use Pixelmator instead" can record a category preference.
+  const lastAppResolutionRef = useRef<import('../../../lib/chatComputerRequestRouter').ChatComputerAppResolution | null>(null);
   const [pendingCapabilityBuildoutNotice, setPendingCapabilityBuildoutNotice] = useState<{
     key: string;
     task: string;
@@ -1685,6 +1789,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // planning. Opens from the Quick Actions "Use Computer" chip and from
   // the __COMPUTER_USE__ slash action.
   const [showComputerUseConsole, setShowComputerUseConsole] = useState(false);
+  // D6 needs-you strip dismissal: keyed by the record's updatedAt so a NEW
+  // task update re-surfaces the strip, but a dismissed stale state stays
+  // hidden across reloads (persisted per circle).
+  const [needsYouStripDismissedKey, setNeedsYouStripDismissedKey] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const stored = await storage.getItem(`uc_needs_you_strip_dismissed::${circleId}`);
+        if (!cancelled) setNeedsYouStripDismissedKey(stored || null);
+      } catch { /* dashboard extra — never break chat */ }
+    })();
+    return () => { cancelled = true; };
+  }, [circleId]);
   // OpenSwan console — launches an OpenSwan turn with a chosen mode.
   // Surface triggered by the Quick Actions "OS OpenSwan" chip.
   const [showOpenSwanConsole, setShowOpenSwanConsole] = useState(false);
@@ -1722,6 +1840,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     checkpointRecovery?: ComputerTaskStateCheckpointRecovery | null;
     checkpointRecoveryIsNew?: boolean;
     checkpointRecoveryObservations?: ComputerTaskCheckpointEvidenceObservation[];
+    /** D6: result summary used as the completed/failed notification body. */
+    resultSummary?: string | null;
   }) => {
     const checkpointRecovery = args.checkpointRecoveryIsNew
       ? markComputerTaskCheckpointRecoveryObserved(computerTaskState?.checkpointRecovery || null, args.checkpointRecovery || null, args.checkpointRecoveryObservations || [])
@@ -1770,6 +1890,19 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       checkpointRecovery,
       updatedAt: new Date().toISOString(),
     };
+    // D6: derive a completion/blocked/needs-you notification on this
+    // transition. The stored record is the previous snapshot (the in-memory
+    // copy can miss hook-written questions/notifications), and its bounded
+    // notification list carries over so banners survive phase rewrites.
+    // Reading storage (not React state) also keeps this callback's deps
+    // narrow — widening them would re-trigger the run-status effect loop.
+    const previousForNotifications = await loadComputerTaskState(circleId, activeThreadId).catch(() => null);
+    const notification = deriveComputerTaskNotification(
+      nextState,
+      computerTaskNotificationSnapshot(previousForNotifications),
+      { resultSummary: args.resultSummary || null },
+    );
+    nextState.notifications = appendComputerTaskNotification(previousForNotifications?.notifications, notification);
     setComputerTaskState(nextState);
     await saveComputerTaskState(nextState);
   }, [activeThreadId, circleId, computerTaskState?.checkpointRecovery]);
@@ -1782,6 +1915,75 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     })();
     return () => { cancelled = true; };
   }, [activeThreadId, circleId]);
+
+  // D6: acknowledge persisted task notifications (banner DISMISS, or the
+  // console opening on a terminal banner) and refresh the mount-loaded copy.
+  const acknowledgeTaskNotifications = useCallback(() => {
+    void (async () => {
+      const next = await acknowledgeComputerTaskNotificationsState(circleId, activeThreadId);
+      if (next) setComputerTaskState(next);
+    })();
+  }, [activeThreadId, circleId]);
+
+  useEffect(() => {
+    // Completed/failed banners auto-acknowledge once the console is open —
+    // the user has now seen the outcome. Needs-you/blocked/partial banners
+    // stay until explicitly dismissed (they still require action).
+    if (!showComputerUseConsole) return;
+    const unacknowledged = listUnacknowledgedComputerTaskNotifications(computerTaskState);
+    if (unacknowledged.length > 0 && (unacknowledged[0].kind === 'completed' || unacknowledged[0].kind === 'failed')) {
+      acknowledgeTaskNotifications();
+    }
+  }, [acknowledgeTaskNotifications, computerTaskState, showComputerUseConsole]);
+
+  useEffect(() => {
+    // T7 sticky allow scopes: hydrate the in-memory grant registry on the
+    // chat path so the synchronous request router sees standing grants on a
+    // fresh app load (previously hydrated only when the Computer Use console
+    // opened, which made chat fail closed and keep prompting).
+    let cancelled = false;
+    import('../../../lib/computerGrantGateStore')
+      .then(({ loadStickyAllowScopes }) => (cancelled ? null : loadStickyAllowScopes()))
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  // Wave-2 task→app resolution: hydrate the router's in-memory app-resolution
+  // registry (same pattern as the T7 sticky-scope registry above) so the
+  // synchronous route build can pick the best app for everyday tasks —
+  // installed/running apps from the desktop bridge plus the circle's
+  // preferred-app-per-category store. Silent failures leave the fail-honest
+  // empty context (bridge treated as offline; known-good web apps win).
+  const hydrateAppResolutionContext = useCallback(async () => {
+    try {
+      const [{ setAppResolutionContext }, bridge, shortcuts] = await Promise.all([
+        import('../../../lib/chatComputerRequestRouter'),
+        import('../../../lib/desktopBridge'),
+        import('../../../lib/knownAppShortcuts'),
+      ]);
+      const bridgeOnline = await bridge.isDesktopBridgeAvailable().catch(() => false);
+      const [installedApps, runningApps, preferredAppByCategory] = await Promise.all([
+        bridgeOnline ? bridge.listInstalledAppNamesLower().catch(() => [] as string[]) : Promise.resolve([] as string[]),
+        bridgeOnline
+          ? bridge.listRunningApps().then((result) => (result.ok ? result.data : undefined)).catch(() => undefined)
+          : Promise.resolve(undefined),
+        shortcuts.loadPreferredAppsByCategory(circleId).catch(() => ({})),
+      ]);
+      setAppResolutionContext({
+        bridgeOnline,
+        // An empty probe result is ambiguous (it also means "probe failed")
+        // — fail honest by leaving installedApps unknown instead of
+        // claiming nothing is installed.
+        ...(installedApps.length > 0 ? { installedApps } : {}),
+        ...(runningApps && runningApps.length > 0 ? { runningApps } : {}),
+        preferredAppByCategory,
+      });
+    } catch { /* fail-honest: unhydrated registry keeps bridgeOnline=false */ }
+  }, [circleId]);
+
+  useEffect(() => {
+    void hydrateAppResolutionContext();
+  }, [hydrateAppResolutionContext]);
 
   useEffect(() => {
     const capabilityBuildout = computerTaskState?.capabilityBuildout;
@@ -2019,11 +2221,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         ['surface:main_chat', 'surface:failure_recovery', ...(details.touched || [])],
       );
       return {
-        message: `\n\nChat failure recovery: handoff failed: ${recoveryError?.message || 'Unknown error'}`,
+        message: '\n\nRecovery could not start automatically. Try again, or open the details for support.',
         recoveryOptions: [{
           id: 'stop_and_report',
           label: 'Stop and report the blocker',
-          detail: `Recovery handoff failed: ${recoveryError?.message || 'Unknown error'}`,
+          detail: 'Recovery could not start automatically. Technical details were saved for support.',
           actor: 'none',
           recommended: true,
           source: 'safety_stop',
@@ -2061,6 +2263,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   }) => {
     const trimmed = taskText.trim();
     if (!trimmed) return;
+    // T7 sticky allow scopes: re-hydrate the standing-grant registry before
+    // the synchronous route build below reads it, so a grant persisted on a
+    // previous load can downgrade approval on the first task of this session.
+    await import('../../../lib/computerGrantGateStore')
+      .then(({ loadStickyAllowScopes }) => loadStickyAllowScopes())
+      .catch(() => {});
+    // Wave-2: refresh the app-resolution registry fire-and-forget (bridge
+    // probes are cached). The awaits below give it time to land before the
+    // route build; a stale registry only degrades the app pick, never blocks.
+    void hydrateAppResolutionContext();
     const initialExecution = prepareComputerTaskExecution({ task: trimmed, audit: null, grantedIds: [] });
     const surfacePreparationPlan = buildComputerTaskSurfacePreparationPlan(initialExecution);
     const surfacePreparationResult = surfacePreparationPlan.shouldPrepareDesktopBridge && Platform.OS === 'web'
@@ -2394,8 +2606,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const computerRequestNotice = computerPlan.computerRequestRoute
       ? buildChatComputerRequestUserNotice(computerPlan.computerRequestRoute)
       : null;
+    // Wave-2: remember this route's app choice so a follow-up "use <app>
+    // instead" can record the user's preferred app for the category.
+    if (computerPlan.computerRequestRoute) {
+      lastAppResolutionRef.current = computerPlan.computerRequestRoute.appResolution ?? null;
+    }
     const computerEvidenceContract = computerPlan.computerRequestRoute?.evidenceContract || null;
     const computerAppRouteDecision = computerPlan.computerRequestRoute?.appAutomationRouteDecision || execution.preflight.routeDecision || null;
+    const computerStickyScopeApplied = computerPlan.computerRequestRoute?.stickyScopeApplied || null;
 
     const startTaskFailureRecovery = async (details: {
       failureMessage: string;
@@ -2452,7 +2670,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     setBotTyping(true);
     setRunStatus('running');
     try {
-	      if (preflightBlockers.length > 0) {
+      if (preflightBlockers.length > 0) {
         const blockerLines = preflightBlockers.map((blocker) => `- ${blocker}`).join('\n');
         const fixLines = execution.preflight.fixActions.map((fix) => `- ${fix}`).join('\n');
         const preflightHandoffContext = buildChatComputerHandoffContext({
@@ -2472,6 +2690,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           requestNotice: computerRequestNotice,
           evidenceContract: computerEvidenceContract,
           appAutomationRouteDecision: computerAppRouteDecision,
+          stickyScopeApplied: computerStickyScopeApplied,
           warnings: preflightWarnings,
           blockers: [...preflightBlockers, ...groundingBlockers],
         });
@@ -2647,6 +2866,172 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               };
             }
 
+            if (computerStickyScopeApplied?.scopeId) {
+              // T7 sticky allow scopes: this branch actually executes (it is
+              // not a preview), so record the standing-grant use
+              // fire-and-forget for the Permissions panel use count.
+              void import('../../../lib/computerGrantGateStore')
+                .then(({ recordStickyAllowScopeUse }) => recordStickyAllowScopeUse([computerStickyScopeApplied.scopeId]))
+                .catch(() => {});
+            }
+            const shouldRunDirectImageConversion = Boolean(
+              computerPlan.computerRequestRoute?.actionItems?.some((item) => item.tool === 'desktop.convert_image'),
+            );
+            if (shouldRunDirectImageConversion) {
+              const bridge = await import('../../../lib/desktopBridge');
+              const directConversion = await executeDirectImageConversionRequest(trimmed, bridge.convertImage);
+              if (!directConversion.handled) {
+                return {
+                  executionKind: 'run_computer_task',
+                  status: 'failed',
+                  message: 'I could not resolve the source image name and target format for desktop.convert_image, so I did not mark this image export done.',
+                  warnings: ['desktop.convert_image request parsing failed'],
+                  runId: null,
+                  data: {
+                    adapterId: 'file_adapter',
+                    taskKind: execution.preview.kind,
+                    taskLabel: execution.preview.label,
+                    readinessSummary: execution.readiness.summary,
+                    recommendedMode: execution.recommendedMode,
+                    capabilityProfile: execution.capabilityProfile,
+                    preflightSummary: execution.preflight.summary,
+                    preflightStatus: execution.preflight.status,
+                    preflightStrategy: execution.preflight.strategy
+                      ? {
+                          id: execution.preflight.strategy.id,
+                          label: execution.preflight.strategy.label,
+                        }
+                      : null,
+                    preflightBlockers,
+                    preflightWarnings,
+                    preflightFixActions: execution.preflight.fixActions,
+                    appAutomationRouteDecision: computerAppRouteDecision,
+                    groundingStatus: execution.computerAppGroundingTrace?.status || null,
+                    groundingSummary: execution.computerAppGroundingTrace?.display.summary || null,
+                    groundingNextAction: execution.computerAppGroundingTrace?.display.nextAction || null,
+                    groundingTrace: execution.computerAppGroundingTrace || null,
+                    complexityPlan: execution.complexityPlan,
+                    grantSummary: execution.grants.summary,
+                    approvalSummary: execution.grants.approvalSummary,
+                    grantIds: execution.grants.outstanding.map((grant) => grant.id),
+                  },
+                };
+              }
+
+              return {
+                executionKind: 'run_computer_task',
+                status: directConversion.status,
+                message: directConversion.message,
+                warnings: directConversion.warnings,
+                runId: null,
+                data: {
+                  adapterId: 'file_adapter',
+                  taskKind: execution.preview.kind,
+                  taskLabel: execution.preview.label,
+                  readinessSummary: execution.readiness.summary,
+                  recommendedMode: execution.recommendedMode,
+                  capabilityProfile: execution.capabilityProfile,
+                  preflightSummary: execution.preflight.summary,
+                  preflightStatus: execution.preflight.status,
+                  preflightStrategy: execution.preflight.strategy
+                    ? {
+                        id: execution.preflight.strategy.id,
+                        label: execution.preflight.strategy.label,
+                      }
+                    : null,
+                  preflightBlockers,
+                  preflightWarnings,
+                  preflightFixActions: execution.preflight.fixActions,
+                  appAutomationRouteDecision: computerAppRouteDecision,
+                  groundingStatus: execution.computerAppGroundingTrace?.status || null,
+                  groundingSummary: execution.computerAppGroundingTrace?.display.summary || null,
+                  groundingNextAction: execution.computerAppGroundingTrace?.display.nextAction || null,
+                  groundingTrace: execution.computerAppGroundingTrace || null,
+                  complexityPlan: execution.complexityPlan,
+                  grantSummary: execution.grants.summary,
+                  approvalSummary: execution.grants.approvalSummary,
+                  grantIds: execution.grants.outstanding.map((grant) => grant.id),
+                  directImageConversion: directConversion.data || null,
+                },
+              };
+            }
+            if (routeHasDirectLocalFileActionItems(computerPlan.computerRequestRoute)) {
+              const directFileAction = await executeDirectLocalFileRequest(trimmed);
+              if (!directFileAction.handled) {
+                return {
+                  executionKind: 'run_computer_task',
+                  status: 'failed',
+                  message: 'I could not resolve the exact local-file action for the requested desktop file task, so I did not mark it done.',
+                  warnings: ['direct local-file request parsing failed'],
+                  runId: null,
+                  data: {
+                    adapterId: 'file_adapter',
+                    taskKind: execution.preview.kind,
+                    taskLabel: execution.preview.label,
+                    readinessSummary: execution.readiness.summary,
+                    recommendedMode: execution.recommendedMode,
+                    capabilityProfile: execution.capabilityProfile,
+                    preflightSummary: execution.preflight.summary,
+                    preflightStatus: execution.preflight.status,
+                    preflightStrategy: execution.preflight.strategy
+                      ? {
+                          id: execution.preflight.strategy.id,
+                          label: execution.preflight.strategy.label,
+                        }
+                      : null,
+                    preflightBlockers,
+                    preflightWarnings,
+                    preflightFixActions: execution.preflight.fixActions,
+                    appAutomationRouteDecision: computerAppRouteDecision,
+                    groundingStatus: execution.computerAppGroundingTrace?.status || null,
+                    groundingSummary: execution.computerAppGroundingTrace?.display.summary || null,
+                    groundingNextAction: execution.computerAppGroundingTrace?.display.nextAction || null,
+                    groundingTrace: execution.computerAppGroundingTrace || null,
+                    complexityPlan: execution.complexityPlan,
+                    grantSummary: execution.grants.summary,
+                    approvalSummary: execution.grants.approvalSummary,
+                    grantIds: execution.grants.outstanding.map((grant) => grant.id),
+                  },
+                };
+              }
+
+              return {
+                executionKind: 'run_computer_task',
+                status: directFileAction.status,
+                message: directFileAction.message,
+                warnings: directFileAction.warnings,
+                runId: null,
+                data: {
+                  adapterId: 'file_adapter',
+                  taskKind: execution.preview.kind,
+                  taskLabel: execution.preview.label,
+                  readinessSummary: execution.readiness.summary,
+                  recommendedMode: execution.recommendedMode,
+                  capabilityProfile: execution.capabilityProfile,
+                  preflightSummary: execution.preflight.summary,
+                  preflightStatus: execution.preflight.status,
+                  preflightStrategy: execution.preflight.strategy
+                    ? {
+                        id: execution.preflight.strategy.id,
+                        label: execution.preflight.strategy.label,
+                      }
+                    : null,
+                  preflightBlockers,
+                  preflightWarnings,
+                  preflightFixActions: execution.preflight.fixActions,
+                  appAutomationRouteDecision: computerAppRouteDecision,
+                  groundingStatus: execution.computerAppGroundingTrace?.status || null,
+                  groundingSummary: execution.computerAppGroundingTrace?.display.summary || null,
+                  groundingNextAction: execution.computerAppGroundingTrace?.display.nextAction || null,
+                  groundingTrace: execution.computerAppGroundingTrace || null,
+                  complexityPlan: execution.complexityPlan,
+                  grantSummary: execution.grants.summary,
+                  approvalSummary: execution.grants.approvalSummary,
+                  grantIds: execution.grants.outstanding.map((grant) => grant.id),
+                  directLocalFileAction: directFileAction.data || null,
+                },
+              };
+            }
             const result = await executeComputerTaskWithAgent({
               task: trimmed,
               circleId,
@@ -2661,7 +3046,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               replyTo: replyTo?.content,
               readyCapabilityBuildout: options?.readyCapabilityBuildout || null,
               disableCapabilityBuildout: Boolean(options?.readyCapabilityBuildout),
+              // Wave-2 app choice: thread the route's resolution so the
+              // dispatch block carries the App-choice contract (open the
+              // chosen app first, verify frontmost, one named fallback).
+              appResolution: computerPlan.computerRequestRoute?.appResolution ?? null,
             });
+            // L0 escalation breadcrumbs: persist runtime surface escalations onto the durable record fire-and-forget (console/Office cards consume them).
+            if (result.surfaceEscalations?.length) void import('../../../lib/computerTaskState').then((m) => m.recordComputerTaskSurfaceEscalations(circleId, activeThreadId, result.surfaceEscalations)).catch(() => {});
             const completedAutoRetryBuildout = options?.readyCapabilityBuildout
               ? {
                   ...(result.capabilityBuildout || options.readyCapabilityBuildout),
@@ -2732,7 +3123,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const rawOutcomeWarnings = Array.isArray(outcome.warnings)
         ? Array.from(new Set((outcome.warnings as unknown[]).map(String).filter(Boolean)))
         : [];
-      const outcomeWarnings = rawOutcomeWarnings.filter((warning) => !isQuietSuccessfulComputerTaskWarning(warning));
+      const outcomeWarnings = rawOutcomeWarnings.filter((warning) => (
+        !isQuietSuccessfulComputerTaskWarning(warning)
+        && !isSupportOnlyComputerTaskWarning(warning)
+      ));
+      const visibleOutcomeMessage = sanitizeVisibleComputerTaskMessage(outcome.message, outcome.status);
       const browserPlan = outcome.data?.browserPlan as BrowserPlanCardData | undefined;
       const browserActions = outcome.data?.browserActions as BrowserAction[] | undefined;
       const handoff = outcome.data?.handoffSuggestion as HandoffSuggestion | undefined;
@@ -2794,7 +3189,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         requestNotice: computerRequestNotice,
         evidenceContract: computerEvidenceContract,
         appAutomationRouteDecision: (outcome.data?.appAutomationRouteDecision as any) || computerAppRouteDecision,
+        stickyScopeApplied: computerStickyScopeApplied,
         warnings: outcomeWarnings,
+        rawWarnings: rawOutcomeWarnings,
         blockers: [...outcomePreflightBlockers, ...outcomeGroundingBlockers, ...capabilityBuildoutHints.blockers],
       });
       const handoffBlock = formatChatComputerHandoffForMessage(handoffContext);
@@ -2808,6 +3205,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         setPendingComputerUseApprovalSummary(approvalSummary);
         setPendingComputerUseGrantIds(grantIds);
         setPendingComputerUseOrigin(null);
+        setPendingComputerUseStickyScopeId(computerStickyScopeApplied?.scopeId || null);
         setShowComputerUsePermission(true);
         const showAccessBlock = Boolean(
           approvalSummary
@@ -2861,10 +3259,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             complexityPlan: outcomeComplexityPlan,
           },
         });
-        addBotMessage(`${prefix}${outcome.message}${handoffBlock}${accessBlock}`, undefined, {
+        addBotMessage(`${prefix}${visibleOutcomeMessage || outcome.message}${handoffBlock}${accessBlock}`, undefined, {
           runId: outcome.runId || null,
           browserPlans: [browserPlan],
           computerHandoff: handoffContext.metadata,
+          chatAutomationPlanPreview: outcome.data?.chatAutomationPlanPreview as ChatAutomationPlanPreview | undefined,
           source: computerTaskSource,
         });
       } else {
@@ -2876,30 +3275,31 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           || outcomePreflightWarnings.length > 0
           || outcomeGroundingBlockers.length > 0,
         );
-	        const accessBlock = grantSummary && showAccessBlock
-	          ? `\n\n${grantSummary}${approvalSummary ? `\n${approvalSummary}` : ''}`
-	          : '';
-	        const outcomePresentation = buildChatComputerOutcomePresentation({
-	          task: trimmed,
-	          outcomeStatus: outcome.status,
-	          outcomeMessage: outcome.message,
-	          rawWarnings: rawOutcomeWarnings,
-	          visibleWarnings: outcomeWarnings,
-	          preflightBlockers: outcomePreflightBlockers,
-	          preflightWarnings: outcomePreflightWarnings,
-	          groundingBlockers: outcomeGroundingBlockers,
-	          capabilityBlockers: capabilityBuildoutHints.blockers,
-	          capabilityPhase: capabilityBuildoutHints.phase,
-	          suppressGenericRecovery: capabilityBuildoutHints.suppressGenericRecovery,
-	        });
-	        shouldShowPendingHandoff = Boolean(handoff && !outcomePresentation.hideComputerHandoff);
-	        shouldClearPendingHandoff = outcomePresentation.hideComputerHandoff;
-	        const warningBlock = outcomePresentation.warningBlock;
-	        const blockerList = outcomePresentation.blockerList;
-	        const shouldRecoverOutcome = outcomePresentation.shouldRecoverOutcome;
-	        const outcomeFailureMessage = [
-	          outcome.message,
-	          outcomeWarnings.length ? `Warnings:\n${outcomeWarnings.map((warning) => `- ${warning}`).join('\n')}` : '',
+        const accessBlock = grantSummary && showAccessBlock
+          ? `\n\n${grantSummary}${approvalSummary ? `\n${approvalSummary}` : ''}`
+          : '';
+        const outcomePresentation = buildChatComputerOutcomePresentation({
+          task: trimmed,
+          outcomeStatus: outcome.status,
+          outcomeMessage: outcome.message,
+          rawWarnings: rawOutcomeWarnings,
+          visibleWarnings: outcomeWarnings,
+          preflightBlockers: outcomePreflightBlockers,
+          preflightWarnings: outcomePreflightWarnings,
+          groundingBlockers: outcomeGroundingBlockers,
+          capabilityBlockers: capabilityBuildoutHints.blockers,
+          capabilityPhase: capabilityBuildoutHints.phase,
+          suppressGenericRecovery: capabilityBuildoutHints.suppressGenericRecovery,
+        });
+        shouldShowPendingHandoff = Boolean(handoff && !outcomePresentation.hideComputerHandoff);
+        shouldClearPendingHandoff = outcomePresentation.hideComputerHandoff;
+        const warningBlock = outcomePresentation.warningBlock;
+        const blockerList = outcomePresentation.blockerList;
+        const shouldRecoverOutcome = outcomePresentation.shouldRecoverOutcome;
+        const outcomeFailureMessage = [
+          outcome.message,
+          blockerList.length ? `Outcome blockers:\n${blockerList.map((blocker) => `- ${blocker}`).join('\n')}` : '',
+          outcomeWarnings.length ? `Warnings:\n${outcomeWarnings.map((warning) => `- ${warning}`).join('\n')}` : '',
           outcomePreflightBlockers.length ? `Preflight blockers:\n${outcomePreflightBlockers.map((blocker) => `- ${blocker}`).join('\n')}` : '',
           outcomeGroundingBlockers.length ? `Grounding blockers:\n${outcomeGroundingBlockers.map((blocker) => `- ${blocker}`).join('\n')}` : '',
         ].filter(Boolean).join('\n\n');
@@ -2921,24 +3321,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           await clearComputerTaskState(circleId, activeThreadId).catch(() => {});
         } else {
           await persistComputerTaskState({
-	            task: trimmed,
-	            taskKind: String(outcome.data?.taskKind || execution.preview.kind),
-	            taskLabel: String(outcome.data?.taskLabel || execution.preview.label),
-	            phase: outcomePresentation.statePhase,
-	            adapterId,
-	            runId: outcome.runId || null,
-	            grantedAccess: execution.grants.granted,
-	            accessPlan: grantSummary || execution.grants.summary,
-	            blockers: blockerList,
-	            nextSteps: capabilityBuildoutHints.nextSteps.length > 0
-	              ? capabilityBuildoutHints.nextSteps
-	              : outcomePresentation.nextSteps.length > 0
-	                ? outcomePresentation.nextSteps
-	                : handoff && !outcomePresentation.hideComputerHandoff
-	                  ? [handoff.title]
-	                : outcomePreflightFixActions.length > 0
-	                  ? outcomePreflightFixActions
-	                  : [...outcomeGroundingNextSteps, ...outcomeComplexityNextSteps].slice(0, 5),
+            task: trimmed,
+            taskKind: String(outcome.data?.taskKind || execution.preview.kind),
+            taskLabel: String(outcome.data?.taskLabel || execution.preview.label),
+            phase: outcomePresentation.statePhase,
+            adapterId,
+            runId: outcome.runId || null,
+            grantedAccess: execution.grants.granted,
+            accessPlan: grantSummary || execution.grants.summary,
+            blockers: blockerList,
+            nextSteps: capabilityBuildoutHints.nextSteps.length > 0
+              ? capabilityBuildoutHints.nextSteps
+              : outcomePresentation.nextSteps.length > 0
+                ? outcomePresentation.nextSteps
+                : handoff && !outcomePresentation.hideComputerHandoff
+                  ? [handoff.title]
+                  : outcomePreflightFixActions.length > 0
+                    ? outcomePreflightFixActions
+                    : [...outcomeGroundingNextSteps, ...outcomeComplexityNextSteps].slice(0, 5),
             grounding: outcomeGroundingState,
             capabilityBuildout: capabilityBuildout || null,
             complexity: compactComputerTaskComplexityPlan(outcomeComplexityPlan),
@@ -2959,9 +3359,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 : capabilityBuildout.status === 'blocked'
                   ? `Computer task blocked by app capability buildout: ${trimmed}`
                   : `Computer task app capability buildout failed: ${trimmed}`
-	          : outcomePresentation.statePhase === 'blocked'
-	            ? `Computer task blocked: ${trimmed}`
-	            : `Computer task completed without browser runtime: ${trimmed}`;
+          : outcomePresentation.statePhase === 'blocked'
+            ? `Computer task blocked: ${trimmed}`
+            : `Computer task completed without browser runtime: ${trimmed}`;
         recordSessionArchiveEvent({
           kind: 'computer_task',
           summary: computerTaskArchiveSummary,
@@ -3000,16 +3400,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               appRouteDecision: (outcome.data?.appAutomationRouteDecision as any) || computerAppRouteDecision,
             })
           : null;
-	        const userVisibleOutcome = outcomePresentation.compactUserMessage
-	          ? outcomePresentation.compactUserMessage
-	          : `${prefix}${outcome.message}${handoffBlock}${accessBlock}${warningBlock}${recovery?.message || ''}`;
-	        addBotMessage(userVisibleOutcome, undefined, {
-	          runId: outcome.runId || null,
-	          recoveryOptions: outcomePresentation.hideRecoveryDetails ? undefined : recovery?.recoveryOptions,
-	          recoveryReliability: outcomePresentation.hideRecoveryDetails ? undefined : recovery?.recoveryReliability,
-	          computerHandoff: outcomePresentation.hideComputerHandoff ? undefined : handoffContext.metadata,
-	          source: computerTaskSource,
-	        });
+        const userVisibleOutcome = outcomePresentation.compactUserMessage
+          ? outcomePresentation.compactUserMessage
+          : `${prefix}${visibleOutcomeMessage || outcome.message}${handoffBlock}${accessBlock}${warningBlock}${recovery?.message || ''}`;
+        addBotMessage(userVisibleOutcome, undefined, {
+          runId: outcome.runId || null,
+          recoveryOptions: outcomePresentation.hideRecoveryDetails ? undefined : recovery?.recoveryOptions,
+          recoveryReliability: outcomePresentation.hideRecoveryDetails ? undefined : recovery?.recoveryReliability,
+          computerHandoff: outcomePresentation.hideComputerHandoff ? undefined : handoffContext.metadata,
+          chatAutomationPlanPreview: outcome.data?.chatAutomationPlanPreview as ChatAutomationPlanPreview | undefined,
+          source: computerTaskSource,
+        });
       }
 
       if (shouldShowPendingHandoff && handoff) {
@@ -3038,7 +3439,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         appAutomationRouteDecision: computerAppRouteDecision,
         blockers: [error?.message || 'Unknown error'],
       });
-      const exceptionHandoffBlock = formatChatComputerHandoffForMessage(exceptionHandoffContext);
       const exceptionCheckpointRecovery = diagnoseComputerTaskCheckpointFailure({
         task: trimmed,
         failureMessage: error?.message || 'Unknown error',
@@ -3088,7 +3488,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         checkpointRecovery: exceptionCheckpointRecovery,
         appRouteDecision: computerAppRouteDecision,
       });
-      addBotMessage(`**Use Computer** failed: ${error?.message || 'Unknown error'}${exceptionHandoffBlock}${recovery.message}`, undefined, {
+      addBotMessage(appendCustomerSafeRecoveryMessage(
+        '**Use Computer** could not complete that task. Technical details were saved for recovery.',
+        recovery.message,
+      ), undefined, {
         recoveryOptions: recovery.recoveryOptions,
         recoveryReliability: recovery.recoveryReliability,
         computerHandoff: exceptionHandoffContext.metadata,
@@ -3111,6 +3514,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     circleId,
     currentUserId,
     currentUserName,
+    hydrateAppResolutionContext,
     loadSessionArchiveContext,
     messages,
     planActMode,
@@ -3394,6 +3798,28 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       console.error('[ChatTab] createPrivateThread failed:', err);
     }
   }, [circleId]);
+
+  const handleSidebarNewAgent = useCallback(() => {
+    setSpawnModalOpen(true);
+  }, []);
+
+  const handleSidebarAutomations = useCallback(() => {
+    setOpenSwanInitialTask(buildOpenSwanAutomationInitialTask(input));
+    setShowOpenSwanConsole(true);
+  }, [input]);
+
+  const handleSidebarMarketplace = useCallback(() => {
+    const tab = 'INTEGRATIONS';
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab } }));
+      return;
+    }
+    try {
+      navigation.setParams?.({ tab, _tabTs: Date.now() });
+    } catch {
+      navigation.navigate?.('CircleDetail', { circleId, tab, _tabTs: Date.now() });
+    }
+  }, [circleId, navigation]);
 
   const handleToggleSidebar = useCallback(() => {
     setSidebarCollapsed(prev => {
@@ -3724,7 +4150,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           streamingBuildCleanupRef.current = null;
         },
         onError: (msg) => {
-          addBotMessage(`Build-page stream failed: ${msg}.`);
+          addBotMessage('I could not finish the page build stream. Try again in a moment.');
           setStreamingBuildText('');
           setStreamingBuildPhase(null);
           setBotTyping(false);
@@ -4551,6 +4977,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       recoveryOptions: extra?.recoveryOptions,
       recoveryReliability: extra?.recoveryReliability,
       computerHandoff: extra?.computerHandoff,
+      chatAutomationPlanPreview: extra?.chatAutomationPlanPreview,
       computerPreflightBlockers: extra?.computerPreflightBlockers,
       quickReplies: extra?.quickReplies,
       taskPlan: extra?.taskPlan,
@@ -4620,6 +5047,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         recoveryOptions: extra?.recoveryOptions,
         recoveryReliability: extra?.recoveryReliability,
         computerHandoff: extra?.computerHandoff,
+        chatAutomationPlanPreview: extra?.chatAutomationPlanPreview,
         routing: extra?.routing,
         onError: (error) => {
           console.error('[ChatTab] Unexpected error persisting bot msg:', error);
@@ -4637,6 +5065,61 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
     return msg;
   };
+
+  useEffect(() => {
+    if (!circleId || !currentUserId || !activeThreadId || messages.length < 4) return;
+    if (messages.some((message) => message.isBot && message.automationProposal)) return;
+
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        const since = new Date(Date.now() - 14 * 24 * 3_600_000).toISOString();
+        const rows = await loadChatAutomationDecisions(circleId, { since, limit: 120 });
+        if (cancelled) return;
+
+        const [suggestion] = buildRepeatedFlowAutomationProposals(rows, {
+          minOccurrences: 3,
+          maxSuggestions: 1,
+        });
+        if (!suggestion) return;
+
+        const seenKey = `${circleId}:${activeThreadId}:${suggestion.fingerprint}`;
+        if (automationSuggestionSeenRef.current.has(seenKey)) return;
+
+        const storageKey = `uc_chat_automation_suggestion_seen:${seenKey}`;
+        if (typeof localStorage !== 'undefined') {
+          const stored = localStorage.getItem(storageKey);
+          if (stored) {
+            automationSuggestionSeenRef.current.add(seenKey);
+            return;
+          }
+          try { localStorage.setItem(storageKey, new Date().toISOString()); } catch {}
+        }
+        automationSuggestionSeenRef.current.add(seenKey);
+        if (cancelled) return;
+
+        addBotMessage(suggestion.message, undefined, {
+          localOnly: true,
+          automationProposal: suggestion.proposal,
+          source: {
+            actor: 'OpenSwan',
+            surface: 'chat_automation_suggestion',
+            selectedModel,
+            effectiveModel: 'repeated-flow-detector-v1',
+          },
+        });
+      })();
+    }, 1800);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // `addBotMessage` is intentionally omitted: it is recreated every render,
+    // while this effect is keyed to thread/message activity and deduped by the
+    // suggestion fingerprint.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeThreadId, circleId, currentUserId, messages.length, selectedModel]);
 
   const addDesktopBridgeAutoConnectMessage = async (surface = 'desktop_bridge_recovery') => {
     const result = await autoConnectDesktopBridge();
@@ -4830,7 +5313,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       .eq('thread_id', activeThreadId);
 
     if (error) {
-      addBotMessage(`Could not clear this thread: ${error.message}`);
+      addBotMessage('I could not clear this thread. Try again in a moment.');
       return;
     }
 
@@ -4901,6 +5384,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         capabilityBuildout: computerTaskState?.capabilityBuildout || null,
         complexity: computerTaskState?.complexity || null,
         checkpointRecovery: null,
+        resultSummary: result.summary || null,
       });
       recordSessionArchiveEvent({
         kind: 'computer_task',
@@ -4990,7 +5474,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             checkpointRecovery ? `checkpoint:${checkpointRecovery.failedCheckpointId}` : '',
           ].filter(Boolean),
         });
-        addBotMessage(`**Computer Use** failed: ${errorMessage}${recovery.message}`, undefined, {
+        addBotMessage(appendCustomerSafeRecoveryMessage(
+          '**Computer Use** could not complete that task. Technical details were saved for recovery.',
+          recovery.message,
+        ), undefined, {
           recoveryOptions: recovery.recoveryOptions,
           recoveryReliability: recovery.recoveryReliability,
         });
@@ -5003,7 +5490,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   const updateBotMessage = (
     messageId: string,
-    patch: Partial<Pick<ChatMessage, 'content' | 'artifacts' | 'wikiRefs' | 'researchRefs' | 'runId' | 'taskPlan' | 'toolEvents' | 'verificationResults' | 'executionStream' | 'browserPlans' | 'browserPlanEvents' | 'browserSessions' | 'recoveryOptions' | 'recoveryReliability' | 'isPending' | 'memoriesUsed' | 'memoryRefs' | 'memoryRecommendations' | 'delegatedSubagents' | 'routing' | 'source' | 'usage'>>,
+    patch: Partial<Pick<ChatMessage, 'content' | 'artifacts' | 'wikiRefs' | 'researchRefs' | 'runId' | 'taskPlan' | 'toolEvents' | 'verificationResults' | 'executionStream' | 'browserPlans' | 'browserPlanEvents' | 'browserSessions' | 'recoveryOptions' | 'recoveryReliability' | 'chatAutomationPlanPreview' | 'isPending' | 'memoriesUsed' | 'memoryRefs' | 'memoryRecommendations' | 'delegatedSubagents' | 'routing' | 'source' | 'usage'>>,
   ) => {
     let nextMessageToPersist: ChatMessage | null = null;
     setMessages(prev => prev.map((message) => {
@@ -5043,6 +5530,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       browserSessions: message.browserSessions,
       recoveryOptions: message.recoveryOptions,
       recoveryReliability: message.recoveryReliability,
+      chatAutomationPlanPreview: message.chatAutomationPlanPreview,
       source: message.source,
       usage: message.usage,
       routing: message.routing,
@@ -5229,6 +5717,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     setPendingComputerUseApprovalSummary('');
     setPendingComputerUseGrantIds([]);
     setPendingComputerUseOrigin({ messageId: message.id, runId: message.runId, planId: plan.planId });
+    setPendingComputerUseStickyScopeId(null);
     setPendingComputerUseActions(plan.actions.map((action) => ({
       id: action.id,
       type: action.type,
@@ -5417,6 +5906,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (!intent.route || !intent.kind) return false;
 
     const toolMap: Partial<Record<typeof intent.kind, { tool: string; args: Record<string, unknown> }>> = {
+      launch_app: { tool: 'desktop.launch_app', args: { appName: intent.appQuery } },
+      focus_app: { tool: 'desktop.focus_app', args: { appName: intent.appQuery } },
       browser_tabs: { tool: 'desktop.list_browser_tabs', args: { browsers: intent.browsers } },
       running_apps: { tool: 'desktop.list_running_apps', args: {} },
       window_state: { tool: 'desktop.window_state', args: {} },
@@ -5523,7 +6014,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
         setWallet(activeWallet);
       } catch (e: any) {
-        addBotMessage(`Wallet connection failed: ${e.message}`);
+        addBotMessage('I could not connect the wallet. Check the wallet popup and try again.');
         setSendingCrypto(false);
         return;
       }
@@ -5561,7 +6052,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       // Trigger celebration effect
       setTimeout(() => triggerParticleEffect(300, 200), 500);
     } else {
-      addBotMessage(`❌ Transaction failed: ${result.error}\n\nTry again or check your wallet.`);
+      addBotMessage('I could not finish the transaction. Check your wallet and try again.');
     }
 
     setSendingCrypto(false);
@@ -5654,12 +6145,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return staged;
   }, []);
 
-  const sendMessage = async (overrideText?: string, options?: { displayText?: string }) => {
+  const sendMessage = async (
+    overrideText?: string,
+    options?: {
+      displayText?: string;
+      modeOverride?: string | null;
+      modelOverride?: string | null;
+    },
+  ) => {
     if (sendLockRef.current) return;
     const requestedContent = (overrideText || input).trim();
     const hasPendingAttachments = attachments.length > 0 || stagedFiles.length > 0;
     const content = requestedContent || (hasPendingAttachments ? 'Open the attached file.' : '');
     if (!content) return;
+    const effectiveChatMode = options?.modeOverride || chatMode;
+    const effectivePlanActMode: 'plan' | 'act' = effectiveChatMode === 'plan' ? 'plan' : 'act';
+    const effectiveSelectedModel = options?.modelOverride && options.modelOverride !== 'auto'
+      ? options.modelOverride
+      : selectedModel;
 
     // ── Resume a pending clarification ──────────────────────────────────────
     // If we recently asked the user for a missing detail, treat this reply as
@@ -5745,7 +6248,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
       const failed = currentStagedFiles.find((file) => file.error);
       if (failed) {
-        addBotMessage(`**${failed.name}** did not upload cleanly: ${failed.error}. Remove it or upload it again before I open it in a desktop app.`, undefined, { localOnly: true });
+        addBotMessage(`**${failed.name}** did not upload cleanly. Remove it or upload it again before I open it in a desktop app.`, undefined, { localOnly: true });
         return;
       }
       setBotTyping(true);
@@ -6320,7 +6823,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // Plan mode is first-class now: Chat classifies the request, SwanBot
     // stays in planner posture, OpenSwan contributes tools/verification,
     // and the result is persisted for Office/run-ledger handoff.
-    if (shouldCreateAgentPlanForMessage(content, chatMode)) {
+    if (shouldCreateAgentPlanForMessage(content, effectiveChatMode)) {
       const explicitPlanTask = content.replace(/^\/plan\s*/i, '').trim();
       const taskText = lowerContent.startsWith('/plan') ? explicitPlanTask : content;
       if (!taskText) {
@@ -6341,7 +6844,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const draft = buildAgentPlanDraft({
           task: taskText,
           selectedMode: 'plan',
-          selectedModel: selectedModel || null,
+          selectedModel: effectiveSelectedModel || null,
           threadId: activeThreadId || null,
           sourceMessageId: userMessage.id,
           circleId,
@@ -6404,6 +6907,32 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // Catches "post this to WordPress", "create a task", "remember that...", etc.
     // Only fires for non-slash-command messages
     if (!lowerContent.startsWith('/')) {
+      // Wave-2 preference learning: a conservative, verb-anchored "use
+      // Pixelmator (instead)" follow-up against the previous route's app
+      // resolution records the preferred app for that category. Fire-and-
+      // forget; a missed parse just means no preference is learned.
+      const previousAppResolution = lastAppResolutionRef.current;
+      if (previousAppResolution && circleId) {
+        void import('../../../lib/chatComputerRequestRouter')
+          .then(async ({ parseAppOverrideChoice, getAppResolutionContext, setAppResolutionContext }) => {
+            const override = parseAppOverrideChoice(content, previousAppResolution);
+            if (!override) return;
+            const { recordPreferredAppForCategory } = await import('../../../lib/knownAppShortcuts');
+            await recordPreferredAppForCategory(circleId, override.category, override.appId);
+            // Update the hydrated registry too so the very next route build
+            // already resolves to the user's choice.
+            const ctx = getAppResolutionContext();
+            setAppResolutionContext({
+              ...ctx,
+              preferredAppByCategory: {
+                ...(ctx.preferredAppByCategory || {}),
+                [override.category]: override.appId,
+              },
+            });
+          })
+          .catch(() => {});
+      }
+
       const photoshopGenerativeFillClarification = buildPhotoshopGenerativeFillClarification(content);
       if (photoshopGenerativeFillClarification.route) {
         addBotMessage([
@@ -6451,9 +6980,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           type: attachment.type,
           id: attachment.id,
         })),
-        selectedMode: chatMode,
+        selectedMode: effectiveChatMode,
       });
       if (plan.execution.kind === 'run_computer_task') {
+        if (currentAttachments.length === 0 && shouldRunImmediateLocalAppLaunch(content)) {
+          const handledLocalAppLaunch = await executeLocalComputerAwarenessRequest(content);
+          if (handledLocalAppLaunch) {
+            return;
+          }
+        }
         const shared = await executeSharedComputerTask(content);
         if (shared?.handled && !shared.browser) {
           return;
@@ -6465,6 +7000,68 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           return;
         }
       }
+      // R7 — apply handler state requests AFTER dispatch (called from a
+      // try/finally around each dispatch below). Handlers return the UI
+      // state they want instead of mutating ChatTab state in their closures,
+      // so a gate refusal, dispatcher skip, or mid-handler throw can never
+      // leave the typing indicator stuck or the composer locked. Only
+      // `workbench.stop` is honored here — a visible `start` must happen
+      // mid-handler (post-dispatch it would appear after the work is done).
+      const applyTransportStateRequests = (requests: ChatTransportStateRequests | null) => {
+        if (!requests) return;
+        if (requests.modalToOpen === 'memory_viewer') setShowMemoryViewer(true);
+        if (requests.workbench?.action === 'stop') stopCodingWorkbench();
+        if (typeof requests.typing === 'boolean') setBotTyping(requests.typing);
+        if (typeof requests.composerLock === 'boolean') sendLockRef.current = requests.composerLock;
+      };
+      const postDispatcherStopOutcome = (
+        outcome: ChatAutomationOutcome | undefined,
+        surface: string,
+      ) => {
+        if (!outcome) return;
+        if (outcome.status === 'skipped' && outcome.data?.planModeRefusal) {
+          addBotMessage(outcome.message, undefined, {
+            localOnly: true,
+            runId: outcome.runId || null,
+            chatAutomationPlanPreview: outcome.data?.chatAutomationPlanPreview as ChatAutomationPlanPreview | undefined,
+            source: {
+              actor: 'OpenSwan',
+              surface,
+              selectedModel,
+              effectiveModel: 'chat-automation-plan-refusal',
+            },
+          });
+          return;
+        }
+        if (outcome.status === 'skipped') return;
+        if (outcome.status !== 'deferred' && outcome.status !== 'failed' && outcome.status !== 'blocked') return;
+        addBotMessage(outcome.message, undefined, {
+          localOnly: true,
+          runId: outcome.runId || null,
+          chatAutomationPlanPreview: outcome.data?.chatAutomationPlanPreview as ChatAutomationPlanPreview | undefined,
+          source: {
+            actor: 'OpenSwan',
+            surface,
+            selectedModel,
+            effectiveModel: `chat-automation-${outcome.status}`,
+          },
+        });
+      };
+      const shouldStopAfterDispatcherOutcome = (outcome: ChatAutomationOutcome | undefined) => (
+        !!outcome && (outcome.status !== 'skipped' || Boolean(outcome.data?.planModeRefusal))
+      );
+      // R9 — thread-scoped clarification park/resume seam handed to handlers
+      // through the dispatch ctx. `pendingClarificationRef` REMAINS the
+      // backing store (the resume block at the top of sendMessage still reads
+      // it directly — no behavior change); this just lets dispatcher handlers
+      // park/resume without reaching into component refs, so the create_task
+      // cutover can use the same seam.
+      const clarifyResumeKey = activeThreadId || 'main';
+      const clarificationResumeStore: ChatClarificationResumeStore = {
+        pending: pendingClarificationRef.current.get(clarifyResumeKey) || null,
+        setPending: (pending) => { pendingClarificationRef.current.set(clarifyResumeKey, pending); },
+        clearPending: () => { pendingClarificationRef.current.delete(clarifyResumeKey); },
+      };
       // Underspecified request — ask for the missing details instead of
       // guessing or fabricating a placeholder. Recall context first (memory +
       // recent thread) so the question is informed, then post it as a bot
@@ -6475,10 +7072,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       // instead of an ad-hoc inline branch. `ask_clarification` is plan-safe and
       // approval-free, so behavior is identical — but it now shares the single
       // plan-mode / approval / observer pipeline with every other kind. The dep
-      // below is the former inline body verbatim.
+      // below is the former inline body verbatim (R7/R9: the trailing typing
+      // reset became a state request and the park moved to the ctx seam).
       if (plan.execution.kind === 'ask_clarification' && plan.execution.clarification && !resolvingClarificationRef.current) {
         const clarificationHandlers = createChatTransportHandlers({
-          ask_clarification: async (dispatchedPlan) => {
+          ask_clarification: async (dispatchedPlan, depCtx) => {
             const clarification = dispatchedPlan.execution.clarification!;
             const recentMessages = messages.slice(-6).map((m) => m.content).filter(Boolean);
             const fill = await recallForClarification({
@@ -6495,6 +7093,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // path reconstructs into the completed task.
             addBotMessage(lines.join('\n'), undefined, {
               localOnly: true,
+              chatAutomationPlanPreview: buildChatAutomationPlanPreview(dispatchedPlan),
               quickReplies: clarification.examples,
               source: {
                 actor: 'OpenSwan',
@@ -6505,88 +7104,235 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             });
             // Remember what we asked so the user's next reply completes the task
             // instead of being routed from scratch (see the resume block above).
-            pendingClarificationRef.current.set(activeThreadId || 'main', {
+            // R9: park through the dispatcher-ctx seam (refs stay the store).
+            depCtx.clarificationResume?.setPending({
               originalMessage: content,
               pendingIntent: clarification.pendingIntent || null,
               missingParams: clarification.missingParams,
               askedAt: Date.now(),
             });
-            setBotTyping(false);
-            return { status: 'needs_input' };
+            // R7: typing reset is a state request, applied post-dispatch.
+            return { status: 'needs_input', stateRequests: { typing: false } };
           },
         });
-        const outcome = await dispatchChatAutomationPlan(plan, {
-          handlers: clarificationHandlers,
-          ctx: {
-            circleId,
-            userId: currentUserId || '',
-            threadId: activeThreadId || undefined,
-            model: selectedModel,
-            chatMode: planActMode,
-          },
-          onOutcome: attachPlanDecisionToRun,
-        });
+        let outcome: ChatAutomationOutcome | undefined;
+        try {
+          outcome = await dispatchChatAutomationPlan(plan, {
+            handlers: clarificationHandlers,
+            ctx: {
+              circleId,
+              userId: currentUserId || '',
+              threadId: activeThreadId || undefined,
+              model: effectiveSelectedModel,
+              chatMode: effectivePlanActMode,
+              clarificationResume: clarificationResumeStore,
+            },
+            approvalGate: chatAutomationApprovalGate,
+            onOutcome: attachPlanDecisionToRun,
+          });
+        } finally {
+          // R7: applied after dispatch, even on a gate refusal or throw.
+          // Default typing→false mirrors the legacy in-closure reset, so a
+          // handler crash can't leave the indicator stuck.
+          const requests = getOutcomeStateRequests(outcome);
+          applyTransportStateRequests(requests ?? { typing: false });
+        }
+        postDispatcherStopOutcome(outcome, 'main_chat_clarification_dispatch');
         // Handled (asked the question, or refused by the plan-mode gate) →
         // stop here. Only an unexpected `skipped` (no handler) falls through to
         // the legacy path, preserving the old safety net.
-        if (outcome.status !== 'skipped') return;
+        if (shouldStopAfterDispatcherOutcome(outcome)) return;
       }
 
-      // C1 (Phase 1b) cutover #2: the memory family of conversational intents
-      // (remember / forget / show_memories) now executes through the unified
-      // executor using the planner's already-detected intent — removing the
-      // double-classification where the legacy `conversationalRouter` below
-      // re-ran its own detector. Scoped to memory intents for a narrow blast
-      // radius; every other conversational intent still falls through to the
-      // legacy router unchanged. The dep body is a faithful copy of the legacy
-      // block, so behavior is preserved (same executor, same workbench/render).
+      // C1 (Phase 1b) cutover #7: natural-language build requests now use the
+      // unified dispatcher before the legacy chat path. The handler preserves
+      // the existing `/build-page` behavior: thin briefs get the same
+      // deterministic clarification, while good briefs launch the streaming
+      // builder and leave its workbench/typing state running until the stream
+      // completes.
+      if (plan.execution.kind === 'run_build_discovery') {
+        let buildStreamStarted = false;
+        const buildDiscoveryHandlers = createChatTransportHandlers({
+          run_build_discovery: async (dispatchedPlan) => {
+            const brief = (dispatchedPlan.execution.commandText || content)
+              .replace(/^\/build-page\s*/i, '')
+              .trim();
+            if (!brief) {
+              addBotMessage('Usage: `/build-page <brief>` — describe the page you want.', undefined, {
+                localOnly: true,
+                chatAutomationPlanPreview: buildChatAutomationPlanPreview(dispatchedPlan),
+                source: {
+                  actor: 'OpenSwan',
+                  surface: 'main_chat_build_discovery_dispatch',
+                  selectedModel,
+                  effectiveModel: 'deterministic-build-brief',
+                },
+              });
+              return { status: 'needs_input', stateRequests: { typing: false } };
+            }
+
+            const briefQuality = analyzeBuildBrief(brief, 'build-page');
+            if (briefQuality.needsClarification) {
+              addBotMessage(briefQuality.hint, undefined, {
+                localOnly: true,
+                chatAutomationPlanPreview: buildChatAutomationPlanPreview(dispatchedPlan),
+                source: {
+                  actor: 'OpenSwan',
+                  surface: 'main_chat_build_discovery_dispatch',
+                  selectedModel,
+                  effectiveModel: 'deterministic-build-brief',
+                },
+              });
+              return { status: 'needs_input', stateRequests: { typing: false } };
+            }
+
+            await launchBuildStream(brief);
+            buildStreamStarted = true;
+            return {
+              status: 'completed',
+              data: { buildStreamStarted: true },
+            };
+          },
+        });
+        let buildOutcome: ChatAutomationOutcome | undefined;
+        try {
+          buildOutcome = await dispatchChatAutomationPlan(plan, {
+            handlers: buildDiscoveryHandlers,
+            ctx: {
+              circleId,
+              userId: currentUserId || '',
+              threadId: activeThreadId || undefined,
+              model: effectiveSelectedModel,
+              chatMode: effectivePlanActMode,
+              clarificationResume: clarificationResumeStore,
+            },
+            approvalGate: chatAutomationApprovalGate,
+            onOutcome: attachPlanDecisionToRun,
+          });
+        } finally {
+          const requests = getOutcomeStateRequests(buildOutcome);
+          if (requests) {
+            applyTransportStateRequests(requests);
+          } else if (!buildStreamStarted) {
+            applyTransportStateRequests({ typing: false, workbench: { action: 'stop', kind: 'coding' } });
+          }
+        }
+        postDispatcherStopOutcome(buildOutcome, 'main_chat_build_discovery_dispatch');
+        if (shouldStopAfterDispatcherOutcome(buildOutcome)) return;
+      }
+
+      // C1 (Phase 1b) cutovers #2/#3/#4/#5/#6/#8: the memory family
+      // (remember / forget / show_memories), image generation, and read-only
+      // WordPress listing / well-specified create-task / office-agent task
+      // requests, plus approval-gated WordPress publish/schedule, now execute
+      // through the unified executor using the planner's already-detected
+      // intent — removing the double-classification where the legacy
+      // `conversationalRouter` below re-ran its own detector. Remaining
+      // conversational intents still fall through to the legacy router
+      // unchanged. The dep body mirrors the legacy block, so behavior is
+      // preserved (same executor, same workbench/render) while image requests
+      // now share the `/imagine` HF command path.
+      // R8: the dep calls `executeDetectedConversationalIntent` with
+      // `plan.intent.intent` — `detectConversationalIntent` never runs on
+      // this path (the chat-transport-handlers smoke asserts it).
       if (plan.intent.kind === 'conversational_action' && plan.execution.kind === 'run_command_handler') {
-        const memoryConversationalHandlers = createChatTransportHandlers({
-          run_command_handler: async (dispatchedPlan) => {
-            if (dispatchedPlan.intent.kind !== 'conversational_action') return { handled: false };
-            const intent = dispatchedPlan.intent.intent;
-            if (intent.type !== 'remember' && intent.type !== 'forget' && intent.type !== 'show_memories') {
-              return { handled: false };
-            }
-            const { executeConversationalIntent } = await import('../../../lib/conversationalRouter');
-            const shouldShowWorkbench = isCodingGenerationRequest(content, sessionProfile)
-              || currentAttachments.some((attachment) => attachment.isFigma)
-              || !!figmaPromptContext;
-            if (shouldShowWorkbench) {
-              startCodingWorkbench([content, buildAttachmentPromptContext(currentAttachments), figmaPromptContext].filter(Boolean).join('\n\n'));
-            }
-            setBotTyping(true);
-            const result = await executeConversationalIntent(intent, {
-              circleId, userId: currentUserId || '', userName: currentUserName,
-              fullMessage: content, attachments: currentAttachments as any,
-            });
-            setBotTyping(false);
-            if (shouldShowWorkbench) stopCodingWorkbench();
-            if (result?.handled) {
-              if (result.message === '__SHOW_MEMORIES__') {
-                setShowMemoryViewer(true);
-              } else {
-                addBotMessage(result.message, result.artifacts as any);
+        const isUnifiedConversationalIntentType = (intentType: string) => intentType === 'remember'
+          || intentType === 'forget'
+          || intentType === 'show_memories'
+          || intentType === 'generate_image'
+          || intentType === 'wordpress_list'
+          || intentType === 'wordpress_publish'
+          || intentType === 'wordpress_schedule'
+          || intentType === 'create_task'
+          || intentType === 'office_agent_task';
+        if (isUnifiedConversationalIntentType(plan.intent.intent.type)) {
+          // R7 fail-safe: tracks the mid-handler workbench start so the finally
+          // below can stop it even when a throw drops the state requests.
+          let conversationalWorkbenchStarted = false;
+          const conversationalCommandHandlers = createChatTransportHandlers({
+            run_command_handler: async (dispatchedPlan) => {
+              if (dispatchedPlan.intent.kind !== 'conversational_action') return { handled: false };
+              const intent = dispatchedPlan.intent.intent;
+              if (!isUnifiedConversationalIntentType(intent.type)) {
+                return { handled: false };
               }
-              return { status: 'completed' };
-            }
-            return { handled: false };
-          },
-        });
-        const memoryOutcome = await dispatchChatAutomationPlan(plan, {
-          handlers: memoryConversationalHandlers,
-          ctx: {
-            circleId,
-            userId: currentUserId || '',
-            threadId: activeThreadId || undefined,
-            model: selectedModel,
-            chatMode: planActMode,
-          },
-          onOutcome: attachPlanDecisionToRun,
-        });
-        // Only fall through to the legacy conversationalRouter when this
-        // handler declined (non-memory intent, or executor didn't handle).
-        if (memoryOutcome.status !== 'skipped') return;
+              const { executeDetectedConversationalIntent } = await import('../../../lib/conversationalRouter');
+              const shouldShowWorkbench = intent.type === 'generate_image'
+                || isCodingGenerationRequest(content, sessionProfile)
+                || currentAttachments.some((attachment) => attachment.isFigma)
+                || !!figmaPromptContext;
+              if (shouldShowWorkbench) {
+                // R7: stays mid-handler — the workbench must be VISIBLE while
+                // the executor runs; starting it post-dispatch would flash it
+                // after the work already finished.
+                startCodingWorkbench([content, buildAttachmentPromptContext(currentAttachments), figmaPromptContext].filter(Boolean).join('\n\n'));
+                conversationalWorkbenchStarted = true;
+              }
+              // R7: stays mid-handler — the typing indicator must show DURING
+              // the executor call; the post-dispatch state request below only
+              // handles the reset.
+              setBotTyping(true);
+              const result = await executeDetectedConversationalIntent(intent, {
+                circleId, userId: currentUserId || '', userName: currentUserName,
+                model: effectiveSelectedModel !== 'auto' ? effectiveSelectedModel : undefined,
+                fullMessage: content, attachments: currentAttachments as any,
+              });
+              const cleanupRequests: ChatTransportStateRequests = {
+                typing: false,
+                ...(shouldShowWorkbench ? { workbench: { action: 'stop' as const, kind: 'coding' } } : {}),
+              };
+              if (result?.handled) {
+                if (result.message === '__SHOW_MEMORIES__') {
+                  // R7: modal open is a state request, applied post-dispatch.
+                  return { status: 'completed', stateRequests: { ...cleanupRequests, modalToOpen: 'memory_viewer' } };
+                }
+                addBotMessage(result.message, result.artifacts as SwanBotStructuredArtifact[] | undefined, {
+                  chatAutomationPlanPreview: buildChatAutomationPlanPreview(dispatchedPlan),
+                  source: intent.type === 'generate_image'
+                    ? {
+                        actor: 'OpenSwan',
+                        surface: 'main_chat_hf_tools_dispatch',
+                        selectedModel,
+                        effectiveModel: 'hf-tools-dispatch',
+                      }
+                    : undefined,
+                });
+                return { status: 'completed', stateRequests: cleanupRequests };
+              }
+              return { handled: false, stateRequests: cleanupRequests };
+            },
+          });
+          let conversationalOutcome: ChatAutomationOutcome | undefined;
+          try {
+            conversationalOutcome = await dispatchChatAutomationPlan(plan, {
+              handlers: conversationalCommandHandlers,
+              ctx: {
+                circleId,
+                userId: currentUserId || '',
+                threadId: activeThreadId || undefined,
+                model: effectiveSelectedModel,
+                chatMode: effectivePlanActMode,
+                clarificationResume: clarificationResumeStore,
+              },
+              approvalGate: chatAutomationApprovalGate,
+              onOutcome: attachPlanDecisionToRun,
+            });
+          } finally {
+            // R7: applied after dispatch in a finally — a gate refusal or
+            // mid-handler throw drops the state requests, so fall back to the
+            // fail-safe defaults (typing off; stop the workbench if the
+            // handler started it) instead of leaving the UI stuck.
+            const requests = getOutcomeStateRequests(conversationalOutcome);
+            applyTransportStateRequests(requests ?? {
+              typing: false,
+              ...(conversationalWorkbenchStarted ? { workbench: { action: 'stop' as const, kind: 'coding' } } : {}),
+            });
+          }
+          postDispatcherStopOutcome(conversationalOutcome, 'main_chat_conversational_command_dispatch');
+          // Only fall through to the legacy conversationalRouter when this
+          // handler declined (intent not cut over yet, or executor didn't handle).
+          if (shouldStopAfterDispatcherOutcome(conversationalOutcome)) return;
+        }
       }
     }
 
@@ -6595,13 +7341,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const { detectConversationalIntent, executeConversationalIntent } = await import('../../../lib/conversationalRouter');
         const intent = detectConversationalIntent(content, currentAttachments as any);
         if (intent.type !== 'none') {
-          const shouldShowWorkbench = isCodingGenerationRequest(content, sessionProfile) || currentAttachments.some((attachment) => attachment.isFigma) || !!figmaPromptContext;
+          const shouldShowWorkbench = intent.type === 'generate_image' || isCodingGenerationRequest(content, sessionProfile) || currentAttachments.some((attachment) => attachment.isFigma) || !!figmaPromptContext;
           if (shouldShowWorkbench) {
             startCodingWorkbench([content, buildAttachmentPromptContext(currentAttachments), figmaPromptContext].filter(Boolean).join('\n\n'));
           }
           setBotTyping(true);
           const result = await executeConversationalIntent(intent, {
             circleId, userId: currentUserId || '', userName: currentUserName,
+            model: effectiveSelectedModel !== 'auto' ? effectiveSelectedModel : undefined,
             fullMessage: content, attachments: currentAttachments as any,
           });
           setBotTyping(false);
@@ -7439,7 +8186,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       setBotTyping(true);
       try {
         const sessionArchiveContext = await loadSessionArchiveContext();
-        const sendModel = resolveSendModel(cleanContent);
+        const sendModel = effectiveSelectedModel !== 'auto'
+          ? effectiveSelectedModel
+          : resolveSendModel(cleanContent);
         const context: SwanBotContext = {
           userId: currentUserId || 'anonymous',
           circleId,
@@ -7466,7 +8215,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
 
         // Use unified agent runtime only when user explicitly selects a specialized mode
-        if (chatMode !== 'none' && chatMode !== 'talk') {
+        if (effectiveChatMode !== 'none' && effectiveChatMode !== 'talk') {
           const result = await executeAgentRun({
             surface: 'main_chat',
             circleId,
@@ -7474,7 +8223,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             userName: currentUserName,
             prompt: fullPrompt,
             model: sendModel || undefined,
-            mode: chatMode as any,
+            mode: effectiveChatMode as any,
             connectedProviders: connectedProviderSet,
             context: {
               chatHistory,
@@ -7517,13 +8266,27 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // exposes. Forcing them off the streaming fast-path lets
             // BlackSwan actually call rooms.create / circle.update_* /
             // missions.* instead of replying "I can't do that."
-            const streamCandidateModel = resolveSendModel(cleanContent) || 'claude-haiku-4-5';
-            const canStream = sessionDelegationMode !== 'parallel'
-              && !selectedRecoveryOption
-              && !isFigmaBuildRequest
-              && !isCodingGenerationRequest(cleanContent, sessionProfile)
-              && !looksLikeActionRequest(cleanContent)
-              && canUseAnthropicChatStream(streamCandidateModel);
+            const streamCandidateModel = sendModel || 'claude-haiku-4-5';
+            const terminalPlan = buildChatAutomationPlan({
+              message: content,
+              attachments: currentAttachments.map((attachment) => ({
+                uri: attachment.uri,
+                type: attachment.type,
+                id: attachment.id,
+              })),
+              selectedMode: effectiveChatMode,
+            });
+            const terminalTransport = chooseChatTerminalTransport({
+              executionKind: terminalPlan.execution.kind,
+              chatMode: effectiveChatMode,
+              sessionDelegationMode,
+              hasSelectedRecoveryOption: Boolean(selectedRecoveryOption),
+              isFigmaBuildRequest,
+              isCodingGenerationRequest: isCodingGenerationRequest(cleanContent, sessionProfile),
+              looksLikeActionRequest: looksLikeActionRequest(cleanContent),
+              canStreamAnthropic: canUseAnthropicChatStream(streamCandidateModel),
+            });
+            const canStream = terminalTransport.path === 'stream_plain_chat';
 
             if (canStream) {
               try {
@@ -7534,7 +8297,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   circleId,
                   userId: currentUserId || 'anonymous',
                   currentMessage: cleanContent,
-                  model: selectedModel !== 'auto' ? selectedModel : undefined,
+                  model: effectiveSelectedModel !== 'auto' ? effectiveSelectedModel : undefined,
                   userName: currentUserName,
                   chatHistory,
                   sessionArchiveContext: sessionArchiveContext || undefined,
@@ -7659,7 +8422,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             delegationMode: sessionDelegationMode,
             activePluginIds: activePlugins,
             metadata: {
-              selectedModel,
+              selectedModel: effectiveSelectedModel,
               effectiveModel: sendModel || null,
               threadId: activeThreadId,
               attachmentCount: currentAttachments.length,
@@ -7868,14 +8631,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             };
             if (pendingMessage) {
               updateBotMessage(pendingMessage.id, {
-                content: `${errorMessage} ${batchMessage}${recovery.message}`,
+                content: appendCustomerSafeRecoveryMessage(`${errorMessage} Technical details were saved for recovery.`, recovery.message),
                 isPending: false,
                 recoveryOptions: recovery.recoveryOptions,
                 recoveryReliability: recovery.recoveryReliability,
                 source: errorSource,
               });
             } else {
-              addBotMessage(`${errorMessage} ${batchMessage}${recovery.message}`, undefined, {
+              addBotMessage(appendCustomerSafeRecoveryMessage(`${errorMessage} Technical details were saved for recovery.`, recovery.message), undefined, {
                 localOnly: true,
                 recoveryOptions: recovery.recoveryOptions,
                 recoveryReliability: recovery.recoveryReliability,
@@ -7983,7 +8746,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             : '\n\nNo active wallet selected.';
           addBotMessage(`**Wallet status**\n\n${lines.join('\n')}${activeLine}`);
         } catch (error: any) {
-          addBotMessage(`Wallet status error: ${error?.message || 'Unknown error'}`);
+          addBotMessage('I could not load wallet status right now. Try again in a moment.');
         }
       })();
       return;
@@ -8054,7 +8817,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const props = await getProposals(circleId, 'active');
       setProposals(props);
     } else {
-      addBotMessage(`❌ Failed to create poll: ${result.error}`);
+      addBotMessage('I could not create that poll. Check the options and try again.');
     }
     setShowCreatePoll(false);
   };
@@ -8066,7 +8829,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const props = await getProposals(circleId, 'active');
       setProposals(props);
     } else {
-      addBotMessage(`❌ Failed to create proposal: ${result.error}`);
+      addBotMessage('I could not create that proposal. Check the title and try again.');
     }
     setShowCreateProposal(false);
   };
@@ -8078,7 +8841,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const props = await getProposals(circleId, 'active');
       setProposals(props);
     } else {
-      addBotMessage(`❌ Vote failed: ${result.error}`);
+      addBotMessage('I could not record that vote. Try again in a moment.');
     }
   };
 
@@ -8392,11 +9155,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const renderContent = (item: ChatMessage) => {
     const routeChips = buildMessageRouteChips(item);
     const handoffMetadata = item.computerHandoff || null;
+    const appChoiceCard = buildChatAppChoiceCard(handoffMetadata);
     const designTaskCard = buildChatDesignTaskCardModel(handoffMetadata);
     const recoveryReliabilityCard = buildRecoveryReliabilityCard(item.recoveryReliability);
     const visibleContent = item.recoveryOptions && item.recoveryOptions.length > 0
       ? stripChatFailureRecoveryOptionsText(item.content)
       : item.content;
+    const bodyContent = appChoiceCard
+      ? stripChatAppChoiceLine(visibleContent, handoffMetadata?.requestNotice?.appChoiceLine)
+      : visibleContent;
     return (
       <View>
         {/* Pending "BUILDING NOW" chip removed — the rotating verb in
@@ -8448,6 +9215,50 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 </Text>
               </View>
             ))}
+          </View>
+        ) : null}
+        {appChoiceCard ? (
+          <View style={styles.appChoiceSection}>
+            <View style={styles.appChoiceCard}>
+              <View style={styles.appChoiceHeader}>
+                <View style={styles.appChoiceTitleWrap}>
+                  <Text style={styles.messageSourceLabel}>App Choice</Text>
+                  <Text style={styles.appChoiceTitle} numberOfLines={1}>
+                    Using {appChoiceCard.selectedAppName}
+                  </Text>
+                </View>
+                <View style={styles.appChoicePill}>
+                  <Text style={styles.appChoicePillText} numberOfLines={1}>
+                    {appChoiceCard.availabilityLabel}
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.appChoiceMeta} numberOfLines={1}>
+                {appChoiceCard.surfaceLabel}{appChoiceCard.openStep ? ` · ${appChoiceCard.openStep}` : ''}
+              </Text>
+              <Text style={styles.appChoiceReason} numberOfLines={2}>{appChoiceCard.reason}</Text>
+              {appChoiceCard.alternatives.length > 0 ? (
+                <View style={styles.appChoiceAlternativeRow}>
+                  {appChoiceCard.alternatives.map((alternative) => (
+                    <Pressable
+                      key={alternative}
+                      onPress={() => {
+                        setInput(`use ${alternative} instead`);
+                        inputRef.current?.focus();
+                      }}
+                      style={styles.appChoiceAlternative}
+                      accessibilityLabel={`Use ${alternative} instead`}
+                    >
+                      <Text style={styles.appChoiceAlternativeText} numberOfLines={1}>
+                        Use {alternative}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : appChoiceCard.switchHint ? (
+                <Text style={styles.appChoiceHint} numberOfLines={1}>{appChoiceCard.switchHint}</Text>
+              ) : null}
+            </View>
           </View>
         ) : null}
         {designTaskCard ? (
@@ -8529,7 +9340,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           </View>
         ) : null}
         <ChatInlineRichText
-          content={visibleContent}
+          content={bodyContent}
           accentColor={accentColor}
           textColor={messageDensity === 'compact' ? '#bbb' : '#ccc'}
         />
@@ -8559,7 +9370,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           <View style={styles.messageSourcesWrap}>
             {item.wikiRefs && item.wikiRefs.length > 0 ? (
               <View style={styles.messageSourceSection}>
-                <Text style={styles.messageSourceLabel}>Knowledge Wiki</Text>
+                <Text style={styles.messageSourceLabel}>Wiki</Text>
                 {item.wikiRefs.slice(0, 3).map((ref) => (
                   <Pressable
                     key={ref.id}
@@ -8991,6 +9802,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 accentColor={accentColor}
               />
             ) : null}
+            {item.chatAutomationPlanPreview ? (
+              <ChatAutomationPlanCard
+                preview={item.chatAutomationPlanPreview}
+                accentColor={accentColor}
+              />
+            ) : null}
             {item.searchResults ? (
               <SearchResultsCard
                 query={item.searchResults.query}
@@ -9117,6 +9934,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           activeThreadId={activeThreadId}
           onSelectThread={handleSelectThread}
           onNewThread={handleNewThread}
+          onNewAgent={handleSidebarNewAgent}
+          onOpenAutomations={handleSidebarAutomations}
+          onOpenMarketplace={handleSidebarMarketplace}
           onDeleteThread={async (threadId) => {
             try {
               const { deleteThread: dt } = await import('../../../lib/circleChatThreads');
@@ -9240,7 +10060,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               .map(r => `- **${r.task.slice(0, 60)}**${r.pid ? ` (PID ${r.pid})` : ''}`);
             addBotMessage(`Spawned ${result.spawned} agent${result.spawned !== 1 ? 's' : ''}:\n\n${lines.join('\n')}\n\nAgents will appear in the Office once detected.`);
           } else {
-            addBotMessage(`Agent spawn failed: ${result.message}`);
+            addBotMessage('I could not spawn those agents. Check the bridge connection and try again.');
           }
         }}
       />
@@ -9487,17 +10307,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           />
 
           {(() => {
-            // D6: persisted needs-you strip. Derived from the durable task
-            // record (survives reload), so a task paused on MFA/approval is
-            // visible the moment the user returns — tap opens the console
-            // where the question/approval can be answered.
-            const checklist = buildComputerTaskChecklistCard(computerTaskState);
-            if (!checklist || !checklist.active || checklist.needsYou.length === 0) return null;
-            const first = checklist.needsYou[0];
-            const prefix = first.kind === 'question' ? 'Needs your answer' : first.kind === 'approval' ? 'Needs your approval' : 'Blocked';
+            // D6: completion/blocked notification banner. The persisted
+            // record carries unacknowledged notifications when the user
+            // walked away mid-task — show the newest one with VIEW (opens
+            // the console like the strip; terminal banners auto-acknowledge
+            // there) and DISMISS (acknowledges + persists).
+            const unacknowledged = listUnacknowledgedComputerTaskNotifications(computerTaskState);
+            if (unacknowledged.length === 0) return null;
+            const notice = unacknowledged[0];
+            const tint = notice.kind === 'completed' ? '#34d399'
+              : notice.kind === 'failed' ? '#ef4444'
+                : notice.kind === 'blocked' ? '#f59e0b'
+                  : notice.kind === 'partial_result' ? '#a78bfa'
+                    : '#e8b339';
             return (
-              <Pressable
-                onPress={() => setShowComputerUseConsole(true)}
+              <View
                 style={{
                   marginHorizontal: 12,
                   marginBottom: 6,
@@ -9505,17 +10329,93 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   paddingHorizontal: 12,
                   borderRadius: 10,
                   borderWidth: 1,
-                  borderColor: '#e8b33955',
-                  backgroundColor: '#e8b33914',
+                  borderColor: tint + '55',
+                  backgroundColor: tint + '14',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 8,
                 }}
               >
-                <Text style={{ color: '#e8b339', fontSize: 12, fontWeight: '700' }} numberOfLines={1}>
-                  ⚑ {checklist.title} — {prefix}
-                </Text>
-                <Text style={{ color: '#cfcfcf', fontSize: 12, marginTop: 2 }} numberOfLines={2}>
-                  {first.label}{checklist.needsYou.length > 1 ? `  (+${checklist.needsYou.length - 1} more)` : ''} — tap to open
-                </Text>
-              </Pressable>
+                <Pressable onPress={() => setShowComputerUseConsole(true)} style={{ flex: 1 }}>
+                  <Text style={{ color: tint, fontSize: 12, fontWeight: '700' }} numberOfLines={1}>
+                    {COMPUTER_TASK_NOTIFICATION_GLYPHS[notice.kind] || '⚑'} {notice.title}{unacknowledged.length > 1 ? `  (+${unacknowledged.length - 1} more)` : ''}
+                  </Text>
+                  {notice.body ? (
+                    <Text style={{ color: '#cfcfcf', fontSize: 12, marginTop: 2 }} numberOfLines={1}>
+                      {notice.body}
+                    </Text>
+                  ) : null}
+                </Pressable>
+                <Pressable
+                  onPress={() => setShowComputerUseConsole(true)}
+                  style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: tint + '66' }}
+                  accessibilityLabel="Open the computer task console"
+                >
+                  <Text style={{ color: tint, fontSize: 9, fontWeight: '900', letterSpacing: 1 }}>VIEW</Text>
+                </Pressable>
+                <Pressable
+                  onPress={acknowledgeTaskNotifications}
+                  style={{ paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: '#334155' }}
+                  accessibilityLabel="Dismiss this task notification"
+                >
+                  <Text style={{ color: '#94a3b8', fontSize: 9, fontWeight: '900', letterSpacing: 1 }}>DISMISS</Text>
+                </Pressable>
+              </View>
+            );
+          })()}
+
+          {(() => {
+            // D6: persisted needs-you strip. Derived from the durable task
+            // record (survives reload), so a task paused on MFA/approval is
+            // visible the moment the user returns — tap opens the console
+            // where the question/approval can be answered.
+            const checklist = buildComputerTaskChecklistCard(computerTaskState);
+            if (!checklist || !checklist.active || checklist.needsYou.length === 0) return null;
+            // Stale guard: a blocked/approval record from an old session must
+            // not nag forever — only surface needs-you for recent activity,
+            // and honor an explicit dismissal of this exact record state.
+            const updatedMs = Date.parse(checklist.updatedAt || '');
+            if (!Number.isFinite(updatedMs) || Date.now() - updatedMs > 48 * 3_600_000) return null;
+            if (needsYouStripDismissedKey && needsYouStripDismissedKey === checklist.updatedAt) return null;
+            const first = checklist.needsYou[0];
+            const prefix = first.kind === 'question' ? 'Needs your answer' : first.kind === 'approval' ? 'Needs your approval' : 'Blocked';
+            const dismissStrip = () => {
+              setNeedsYouStripDismissedKey(checklist.updatedAt);
+              void Promise.resolve(storage.setItem(`uc_needs_you_strip_dismissed::${circleId}`, checklist.updatedAt)).catch(() => {});
+            };
+            return (
+              <View
+                style={{
+                  marginHorizontal: 12,
+                  marginBottom: 6,
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: '#e8b33955',
+                  backgroundColor: '#e8b33914',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                }}
+              >
+                <Pressable
+                  onPress={() => setShowComputerUseConsole(true)}
+                  style={{ flex: 1, paddingVertical: 8, paddingLeft: 12, paddingRight: 4 }}
+                >
+                  <Text style={{ color: '#e8b339', fontSize: 12, fontWeight: '700' }} numberOfLines={1}>
+                    ⚑ {checklist.title} — {prefix}
+                  </Text>
+                  <Text style={{ color: '#cfcfcf', fontSize: 12, marginTop: 2 }} numberOfLines={2}>
+                    {first.label}{checklist.needsYou.length > 1 ? `  (+${checklist.needsYou.length - 1} more)` : ''} — tap to open
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={dismissStrip}
+                  accessibilityRole="button"
+                  accessibilityLabel="Dismiss"
+                  style={{ paddingHorizontal: 12, paddingVertical: 10 }}
+                >
+                  <Text style={{ color: '#9a9a9a', fontSize: 14, fontWeight: '700' }}>×</Text>
+                </Pressable>
+              </View>
             );
           })()}
 
@@ -10083,7 +10983,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   backendLiveUrl: result.backendLiveUrl || s.backendLiveUrl,
                 } : s);
                 finalizeBrowserPlanFromSession(updated, result);
-                addBotMessage(`**Computer Use** ${result.success ? 'completed' : 'failed'}: ${result.message}`);
+                addBotMessage(result.success
+                  ? `**Computer Use** completed: ${result.message}`
+                  : '**Computer Use** could not complete that browser task. Technical details were saved for recovery.');
               }).catch(() => {
                 setComputerUseSession(s => s ? { ...s, status: 'failed' } : s);
                 finalizeBrowserPlanFromSession(updated, { success: false });
@@ -10115,7 +11017,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   backendLiveUrl: result.backendLiveUrl || s.backendLiveUrl,
                 } : s);
                 finalizeBrowserPlanFromSession(resumed, result);
-                addBotMessage(`**Computer Use** ${result.success ? 'completed' : 'failed'}: ${result.message}`);
+                addBotMessage(result.success
+                  ? `**Computer Use** completed: ${result.message}`
+                  : '**Computer Use** could not complete that browser task. Technical details were saved for recovery.');
               }).catch(() => {
                 setComputerUseSession(s => s ? { ...s, status: 'failed' } : s);
                 finalizeBrowserPlanFromSession(resumed, { success: false });
@@ -10196,6 +11100,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             const taskToRun = pendingComputerUseTask;
             const planToRun = pendingComputerUsePlan;
             const originToRun = pendingComputerUseOrigin;
+            const stickyScopeIdToRecord = pendingComputerUseStickyScopeId;
             const grantIdsToPersist = deriveGrantedScopesFromBrowserPermission(permission, pendingComputerUseGrantIds);
             await persistComputerTaskState({
               task: taskToRun,
@@ -10220,8 +11125,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             setPendingComputerUseApprovalSummary('');
             setPendingComputerUseGrantIds([]);
             setPendingComputerUseOrigin(null);
+            setPendingComputerUseStickyScopeId(null);
             computerUsePostedKeyRef.current = null;
             await grantComputerTaskScopes(circleId, grantIdsToPersist).catch(() => {});
+            if (stickyScopeIdToRecord) {
+              // T7 sticky allow scopes: the approved browser plan is now
+              // actually launching (not previewing) — record use silently.
+              void import('../../../lib/computerGrantGateStore')
+                .then(({ recordStickyAllowScopeUse }) => recordStickyAllowScopeUse([stickyScopeIdToRecord]))
+                .catch(() => {});
+            }
             if (planToRun?.backend === 'playwright_bridge') {
               await runLocalBrowserPlan(planToRun, permission, originToRun);
               return;
@@ -10230,7 +11143,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               model: resolveSendModel(taskToRun) || undefined,
             });
             if (!started.started) {
-              addBotMessage(`**Computer Use** could not start: ${started.reason || 'unknown error'}`);
+              addBotMessage('**Computer Use** could not start. Check the connection and try again.');
               return;
             }
             addBotMessage(`**Computer Use** starting — ${taskToRun}`);
@@ -10246,6 +11159,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             setPendingComputerUseApprovalSummary('');
             setPendingComputerUseGrantIds([]);
             setPendingComputerUseOrigin(null);
+            setPendingComputerUseStickyScopeId(null);
           }}
         />
       )}
@@ -10276,21 +11190,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               setShowOpenSwanConsole(false);
               setOpenSwanInitialTask('');
             }}
-            onSubmit={({ task, mode, model: modelOverride }) => {
+            onSubmit={({ task, displayTask, mode, model: modelOverride }) => {
               setShowOpenSwanConsole(false);
               setOpenSwanInitialTask('');
               // Sync the mode into the chat state so the rest of the turn
               // renders with the right accent + response contract. The
-              // sendMessage path will see `chatMode === mode` and pass it
-              // into `buildChatAutomationPlan({ selectedMode })`.
+              // immediate send also gets `modeOverride` below so planner
+              // routing does not race React state.
               setChatMode(mode);
               if (modelOverride && modelOverride !== selectedModel) {
                 handleSessionModelChange(modelOverride);
               }
               // Fire the task through the normal send path so it goes
               // through the planner + dispatcher + HITL gate.
-              setInput(task);
-              sendMessage(task);
+              setInput(displayTask || task);
+              sendMessage(task, {
+                displayText: displayTask,
+                modeOverride: mode,
+                modelOverride,
+              });
 
               // Auto-attach a live trace card to chat. Modes that bypass
               // the run pipeline (talk / none) skip this since they
@@ -10334,7 +11252,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               onConfirmationPick={(id, choice) => {
                 if (!id) return;
                 resolveComputerUseConfirmation(id, choice).catch((err) => {
-                  addBotMessage(`Confirmation could not be recorded: ${err?.message || 'unknown error'}`);
+                  addBotMessage('I could not record that confirmation. Try again in a moment.');
                 });
               }}
               onCancel={() => computerUseTask.cancel()}
@@ -10382,6 +11300,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           actively capturing. Polls localStorage every 2s so state
           reflects starts/stops from any tab. */}
       <RecordingBadge />
+
+      {/* HITL pending chat approvals — `dispatchChatAutomationPlan` writes
+          these to agent_approvals through chatApprovalGate. Surface them in
+          Chat as well as Office so approval-gated requests do not disappear
+          after the Plan Card defers. */}
+      <HitlApprovalBanner approvals={pendingHitlApprovals} circleId={circleId} />
 
       {/* HITL pending approvals — v2 M3d writes to agent_run_approvals
           from `approvals.request`; surface inline so users can
@@ -10666,8 +11590,6 @@ function MessageRow({
   }, []);
 
   const messageStyle = Platform.OS === 'web' ? {
-    backdropFilter: hovered ? 'blur(8px)' : 'none',
-    backgroundColor: hovered ? (item.isBot ? accentColor + '08' : '#ffffff08') : 'transparent',
     transition: 'all 0.2s ease',
   } as any : {};
 
@@ -10738,7 +11660,26 @@ function MessageRow({
       )}
 
       <View style={styles.msgContentWrap}>
-        <View style={[styles.enhancedMsgBubble, item.isBot && { borderLeftColor: accentColor }]}>
+        <View
+          style={[
+            styles.enhancedMsgBubble,
+            item.isBot && {
+              borderColor: hovered ? accentColor : accentColor + 'aa',
+              backgroundColor: accentColor + '12',
+              ...(Platform.OS === 'web'
+                ? {
+                    boxShadow: `0 0 ${hovered ? '22px' : '14px'} ${accentColor}${hovered ? '55' : '2e'}`,
+                    transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
+                  } as any
+                : {
+                    shadowColor: accentColor,
+                    shadowOpacity: hovered ? 0.6 : 0.4,
+                    shadowRadius: hovered ? 16 : 11,
+                    shadowOffset: { width: 0, height: 0 },
+                  }),
+            },
+          ]}
+        >
           {renderContent(item)}
         </View>
         
@@ -11555,6 +12496,26 @@ function popularRankingToChatModel(model: {
   };
 }
 
+const OPENROUTER_RANKINGS_FAILURE_KEY = 'openswan:openrouter_rankings_failed_until';
+const OPENROUTER_RANKINGS_FAILURE_COOLDOWN_MS = 60 * 60_000;
+
+function shouldRefreshOpenRouterRankings(): boolean {
+  try {
+    const host = typeof window !== 'undefined' ? window.location.hostname : '';
+    if (host === 'localhost' || host === '127.0.0.1') return false;
+    const failedUntil = Number(localStorage.getItem(OPENROUTER_RANKINGS_FAILURE_KEY) || 0);
+    return !Number.isFinite(failedUntil) || failedUntil <= Date.now();
+  } catch {
+    return false;
+  }
+}
+
+function rememberOpenRouterRankingsFailure() {
+  try {
+    localStorage.setItem(OPENROUTER_RANKINGS_FAILURE_KEY, String(Date.now() + OPENROUTER_RANKINGS_FAILURE_COOLDOWN_MS));
+  } catch {}
+}
+
 const CHAT_MODELS: ChatPickerModel[] = [
   // ── Auto ──
   // Default. Routes by detected intent + complexity:
@@ -12342,6 +13303,7 @@ function EnhancedInput({
   React.useEffect(() => {
     if (!showModelPicker || popularRankingsLoadedRef.current) return;
     popularRankingsLoadedRef.current = true;
+    if (!shouldRefreshOpenRouterRankings()) return;
     let cancelled = false;
 
     supabase.functions.invoke('openrouter-rankings', { body: { limit: 20 } })
@@ -12353,7 +13315,8 @@ function EnhancedInput({
         }
       })
       .catch((error) => {
-        console.warn('[ChatTab] OpenRouter popular ranking refresh failed; using seeded list.', error);
+        rememberOpenRouterRankingsFailure();
+        console.debug?.('[ChatTab] OpenRouter popular ranking refresh failed; using seeded list.', error);
       });
 
     return () => {
@@ -13535,10 +14498,10 @@ function EnhancedInput({
                       <Text style={[styles.controlCenterModeLabel, isActive && { color: m.color }]}>{m.label}</Text>
                       <Text style={styles.controlCenterModeDesc}>{m.desc}</Text>
                     </View>
-	                    {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: m.color }]} />}
-	                  </Pressable>
-	                );
-	              })}
+                    {isActive && <View style={[styles.dropdownActiveDot, { backgroundColor: m.color }]} />}
+                  </Pressable>
+                );
+              })}
                 </>
               ) : null}
             </AnimatedPopup>
@@ -14244,14 +15207,14 @@ const styles = StyleSheet.create({
 
   msgContentWrap: { marginLeft: 46, position: 'relative' as any, overflow: 'visible' as any, zIndex: 1 },
   enhancedMsgBubble: {
-    padding: 12,
-    borderRadius: 12,
+    padding: 13,
+    borderRadius: 20,
     backgroundColor: '#11111180',
-    borderWidth: 1,
-    borderColor: '#00000060',
-    borderLeftWidth: 3,
-    borderLeftColor: '#2a2a2a',
-    ...(Platform.OS === 'web' ? { backdropFilter: 'blur(8px)' } as any : {}),
+    borderWidth: 2,
+    borderColor: '#2a2a2a',
+    ...(Platform.OS === 'web'
+      ? { backdropFilter: 'blur(8px)' } as any
+      : { shadowColor: '#000000', shadowOpacity: 0.35, shadowRadius: 10, shadowOffset: { width: 0, height: 4 } }),
   },
   messageRouteStrip: {
     flexDirection: 'row',
@@ -14338,6 +15301,93 @@ const styles = StyleSheet.create({
     color: '#cbd5e1',
     fontSize: 11,
     lineHeight: 15,
+  },
+  appChoiceSection: {
+    marginBottom: 8,
+  },
+  appChoiceCard: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#14b8a655',
+    backgroundColor: '#042f2e',
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    gap: 6,
+  },
+  appChoiceHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  appChoiceTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  appChoiceTitle: {
+    color: '#ccfbf1',
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '900',
+    letterSpacing: 0,
+  },
+  appChoicePill: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#5eead466',
+    backgroundColor: '#0f766e40',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    maxWidth: 110,
+    flexShrink: 0,
+  },
+  appChoicePillText: {
+    color: '#ccfbf1',
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0,
+  },
+  appChoiceMeta: {
+    color: '#99f6e4',
+    fontSize: 10,
+    lineHeight: 14,
+    fontWeight: '800',
+    letterSpacing: 0,
+  },
+  appChoiceReason: {
+    color: '#d1fae5',
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '700',
+    letterSpacing: 0,
+  },
+  appChoiceAlternativeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 5,
+  },
+  appChoiceAlternative: {
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#2dd4bf55',
+    backgroundColor: '#0f172a',
+    paddingHorizontal: 7,
+    paddingVertical: 4,
+    maxWidth: 150,
+  },
+  appChoiceAlternativeText: {
+    color: '#a7f3d0',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0,
+  },
+  appChoiceHint: {
+    color: '#99f6e4',
+    fontSize: 10,
+    lineHeight: 14,
+    fontWeight: '800',
+    letterSpacing: 0,
   },
   designTaskSection: {
     marginBottom: 8,

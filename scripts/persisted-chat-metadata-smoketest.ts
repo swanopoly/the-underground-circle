@@ -191,6 +191,23 @@ const handoffMessage = formatPersistedChatBotMessage(
         badges: ['Desktop app', 'Approval', 'Adobe InDesign'],
         proof: ['App-native document status, text inventory, proof screenshot or exported proof, and output file stat.'],
         hiddenReason: null,
+        appChoiceLine: 'Using Adobe InDesign (explicitly requested) — say "use Canva" to switch.',
+        appChoice: {
+          visibility: 'user',
+          selectedAppId: 'adobe_indesign',
+          selectedAppName: 'Adobe InDesign',
+          selectedSurface: 'desktop',
+          openVia: 'desktop_launch',
+          availability: 'installed',
+          reason: 'explicitly requested',
+          line: 'Using Adobe InDesign (explicitly requested) — say "use Canva" to switch.',
+          alternatives: ['Canva', 'Figma', 'Adobe Illustrator'],
+          switchHint: 'Say "use Canva" to switch.',
+          explicitAppNamed: true,
+          namedAppIntent: 'InDesign',
+          openStepLines: ['Open Adobe InDesign from the desktop bridge', 'Focus the current document'],
+          recoveryFallbackName: 'Canva',
+        },
       },
       appRouteDecision: {
         status: 'needs_observation',
@@ -298,6 +315,10 @@ assert(handoffMetadata?.computerHandoff?.designObjectManifestArtifact?.auditOk =
 assert(handoffMetadata?.computerHandoff?.designObjectManifestArtifact?.proofArtifacts?.[0]?.basename === 'dealer-banner-proof.pdf', 'design object manifest proof summary is persisted');
 assert(handoffMetadata?.computerHandoff?.requestNotice?.primaryAction?.kind === 'approve_desktop', 'computer request user notice is persisted with handoff metadata');
 assert((handoffMetadata?.computerHandoff?.requestNotice?.summary || '').includes('desktop-app path'), 'computer request user notice summary is persisted');
+assert((handoffMetadata?.computerHandoff?.requestNotice?.appChoiceLine || '').includes('Adobe InDesign'), 'computer request app choice line is persisted');
+assert(handoffMetadata?.computerHandoff?.requestNotice?.appChoice?.selectedAppName === 'Adobe InDesign', 'computer request structured app choice is persisted');
+assert((handoffMetadata?.computerHandoff?.requestNotice?.appChoice?.alternatives || []).includes('Canva'), 'computer request app alternatives are persisted');
+assert(handoffMetadata?.computerHandoff?.requestNotice?.appChoice?.recoveryFallbackName === 'Canva', 'computer request app fallback is persisted');
 assert(handoffMetadata?.computerHandoff?.appRouteDecision?.status === 'needs_observation', 'computer app route decision is persisted with handoff metadata');
 assert(handoffMetadata?.computerHandoff?.appRouteDecision?.chosenSurfaceId === 'adobe_indesign_uxp_dom', 'computer app route decision chosen surface is persisted');
 assert((handoffMetadata?.computerHandoff?.appRouteDecision?.sourceRefs || []).some((ref) => ref.url.includes('/indesign/uxp/scripts')), 'computer app route decision source refs are persisted');

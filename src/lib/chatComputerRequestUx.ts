@@ -21,6 +21,27 @@ export interface ChatComputerRequestNoticeAction {
   detail: string;
 }
 
+export interface ChatComputerAppChoiceCard {
+  /**
+   * Separate from the full notice visibility. App tasks can run quietly while
+   * still showing a compact "using this app" strip so the user can redirect.
+   */
+  visibility: 'hidden' | 'user';
+  selectedAppId: string;
+  selectedAppName: string;
+  selectedSurface: 'desktop' | 'browser';
+  openVia: 'desktop_launch' | 'url_scheme' | 'browser_url';
+  availability?: 'installed' | 'maybe' | 'web';
+  reason: string;
+  line: string;
+  alternatives: string[];
+  switchHint: string | null;
+  explicitAppNamed: boolean;
+  namedAppIntent?: string | null;
+  openStepLines: string[];
+  recoveryFallbackName?: string | null;
+}
+
 export interface ChatComputerRequestUserNotice {
   visibility: ChatComputerRequestNoticeVisibility;
   tone: ChatComputerRequestNoticeTone;
@@ -33,6 +54,18 @@ export interface ChatComputerRequestUserNotice {
   proof: string[];
   hiddenReason: string | null;
   planPreview: ChatComputerTaskPlanPreviewCard | null;
+  /**
+   * Wave-2 task→app resolution: one compact "Using <app> (<why>) — say
+   * 'use <alternative>' to switch" line. `formatChatComputerRequestUserNotice`
+   * still gates this on the full notice visibility; `appChoice` below is the
+   * separate chat chip that can show for quiet app tasks.
+   */
+  appChoiceLine?: string | null;
+  /**
+   * Structured app-choice chip. Optional so notices persisted before this field
+   * keep parsing.
+   */
+  appChoice?: ChatComputerAppChoiceCard | null;
 }
 
 /**
@@ -190,6 +223,44 @@ function buildBadges(route: ChatComputerRequestRoute, autonomy: ChatComputerTask
   return uniqueCompact(badges, 5);
 }
 
+function appAlternativeName(value: string): string | null {
+  return String(value || '').split(' — ')[0].trim() || null;
+}
+
+/** Wave-2: compact app-choice model, with the cheapest switch path. */
+function appChoiceForRoute(route: ChatComputerRequestRoute): ChatComputerAppChoiceCard | null {
+  const resolution = route.appResolution;
+  if (!resolution) return null;
+  const why = String(resolution.best.reason || '').split(';')[0].trim()
+    || `best ${formatGenericAppTaskFamilyForUser(resolution.category)} match`;
+  const alternatives = uniqueCompact(
+    (resolution.alternativesSummary || [])
+      .map(appAlternativeName)
+      .filter((name): name is string => Boolean(name) && name !== resolution.best.displayName),
+    3,
+  );
+  const topAlternative = alternatives[0] || '';
+  const line = topAlternative
+    ? `Using ${resolution.best.displayName} (${why}) — say "use ${topAlternative}" to switch.`
+    : `Using ${resolution.best.displayName} (${why}).`;
+  return {
+    visibility: 'user',
+    selectedAppId: resolution.best.appId,
+    selectedAppName: resolution.best.displayName,
+    selectedSurface: resolution.best.surface,
+    openVia: resolution.best.openVia,
+    availability: resolution.best.availability,
+    reason: why,
+    line,
+    alternatives,
+    switchHint: topAlternative ? `Say "use ${topAlternative}" to switch.` : null,
+    explicitAppNamed: resolution.explicitAppNamed,
+    namedAppIntent: resolution.namedAppIntent || null,
+    openStepLines: uniqueCompact(resolution.openStepLines || [], 3),
+    recoveryFallbackName: resolution.recoveryFallback?.displayName || null,
+  };
+}
+
 function userFacingConstraintLines(route: ChatComputerRequestRoute): string[] {
   const constraints = route.userConstraints;
   if (!constraints) return [];
@@ -206,7 +277,9 @@ export function buildChatComputerTaskPlanPreview(
 ): ChatComputerTaskPlanPreviewCard {
   const resolvedAutonomy = autonomy ?? buildChatComputerTaskAutonomy(route);
   const steps = uniqueCompact(
-    route.designExecutionPipeline
+    route.actionItems && route.actionItems.length >= 2
+      ? route.actionItems.map((item) => item.label)
+      : route.designExecutionPipeline
       ? route.designExecutionPipeline.phases.map((phase) => String(phase.id).replace(/_/g, ' '))
       : route.selectedPipeline?.solutionSteps || [],
     6,
@@ -277,6 +350,7 @@ export function buildChatComputerRequestUserNotice(route: ChatComputerRequestRou
       : 'Ready';
 
   const planPreviewCard = buildChatComputerTaskPlanPreview(route, autonomy);
+  const appChoice = appChoiceForRoute(route);
 
   return {
     visibility: shouldShow ? 'user' : 'hidden',
@@ -290,6 +364,8 @@ export function buildChatComputerRequestUserNotice(route: ChatComputerRequestRou
     proof,
     hiddenReason: autonomy.hiddenReason,
     planPreview: planPreviewCard.visibility === 'user' && planPreviewCard.steps.length >= 2 ? planPreviewCard : null,
+    appChoiceLine: appChoice?.line || null,
+    appChoice,
   };
 }
 
@@ -303,6 +379,7 @@ export function formatChatComputerRequestUserNotice(notice: ChatComputerRequestU
   // action must never be displaced by plan detail.
   const lines = [
     notice.summary,
+    notice.appChoiceLine,
     notice.primaryAction ? `${notice.primaryAction.label}: ${notice.primaryAction.detail}` : null,
     !notice.primaryAction && primaryUserAction ? `Next: ${primaryUserAction}` : null,
     firstBlocker && firstBlocker !== primaryUserAction ? `Blocker: ${firstBlocker}` : null,
@@ -334,6 +411,22 @@ export function summarizeChatComputerRequestUserNotice(route: ChatComputerReques
     badges: notice.badges,
     proof: notice.proof,
     hiddenReason: notice.hiddenReason,
+    appChoiceLine: notice.appChoiceLine,
+    appChoice: notice.appChoice
+      ? {
+          visibility: notice.appChoice.visibility,
+          selectedAppId: notice.appChoice.selectedAppId,
+          selectedAppName: notice.appChoice.selectedAppName,
+          selectedSurface: notice.appChoice.selectedSurface,
+          availability: notice.appChoice.availability || null,
+          reason: notice.appChoice.reason,
+          alternativeCount: notice.appChoice.alternatives.length,
+          alternatives: notice.appChoice.alternatives.slice(0, 3),
+          switchHint: notice.appChoice.switchHint,
+          explicitAppNamed: notice.appChoice.explicitAppNamed,
+          recoveryFallbackName: notice.appChoice.recoveryFallbackName || null,
+        }
+      : null,
     planPreview: notice.planPreview
       ? {
           target: notice.planPreview.target,

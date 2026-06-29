@@ -150,6 +150,66 @@ export interface ComputerTaskPendingQuestion {
   resolvedAt: string | null;
 }
 
+/**
+ * A completion/blocked/needs-you notification for a computer task (D6) —
+ * the "you walked away, here is what happened" record. Derived only on
+ * state TRANSITIONS (never re-fired for the same state) and persisted on
+ * the durable task record so a user who returns after the task finished,
+ * failed, or got stuck learns about it without opening the console.
+ */
+export type ComputerTaskNotificationKind =
+  | 'completed'
+  | 'failed'
+  | 'blocked'
+  | 'needs_you'
+  | 'partial_result';
+
+export interface ComputerTaskNotification {
+  id: string;
+  kind: ComputerTaskNotificationKind;
+  /** Bounded ≤80 chars. */
+  title: string;
+  /** Bounded ≤200 chars; includes top blocker/question or result summary. */
+  body: string;
+  createdAtIso: string;
+  taskRunId?: string | null;
+  acknowledged?: boolean;
+}
+
+/**
+ * E1 surface-escalation breadcrumb (durable copy) — "the run switched from
+ * rung X to rung Y because Z". Structurally identical to
+ * `ComputerTaskSurfaceEscalation` in `appAutomationControlSurfaces.ts` but
+ * defined locally so this model stays dependency-light for smoke tests.
+ * Bounded ≤3 with the same persistence discipline as D6 notifications.
+ */
+export interface ComputerTaskSurfaceEscalationBreadcrumb {
+  fromSurface: string;
+  toSurface: string;
+  /** Bounded ≤300 chars. */
+  reason: string;
+  atIso: string;
+  appName?: string | null;
+  failureCode?: string | null;
+}
+
+/**
+ * L2 hybrid recipes: one recorded tool action from a successful run. The
+ * producer (computerTaskRuntime — owned by another agent right now) captures
+ * these at execution time, credential-redacted and bounded, and sets them on
+ * the durable record. This model only normalizes/consumes them.
+ */
+export interface ComputerTaskActionTraceStep {
+  tool: string;
+  input?: Record<string, unknown> | null;
+}
+
+/** Versioned trace envelope persisted on the durable task record. */
+export interface ComputerTaskActionTrace {
+  v: 1;
+  actions: ComputerTaskActionTraceStep[];
+}
+
 export interface ComputerTaskStateRecord {
   id: string;
   circleId: string;
@@ -173,7 +233,86 @@ export interface ComputerTaskStateRecord {
   complexity?: ComputerTaskStateComplexity | null;
   checkpointRecovery?: ComputerTaskStateCheckpointRecovery | null;
   pendingQuestions?: ComputerTaskPendingQuestion[] | null;
+  /** D6 completion/blocked notifications — bounded ≤5, newest first. */
+  notifications?: ComputerTaskNotification[] | null;
+  /** E1 surface-escalation breadcrumbs — bounded ≤3, oldest first.
+   *  Persisted-compatible: old records without the field normalize to []. */
+  surfaceEscalations?: ComputerTaskSurfaceEscalationBreadcrumb[] | null;
+  /** L2 hybrid recipes: redacted tool-action trace from a successful run —
+   *  bounded ≤40 actions. Persisted-compatible: old records without the
+   *  field normalize to null. PRODUCER: `computerTaskRuntime` (owned by
+   *  another agent) sets this on run completion; "Save as recipe" passes it
+   *  into `buildComputerTaskRecipeDraft` so the recipe embeds the verified
+   *  step sequence. */
+  actionTrace?: ComputerTaskActionTrace | null;
   updatedAt: string;
+}
+
+// ─── Surface-escalation breadcrumbs (E1 follow-up) ──────────────────────────
+
+const SURFACE_ESCALATION_LIMIT = 3;
+
+/** Drop malformed entries, bound strings, keep order, cap at 3 (newest kept). */
+export function compactComputerTaskSurfaceEscalations(
+  list?: Array<Partial<ComputerTaskSurfaceEscalationBreadcrumb>> | null,
+): ComputerTaskSurfaceEscalationBreadcrumb[] {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((item) => item
+      && String(item.fromSurface || '').trim()
+      && String(item.toSurface || '').trim()
+      && String(item.reason || '').trim())
+    .map((item): ComputerTaskSurfaceEscalationBreadcrumb => ({
+      fromSurface: String(item.fromSurface).slice(0, 60),
+      toSurface: String(item.toSurface).slice(0, 60),
+      reason: String(item.reason).slice(0, 300),
+      atIso: String(item.atIso || ''),
+      appName: item.appName ? String(item.appName).slice(0, 80) : null,
+      failureCode: item.failureCode ? String(item.failureCode).slice(0, 60) : null,
+    }))
+    .slice(-SURFACE_ESCALATION_LIMIT);
+}
+
+/**
+ * Merge new runtime breadcrumbs onto the persisted list — dedupes identical
+ * from+to+reason entries (the same descent persisted by two write paths must
+ * not double up), keeps chronological order, bounded ≤3 (oldest dropped).
+ * Pure; smoke-testable.
+ */
+export function appendComputerTaskSurfaceEscalations(
+  existing: Array<Partial<ComputerTaskSurfaceEscalationBreadcrumb>> | null | undefined,
+  incoming: Array<Partial<ComputerTaskSurfaceEscalationBreadcrumb>> | null | undefined,
+): ComputerTaskSurfaceEscalationBreadcrumb[] {
+  const base = compactComputerTaskSurfaceEscalations(existing);
+  const merged = [...base];
+  for (const entry of compactComputerTaskSurfaceEscalations(incoming)) {
+    const duplicate = merged.some((item) => (
+      item.fromSurface === entry.fromSurface
+      && item.toSurface === entry.toSurface
+      && item.reason === entry.reason
+    ));
+    if (!duplicate) merged.push(entry);
+  }
+  return merged.slice(-SURFACE_ESCALATION_LIMIT);
+}
+
+function humanizeSurfaceToken(value: string): string {
+  return String(value || '').replace(/_/g, ' ').trim();
+}
+
+/**
+ * Compact one-line rendering of an escalation breadcrumb for task cards:
+ * `↳ switched to screenshot control: a11y tree empty (Photoshop)`.
+ * Prefers the structured failure code over the long reason text.
+ */
+export function formatComputerTaskSurfaceEscalationLine(
+  entry: ComputerTaskSurfaceEscalationBreadcrumb,
+): string {
+  const cause = entry.failureCode
+    ? humanizeSurfaceToken(entry.failureCode)
+    : entry.reason.slice(0, 80);
+  const app = entry.appName ? ` (${entry.appName})` : '';
+  return `↳ switched to ${humanizeSurfaceToken(entry.toSurface)}: ${cause}${app}`;
 }
 
 export function compactComputerTaskPendingQuestions(
@@ -231,6 +370,193 @@ export function listOpenComputerTaskQuestions(
   record: Pick<ComputerTaskStateRecord, 'pendingQuestions'> | null | undefined,
 ): ComputerTaskPendingQuestion[] {
   return compactComputerTaskPendingQuestions(record?.pendingQuestions).filter((item) => item.status === 'pending');
+}
+
+// ─── Completion/blocked notifications (D6) ──────────────────────────────────
+
+const NOTIFICATION_KINDS: ComputerTaskNotificationKind[] = [
+  'completed',
+  'failed',
+  'blocked',
+  'needs_you',
+  'partial_result',
+];
+
+const NOTIFICATION_LIMIT = 5;
+
+/** Drop malformed entries, bound strings, keep newest-first order, cap at 5. */
+export function compactComputerTaskNotifications(
+  list?: Array<Partial<ComputerTaskNotification>> | null,
+): ComputerTaskNotification[] {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((item) => item
+      && NOTIFICATION_KINDS.includes(item.kind as ComputerTaskNotificationKind)
+      && String(item.title || '').trim())
+    .map((item): ComputerTaskNotification => ({
+      id: String(item.id || `ctn_${item.kind}_${item.createdAtIso || ''}`).slice(0, 80),
+      kind: item.kind as ComputerTaskNotificationKind,
+      title: String(item.title).slice(0, 80),
+      body: String(item.body || '').slice(0, 200),
+      createdAtIso: String(item.createdAtIso || ''),
+      taskRunId: item.taskRunId ? String(item.taskRunId).slice(0, 120) : null,
+      acknowledged: Boolean(item.acknowledged),
+    }))
+    .slice(0, NOTIFICATION_LIMIT);
+}
+
+/**
+ * Compact snapshot of the notification-relevant state used to detect
+ * transitions. Callers capture it from the PREVIOUS record before a write
+ * and pass it to `deriveComputerTaskNotification` with the NEXT record.
+ */
+export interface ComputerTaskNotificationSnapshot {
+  phase?: ComputerTaskPhase | string | null;
+  openQuestionCount?: number;
+  blockerCount?: number;
+}
+
+export function computerTaskNotificationSnapshot(
+  record: Pick<ComputerTaskStateRecord, 'phase' | 'pendingQuestions' | 'blockers'> | null | undefined,
+): ComputerTaskNotificationSnapshot {
+  if (!record) return { phase: null, openQuestionCount: 0, blockerCount: 0 };
+  return {
+    phase: record.phase,
+    openQuestionCount: listOpenComputerTaskQuestions(record).length,
+    blockerCount: Array.isArray(record.blockers) ? record.blockers.filter(Boolean).length : 0,
+  };
+}
+
+/**
+ * Derive a notification for a state TRANSITION (D6): running→completed/
+ * failed/blocked, blocker count 0→n, a new open question, awaiting
+ * approval, or an explicit partial result on a bounded stop. Returns null
+ * when nothing newly notification-worthy happened — calling it twice with
+ * the same record/snapshot never repeats. Pure; smoke-testable.
+ */
+export function deriveComputerTaskNotification(
+  record: ComputerTaskStateRecord | null | undefined,
+  prevSnapshot?: ComputerTaskNotificationSnapshot | null,
+  opts?: {
+    nowIso?: string;
+    /** Final result summary — used as the completed/failed body when present. */
+    resultSummary?: string | null;
+    /** A bounded stop handed back partial progress (D8) — fires `partial_result`. */
+    partialResultSummary?: string | null;
+  },
+): ComputerTaskNotification | null {
+  if (!record || !record.id) return null;
+  const createdAtIso = opts?.nowIso || new Date().toISOString();
+  const taskLabel = String(record.taskLabel || record.task || 'Computer task').slice(0, 60);
+  const prevPhase = prevSnapshot?.phase ?? null;
+  const prevQuestionCount = Math.max(0, Math.floor(prevSnapshot?.openQuestionCount ?? 0));
+  const prevBlockerCount = Math.max(0, Math.floor(prevSnapshot?.blockerCount ?? 0));
+  const openQuestions = listOpenComputerTaskQuestions(record);
+  const blockers = (record.blockers || []).map(String).filter(Boolean);
+  const make = (kind: ComputerTaskNotificationKind, title: string, body: string): ComputerTaskNotification => ({
+    id: `ctn_${kind}_${createdAtIso}`.slice(0, 80),
+    kind,
+    title: title.slice(0, 80),
+    body: String(body || '').slice(0, 200),
+    createdAtIso,
+    taskRunId: record.runId || null,
+    acknowledged: false,
+  });
+
+  if (opts?.partialResultSummary && record.phase !== 'completed') {
+    return make('partial_result', `${taskLabel} stopped with partial progress`, opts.partialResultSummary);
+  }
+  if (record.phase === 'completed' && prevPhase !== 'completed') {
+    return make('completed', `${taskLabel} finished`, opts?.resultSummary || `Done: ${record.task}`);
+  }
+  if (record.phase === 'failed' && prevPhase !== 'failed') {
+    const body = blockers[0] || record.checkpointRecovery?.reason || opts?.resultSummary || `The task failed: ${record.task}`;
+    return make('failed', `${taskLabel} failed`, body);
+  }
+  if (record.phase === 'blocked' && prevPhase !== 'blocked') {
+    const body = blockers[0] || record.checkpointRecovery?.reason || record.nextSteps[0] || 'The task is blocked and needs attention.';
+    return make('blocked', `${taskLabel} is blocked`, body);
+  }
+  if (openQuestions.length > prevQuestionCount) {
+    const newest = openQuestions[openQuestions.length - 1];
+    return make('needs_you', `${taskLabel} needs your answer`, newest.question);
+  }
+  if ((record.phase === 'awaiting_approval' || record.phase === 'awaiting_capability_approval') && prevPhase !== record.phase) {
+    const body = record.capabilityBuildout?.message || record.accessPlan || 'The task is paused waiting for your approval.';
+    return make('needs_you', `${taskLabel} needs your approval`, body);
+  }
+  if (blockers.length > 0 && prevBlockerCount === 0 && record.phase !== 'completed') {
+    return make('blocked', `${taskLabel} hit a blocker`, blockers[0]);
+  }
+  return null;
+}
+
+/**
+ * Prepend a derived notification to the bounded list (newest first, ≤5).
+ * Dedupes an identical kind+title+body so the same state never produces a
+ * second banner even if two write paths derive it.
+ */
+export function appendComputerTaskNotification(
+  list: Array<Partial<ComputerTaskNotification>> | null | undefined,
+  notification: ComputerTaskNotification | null | undefined,
+): ComputerTaskNotification[] {
+  const existing = compactComputerTaskNotifications(list);
+  const compact = notification ? compactComputerTaskNotifications([notification])[0] : null;
+  if (!compact) return existing;
+  if (existing.some((item) => item.kind === compact.kind && item.title === compact.title && item.body === compact.body)) {
+    return existing;
+  }
+  return [compact, ...existing].slice(0, NOTIFICATION_LIMIT);
+}
+
+/** The notifications the user has not seen/dismissed yet — newest first. */
+export function listUnacknowledgedComputerTaskNotifications(
+  record: Pick<ComputerTaskStateRecord, 'notifications'> | null | undefined,
+): ComputerTaskNotification[] {
+  return compactComputerTaskNotifications(record?.notifications).filter((item) => !item.acknowledged);
+}
+
+/** Mark every persisted notification acknowledged (banner dismissed/seen). */
+export function acknowledgeComputerTaskNotifications(
+  record: ComputerTaskStateRecord,
+): ComputerTaskStateRecord {
+  const notifications = compactComputerTaskNotifications(record.notifications)
+    .map((item) => ({ ...item, acknowledged: true }));
+  return { ...record, notifications };
+}
+
+export const COMPUTER_TASK_NOTIFICATION_GLYPHS: Record<ComputerTaskNotificationKind, string> = {
+  completed: '✓',
+  failed: '✕',
+  blocked: '⛔',
+  needs_you: '🙋',
+  partial_result: '◐',
+};
+
+/**
+ * Progressive enhancement: fire a native web Notification for a terminal
+ * transition observed by the LIVE task hook, but only when the page is
+ * hidden and the browser permission was ALREADY granted (never requests
+ * permission). Silent no-op everywhere else (native, denied, unsupported).
+ */
+export function fireComputerTaskWebNotification(
+  notification: Pick<ComputerTaskNotification, 'kind' | 'title' | 'body'> | null | undefined,
+): boolean {
+  try {
+    if (!notification) return false;
+    if (notification.kind !== 'completed' && notification.kind !== 'failed' && notification.kind !== 'blocked') return false;
+    if (typeof document === 'undefined' || document.visibilityState !== 'hidden') return false;
+    const NotificationCtor = typeof window !== 'undefined' ? (window as any).Notification : undefined;
+    if (typeof NotificationCtor !== 'function' || NotificationCtor.permission !== 'granted') return false;
+    // eslint-disable-next-line no-new
+    new NotificationCtor(String(notification.title).slice(0, 80), {
+      body: String(notification.body || '').slice(0, 200),
+      tag: 'uc-computer-task',
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function compactComputerTaskComplexityPlan(plan?: ComputerTaskComplexityPlan | null): ComputerTaskStateComplexity | null {
@@ -509,6 +835,9 @@ export interface ComputerTaskChecklistCard {
    *  from stage-aware recovery (D4b): completed stages must not be redone,
    *  the failed stage is where resume starts. */
   stages: ComputerTaskChecklistStage[];
+  /** E1 escalation breadcrumbs as compact display lines — ≤3, oldest first.
+   *  Empty for tasks that never switched control surfaces. */
+  surfaceChanges: string[];
   /** Everything waiting on the user, most actionable first. */
   needsYou: ComputerTaskChecklistNeedsYouItem[];
   /** Browser session is replayable — a fresh client can resume it. */
@@ -586,6 +915,8 @@ export function buildComputerTaskChecklistCard(
     active,
     items: record.steps.slice(0, 8),
     stages,
+    surfaceChanges: compactComputerTaskSurfaceEscalations(record.surfaceEscalations)
+      .map(formatComputerTaskSurfaceEscalationLine),
     needsYou: needsYou.slice(0, 5),
     resumable: Boolean(record.sessionId) && record.phase !== 'completed',
     liveUrl: record.liveUrl || null,
@@ -612,6 +943,10 @@ export function formatComputerTaskChecklistCard(card: ComputerTaskChecklistCard 
     const glyph = stage.status === 'completed' ? '✓' : stage.status === 'failed' ? '✕' : '○';
     lines.push(`${glyph} Stage ${stage.ordinal} [${stage.surface.replace(/_/g, ' ')}]: ${stage.goal.slice(0, 80)}`);
   }
+  // E1 escalation breadcrumbs — compact "surface changes" trail.
+  for (const change of card.surfaceChanges) {
+    lines.push(change);
+  }
   // Step rows are redundant when stages carry the progress story.
   if (card.stages.length === 0) {
     for (const step of card.items) {
@@ -622,7 +957,89 @@ export function formatComputerTaskChecklistCard(card: ComputerTaskChecklistCard 
   return lines.join('\n');
 }
 
-// ─── Task → recipe (D7) ─────────────────────────────────────────────────────
+// ─── Action trace (L2 hybrid recipes) ───────────────────────────────────────
+
+const ACTION_TRACE_LIMIT = 40;
+const ACTION_TRACE_INPUT_KEYS_LIMIT = 12;
+const ACTION_TRACE_STRING_LIMIT = 200;
+
+/**
+ * Normalize a persisted/incoming action trace: drop malformed steps, bound
+ * tool names, keep only plain-object inputs with primitive values (strings
+ * bounded ≤200), cap at 40 actions (first 40 kept — replay order matters).
+ * Returns null when nothing usable remains, so old records without the
+ * field stay persisted-compatible. Pure; smoke-testable.
+ */
+export function compactComputerTaskActionTrace(
+  raw?: { v?: number; actions?: Array<Partial<ComputerTaskActionTraceStep>> | null } | null,
+): ComputerTaskActionTrace | null {
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.actions)) return null;
+  const actions: ComputerTaskActionTraceStep[] = [];
+  for (const step of raw.actions) {
+    if (actions.length >= ACTION_TRACE_LIMIT) break;
+    const tool = String(step?.tool || '').trim().slice(0, 80);
+    if (!tool) continue;
+    let input: Record<string, unknown> | null = null;
+    if (step?.input && typeof step.input === 'object' && !Array.isArray(step.input)) {
+      input = {};
+      for (const [key, value] of Object.entries(step.input).slice(0, ACTION_TRACE_INPUT_KEYS_LIMIT)) {
+        if (typeof value === 'string') input[key.slice(0, 60)] = value.slice(0, ACTION_TRACE_STRING_LIMIT);
+        else if (typeof value === 'number' || typeof value === 'boolean' || value === null) input[key.slice(0, 60)] = value;
+        // objects/arrays/functions dropped — traces stay flat and bounded.
+      }
+      if (Object.keys(input).length === 0) input = null;
+    }
+    actions.push({ tool, input });
+  }
+  return actions.length > 0 ? { v: 1, actions } : null;
+}
+
+/** Compact one-line `tool(key=value, …)` rendering, bounded ≤120 chars. */
+function formatActionTraceStep(step: ComputerTaskActionTraceStep): string {
+  const parts = step.input
+    ? Object.entries(step.input).map(([key, value]) => `${key}=${typeof value === 'string' ? JSON.stringify(value) : String(value)}`)
+    : [];
+  const summary = parts.join(', ');
+  const bounded = summary.length > 120 ? `${summary.slice(0, 119)}…` : summary;
+  return `${step.tool}(${bounded})`;
+}
+
+interface DetectedRecipeParameter {
+  placeholder: string;
+  example: string;
+}
+
+/**
+ * Heuristic parameter-slot detection over trace input values (verified
+ * finding 1: parameterized procedures beat prose/raw traces). Task-specific-
+ * looking values — URLs, file paths, ISO dates, name/query-like fields —
+ * become `<param>` placeholders with the run's value as the example.
+ */
+function detectRecipeParameters(trace: ComputerTaskActionTrace): DetectedRecipeParameter[] {
+  const found = new Map<string, string>();
+  const add = (placeholder: string, example: string) => {
+    if (!found.has(placeholder)) found.set(placeholder, example.slice(0, 120));
+  };
+  const NAME_KEYS = new Set(['name', 'filename', 'file_name', 'title', 'query', 'search', 'subject', 'project']);
+  for (const step of trace.actions) {
+    if (!step.input) continue;
+    for (const [key, value] of Object.entries(step.input)) {
+      if (typeof value !== 'string' || !value.trim()) continue;
+      if (/^https?:\/\//i.test(value)) {
+        add('<url>', value);
+      } else if (/^(~|\/|[A-Za-z]:[\\/])/.test(value) || (/[\\/]/.test(value) && /\.[a-z0-9]{1,5}$/i.test(value))) {
+        add('<file_path>', value);
+      } else if (NAME_KEYS.has(key.toLowerCase())) {
+        add(`<${key.toLowerCase()}>`, value);
+      }
+      const date = value.match(/\b\d{4}-\d{2}-\d{2}\b/);
+      if (date) add('<date>', date[0]);
+    }
+  }
+  return Array.from(found.entries()).slice(0, 8).map(([placeholder, example]) => ({ placeholder, example }));
+}
+
+// ─── Task → recipe (D7 + L2 hybrid trace embedding) ─────────────────────────
 
 export interface ComputerTaskRecipeDraft {
   name: string;
@@ -640,6 +1057,9 @@ function kebab(value: string): string {
     .slice(0, 60);
 }
 
+/** Total recipe content budget — the trace is trimmed first to stay under. */
+const RECIPE_CONTENT_LIMIT = 6000;
+
 /**
  * Turn a COMPLETED task record into a reusable SKILL.md recipe draft (D7)
  * — "that worked, save it so I can run it again". Pure; the caller files
@@ -647,9 +1067,19 @@ function kebab(value: string): string {
  * a circle member still approves before anything lands in the library.
  * Returns null unless the task actually completed: failed runs make bad
  * recipes.
+ *
+ * L2 hybrid recipes: when an `actionTrace` is provided (explicitly, or via
+ * `record.actionTrace`), the draft also embeds a `## Deterministic replay`
+ * section (the verified tool steps from the source run, prefixed by the
+ * recorded-steps-are-hypotheses rule — verified finding 3) and a
+ * `## Parameters` section with detected parameter slots (finding 1:
+ * parameterized procedures beat prose and raw traces). The procedural
+ * sections stay — they are the adaptive fallback when replay mismatches.
+ * Total content is bounded ~6k chars; the trace is trimmed first.
  */
 export function buildComputerTaskRecipeDraft(
   record: ComputerTaskStateRecord | null | undefined,
+  actionTrace?: { v: 1; actions: Array<{ tool: string; input?: Record<string, unknown> | null }> } | null,
 ): ComputerTaskRecipeDraft | null {
   if (!record || record.phase !== 'completed' || !record.task.trim()) return null;
   const label = record.taskLabel || record.task.slice(0, 60);
@@ -683,7 +1113,7 @@ export function buildComputerTaskRecipeDraft(
   body.push('- Pause for approval before any submit, publish, payment, upload, delete, or credential step.');
   body.push('- Finish with proof (screenshot, file stats, or page state) — never declare done without it.');
 
-  const content = [
+  const assemble = (extra: string[]): string => [
     '---',
     `name: ${name}`,
     `description: ${description.replace(/\n/g, ' ')}`,
@@ -692,7 +1122,54 @@ export function buildComputerTaskRecipeDraft(
     '---',
     '',
     ...body,
+    ...extra,
   ].join('\n');
+
+  // L2: embed the verified trace as a deterministic-replay section with
+  // parameter slots. Explicit argument wins; otherwise use the trace the
+  // runtime persisted on the record. Compaction drops malformed/oversized
+  // input, so a junk trace degrades to the plain procedural recipe.
+  const trace = compactComputerTaskActionTrace(actionTrace !== undefined ? actionTrace : record.actionTrace);
+  if (!trace) {
+    return { name, description, tags, content: assemble([]) };
+  }
+
+  const parameters = detectRecipeParameters(trace);
+  const buildTraceSection = (keepSteps: number): string[] => {
+    const lines: string[] = [
+      '',
+      '## Deterministic replay (verified steps from the source run)',
+      'Recorded steps are hypotheses from one successful run, not guarantees:',
+      'verify the target still exists/enabled before each step; on mismatch stop',
+      'replaying and follow the Procedure section above instead.',
+      '',
+    ];
+    trace.actions.slice(0, keepSteps).forEach((step, index) => {
+      lines.push(`${index + 1}. ${formatActionTraceStep(step)}`);
+    });
+    if (keepSteps < trace.actions.length) {
+      lines.push(`… ${trace.actions.length - keepSteps} more steps trimmed to fit the recipe size budget — follow the Procedure section from here.`);
+    }
+    if (parameters.length > 0) {
+      lines.push('');
+      lines.push('## Parameters');
+      lines.push('Substitute these slots when reusing the recipe — the examples are the values from the source run:');
+      for (const param of parameters) {
+        lines.push(`- ${param.placeholder} — example: ${param.example}`);
+      }
+    }
+    return lines;
+  };
+
+  // Bound total content ~6k chars: trim trace steps first (procedural
+  // sections and parameters are the durable knowledge; the trace is the
+  // optimization).
+  let keepSteps = trace.actions.length;
+  let content = assemble(buildTraceSection(keepSteps));
+  while (content.length > RECIPE_CONTENT_LIMIT && keepSteps > 0) {
+    keepSteps -= 1;
+    content = assemble(keepSteps === 0 ? [] : buildTraceSection(keepSteps));
+  }
 
   return { name, description, tags, content };
 }

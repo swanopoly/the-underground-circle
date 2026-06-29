@@ -208,13 +208,65 @@ function rootTargetPath(rootPath: string, pathOrName: string): string {
   return `${String(rootPath || '~').replace(/\/+$/, '')}/${target.replace(/^\/+/, '')}`;
 }
 
-function pickBestFileMatch(matches: Array<{ path: string; name?: string }>, query: string): { path: string; name?: string } | null {
+function localFileAccessRetryMessage(action: string): string {
+  return `I could not ${action}. Reconnect the desktop bridge, approve the requested folder, then try again.`;
+}
+
+function localFileVerifyRetryMessage(action: string): string {
+  return `I could not verify the file before trying to ${action}. Send the exact file path or reconnect the desktop bridge, then try again.`;
+}
+
+export type LocalFileMutationMatchSelection =
+  | { status: 'matched'; match: { path: string; name?: string } }
+  | { status: 'none' }
+  | { status: 'ambiguous'; candidates: Array<{ path: string; name?: string }>; message: string };
+
+function dedupeFileMatches(matches: Array<{ path: string; name?: string }>): Array<{ path: string; name?: string }> {
+  const seen = new Set<string>();
+  const deduped: Array<{ path: string; name?: string }> = [];
+  for (const match of matches) {
+    const key = String(match.path || '').trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(match);
+  }
+  return deduped;
+}
+
+export function selectUnambiguousFileMatchForMutation(
+  matches: Array<{ path: string; name?: string }>,
+  query: string,
+): LocalFileMutationMatchSelection {
   const normalizedQuery = query.trim().toLowerCase();
-  if (!matches.length) return null;
-  return matches.find((match) => basenameFromPath(match.path).toLowerCase() === normalizedQuery)
-    || matches.find((match) => String(match.name || '').toLowerCase() === normalizedQuery)
-    || matches.find((match) => basenameFromPath(match.path).toLowerCase().includes(normalizedQuery))
-    || matches[0];
+  const uniqueMatches = dedupeFileMatches(matches);
+  if (!uniqueMatches.length) return { status: 'none' };
+  const exactMatches = uniqueMatches.filter((match) => (
+    basenameFromPath(match.path).toLowerCase() === normalizedQuery
+    || String(match.name || '').toLowerCase() === normalizedQuery
+  ));
+  if (exactMatches.length === 1) return { status: 'matched', match: exactMatches[0] };
+  if (exactMatches.length > 1) {
+    return {
+      status: 'ambiguous',
+      candidates: exactMatches.slice(0, 8),
+      message: `Multiple local files exactly matched "${query}". Provide the full path before changing files.`,
+    };
+  }
+  const fuzzyMatches = uniqueMatches.filter((match) => basenameFromPath(match.path).toLowerCase().includes(normalizedQuery));
+  if (fuzzyMatches.length === 1) return { status: 'matched', match: fuzzyMatches[0] };
+  if (fuzzyMatches.length > 1) {
+    return {
+      status: 'ambiguous',
+      candidates: fuzzyMatches.slice(0, 8),
+      message: `Multiple local files matched "${query}". Provide the full path before changing files.`,
+    };
+  }
+  if (uniqueMatches.length === 1) return { status: 'matched', match: uniqueMatches[0] };
+  return {
+    status: 'ambiguous',
+    candidates: uniqueMatches.slice(0, 8),
+    message: `Multiple local files matched "${query}". Provide the full path before changing files.`,
+  };
 }
 
 export function planDesktopBridgeFileTask(task: string): {
@@ -380,7 +432,7 @@ function formatDesktopBridgeStat(stat: {
   ].join('\n');
 }
 
-async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileAdapterResult | null> {
+export async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileAdapterResult | null> {
   const bridgeAvailable = await isDesktopBridgeAvailable().catch(() => false);
   if (!bridgeAvailable) return null;
 
@@ -428,8 +480,8 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
       if (!result.ok) {
         return {
           ok: false,
-          message: `Desktop bridge file list failed: ${result.error || 'unknown error'}`,
-          warnings: ['Desktop bridge file list failed.'],
+          message: localFileAccessRetryMessage('read that folder'),
+          warnings: [`Desktop bridge file list failed: ${result.error || 'unknown error'}.`],
           data: { adapter: 'desktop_bridge', plan },
         };
       }
@@ -458,8 +510,8 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
       if (!result.ok) {
         return {
           ok: false,
-          message: `Desktop bridge folder creation failed: ${result.error || 'unknown error'}`,
-          warnings: ['Desktop bridge folder creation failed.'],
+          message: localFileAccessRetryMessage('create that folder'),
+          warnings: [`Desktop bridge folder creation failed: ${result.error || 'unknown error'}.`],
           data: { adapter: 'desktop_bridge', plan },
         };
       }
@@ -488,8 +540,8 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
       if (!result.ok) {
         return {
           ok: false,
-          message: `Desktop bridge text file write failed: ${result.error || 'unknown error'}`,
-          warnings: ['Desktop bridge text file write failed.'],
+          message: localFileAccessRetryMessage('write that file'),
+          warnings: [`Desktop bridge text file write failed: ${result.error || 'unknown error'}.`],
           data: { adapter: 'desktop_bridge', plan },
         };
       }
@@ -508,8 +560,8 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
         if (!result.ok) {
           return {
             ok: false,
-            message: `Desktop bridge file metadata check failed: ${result.error || 'unknown error'}`,
-            warnings: ['Desktop bridge file stat failed.'],
+            message: localFileAccessRetryMessage('check that file'),
+            warnings: [`Desktop bridge file stat failed: ${result.error || 'unknown error'}.`],
             data: { adapter: 'desktop_bridge', plan },
           };
         }
@@ -539,13 +591,13 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
       if (!search.ok) {
         return {
           ok: false,
-          message: `Desktop bridge file search failed before metadata check: ${search.error || 'unknown error'}`,
-          warnings: ['Desktop bridge file search failed.'],
+          message: localFileVerifyRetryMessage('check it'),
+          warnings: [`Desktop bridge file search failed before metadata check: ${search.error || 'unknown error'}.`],
           data: { adapter: 'desktop_bridge', plan },
         };
       }
-      const source = pickBestFileMatch(search.data?.matches || [], query);
-      if (!source) {
+      const selection = selectUnambiguousFileMatchForMutation(search.data?.matches || [], query);
+      if (selection.status === 'none') {
         return {
           ok: true,
           message: `No local file matches for "${search.data?.query || query}" under ${search.data?.rootPath || plan.rootPath}.`,
@@ -553,12 +605,21 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
           data: { adapter: 'desktop_bridge', plan, result: search.data },
         };
       }
+      if (selection.status === 'ambiguous') {
+        return {
+          ok: false,
+          message: selection.message,
+          warnings: ['Ambiguous local file metadata target.'],
+          data: { adapter: 'desktop_bridge', plan, result: search.data, candidates: selection.candidates },
+        };
+      }
+      const source = selection.match;
       const result = await statFile(source.path);
       if (!result.ok) {
         return {
           ok: false,
-          message: `Desktop bridge file metadata check failed: ${result.error || 'unknown error'}`,
-          warnings: ['Desktop bridge file stat failed.'],
+          message: localFileAccessRetryMessage('check that file'),
+          warnings: [`Desktop bridge file stat failed: ${result.error || 'unknown error'}.`],
           data: { adapter: 'desktop_bridge', plan, source },
         };
       }
@@ -590,14 +651,14 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
       if (!search.ok) {
         return {
           ok: false,
-          message: `Desktop bridge file search failed before rename: ${search.error || 'unknown error'}`,
-          warnings: ['Desktop bridge file search failed.'],
+          message: localFileVerifyRetryMessage('rename it'),
+          warnings: [`Desktop bridge file search failed before rename: ${search.error || 'unknown error'}.`],
           data: { adapter: 'desktop_bridge', plan },
         };
       }
       const matches = search.data?.matches || [];
-      const source = pickBestFileMatch(matches, query);
-      if (!source) {
+      const selection = selectUnambiguousFileMatchForMutation(matches, query);
+      if (selection.status === 'none') {
         return {
           ok: false,
           message: `No local file matches for "${search.data?.query || query}" under ${search.data?.rootPath || plan.rootPath}.`,
@@ -605,13 +666,22 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
           data: { adapter: 'desktop_bridge', plan, result: search.data },
         };
       }
+      if (selection.status === 'ambiguous') {
+        return {
+          ok: false,
+          message: selection.message,
+          warnings: ['Ambiguous local file mutation target.'],
+          data: { adapter: 'desktop_bridge', plan, result: search.data, candidates: selection.candidates },
+        };
+      }
+      const source = selection.match;
       const toPath = siblingTargetPath(source.path, target);
       const result = await renameFile(source.path, toPath, { overwrite: false });
       if (!result.ok) {
         return {
           ok: false,
-          message: `Desktop bridge file rename failed: ${result.error || 'unknown error'}`,
-          warnings: ['Desktop bridge file rename failed.'],
+          message: localFileAccessRetryMessage('rename that file'),
+          warnings: [`Desktop bridge file rename failed: ${result.error || 'unknown error'}.`],
           data: { adapter: 'desktop_bridge', plan, source },
         };
       }
@@ -643,14 +713,14 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
       if (!search.ok) {
         return {
           ok: false,
-          message: `Desktop bridge file search failed before copy: ${search.error || 'unknown error'}`,
-          warnings: ['Desktop bridge file search failed.'],
+          message: localFileVerifyRetryMessage('copy it'),
+          warnings: [`Desktop bridge file search failed before copy: ${search.error || 'unknown error'}.`],
           data: { adapter: 'desktop_bridge', plan },
         };
       }
       const matches = search.data?.matches || [];
-      const source = pickBestFileMatch(matches, query);
-      if (!source) {
+      const selection = selectUnambiguousFileMatchForMutation(matches, query);
+      if (selection.status === 'none') {
         return {
           ok: false,
           message: `No local file matches for "${search.data?.query || query}" under ${search.data?.rootPath || plan.rootPath}.`,
@@ -658,13 +728,22 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
           data: { adapter: 'desktop_bridge', plan, result: search.data },
         };
       }
+      if (selection.status === 'ambiguous') {
+        return {
+          ok: false,
+          message: selection.message,
+          warnings: ['Ambiguous local file mutation target.'],
+          data: { adapter: 'desktop_bridge', plan, result: search.data, candidates: selection.candidates },
+        };
+      }
+      const source = selection.match;
       const toPath = siblingTargetPath(source.path, target);
       const result = await copyFile(source.path, toPath, { overwrite: false });
       if (!result.ok) {
         return {
           ok: false,
-          message: `Desktop bridge file copy failed: ${result.error || 'unknown error'}`,
-          warnings: ['Desktop bridge file copy failed.'],
+          message: localFileAccessRetryMessage('copy that file'),
+          warnings: [`Desktop bridge file copy failed: ${result.error || 'unknown error'}.`],
           data: { adapter: 'desktop_bridge', plan, source },
         };
       }
@@ -695,14 +774,14 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
       if (!search.ok) {
         return {
           ok: false,
-          message: `Desktop bridge file search failed before moving to Trash: ${search.error || 'unknown error'}`,
-          warnings: ['Desktop bridge file search failed.'],
+          message: localFileVerifyRetryMessage('move it to Trash'),
+          warnings: [`Desktop bridge file search failed before moving to Trash: ${search.error || 'unknown error'}.`],
           data: { adapter: 'desktop_bridge', plan },
         };
       }
       const matches = search.data?.matches || [];
-      const source = pickBestFileMatch(matches, query);
-      if (!source) {
+      const selection = selectUnambiguousFileMatchForMutation(matches, query);
+      if (selection.status === 'none') {
         return {
           ok: false,
           message: `No local file matches for "${search.data?.query || query}" under ${search.data?.rootPath || plan.rootPath}.`,
@@ -710,12 +789,21 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
           data: { adapter: 'desktop_bridge', plan, result: search.data },
         };
       }
+      if (selection.status === 'ambiguous') {
+        return {
+          ok: false,
+          message: selection.message,
+          warnings: ['Ambiguous local file mutation target.'],
+          data: { adapter: 'desktop_bridge', plan, result: search.data, candidates: selection.candidates },
+        };
+      }
+      const source = selection.match;
       const result = await trashFile(source.path);
       if (!result.ok) {
         return {
           ok: false,
-          message: `Desktop bridge move-to-Trash failed: ${result.error || 'unknown error'}`,
-          warnings: ['Desktop bridge move-to-Trash failed.'],
+          message: localFileAccessRetryMessage('move that file to Trash'),
+          warnings: [`Desktop bridge move-to-Trash failed: ${result.error || 'unknown error'}.`],
           data: { adapter: 'desktop_bridge', plan, source },
         };
       }
@@ -732,8 +820,8 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
       if (!result.ok) {
         return {
           ok: false,
-          message: `Desktop bridge file read failed: ${result.error || 'unknown error'}`,
-          warnings: ['Desktop bridge file read failed.'],
+          message: localFileAccessRetryMessage('read that file'),
+          warnings: [`Desktop bridge file read failed: ${result.error || 'unknown error'}.`],
           data: { adapter: 'desktop_bridge', plan },
         };
       }
@@ -764,8 +852,8 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
     if (!result.ok) {
       return {
         ok: false,
-        message: `Desktop bridge file search failed: ${result.error || 'unknown error'}`,
-        warnings: ['Desktop bridge file search failed.'],
+        message: localFileAccessRetryMessage('search those files'),
+        warnings: [`Desktop bridge file search failed: ${result.error || 'unknown error'}.`],
         data: { adapter: 'desktop_bridge', plan },
       };
     }
@@ -781,8 +869,8 @@ async function executeDesktopBridgeFileTask(task: string): Promise<ComputerFileA
   } catch (error: any) {
     return {
       ok: false,
-      message: `Desktop bridge file task failed: ${error?.message || 'Unknown error'}`,
-      warnings: ['Desktop bridge file task failed.'],
+      message: 'I could not complete that file task. Reconnect the desktop bridge, approve the folder, then try again.',
+      warnings: [`Desktop bridge file task failed: ${error?.message || 'Unknown error'}.`],
       data: { adapter: 'desktop_bridge', plan },
     };
   }
@@ -815,7 +903,7 @@ export async function executeComputerFileTask(args: {
       ok: false,
       message: bridgeUp
         ? 'No filesystem integration is connected for remote files, and this did not match a local-file action. For cloud/remote files, connect a filesystem integration in Marketplace; for local files, name the exact path (e.g. `~/Downloads/report.pdf`).'
-        : 'To work with local files I need the desktop bridge running — start it with `npm run bridge` and grant the folder, then ask again. For remote/cloud files instead, connect a filesystem integration in Marketplace.',
+        : 'To work with local files, I need the desktop bridge connected and folder access approved. Reconnect it, grant the folder, then ask again. For remote/cloud files, connect a filesystem integration in Marketplace.',
       warnings: [bridgeUp
         ? 'No filesystem MCP surface; desktop bridge up but task unmatched.'
         : 'Desktop bridge offline and no filesystem MCP surface.'],
@@ -867,8 +955,8 @@ export async function executeComputerFileTask(args: {
   } catch (error: any) {
     return {
       ok: false,
-      message: `Filesystem tool execution failed: ${error?.message || 'Unknown error'}`,
-      warnings: ['Filesystem MCP call failed.'],
+      message: 'I could not run the connected file tool for that request. Check the integration or send the exact path, then try again.',
+      warnings: [`Filesystem MCP call failed: ${error?.message || 'Unknown error'}.`],
       data: {
         toolName: chosenTool.name,
         toolArgs,

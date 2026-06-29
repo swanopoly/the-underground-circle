@@ -387,6 +387,57 @@ assert(diagnoseComputerTaskCheckpointFailure({
   assert(!plainCompact || plainCompact.stages === null || plainCompact.stages === undefined, 'stages: single-surface persists no stages');
 }
 
+// ─── E4: data transfer & precision rules in the dispatch block ──────────────
+
+{
+  const {
+    DATA_TRANSFER_PRECISION_RULES,
+    formatDataTransferPrecisionRulesBlock,
+    complexityPlanTouchesDesktopSurface,
+    buildComputerTaskComplexityPlan,
+    formatComputerTaskComplexityDispatchBlock,
+  } = require('../src/lib/computerTaskComplexityPlan') as typeof import('../src/lib/computerTaskComplexityPlan');
+  const { planComputerTaskPreview } = require('../src/lib/computerTaskPlanner') as typeof import('../src/lib/computerTaskPlanner');
+
+  // Rule set shape: exactly five rules, covering the verified failure modes.
+  assert(DATA_TRANSFER_PRECISION_RULES.length === 5, 'E4: five transfer rules', String(DATA_TRANSFER_PRECISION_RULES.length));
+  const rulesBlock = formatDataTransferPrecisionRulesBlock();
+  assert(rulesBlock.startsWith('Data transfer & precision rules (desktop/app surfaces):'), 'E4: rules block header');
+  for (const needle of [
+    'Never read precise strings',
+    'set_element_value / fill_field / paste',
+    'typed editing surfaces',
+    'keyboard shortcuts over coordinate clicks',
+    'reading the field value back',
+  ]) {
+    assert(rulesBlock.includes(needle), `E4: rules block carries "${needle}"`);
+  }
+
+  // Desktop/app-touching plan → dispatch block carries the rules.
+  const hybridTask = 'log into my supplier portal at portal.acme.com and download the latest invoices, then rename the files by date in my downloads folder, then import them into QuickBooks';
+  const hybridPlan = buildComputerTaskComplexityPlan({ task: hybridTask, preview: planComputerTaskPreview(hybridTask) });
+  assert(complexityPlanTouchesDesktopSurface(hybridPlan), 'E4: hybrid plan touches a desktop surface');
+  const hybridBlock = formatComputerTaskComplexityDispatchBlock(hybridPlan) || '';
+  assert(hybridBlock.includes('Data transfer & precision rules (desktop/app surfaces):'), 'E4: hybrid dispatch block carries the rules');
+  assert(hybridBlock.includes('Staged execution contract'), 'E4: rules do not displace the staged contract');
+  assert(hybridBlock.includes('Checkpoint rule:'), 'E4: rules sit before the checkpoint rule footer');
+
+  // Browser-only plan → no rules block (edge loop owns its own).
+  const browserTask = 'go to acme.com and read the pricing page then summarize it';
+  const browserPlan = buildComputerTaskComplexityPlan({ task: browserTask, preview: planComputerTaskPreview(browserTask) });
+  if (complexityPlanTouchesDesktopSurface(browserPlan)) {
+    fail('E4: browser-only plan should not register a desktop surface');
+  } else {
+    pass('E4: browser-only plan registers no desktop surface');
+    const browserBlock = formatComputerTaskComplexityDispatchBlock(browserPlan) || '';
+    assert(!browserBlock.includes('Data transfer & precision rules'), 'E4: browser-only dispatch block omits the rules');
+  }
+
+  // Null-safety for persisted/absent plans.
+  assert(complexityPlanTouchesDesktopSurface(null) === false, 'E4: null plan fails closed');
+  assert(complexityPlanTouchesDesktopSurface(undefined) === false, 'E4: undefined plan fails closed');
+}
+
 // ─── D4b: stage-aware recovery ──────────────────────────────────────────────
 
 {
@@ -531,6 +582,109 @@ assert(diagnoseComputerTaskCheckpointFailure({
   // Failed/blocked tasks never produce recipes.
   assert(buildComputerTaskRecipeDraft(stagedRecord as any) === null, 'recipe: blocked task → null');
   assert(buildComputerTaskRecipeDraft(null) === null, 'recipe: null record → null');
+
+  // ─── L2 hybrid recipes: trace-embedded deterministic replay ──────────────
+  const { compactComputerTaskActionTrace } =
+    require('../src/lib/computerTaskStateModel') as typeof import('../src/lib/computerTaskStateModel');
+
+  const trace = {
+    v: 1 as const,
+    actions: [
+      { tool: 'browser.navigate', input: { url: 'https://portal.acme.com/login' } },
+      { tool: 'browser.type', input: { selector: '#user', text: 'billing-team' } },
+      { tool: 'browser.click', input: { selector: '#download-invoices' } },
+      { tool: 'desktop.file_move', input: { from: '/Users/me/Downloads/invoices-2026-05-31.zip', to: '/Users/me/Documents/invoices' } },
+    ],
+  };
+  const hybrid = buildComputerTaskRecipeDraft(doneRecord as any, trace);
+  assert(!!hybrid, 'hybrid recipe: draft built with trace');
+  if (hybrid) {
+    assert(hybrid.content.includes('## Deterministic replay (verified steps from the source run)'), 'hybrid recipe: replay section present');
+    assert(
+      hybrid.content.includes('hypotheses from one successful run')
+        && hybrid.content.includes('verify the target still exists/enabled before each step')
+        && hybrid.content.includes('stop'),
+      'hybrid recipe: hypothesis rule prefixes the steps (finding 3)',
+    );
+    assert(
+      hybrid.content.indexOf('hypotheses from one successful run') < hybrid.content.indexOf('1. browser.navigate('),
+      'hybrid recipe: rule comes BEFORE step 1',
+    );
+    assert(hybrid.content.includes('1. browser.navigate('), 'hybrid recipe: numbered step 1');
+    assert(hybrid.content.includes('4. desktop.file_move('), 'hybrid recipe: numbered step 4');
+    assert(hybrid.content.includes('## Parameters'), 'hybrid recipe: parameters section present');
+    assert(hybrid.content.includes('- <url> — example: https://portal.acme.com/login'), 'hybrid recipe: url slot detected');
+    assert(hybrid.content.includes('- <file_path> — example: /Users/me/Downloads/invoices-2026-05-31.zip'), 'hybrid recipe: file path slot detected');
+    assert(hybrid.content.includes('- <date> — example: 2026-05-31'), 'hybrid recipe: date slot detected');
+    // Procedural sections survive — the adaptive fallback stays intact.
+    assert(hybrid.content.includes('## Stages'), 'hybrid recipe: procedural stages section kept');
+    assert(hybrid.content.includes('Pause for approval'), 'hybrid recipe: safety rules kept');
+  }
+
+  // Input summaries are bounded ≤120 chars per step.
+  const longText = 'x'.repeat(400);
+  const longInputDraft = buildComputerTaskRecipeDraft(doneRecord as any, {
+    v: 1 as const,
+    actions: [{ tool: 'browser.type', input: { selector: '#notes', text: longText } }],
+  });
+  const longLine = (longInputDraft?.content || '').split('\n').find((line) => line.startsWith('1. browser.type('));
+  assert(!!longLine && longLine.length <= '1. browser.type()'.length + 121, 'hybrid recipe: input summary bounded ≤120 chars', String(longLine?.length));
+  assert(!!longLine?.endsWith('…)'), 'hybrid recipe: truncated summary marked with ellipsis');
+
+  // Bounds: a huge trace is trimmed (trace first) and the content stays ≤6k.
+  const hugeTrace = {
+    v: 1 as const,
+    actions: Array.from({ length: 60 }, (_, index) => ({
+      tool: `desktop.click_${index}`,
+      input: { selector: `#button-${index}`, note: 'n'.repeat(110) },
+    })),
+  };
+  const bounded = buildComputerTaskRecipeDraft(doneRecord as any, hugeTrace);
+  assert(!!bounded && bounded.content.length <= 6000, 'hybrid recipe: huge trace bounded ≤6k chars', String(bounded?.content.length));
+  assert(!!bounded?.content.includes('more steps trimmed'), 'hybrid recipe: trimming is announced');
+  assert(!!bounded?.content.includes('## Goal'), 'hybrid recipe: procedural sections survive trimming');
+
+  // No-trace output is byte-identical to the pre-L2 draft (and explicit
+  // null behaves the same).
+  assert(
+    JSON.stringify(buildComputerTaskRecipeDraft(doneRecord as any)) === JSON.stringify(recipe),
+    'hybrid recipe: no-trace draft unchanged',
+  );
+  assert(
+    JSON.stringify(buildComputerTaskRecipeDraft(doneRecord as any, null)) === JSON.stringify(recipe),
+    'hybrid recipe: explicit null trace draft unchanged',
+  );
+
+  // When the trace rides the durable record, the draft picks it up without
+  // an explicit argument ("Save as recipe" path).
+  const tracedRecord = { ...doneRecord, actionTrace: trace };
+  assert(
+    !!buildComputerTaskRecipeDraft(tracedRecord as any)?.content.includes('## Deterministic replay'),
+    'hybrid recipe: record-carried trace embeds replay section',
+  );
+
+  // ─── L2 durable record field: persisted-compat normalization ─────────────
+  assert(compactComputerTaskActionTrace(undefined) === null, 'action trace: old records (missing field) → null');
+  assert(compactComputerTaskActionTrace(null) === null, 'action trace: null → null');
+  assert(compactComputerTaskActionTrace({ v: 1, actions: [] }) === null, 'action trace: empty actions → null');
+  assert(compactComputerTaskActionTrace('garbage' as any) === null, 'action trace: junk value → null');
+  const compactTrace = compactComputerTaskActionTrace({
+    v: 1,
+    actions: [
+      { tool: 'browser.click', input: { selector: '#go', nested: { drop: 'me' } as any, big: 'y'.repeat(400) } },
+      { tool: '', input: { selector: '#dropped' } },
+      ...Array.from({ length: 60 }, (_, index) => ({ tool: `t${index}` })),
+    ],
+  });
+  assert(compactTrace?.v === 1 && compactTrace.actions.length === 40, 'action trace: bounded ≤40 actions, malformed dropped', String(compactTrace?.actions.length));
+  assert(compactTrace?.actions[0].tool === 'browser.click', 'action trace: first action kept (replay order)');
+  assert(compactTrace?.actions[0].input?.nested === undefined, 'action trace: non-primitive input values dropped');
+  assert(String(compactTrace?.actions[0].input?.big || '').length === 200, 'action trace: string inputs bounded ≤200');
+  // Round-trip stability: compacting a compacted trace is a no-op.
+  assert(
+    JSON.stringify(compactComputerTaskActionTrace(compactTrace)) === JSON.stringify(compactTrace),
+    'action trace: compact is idempotent (persist round-trip safe)',
+  );
 }
 
 // ─── Staged pre-flight validation ───────────────────────────────────────────
@@ -576,6 +730,395 @@ assert(diagnoseComputerTaskCheckpointFailure({
   // Healthy audit → staged task ready, no blockers.
   const healthy = prepareComputerTaskExecution({ task: stagedTask, audit: audit(), grantedIds: [] });
   assert(healthy.stagePreflightBlockers.length === 0, 'stage preflight: healthy audit has no stage blockers');
+}
+
+// ─── D6: completion/blocked notifications ───────────────────────────────────
+
+{
+  const {
+    deriveComputerTaskNotification,
+    computerTaskNotificationSnapshot,
+    appendComputerTaskNotification,
+    compactComputerTaskNotifications,
+    listUnacknowledgedComputerTaskNotifications,
+    acknowledgeComputerTaskNotifications,
+    fireComputerTaskWebNotification,
+  } = require('../src/lib/computerTaskStateModel') as typeof import('../src/lib/computerTaskStateModel');
+
+  const base = {
+    id: 'task-3',
+    circleId: 'c1',
+    threadId: null,
+    task: 'Log into the supplier portal and download invoices',
+    taskKind: 'browser_task',
+    taskLabel: 'Supplier invoice download',
+    phase: 'executing' as const,
+    currentStep: null,
+    steps: [],
+    blockers: [] as string[],
+    nextSteps: [] as string[],
+    grantedAccess: [],
+    accessPlan: null,
+    runId: 'run-3',
+    updatedAt: '2026-06-10T14:00:00.000Z',
+  };
+  const at = '2026-06-10T14:05:00.000Z';
+
+  // Transition: running → completed. Body carries the result summary.
+  const completed = deriveComputerTaskNotification(
+    { ...base, phase: 'completed' },
+    computerTaskNotificationSnapshot(base),
+    { nowIso: at, resultSummary: 'Downloaded 4 invoices from the portal.' },
+  );
+  assert(completed?.kind === 'completed', 'notify: running→completed fires', completed?.kind);
+  assert(!!completed && completed.body.includes('Downloaded 4 invoices'), 'notify: completed body carries result summary');
+  assert(!!completed && completed.taskRunId === 'run-3', 'notify: notification carries run id');
+
+  // Same state twice ⇒ null (transitions only, never repeats).
+  const doneRecord = { ...base, phase: 'completed' as const };
+  assert(
+    deriveComputerTaskNotification(doneRecord, computerTaskNotificationSnapshot(doneRecord), { nowIso: at }) === null,
+    'notify: same completed state twice derives nothing',
+  );
+  assert(
+    deriveComputerTaskNotification(base, computerTaskNotificationSnapshot(base), { nowIso: at }) === null,
+    'notify: steady executing state derives nothing',
+  );
+
+  // Transition: running → failed. Body carries the top blocker.
+  const failed = deriveComputerTaskNotification(
+    { ...base, phase: 'failed', blockers: ['The portal login rejected the credentials.'] },
+    computerTaskNotificationSnapshot(base),
+    { nowIso: at },
+  );
+  assert(failed?.kind === 'failed', 'notify: running→failed fires', failed?.kind);
+  assert(!!failed && failed.body.includes('rejected the credentials'), 'notify: failed body carries top blocker');
+
+  // Blocker count 0 → n while still executing ⇒ blocked.
+  const blocked = deriveComputerTaskNotification(
+    { ...base, blockers: ['Desktop bridge offline'] },
+    computerTaskNotificationSnapshot(base),
+    { nowIso: at },
+  );
+  assert(blocked?.kind === 'blocked', 'notify: blocker 0→n fires blocked', blocked?.kind);
+  assert(!!blocked && blocked.body === 'Desktop bridge offline', 'notify: blocked body is the blocker');
+  // ...and n → n does not re-fire.
+  const blockedRecord = { ...base, blockers: ['Desktop bridge offline'] };
+  assert(
+    deriveComputerTaskNotification(blockedRecord, computerTaskNotificationSnapshot(blockedRecord), { nowIso: at }) === null,
+    'notify: unchanged blocker count derives nothing',
+  );
+
+  // New open question ⇒ needs_you with the question text.
+  const question = {
+    id: 'q9',
+    question: 'The portal is asking for an MFA code — can you provide it?',
+    options: [],
+    context: null,
+    askedAt: at,
+    sessionId: null,
+    runId: 'run-3',
+    status: 'pending' as const,
+    answer: null,
+    resolvedAt: null,
+  };
+  const needsYou = deriveComputerTaskNotification(
+    { ...base, pendingQuestions: [question] },
+    computerTaskNotificationSnapshot(base),
+    { nowIso: at },
+  );
+  assert(needsYou?.kind === 'needs_you', 'notify: new open question fires needs_you', needsYou?.kind);
+  assert(!!needsYou && needsYou.body.includes('MFA code'), 'notify: needs_you body carries question text');
+
+  // Awaiting-approval transition ⇒ needs_you.
+  const approval = deriveComputerTaskNotification(
+    { ...base, phase: 'awaiting_approval', accessPlan: 'Grant browser side-effect access' },
+    computerTaskNotificationSnapshot(base),
+    { nowIso: at },
+  );
+  assert(approval?.kind === 'needs_you', 'notify: awaiting approval fires needs_you', approval?.kind);
+
+  // Partial result on a bounded stop ⇒ partial_result.
+  const partial = deriveComputerTaskNotification(
+    base,
+    computerTaskNotificationSnapshot(base),
+    { nowIso: at, partialResultSummary: 'Logged in and downloaded 2 of 4 invoices before the budget ran out.' },
+  );
+  assert(partial?.kind === 'partial_result', 'notify: bounded stop fires partial_result', partial?.kind);
+  assert(!!partial && partial.body.includes('2 of 4 invoices'), 'notify: partial body carries progress summary');
+
+  // Bounds: title ≤80, body ≤200.
+  const longBlocker = 'x'.repeat(600);
+  const bounded = deriveComputerTaskNotification(
+    { ...base, taskLabel: 'L'.repeat(200), phase: 'failed', blockers: [longBlocker] },
+    computerTaskNotificationSnapshot(base),
+    { nowIso: at },
+  );
+  assert(!!bounded && bounded.title.length <= 80 && bounded.body.length <= 200, 'notify: title/body bounded');
+
+  // Append: newest first, deduped, capped at 5.
+  let list = appendComputerTaskNotification(null, completed);
+  list = appendComputerTaskNotification(list, completed);
+  assert(list.length === 1, 'notify: identical notification not appended twice', String(list.length));
+  list = appendComputerTaskNotification(list, failed);
+  assert(list[0].kind === 'failed', 'notify: newest first');
+  for (let i = 0; i < 6; i += 1) {
+    list = appendComputerTaskNotification(list, {
+      ...blocked!,
+      id: `ctn_blocked_${i}`,
+      body: `blocker ${i}`,
+      createdAtIso: at,
+    });
+  }
+  assert(list.length === 5, 'notify: list bounded at 5', String(list.length));
+  assert(appendComputerTaskNotification(list, null).length === 5, 'notify: null append is a no-op');
+
+  // Acknowledge clears the unacknowledged view; record stays bounded.
+  const record = { ...base, notifications: list };
+  assert(listUnacknowledgedComputerTaskNotifications(record).length === 5, 'notify: unacknowledged listed');
+  const acked = acknowledgeComputerTaskNotifications(record);
+  assert(listUnacknowledgedComputerTaskNotifications(acked).length === 0, 'notify: acknowledge clears banner list');
+  assert((acked.notifications || []).length === 5, 'notify: acknowledge keeps history');
+
+  // Persisted-compat: old records without the field, malformed entries.
+  assert(listUnacknowledgedComputerTaskNotifications(base as any).length === 0, 'notify: record without field is safe');
+  assert(compactComputerTaskNotifications(undefined).length === 0, 'notify: undefined list compacts empty');
+  const compacted = compactComputerTaskNotifications([
+    { kind: 'bogus' as any, title: 'nope', body: '', createdAtIso: at, id: 'x' },
+    { kind: 'completed', title: 't'.repeat(300), body: 'b'.repeat(900), createdAtIso: at, id: 'ok' },
+  ]);
+  assert(compacted.length === 1, 'notify: malformed kinds dropped', String(compacted.length));
+  assert(compacted[0].title.length <= 80 && compacted[0].body.length <= 200, 'notify: compaction bounds strings');
+
+  // Web notification helper is a silent no-op outside a hidden web page.
+  assert(fireComputerTaskWebNotification(completed) === false, 'notify: web notification no-ops outside the browser');
+  assert(fireComputerTaskWebNotification(null) === false, 'notify: web notification null-safe');
+}
+
+// ─── E1 follow-up: surface-escalation breadcrumbs on the durable record ─────
+
+{
+  const {
+    appendComputerTaskSurfaceEscalations,
+    buildComputerTaskChecklistCard,
+    compactComputerTaskSurfaceEscalations,
+    formatComputerTaskChecklistCard,
+    formatComputerTaskSurfaceEscalationLine,
+  } = require('../src/lib/computerTaskStateModel') as typeof import('../src/lib/computerTaskStateModel');
+
+  const at = '2026-06-12T10:00:00.000Z';
+  const crumb = (n: number, extra?: Record<string, unknown>) => ({
+    fromSurface: 'os_accessibility',
+    toSurface: 'screenshot_control',
+    reason: `descent ${n}: the ranked ladder moved down a rung`,
+    atIso: at,
+    appName: 'Photoshop',
+    failureCode: 'a11y_tree_empty',
+    ...extra,
+  });
+
+  // Compaction: malformed dropped, strings bounded, list capped at 3 (newest kept).
+  const compacted = compactComputerTaskSurfaceEscalations([
+    { fromSurface: '', toSurface: 'pixels', reason: 'no from' },
+    { fromSurface: 'a', toSurface: 'b', reason: '' },
+    crumb(1, { reason: 'r'.repeat(900), appName: 'A'.repeat(300), failureCode: 'f'.repeat(200) }),
+  ] as any);
+  assert(compacted.length === 1, 'escalation: malformed entries dropped', String(compacted.length));
+  assert(
+    compacted[0].reason.length <= 300 && (compacted[0].appName || '').length <= 80 && (compacted[0].failureCode || '').length <= 60,
+    'escalation: strings bounded',
+  );
+  const overflow = compactComputerTaskSurfaceEscalations([crumb(1), crumb(2), crumb(3), crumb(4)]);
+  assert(overflow.length === 3, 'escalation: list bounded at 3', String(overflow.length));
+  assert(overflow[2].reason.includes('descent 4'), 'escalation: newest entries kept on overflow');
+  assert(compactComputerTaskSurfaceEscalations(undefined).length === 0, 'escalation: undefined list compacts empty');
+
+  // Append: merges, dedupes identical from+to+reason, stays bounded.
+  let merged = appendComputerTaskSurfaceEscalations(null, [crumb(1)]);
+  merged = appendComputerTaskSurfaceEscalations(merged, [crumb(1), crumb(2)]);
+  assert(merged.length === 2, 'escalation: duplicate descent not appended twice', String(merged.length));
+  merged = appendComputerTaskSurfaceEscalations(merged, [crumb(3), crumb(4)]);
+  assert(merged.length === 3 && merged[0].reason.includes('descent 2'), 'escalation: merge bounded, oldest dropped');
+  assert(appendComputerTaskSurfaceEscalations(merged, null).length === 3, 'escalation: null append is a no-op');
+
+  // Display line prefers the structured failure code and humanizes tokens.
+  const line = formatComputerTaskSurfaceEscalationLine(compactComputerTaskSurfaceEscalations([crumb(1)])[0]);
+  assert(
+    line === '↳ switched to screenshot control: a11y tree empty (Photoshop)',
+    'escalation: card line format',
+    line,
+  );
+  const noCodeLine = formatComputerTaskSurfaceEscalationLine(
+    compactComputerTaskSurfaceEscalations([crumb(1, { failureCode: null, appName: null })])[0],
+  );
+  assert(noCodeLine.startsWith('↳ switched to screenshot control: descent 1'), 'escalation: reason fallback line', noCodeLine);
+
+  // Checklist-card projection + formatter rendering.
+  const record = {
+    id: 'task-esc',
+    circleId: 'c1',
+    threadId: null,
+    task: 'Crop the hero image in Photoshop',
+    taskKind: 'app_task',
+    taskLabel: 'Photoshop crop',
+    phase: 'executing' as const,
+    currentStep: 'execute',
+    steps: [{ id: 'execute', label: 'Execute task', status: 'active' as const }],
+    blockers: [],
+    nextSteps: [],
+    grantedAccess: [],
+    accessPlan: null,
+    surfaceEscalations: [crumb(1)],
+    updatedAt: at,
+  };
+  const card = buildComputerTaskChecklistCard(record as any);
+  assert(!!card && card.surfaceChanges.length === 1, 'escalation: card projects surface changes');
+  assert(Boolean(card?.surfaceChanges[0]?.includes('a11y tree empty')), 'escalation: projected line carries failure cause');
+  const text = formatComputerTaskChecklistCard(card);
+  assert(text.includes('↳ switched to screenshot control'), 'escalation: formatter renders breadcrumb line');
+
+  // Persisted-compat: old records without the field are safe everywhere.
+  const legacyCard = buildComputerTaskChecklistCard({ ...record, surfaceEscalations: undefined } as any);
+  assert(!!legacyCard && legacyCard.surfaceChanges.length === 0, 'escalation: legacy record projects no lines');
+  assert(!formatComputerTaskChecklistCard(legacyCard).includes('↳'), 'escalation: legacy record formats without breadcrumbs');
+}
+
+// ─── Wave-2: app-choice contract in the dispatch block ───────────────────────
+{
+  const {
+    buildComputerTaskComplexityPlan,
+    formatComputerTaskComplexityDispatchBlock,
+  } = require('../src/lib/computerTaskComplexityPlan') as typeof import('../src/lib/computerTaskComplexityPlan');
+  const { planComputerTaskPreview } = require('../src/lib/computerTaskPlanner') as typeof import('../src/lib/computerTaskPlanner');
+
+  const appResolution = {
+    category: 'photo_editing',
+    best: {
+      appId: 'adobe-photoshop',
+      displayName: 'Adobe Photoshop 2026',
+      surface: 'desktop' as const,
+      openVia: 'desktop_launch' as const,
+      openTarget: 'Adobe Photoshop 2026',
+      reason: 'installed on this Mac',
+    },
+    alternativesSummary: ['Photopea — full-featured web app', 'GIMP — installed on this Mac'],
+    explicitAppNamed: false,
+    openStepLines: [
+      'Open Adobe Photoshop 2026 (installed on this Mac) — launch it on the desktop first.',
+      'Wait for Adobe Photoshop 2026 to be ready and frontmost before acting in it.',
+    ],
+  };
+
+  // Threaded into a complex task: the contract section rides the dispatch
+  // block WITHOUT displacing stages/checkpoints/E4 rules.
+  const complexTask = 'open my supplier portal in the browser, download the invoices, then edit the photo in Photoshop and export a png';
+  const threaded = buildComputerTaskComplexityPlan({
+    task: complexTask,
+    preview: planComputerTaskPreview(complexTask),
+    appResolution,
+  });
+  const threadedBlock = formatComputerTaskComplexityDispatchBlock(threaded) || '';
+  assert(threaded.appResolution?.best.displayName === 'Adobe Photoshop 2026', 'app-choice: plan carries the threaded resolution');
+  assert(threadedBlock.includes('### App choice contract'), 'app-choice: dispatch block carries the contract section');
+  assert(threadedBlock.includes('Chosen app: Adobe Photoshop 2026 (installed on this Mac)'), 'app-choice: contract names the chosen app and why');
+  assert(threadedBlock.includes('Open first: Open Adobe Photoshop 2026'), 'app-choice: contract opens the app first');
+  assert(threadedBlock.includes('frontmost and ready BEFORE any task action'), 'app-choice: contract verifies frontmost before acting');
+  assert(
+    threadedBlock.includes('fall back ONCE to Photopea — full-featured web app') && threadedBlock.includes('stop and ask the user'),
+    'app-choice: contract names a single fallback before asking the user',
+  );
+  assert(threadedBlock.includes('## Complex Computer Task Checkpoints'), 'app-choice: checkpoint header still present');
+  assert(threadedBlock.includes('Checkpoint rule: after each mutation'), 'app-choice: checkpoint rules untouched');
+
+  // Not threaded: identical task produces NO contract (and stays parse-safe).
+  const unthreaded = buildComputerTaskComplexityPlan({ task: complexTask, preview: planComputerTaskPreview(complexTask) });
+  const unthreadedBlock = formatComputerTaskComplexityDispatchBlock(unthreaded) || '';
+  assert(unthreaded.appResolution === null, 'app-choice: unthreaded plan carries no resolution');
+  assert(!unthreadedBlock.includes('App choice contract'), 'app-choice: unthreaded dispatch block has no contract');
+
+  // Simple task + resolution: the open-first contract still ships (it is
+  // step zero regardless of complexity) — without checkpoint scaffolding.
+  const simpleTask = 'edit this photo';
+  const simpleWith = buildComputerTaskComplexityPlan({ task: simpleTask, preview: planComputerTaskPreview(simpleTask), appResolution });
+  if (simpleWith.level === 'simple') {
+    const simpleBlock = formatComputerTaskComplexityDispatchBlock(simpleWith) || '';
+    assert(simpleBlock.includes('### App choice contract'), 'app-choice: simple plan with resolution still ships the contract');
+    assert(!simpleBlock.includes('## Complex Computer Task Checkpoints'), 'app-choice: simple plan adds no checkpoint scaffolding');
+  } else {
+    pass('app-choice: simple-task fixture scored above simple — checkpoint path covers it');
+  }
+  const simpleWithout = buildComputerTaskComplexityPlan({ task: simpleTask, preview: planComputerTaskPreview(simpleTask) });
+  if (simpleWithout.level === 'simple') {
+    assert(formatComputerTaskComplexityDispatchBlock(simpleWithout) === null, 'app-choice: simple plan without resolution still formats to null');
+  }
+
+  // Fallback wording when no alternative is ranked.
+  const noAltBlock = formatComputerTaskComplexityDispatchBlock({
+    ...threaded,
+    appResolution: { ...appResolution, alternativesSummary: [] },
+  }) || '';
+  assert(noAltBlock.includes('no ranked alternative'), 'app-choice: missing alternatives degrade to ask-the-user');
+
+  // Persisted-plan compat: plans stored before this field keep formatting.
+  const legacyPlan = JSON.parse(JSON.stringify(unthreaded));
+  delete (legacyPlan as any).appResolution;
+  assert(
+    (formatComputerTaskComplexityDispatchBlock(legacyPlan) || '').includes('## Complex Computer Task Checkpoints'),
+    'app-choice: pre-wave-2 persisted plan still formats',
+  );
+
+  // ─── AR3: fail-fast availability + structured fallback ────────────────────
+  // A named app whose install is UNCONFIRMED ('maybe') must be proven to
+  // launch before task work, the contract names the user's intent, and the
+  // fallback comes from the structured recoveryFallback (a known-launchable
+  // web app) — not a blind alternativesSummary[0].
+  const maybeNamedResolution = {
+    category: 'photo_editing',
+    best: {
+      appId: 'pixelmator-pro',
+      displayName: 'Pixelmator Pro',
+      surface: 'desktop' as const,
+      openVia: 'desktop_launch' as const,
+      openTarget: 'Pixelmator Pro',
+      reason: "you named it — desktop bridge is online but the installed-app list is unavailable",
+      availability: 'maybe' as const,
+    },
+    alternativesSummary: ['GIMP — installed on this Mac', 'Photopea — full-featured web app'],
+    explicitAppNamed: true,
+    namedAppIntent: 'pixelmator',
+    openStepLines: ['Open Pixelmator Pro — launch it on the desktop first.'],
+    recoveryFallback: {
+      appId: 'photopea',
+      displayName: 'Photopea',
+      surface: 'browser' as const,
+      openVia: 'browser_url' as const,
+      openTarget: 'https://www.photopea.com',
+      reason: 'full-featured web app — works in the browser',
+      availability: 'web' as const,
+    },
+  };
+  const maybeBlock = formatComputerTaskComplexityDispatchBlock(
+    buildComputerTaskComplexityPlan({ task: simpleTask, preview: planComputerTaskPreview(simpleTask), appResolution: maybeNamedResolution }),
+  ) || '';
+  assert(maybeBlock.includes('Confirm Pixelmator Pro actually launched'), 'AR3: maybe/named app gets a fail-fast availability line');
+  assert(maybeBlock.includes('you asked for pixelmator'), 'AR3: availability line names the user intent');
+  assert(maybeBlock.includes('fallback trigger'), 'AR3: a not-installed failure is framed as the fallback trigger');
+  assert(!maybeBlock.includes('frontmost and ready BEFORE any task action'), "AR3: the plain frontmost line is replaced for 'maybe' apps");
+  assert(
+    maybeBlock.includes('fall back ONCE to Photopea (open it in the browser') && !maybeBlock.includes('fall back ONCE to GIMP'),
+    'AR3: fallback uses the structured web recoveryFallback, not alternativesSummary[0] (GIMP)',
+  );
+
+  // A CONFIRMED-installed app keeps the plain verify line (no fail-fast noise).
+  const installedBlock = formatComputerTaskComplexityDispatchBlock(
+    buildComputerTaskComplexityPlan({
+      task: simpleTask,
+      preview: planComputerTaskPreview(simpleTask),
+      appResolution: { ...appResolution, best: { ...appResolution.best, availability: 'installed' as const } },
+    }),
+  ) || '';
+  assert(installedBlock.includes('frontmost and ready BEFORE any task action'), 'AR3: confirmed-installed app keeps the plain verify line');
+  assert(!installedBlock.includes('actually launched'), 'AR3: confirmed-installed app gets no fail-fast availability line');
 }
 
 if (failures > 0) {

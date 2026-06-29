@@ -24,6 +24,7 @@ import {
 } from './computerAppGrounding';
 import {
   clickRole as localBrowserClickRole,
+  describeDomSnapshotTruncation,
   domSnapshot as localBrowserDomSnapshot,
   fillField as localBrowserFillField,
   openUrl as localBrowserOpenUrl,
@@ -768,6 +769,10 @@ async function runLocalBrowserReadAction(action: BrowserAction): Promise<string>
     throw new Error(result.error || 'Browser DOM snapshot failed.');
   }
   const treeText = renderBrowserTree(result.data.tree).join('\n');
+  // The snapshot-level truncation note (node budget hit on the bridge)
+  // is appended LAST so it survives the local 20k character cap — the
+  // model must see "page continues past this tree", not infer absence.
+  const snapshotTruncationNote = describeDomSnapshotTruncation(result.data);
   return [
     `URL: ${result.data.url}`,
     `Title: ${result.data.title || '(untitled)'}`,
@@ -775,6 +780,7 @@ async function runLocalBrowserReadAction(action: BrowserAction): Promise<string>
     '',
     treeText.slice(0, 20000),
     treeText.length > 20000 ? '\n...truncated' : '',
+    snapshotTruncationNote || '',
   ].filter(Boolean).join('\n');
 }
 

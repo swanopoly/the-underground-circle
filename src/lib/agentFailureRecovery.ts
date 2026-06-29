@@ -74,6 +74,16 @@ export interface AgentFailureRecoveryInput {
   source?: string | null;
   sessionId?: string | null;
   launchIfMissing?: boolean;
+  /**
+   * Explicit user approval to launch or commandeer a connected coding agent
+   * (Codex / Claude Code / Gemini / Cursor) for recovery. Defaults to false:
+   * AUTOMATIC failure recovery prepares + presents the recovery options but
+   * NEVER opens a terminal window or hijacks a running agent on its own —
+   * launching a desktop agent is a side-effectful action the user must
+   * approve (CLAUDE.md: desktop actions stay explicit about risk and approval).
+   * Set true only from a user-initiated recovery action (the "repair" option).
+   */
+  approveConnectedAgentLaunch?: boolean;
   circleId?: string;
   userId?: string;
 }
@@ -552,6 +562,22 @@ export async function startConnectedAgentFailureRecovery(
       assessment: policy.assessment,
       runbook: policy.runbook,
       message: `Connected agent recovery not launched. ${summarizeAgentFailureRecoveryPolicy(policy)}`,
+    };
+  }
+  // Approval gate: even when the policy WOULD hand off to a connected agent, do
+  // not launch a terminal or commandeer a running agent without explicit
+  // approval. Automatic recovery presents the options and waits — opening a
+  // desktop agent window unprompted is exactly the "surprise Codex terminal"
+  // this guards against.
+  if (!input.approveConnectedAgentLaunch) {
+    return {
+      ok: false,
+      provider: null,
+      launched: false,
+      recoveryAction: policy.action,
+      assessment: policy.assessment,
+      runbook: policy.runbook,
+      message: `Connected agent recovery is ready — approve the repair option to launch a connected agent. ${summarizeAgentFailureRecoveryPolicy(policy)}`,
     };
   }
   try {

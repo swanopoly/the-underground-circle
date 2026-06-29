@@ -55,6 +55,18 @@ assert.equal(solidworksPlan?.targetName, 'SOLIDWORKS');
 assert(solidworksPlan?.operations.includes('model_or_bim_edit'));
 assert(solidworksPlan?.operations.includes('export_plot'));
 assert(solidworksPlan?.sourceRefs.some((ref) => ref.label.includes('SOLIDWORKS API')));
+assert(solidworksPlan?.sourceRefs.some((ref) => ref.label.includes('SOLIDWORKS macros')));
+
+const matlabPlan = buildEngineeringCadOperationRunbookPlan('Open MATLAB, build a Simulink model, run the simulation, test the script, and export plots after approval.');
+assert.equal(matlabPlan?.targetName, 'MATLAB / Simulink');
+assert(matlabPlan?.operations.includes('matlab_compute_simulation'));
+assert(matlabPlan?.operations.includes('matlab_code_test_review'));
+assert(matlabPlan?.sourceRefs.some((ref) => ref.label.includes('MATLAB MCP Core Server')));
+assert(matlabPlan?.sourceRefs.some((ref) => ref.label.includes('MATLAB Agentic Toolkit')));
+const matlabRunbook = matlabPlan?.runbooks.find((runbook) => runbook.operation === 'matlab_compute_simulation');
+assert.equal(matlabRunbook?.risk, 'review');
+assert(matlabRunbook?.steps.some((step) => step.tool?.includes('detect_matlab_toolboxes')));
+assert(matlabRunbook?.fallbackBuildoutTrigger.includes('MATLAB execution adapter'));
 
 const revitPlan = buildEngineeringCadOperationRunbookPlan('Open Revit, update the sheet title block, and export a PDF set after approval.');
 assert.equal(revitPlan?.targetName, 'Autodesk Revit');

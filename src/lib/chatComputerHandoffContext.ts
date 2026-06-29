@@ -37,6 +37,10 @@ import type {
   AppAutomationRouteDecision,
   AppAutomationRouteDecisionStatus,
 } from './appAutomationControlSurfaces';
+import {
+  formatStickyScopeAppliedNotice,
+  type StickyScopeAppliedSummary,
+} from './computerGrantGate';
 import type { ComputerTaskEvidenceContract } from './computerTaskEvidenceContract';
 
 export type ChatComputerSurfaceKind = 'browser' | 'desktop' | 'local_files' | 'computer';
@@ -62,7 +66,15 @@ export interface ChatComputerHandoffContextInput {
   requestNotice?: ChatComputerRequestUserNotice | null;
   evidenceContract?: ComputerTaskEvidenceContract | null;
   appAutomationRouteDecision?: AppAutomationRouteDecision | null;
+  /**
+   * T7 sticky allow scopes: set when the route's `stickyScopeApplied` stamp
+   * downgraded approval via a standing grant, so handoff metadata and the
+   * compact route summary carry the visible notice + scope id. Optional and
+   * persisted-compatible — rows written before this field keep parsing.
+   */
+  stickyScopeApplied?: Pick<StickyScopeAppliedSummary, 'scopeId' | 'scopeKey'> | null;
   warnings?: string[];
+  rawWarnings?: string[];
   blockers?: string[];
 }
 
@@ -97,6 +109,7 @@ export interface ChatComputerHandoffMetadata {
   warningCount: number;
   blockerCount: number;
   warnings: string[];
+  rawWarnings?: string[];
   blockers: string[];
   grantSummary?: string | null;
   approvalSummary?: string | null;
@@ -219,6 +232,8 @@ export interface ChatComputerHandoffMetadata {
   requestNotice?: ChatComputerRequestUserNotice | null;
   evidenceContract?: ComputerTaskEvidenceContract | null;
   appRouteDecision?: ChatComputerAppRouteDecisionSummary | null;
+  /** T7: standing-grant stamp (scope id + bounded user-visible notice). */
+  standingGrant?: { scopeId: string; scopeKey: string; notice: string } | null;
 }
 
 export interface ChatComputerAppRouteDecisionSummary {
@@ -358,7 +373,15 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
       }
     : null;
   const warnings = compactList(input.warnings || [], 4);
+  const rawWarnings = compactList(input.rawWarnings || input.warnings || [], 8);
   const blockers = compactList(input.blockers || [], 4);
+  const standingGrant = input.stickyScopeApplied?.scopeId && input.stickyScopeApplied.scopeKey
+    ? {
+        scopeId: String(input.stickyScopeApplied.scopeId).slice(0, 80),
+        scopeKey: String(input.stickyScopeApplied.scopeKey).slice(0, 120),
+        notice: formatStickyScopeAppliedNotice({ scopeKey: String(input.stickyScopeApplied.scopeKey).slice(0, 120) }).slice(0, 240),
+      }
+    : null;
   const chatLines = [
     `- Surface: ${surfaceLabel(surface)} via ${adapterLabel(input, surface)}`,
     input.taskLabel ? `- Task: ${input.taskLabel}` : null,
@@ -377,6 +400,7 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
     appRouteDecision ? `- App route decision: ${appRouteDecision.status} via ${appRouteDecision.chosenSurfaceLabel} for ${appRouteDecision.taskFamily}` : null,
     input.groundingStatus ? `- Grounding: ${input.groundingStatus}` : null,
     input.approvalSummary ? `- Approval: ${input.approvalSummary}` : null,
+    standingGrant ? `- Standing grant: ${standingGrant.scopeKey}` : null,
     warnings.length ? `- Warnings: ${warnings.join('; ')}` : null,
     blockers.length ? `- Blockers: ${blockers.join('; ')}` : null,
   ].filter((line): line is string => Boolean(line));
@@ -413,6 +437,7 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
       warningCount: warnings.length,
       blockerCount: blockers.length,
       warnings,
+      rawWarnings,
       blockers,
       grantSummary: input.grantSummary || null,
       approvalSummary: input.approvalSummary || null,
@@ -525,6 +550,7 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
       requestNotice: input.requestNotice || null,
       evidenceContract: input.evidenceContract || null,
       appRouteDecision,
+      standingGrant,
       designProofReview: proofReviewPlan
         ? {
             reviewTitle: proofReviewPlan.reviewTitle,
@@ -574,13 +600,17 @@ function problemLines(context: ChatComputerHandoffContext, includeTechnicalPaths
 }
 
 function approvalLines(context: ChatComputerHandoffContext): string[] {
+  const standingGrantLine = context.metadata.standingGrant
+    ? `- ${context.metadata.standingGrant.notice}`
+    : null;
   const notice = context.metadata.requestNotice;
   if (notice?.visibility === 'user' && notice.tone !== 'attention') {
     const formatted = formatChatComputerRequestUserNotice(notice);
-    return formatted
+    const noticeLines = formatted
       .split('\n')
       .filter((line) => line.trim() && !/^\*\*[^*]+\*\*$/.test(line.trim()))
       .slice(0, 5);
+    return standingGrantLine ? [...noticeLines, standingGrantLine].slice(0, 6) : noticeLines;
   }
   const design = context.metadata.designAppTask;
   const lines = [
@@ -598,6 +628,9 @@ function approvalLines(context: ChatComputerHandoffContext): string[] {
   if (context.metadata.approvalSummary) {
     lines.push(`- ${context.metadata.approvalSummary}`);
   }
+  if (standingGrantLine) {
+    lines.push(standingGrantLine);
+  }
   return lines.slice(0, 6);
 }
 
@@ -612,8 +645,14 @@ export function formatChatComputerHandoffForMessage(
     return `\n\n**Execution details**\n${context.chatLines.join('\n')}`;
   }
 
+  // Only real BLOCKERS (things the user must act on) trigger the verbose
+  // "Needs attention" block. WARNINGS are internal agent guidance — research
+  // surface order, "inventory required" reminders, preflight notes — which
+  // belong in metadata, not the chat bubble (user feedback: "too much info").
+  // A warning-only task with an approval/notice falls through to the terse
+  // "Ready for review", or stays hidden.
   const resolvedVisibility = visibility === 'auto'
-    ? context.metadata.blockerCount > 0 || context.metadata.warningCount > 0
+    ? context.metadata.blockerCount > 0
       ? 'problem'
       : context.metadata.requestNotice?.visibility === 'user' || context.metadata.approvalSummary || context.metadata.browserPlanId
         ? 'approval'

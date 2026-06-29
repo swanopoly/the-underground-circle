@@ -140,7 +140,7 @@ function metadataString(entry: SiteCredentialVaultEntry, key: string): string {
   return typeof value === 'string' ? value : '';
 }
 
-function normalizedOrigin(value?: string | null): string | null {
+export function normalizedOrigin(value?: string | null): string | null {
   if (!value) return null;
   try {
     const withProtocol = /^https?:\/\//i.test(value) ? value : `https://${value}`;
@@ -532,9 +532,16 @@ export function buildVaultAgentRunbook(
 ): string {
   const actions = getVaultEntryAllowedActions(entry);
   const origins = getVaultEntryAllowedOrigins(entry);
+  const metadata = asRecord(entry.metadata);
+  const onePasswordItem = typeof metadata.onePasswordItem === 'string'
+    ? metadata.onePasswordItem.trim()
+    : typeof metadata.one_password_item === 'string'
+      ? metadata.one_password_item.trim()
+      : '';
   const task = opts.task?.trim();
   const grantee = normalizeGrantee(opts.grantee || 'OpenSwan');
   const granteeType = normalizeGranteeType(opts.granteeType || 'openswan');
+  const expectedOrigin = origins[0] || entry.loginUrl || entry.siteUrl || '';
   return [
     `Vault runbook: ${entry.platform}/${entry.label}`,
     `Credential ID: ${entry.id}`,
@@ -549,9 +556,12 @@ export function buildVaultAgentRunbook(
     'Agent instructions:',
     '1. Navigate to the login URL and confirm the current hostname matches an allowed origin.',
     '2. If the credential requires approval, ask the user before using it.',
-    `3. For Computer Use, call fill_saved_login with credential_id="${entry.id}", grantee="${grantee}", grantee_type="${granteeType}", and a short purpose.`,
-    '4. Never print, summarize, paste into chat, or store the secret outside the approved vault/browser tool.',
-    '5. After login, only perform actions included in the allowed actions list and ask for approval before publish/delete/purchase/send.',
+    `3. For remote Computer Use, call fill_saved_login with credential_id="${entry.id}", grantee="${grantee}", grantee_type="${granteeType}", and a short purpose.`,
+    onePasswordItem
+      ? `4. For the local OpenSwan browser, use browser.fill_credential_field with item="${onePasswordItem}", expectedOrigin="${expectedOrigin}", and credentialField=username/email/password. Do not call credentials.get unless the safe browser-fill tool is unavailable.`
+      : '4. For the local OpenSwan browser, use browser.fill_credential_field only when the task or credential metadata supplies the matching 1Password item name; otherwise pause and ask for the safe local credential mapping instead of fetching raw secrets.',
+    '5. Never print, summarize, paste into chat, or store the secret outside the approved vault/browser tool.',
+    '6. After login, only perform actions included in the allowed actions list and ask for approval before publish/delete/purchase/send.',
   ].join('\n');
 }
 

@@ -8,6 +8,7 @@
  * Run: npm run smoke:openswan-runtime-approval
  */
 
+import { readFileSync } from 'node:fs';
 import {
   buildOpenSwanToolApprovalKey,
   resolveOpenSwanRuntimeApprovalDecision,
@@ -107,6 +108,32 @@ const legacyExact = resolveOpenSwanRuntimeApprovalDecision({
   rows: [{ id: 'legacy-exact', status: 'approved', payload: { tool, args: reorderedArgs } }],
 });
 assert(legacyExact.kind === 'pass', 'legacy exact tool and args payload passes execution');
+
+const runtimeSource = readFileSync('src/lib/openswanToolRuntime.ts', 'utf8');
+assert(runtimeSource.includes("if (tool.startsWith('wp.'))"), 'OpenSwan runtime has explicit wp.* policy branch');
+assert(
+  /const readOnly = tool === 'wp\.discover_types' \|\| tool === 'wp\.list_posts'/.test(runtimeSource),
+  'wp.discover_types and wp.list_posts are the only read-only WP runtime tools',
+);
+assert(
+  /approvalMode:\s*readOnly \? 'auto' : 'ask'/.test(runtimeSource),
+  'mutating wp.* runtime tools require approval',
+);
+assert(
+  /approvalKind:\s*readOnly \? undefined : 'publish'/.test(runtimeSource),
+  'mutating wp.* runtime tools use publish approval kind',
+);
+assert(
+  /externalSideEffect:\s*!readOnly/.test(runtimeSource),
+  'mutating wp.* runtime tools are external side effects',
+);
+
+assert(runtimeSource.includes("name: 'browser.fill_credential_field'"), 'OpenSwan runtime catalogs browser.fill_credential_field');
+assert(runtimeSource.includes("'browser.fill_credential_field': BrowserToolExecutionResult"), 'browser.fill_credential_field has a typed execution result');
+assert(runtimeSource.includes("'browser.fill_credential_field': { reads: ['vault'], writes: ['browser_page'] }"), 'browser.fill_credential_field declares vault read + browser write dependencies');
+assert(runtimeSource.includes("'browser.fill_credential_field': ['execute']"), 'browser.fill_credential_field is exposed only in execute mode');
+assert(runtimeSource.includes("case 'browser.fill_credential_field':"), 'OpenSwan runtime executes browser.fill_credential_field');
+assert(runtimeSource.includes('without returning raw secret values to the model'), 'browser.fill_credential_field policy names no raw secret return');
 
 if (failures > 0) {
   console.error(`\n${failures} OpenSwan runtime approval smoke-test failure(s)`);

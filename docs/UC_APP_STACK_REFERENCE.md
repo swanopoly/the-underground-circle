@@ -1,7 +1,7 @@
 # The Underground Circle - App Stack Reference
 
 > Current app map for agents before writing code.
-> Last reviewed: 2026-06-02
+> Last reviewed: 2026-06-29
 
 `AGENTS.md` and `docs/AGENTS_ROADMAP.md` own agent workflow and runtime
 ownership. This file maps the app.
@@ -47,15 +47,15 @@ ownership. This file maps the app.
 
 | Concern | File(s) |
 |---|---|
-| Agent standards and worktree quality | `src/lib/agentDevelopmentStandards.ts`, `src/lib/openswanWorktreeConfig.ts`, `docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md` |
+| Agent standards, lanes, and worktree quality | `src/lib/agentDevelopmentStandards.ts`, `src/lib/openswanWorktreeConfig.ts`, `scripts/openswan-lane-report.ts`, `docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md`, `docs/SWANBOT_OPENSWAN_AGENT_LANES_2026-06-29.md` |
 | Chat classification | `src/lib/chatAutomationPlanner.ts` |
 | Chat computer request route | `src/lib/chatComputerRequestRouter.ts` |
 | Chat computer request UX | `src/lib/chatComputerRequestUx.ts` |
 | Computer task evidence contract | `src/lib/computerTaskEvidenceContract.ts`, `src/lib/computerTaskEvidenceRecovery.ts` |
 | Chat plan execution | `src/lib/runChatAutomationPlan.ts` |
-| SwanBot client path | `src/lib/swanbot.ts` |
+| SwanBot client path | `src/lib/swanbot.ts`, `src/lib/swanbotClientToolDispatcher.ts` |
 | SwanBot edge path | `supabase/functions/swanbot-ai/index.ts` |
-| SwanBot v2 typed loop | `supabase/functions/swanbot-v2-ai/index.ts` |
+| SwanBot v2 typed loop | `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/functions/_shared/swanbot-continuation.ts` |
 | SwanBot/OpenSwan default readiness | `src/lib/swanbotOpenSwanReadiness.ts` |
 | Typed agent loop | `src/lib/agentExecutionCore.ts` |
 | OpenSwan session runtime | `src/lib/openswanSessionRuntime.ts` |
@@ -68,6 +68,7 @@ ownership. This file maps the app.
 | Browser computer use | `src/lib/computerUse.ts`, `supabase/functions/computer-use-agent/index.ts` |
 | Computer capability expansion | `src/lib/computerCapabilityRegistry.ts`, `src/lib/computerCapabilityExpansion.ts` |
 | Local desktop awareness | `src/lib/localComputerAwarenessIntent.ts` |
+| WordPress/Dealer Inspire admin automation | `src/lib/wpAdmin.ts`, `src/lib/computerAppTaskStrategy.ts`, `src/lib/chatComputerRequestRouter.ts`, `src/lib/userTaskPipelines.ts`, `src/lib/wordpressAdminSourceIntelligence.ts` |
 | Office bridge readiness | `src/lib/bridgeHealthDiag.ts`, `src/lib/officeBridgeReadiness.ts`, `src/screens/circles/tabs/office/Whiteboard.tsx` |
 | App automation control surfaces | `src/lib/appAutomationControlSurfaces.ts` |
 | Engineering/CAD operation runbooks | `src/lib/engineeringCadOperationRunbooks.ts` |
@@ -114,6 +115,8 @@ src/
     computerTaskRuntime.ts
 supabase/
   functions/
+    _shared/
+      swanbot-continuation.ts
     swanbot-ai/
     swanbot-v2-ai/
     llm-proxy/
@@ -364,8 +367,13 @@ constraints aligned.
 ## Validation
 
 ```bash
+npm run check:openswan-lanes
+npm run check:swanbot-chat:daily
 npm run typecheck
 npm run build
 ```
 
-Use focused smoke scripts from `package.json` for runtime changes.
+Use focused smoke scripts from `package.json` for runtime changes. Use
+`npm run check:swanbot-chat:release` before bundling a larger
+SwanBot/OpenSwan/Chat delivery. `smoke:all` is the integration sweep, not the
+daily default.

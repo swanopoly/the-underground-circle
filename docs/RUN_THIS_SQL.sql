@@ -841,6 +841,18 @@ ALTER TABLE computer_use_runs
 
 NOTIFY pgrst, 'reload schema';
 
+-- ─── §21. Raise messages.content length cap (2026-06-12) ─────────────────────
+-- Source: 20260612_messages_content_cap.sql
+-- The original schema capped circle-chat content at 1000 chars, so agent /
+-- recovery messages (Use-Computer preflight blocks, recovery cards, structured
+-- findings) were rejected with a `messages_content_check` violation (HTTP 400)
+-- and failed to persist. Raise to a generous bound. Idempotent.
+
+ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_content_check;
+ALTER TABLE messages ADD CONSTRAINT messages_content_check CHECK (char_length(content) <= 100000);
+
+NOTIFY pgrst, 'reload schema';
+
 -- Final verify:
 --   SELECT jobname, schedule FROM cron.job ORDER BY jobname;
 --   \d user_google_credentials

@@ -20,7 +20,7 @@
  * when a skill looks relevant.
  */
 
-import { listLibrarySkills, renderLibraryMetadataTable } from './skillLibrary';
+import { listLibrarySkills, loadSkillHealthByName, renderLibraryMetadataTable } from './skillLibrary';
 
 export type BuildSkillsContextOptions = {
   /** Narrow to skills whose tags overlap this list. Default: no filter. */
@@ -49,5 +49,12 @@ export async function buildSkillsContextMessage(
     limit: Math.min(opts.limit ?? 25, 100),
   });
   if (skills.length === 0 && opts.suppressWhenEmpty) return '';
-  return renderLibraryMetadataTable(skills);
+  // L2 lifecycle: merge device-stored run-outcome health at read time —
+  // FAILING skills get a compact "⚠ failing — review" marker (deprecation
+  // signal, finding 2). Never blocks the table: health is best-effort.
+  let healthByName: Awaited<ReturnType<typeof loadSkillHealthByName>> = {};
+  try {
+    healthByName = await loadSkillHealthByName(circleId);
+  } catch {}
+  return renderLibraryMetadataTable(skills, healthByName);
 }

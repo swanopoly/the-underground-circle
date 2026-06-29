@@ -11,10 +11,13 @@ import {
 } from './adobeCreativeCloudApps';
 import {
   buildGenericAppNavigatorRouteContext,
+  formatProfessionalAppAutonomyPromptBlock,
   formatGenericAppNavigatorPromptBlock,
   shouldUseGenericAppNavigator,
+  shouldUseProfessionalAppAutonomy,
 } from './genericAppNavigator';
 import { buildAppAdapterGapPromptBlock } from './appAdapterGapContract';
+import { isDirectLocalImageFormatConversionTask } from './computerTaskPlanner';
 
 export type ComputerAppStrategyId =
   | 'browser_semantic'
@@ -105,10 +108,10 @@ function textMatchesAdobeCreativeCloudApp(message: string): boolean {
 
 function textMatchesEngineeringCadApp(message: string): boolean {
   return (
-    /\b(auto\s*cad|autocad|cad|computer aided design|fusion\s*360|solid\s*works|solidworks|sketch\s*up|sketchup|freecad|librecad|qcad|draftsight|rhino(?:ceros)?|revit|civil\s*3d|inventor|onshape|vectorworks|archicad)\b/i.test(message) ||
+    /\b(auto\s*cad|autocad|cad|computer aided design|fusion\s*360|solid\s*works|solidworks|matlab|mathworks|simulink|simscape|sketch\s*up|sketchup|freecad|librecad|qcad|draftsight|rhino(?:ceros)?|revit|civil\s*3d|inventor|onshape|vectorworks|archicad)\b/i.test(message) ||
     (
       /\b(?:create|draw|draft|model|design|make|edit|revise|dimension|export|save|open|inspect|convert)\b/i.test(message) &&
-      /\b(?:floor plan|site plan|blueprint|mechanical drawing|engineering drawing|technical drawing|shop drawing|2d drawing|3d model|solid model|parametric sketch|sketch constraint|constraint|extrude|section view|dimensioned drawing|dimensions?|units?|scale|blocks?|polyline|linework|geometry|dwg|dxf|step|iges|stl)\b/i.test(message)
+      /\b(?:floor plan|site plan|blueprint|mechanical drawing|engineering drawing|technical drawing|shop drawing|2d drawing|3d model|solid model|parametric sketch|sketch constraint|constraint|extrude|section view|dimensioned drawing|dimensions?|units?|scale|blocks?|polyline|linework|geometry|simulation|solver|toolbox|matlab script|live script|simulink model|dwg|dxf|step|iges|stl|mlx|slx)\b/i.test(message)
     )
   );
 }
@@ -238,6 +241,7 @@ function withGenericAppNavigator(strategy: ComputerAppTaskStrategy, message: str
 function textMatchesUniversalAppControl(message: string): boolean {
   const text = String(message || '');
   return (
+    shouldUseProfessionalAppAutonomy(text) ||
     /\b(?:app|application|desktop app|native app|program|window)\b[\s\S]{0,120}\b(?:open|launch|focus|control|drive|automate|take over|click|type|paste|press|menu|create|make|build|edit|update|export|save|run)\b/i.test(text) ||
     /\b(?:open|launch|focus|switch to|use|control|drive|automate|take over)\s+(?!the\s+(?:website|browser|page|site|file|folder)\b)(?:[A-Za-z][A-Za-z0-9._+-]{1,40}(?:\s+[A-Za-z0-9][A-Za-z0-9._+-]{1,40}){0,4})(?:\s+(?:app|application|window|program))?\s+(?:and|then|to|for|with)\s+\b(?:create|make|build|edit|update|export|save|click|type|paste|press|fill|draw|design|run|do)\b/i.test(text) ||
     /\b(?:click|type|paste|press|select|choose|fill|set|create|make|build|edit|update|export|save|run)\b[\s\S]{0,160}\b(?:in|inside|on|with|using)\s+(?:the\s+)?(?:[A-Za-z][A-Za-z0-9._+-]{1,40}(?:\s+[A-Za-z0-9][A-Za-z0-9._+-]{1,40}){0,4})\s+(?:app|application|window|program)\b/i.test(text) ||
@@ -253,12 +257,166 @@ function textMatchesCredentialedBrowser(message: string): boolean {
   return /\b(log ?in|sign ?in|password|credential|saved login|vault|admin panel|wp admin|checkout|submit|publish)\b/i.test(message);
 }
 
-function textMatchesBrowserFileTransfer(message: string): boolean {
-  if (buildDesignAppAutomationPlan(String(message || ''))) return false;
+function textMatchesWordPressWorkflow(message: string): boolean {
+  return /\b(wordpress|wp[-\s]?admin|wp[-\s]?login|wp-login|wp-json|gutenberg|woocommerce|dealer\s+inspire|di\s+slides?|di_slide|flavor_di_slides|dealerinspire)\b/i.test(message);
+}
+
+export function detectWordPressTrashPostIntent(message: string): boolean {
+  const text = String(message || '');
+  if (!textMatchesWordPressWorkflow(text)) return false;
+  if (!/\b(delete|deleting|trash|trashing|remove|removing|archive|archiving)\b/i.test(text)) return false;
+
+  const contentTarget = /\b(posts?|pages?|drafts?|articles?|blog posts?|content items?|di\s+slides?|slides?|di_slide|flavor_di_slides)\b/i;
+  if (!contentTarget.test(text)) return false;
+
+  // Do not turn field/media/plugin removal on a WordPress item into a content-trash action.
+  if (/\b(?:remove|removing)\b[\s\S]{0,90}\b(featured image|image|photo|media|attachment|banner|field|meta|category|tag|menu|widget|plugin|theme|role|permission|setting|slider assignment|expiration(?:_date)?)\b[\s\S]{0,90}\b(from|off)\b/i.test(text)) {
+    return false;
+  }
+
   return (
-    /\b(upload|attach|choose file|select file|import|download|export|save (?:this )?(?:page|webpage|site|report|csv|pdf)|save as pdf|print to pdf)\b/i.test(message) &&
-    /\b(browser|website|webpage|site|shopify|wordpress|wp|webflow|wix|squarespace|woocommerce|bigcommerce|framer|cms|admin|product page|media library|downloads?|desktop|documents?|file|image|photo|pdf|csv|spreadsheet)\b/i.test(message)
+    /\b(delete|deleting|trash|trashing|archive|archiving)\b[\s\S]{0,120}\b(posts?|pages?|drafts?|articles?|blog posts?|content items?|di\s+slides?|slides?|di_slide|flavor_di_slides)\b/i.test(text) ||
+    /\b(posts?|pages?|drafts?|articles?|blog posts?|content items?|di\s+slides?|slides?|di_slide|flavor_di_slides)\b[\s\S]{0,120}\b(delete|deleting|trash|trashing|archive|archiving)\b/i.test(text) ||
+    /\b(remove|removing)\b[\s\S]{0,80}\b(posts?|pages?|drafts?|articles?|blog posts?|content items?|di\s+slides?|slides?|di_slide|flavor_di_slides)\b/i.test(text)
   );
+}
+
+function textMatchesWordPressAdminTask(message: string): boolean {
+  return textMatchesWordPressWorkflow(message) && (
+    /\b(wp[-\s]?admin|wp[-\s]?login|dashboard|admin|plugin|theme|customi[sz]er?|settings?|menus?|navigation|users?|roles?|permissions?|woocommerce|products?|orders?|coupons?|forms?|seo|cache|reload cache|media library|gutenberg|editor|pages?|slides?|sliders?|quick edit|expiration(?:_date)?|inventory|admin\.php)\b/i.test(message) ||
+    /\b(log ?in|sign ?in|install|activate|deactivate|configure|edit|update|change|upload|attach|delete|trash|archive)\b[\s\S]{0,120}\b(wordpress|wp)\b/i.test(message) ||
+    detectWordPressTrashPostIntent(message)
+  );
+}
+
+function textMatchesBrowserFileTransfer(message: string): boolean {
+  const text = String(message || '');
+  if (!textMatchesWordPressWorkflow(text) && buildDesignAppAutomationPlan(text)) return false;
+  const hasTransferVerb = (
+    /\b(upload|attach|choose file|select file|import|download|export|save (?:this )?(?:page|webpage|site|report|csv|pdf)|save as pdf|print to pdf)\b/i.test(text) ||
+    /\b(create|add|update|replace)\b[\s\S]{0,100}\b(?:banner|image|photo|file|media)\b/i.test(text)
+  );
+  const hasBrowserOrFileTarget = (
+    /\b(browser|website|webpage|site|shopify|wordpress|wp|webflow|wix|squarespace|woocommerce|bigcommerce|framer|cms|admin|product page|media library|downloads?|desktop|documents?|file|image|photo|banner|pdf|csv|spreadsheet)\b/i.test(text) ||
+    /\b(dealer\s+inspire|dealerinspire|di\s+slides?|di_slide|flavor_di_slides|sliders?|quick edit|expiration(?:_date)?|admin\.php|reload cache)\b/i.test(text) ||
+    /\b[\w .-]+\.(?:png|jpe?g|webp|gif|svg|pdf|csv|xlsx?|docx?|zip)\b/i.test(text)
+  );
+  return hasTransferVerb && hasBrowserOrFileTarget;
+}
+
+function withWordPressAdminWorkflow(strategy: ComputerAppTaskStrategy, message: string): ComputerAppTaskStrategy {
+  const text = String(message || '');
+  const wantsMedia = /\b(media library|upload|attach|featured image|image|photo|file)\b/i.test(text);
+  const wantsAdminConfig = /\b(plugin|theme|customi[sz]e|customizer|setting|menu|navigation|user|role|permission|woocommerce|product|order|coupon|form|redirect|seo|cache)\b/i.test(text);
+  const wantsContent = /\b(post|page|draft|publish|schedule|category|tag|block|gutenberg|editor|headline|slug|excerpt)\b/i.test(text);
+  const wantsDealerInspire = /\b(dealer\s+inspire|dealerinspire|di\s+slides?|di_slide|flavor_di_slides|sliders?|quick edit|expiration(?:_date)?|inventory|broadcaster|reload cache)\b/i.test(text);
+  const wantsTrashPost = detectWordPressTrashPostIntent(text);
+
+  const taskMap = uniqueStrings([
+    wantsContent ? 'content/posts/pages: prefer REST or WordPress tools for list/create/update where supported; use wp-admin editor for block/theme/plugin-specific fields' : '',
+    wantsTrashPost ? 'trash/delete/archive content: discover the exact post/page/CPT id first, prefer wp.trash_post, require approval, and verify trash status after the action' : '',
+    wantsMedia ? 'media/uploads: verify the local file first, prefer wp.upload_media or REST media upload, then use wp-admin media library only when the UI flow is required' : '',
+    wantsAdminConfig ? 'admin/config: use browser wp-admin for plugins, themes, menus, users, WooCommerce, forms, settings, and other dashboard-only workflows' : '',
+    wantsDealerInspire ? 'Dealer Inspire/DI Slides: discover post type first, sample source/DOM facts, list slides, identify slider assignment, desktop/mobile image fields, expiration_date, Quick Edit, clone/new-draft, cache reload, and proof requirements' : '',
+    'login/session: resolve credentials through vault grants, verify the WordPress origin, stop for MFA/CAPTCHA/security checks',
+  ]);
+
+  return {
+    ...strategy,
+    label: strategy.id === 'browser_file_transfer'
+      ? 'WordPress Media/Admin File Transfer Workflow'
+      : 'WordPress Admin Browser Workflow',
+    summary: `Operate WordPress like a senior site admin: choose the REST/tool path for supported content and media tasks, fall back to wp-admin browser automation for dashboard-only workflows, and stage public changes behind approval. Task map: ${taskMap.join(' | ')}.`,
+    observeFirst: uniqueStrings([
+      'resolve WordPress site URL, wp-admin URL, and allowed origin before login',
+      'vault.resolve_for_task and vault.runbook before any credential field',
+      'wp.discover_types or wp.list_posts for supported REST content discovery',
+      wantsDealerInspire ? 'browser.wp_admin_source_intelligence for current wp-admin source facts: Dealer Inspire menus, di_slide rows, row actions, inline Quick Edit fields, expiration fields, and session-expired markers' : '',
+      'browser.verification_state for login, MFA, CAPTCHA, and admin-session state',
+      'browser.dom_snapshot for wp-admin menus, editor panels, media library, plugins, themes, settings, WooCommerce, or forms',
+      wantsMedia ? 'desktop.file_search and desktop.file_stat for local media before upload' : '',
+      ...strategy.observeFirst,
+    ]).slice(0, 16),
+    actionOrder: uniqueStrings([
+      'use /wp or wp.* tools first for read/list/draft/content/media operations that the REST API supports',
+      wantsDealerInspire ? 'for Dealer Inspire slides, discover di_slide/flavor_di_slides REST support, then create/update as draft before assigning sliders, expiration, order, cache reload, or public status' : '',
+      'open the canonical /wp-admin/ dashboard only for admin-only workflows or when REST cannot reach the requested UI/plugin surface',
+      'fill credentials only through browser.fill_credential_field after origin and vault grant checks',
+      'work in draft, preview, staged media, plugin inactive/configured state, or settings preview before any live change when WordPress supports it',
+      'for Gutenberg/editor work, update one field/block/panel at a time and re-observe the DOM or visible editor state after each step',
+      wantsTrashPost ? 'for delete/trash/remove/archive of a WordPress post, page, or DI Slide, use wp.trash_post only after wp.discover_types/wp.list_posts identify the exact target id and approval is recorded' : '',
+      'request approval before publish, update live pages, install/activate plugins or themes, change users/roles/settings/menus, delete/trash, or submit WooCommerce/form changes',
+      ...strategy.actionOrder,
+    ]).slice(0, 18),
+    verificationOrder: uniqueStrings([
+      'verify admin URL/origin and current user/session state before mutation',
+      'verify WordPress REST result, admin status badge, editor saved state, media URL, plugin/theme state, settings value, or public URL as appropriate',
+      wantsTrashPost ? 'verify the target post/page/CPT moved to trash or equivalent archived status and no unrelated WordPress records changed' : '',
+      wantsDealerInspire ? 'verify DI slide post id/title/status, assigned slider, desktop/mobile image URL, expiration date, row action/result, and cache/public slider state when changed' : '',
+      'prefer browser.wp_admin_source_intelligence for changed wp-admin list/plugin/editor state; use browser.dom_snapshot plus screenshot for clickable or visual proof',
+      'for uploads, verify source file metadata before upload and WordPress media id/source URL after upload',
+      ...strategy.verificationOrder,
+    ]).slice(0, 16),
+    recoveryPolicy: uniqueStrings([
+      'If REST/tool support exists for the requested task, do not drive the dashboard UI just because it is familiar.',
+      wantsTrashPost ? 'If the trash target is ambiguous, list candidate posts/pages/CPT items and stop for selection before any trash action.' : '',
+      wantsDealerInspire ? 'If a DI Slides field is only visible in wp-admin or Vue/admin scripts, collect the DOM/source field names and use browser/admin controls one field at a time.' : '',
+      'If wp-admin asks for MFA/CAPTCHA/security verification, stop and ask the user to complete it.',
+      'If the WordPress site, wp-admin URL, credential grant, user role, plugin, theme, or REST endpoint is missing, report the exact blocker.',
+      'If a plugin/theme/admin screen cannot be controlled semantically after two observations, delegate app/browser capability buildout instead of blind clicking.',
+      ...strategy.recoveryPolicy,
+    ]).slice(0, 16),
+    approvalCheckpoints: uniqueStrings([
+      'using saved WordPress credentials',
+      'publishing, scheduling, updating live pages/posts, or changing public URLs',
+      'uploading external media or attaching local files to the site',
+      wantsTrashPost ? 'trashing, archiving, deleting, or removing a WordPress post, page, draft, custom post type item, or DI Slide' : '',
+      'installing, activating, deactivating, updating, or deleting plugins/themes',
+      'changing settings, menus, widgets, users, roles, WooCommerce products/orders/coupons, forms, or SEO/cache/security configuration',
+      wantsDealerInspire ? 'changing DI slide status, expiration_date, slider assignment, order, desktop/mobile images, clone/new draft, broadcaster state, or cache reload' : '',
+      'deleting/trashing content or bulk-changing site records',
+      ...strategy.approvalCheckpoints,
+    ]).slice(0, 18),
+    stopConditions: uniqueStrings([
+      'requested WordPress state is verified by REST/admin/public proof',
+      'approval is required before a public, credentialed, destructive, plugin/theme, user, settings, or ecommerce side effect',
+      'vault grant, WordPress role/capability, login, MFA/CAPTCHA, plugin/theme surface, REST endpoint, or file grant blocks safe completion',
+      ...strategy.stopConditions,
+    ]).slice(0, 14),
+    recommendedTools: uniqueStrings([
+      'wp.discover_types',
+      'wp.list_posts',
+      'wp.upload_media',
+      wantsDealerInspire ? 'wp.create_slide' : '',
+      wantsTrashPost ? 'wp.trash_post' : '',
+      'wp.update_post',
+      'vault.resolve_for_task',
+      'vault.runbook',
+      'vault.grants',
+      'browser.open_url',
+      'browser.verification_state',
+      'browser.wp_admin_source_intelligence',
+      'browser.dom_snapshot',
+      'browser.fill_credential_field',
+      'browser.fill_field',
+      wantsMedia ? 'desktop.file_search' : '',
+      wantsMedia ? 'desktop.file_stat' : '',
+      wantsMedia ? 'browser.upload_file' : '',
+      'browser.click_role',
+      'browser.screenshot',
+      'approvals.request',
+      ...strategy.recommendedTools,
+    ]).slice(0, 32),
+    bridgeRequirements: uniqueStrings([
+      'WordPress site URL and canonical /wp-admin/ URL',
+      'vault grant scoped to the WordPress origin and requested action',
+      'browser bridge or Browserbase persistent context with WordPress session support',
+      wantsMedia ? 'local desktop/file grant for upload source files' : '',
+      'WordPress role/capability sufficient for the requested admin action',
+      ...strategy.bridgeRequirements,
+    ]).slice(0, 14),
+    maxBlindActions: 0,
+  };
 }
 
 function textMatchesAgentAssetAcquisition(message: string): boolean {
@@ -271,6 +429,10 @@ function textMatchesAgentAssetAcquisition(message: string): boolean {
 function textMatchesLocalFileWorkflow(message: string): boolean {
   const text = String(message || '');
   if (textMatchesBrowserFileTransfer(text)) return false;
+  const hasExplicitFileScope = /\b(downloads?|documents?|files?|folders?|directory|path|local computer|hard drive|finder|desktop folder)\b|\.(pdf|csv|docx?|xlsx?|png|jpe?g|gif|webp|psd|psb|indd|idml|txt|md|json|zip)\b/i.test(text);
+  if (/\b(desktop app|native app|app window|application window|app_adapter|window state)\b/i.test(text) && !hasExplicitFileScope) {
+    return false;
+  }
   return (
     /\b(search|find|locate|read|open|scan|list|rename|move|copy|trash|delete|edit|write|save)\b[\s\S]{0,140}\b(desktop|downloads?|documents?|files?|folders?|directory|path|local computer|hard drive|finder)\b/i.test(text) ||
     /\b(desktop|downloads?|documents?|files?|folders?|directory|path|local computer|hard drive|finder)\b[\s\S]{0,140}\b(search|find|locate|read|open|scan|list|rename|move|copy|trash|delete|edit|write|save)\b/i.test(text) ||
@@ -448,15 +610,15 @@ function baseStrategy(id: ComputerAppStrategyId): ComputerAppTaskStrategy {
     case 'engineering_cad_control':
       return {
         id,
-        label: 'Engineering/CAD Control Loop',
-        summary: 'For AutoCAD/Fusion/SketchUp/SOLIDWORKS/Rhino/Revit-style work, choose the official app API, script, add-in, command, or cloud automation surface before desktop UI fallback, then run read-first state checks and measurement checkpoints.',
-        observeFirst: ['desktop.launch_app or desktop.focus_app for the target CAD/engineering app', 'desktop.window_state to verify the active drawing/model window', 'desktop.read_a11y_tree for command line, menus, panels, and file dialogs', 'desktop.screenshot for drawing/model state before geometry edits', 'desktop.file_search/stat for source DWG/DXF/STEP/STL/project files or export targets'],
-        actionOrder: ['confirm target app, document, units, scale, and file path before editing', 'choose the researched control surface first: app API/script/add-in/command/cloud automation before generic desktop control', 'prefer CAD command line, app menus, named panels, and shortcuts over coordinate clicks when no app-native adapter exists', 'perform one geometry/modeling operation at a time with explicit numeric input when possible', 'use coordinate actions only after a fresh screenshot and screen_size prove the target', 'save/export only after approval and destination path verification'],
-        verificationOrder: ['desktop.screenshot after each geometry/modeling mutation', 'verify dimensions/units/layers/object count or named features after each step', 'desktop.file_stat after save/export', 'ask for human confirmation when visual geometry or tolerances are ambiguous'],
-        recoveryPolicy: ['If focus, command line, units, or drawing context is unclear, stop and re-observe before typing.', 'If a CAD command fails or creates unexpected geometry, undo once, re-observe, and switch to a smaller command step.', 'If no verified app-native route exists for the requested CAD operation, delegate a bounded app-capability buildout with official source refs before blind UI control.', 'Never keep drawing from an unverified scale, unit system, or coordinate origin.'],
-        approvalCheckpoints: ['creating or modifying engineering files', 'overwriting DWG/DXF/STEP/STL/project files', 'exporting manufacturing/permit/client deliverables', 'running macros/scripts/plugins inside CAD apps', 'coordinate-based destructive edits'],
-        stopConditions: ['requested geometry/model/file is verified', 'target CAD app or file is unavailable', 'units/scale/tolerances are ambiguous', 'approval required before save/export/overwrite', 'verified app-native route is missing and connected-agent buildout has been delegated', 'bridge lacks Accessibility or Screen Recording permission'],
-        recommendedTools: ['desktop.launch_app', 'desktop.focus_app', 'desktop.window_state', 'desktop.read_a11y_tree', 'desktop.screenshot', 'desktop.screen_size', 'desktop.menu_click', 'desktop.click_element', 'desktop.press_keys', 'desktop.type_text', 'desktop.paste_text', 'desktop.file_search', 'desktop.file_stat', 'desktop.open_path', 'office.list_agents', 'research.search', 'agent.build_app_capability', 'approvals.request'],
+        label: 'Engineering/CAD/MATLAB Control Loop',
+        summary: 'For AutoCAD, MATLAB/Simulink, SOLIDWORKS, Fusion, Rhino, Revit, and similar engineering work, choose the official API, MCP server, macro/script, add-in, command, Assistant, or cloud automation surface before desktop UI fallback, then run read-first state checks and measurement/test checkpoints.',
+        observeFirst: ['desktop.launch_app or desktop.focus_app for the target engineering app', 'desktop.window_state to verify the active drawing/model/MATLAB project window', 'desktop.read_a11y_tree for command line, MATLAB command window/editor, menus, panels, and dialogs', 'desktop.screenshot for drawing/model/figure/simulation state before edits', 'desktop.file_search/stat for source DWG/DXF/STEP/STL/SLDPRT/MATLAB project/.m/.mlx/.slx files or export targets', 'research.search/fetch_url for official API/MCP/macro docs when the control surface is not already known'],
+        actionOrder: ['confirm target app, document/project, units/toolboxes, scale/tolerance, active configuration/sheet/model, and file path before editing or executing code', 'choose the researched control surface first: MATLAB MCP/Agentic Toolkit, AutoCAD AutoLISP/.NET/Autodesk MCP/Assistant/APS, SOLIDWORKS API/macros, or app API/script/add-in before generic desktop control', 'prefer MATLAB MCP code execution/tests, CAD command lines, app menus, named panels, and macros over coordinate clicks when no app-native adapter exists', 'perform one geometry/modeling/simulation/code operation at a time with explicit numeric inputs, parameters, and test criteria when possible', 'use coordinate actions only after a fresh screenshot and screen_size prove the target', 'save/export/write reports/models only after approval and destination path verification'],
+        verificationOrder: ['desktop.screenshot after each geometry/modeling/figure or visible simulation mutation', 'verify dimensions/units/layers/object count/named features, MATLAB static-analysis output, toolbox/version evidence, run/test result, or simulation outputs after each step', 'desktop.file_stat after save/export/report/model writes', 'ask for human confirmation when visual geometry, tolerances, solver assumptions, or engineering requirements are ambiguous'],
+        recoveryPolicy: ['If focus, command line, MATLAB session/toolboxes, units, drawing/model, or project context is unclear, stop and re-observe before typing or running code.', 'If a CAD command, macro, MATLAB script, or simulation fails, capture the exact output, undo/revert when safe, re-observe, and switch to a smaller tested step.', 'If no verified app-native route exists for the requested engineering operation, delegate a bounded app-capability buildout with official source refs before blind UI control.', 'Never keep drawing, solving, exporting, or reporting from an unverified scale, unit system, coordinate origin, toolbox set, or model configuration.'],
+        approvalCheckpoints: ['creating or modifying engineering files', 'overwriting DWG/DXF/STEP/STL/SLDPRT/MATLAB project/.m/.mlx/.slx files', 'exporting manufacturing/permit/client deliverables, reports, plots, or simulation results', 'running generated MATLAB code, AutoLISP, macros, scripts, add-ins, plugins, MCP/Assistant actions, or cloud automation', 'coordinate-based destructive edits'],
+        stopConditions: ['requested geometry/model/file/code/simulation result is verified', 'target engineering app, license, project, toolbox, or file is unavailable', 'units/scale/tolerances/toolboxes/solver assumptions are ambiguous', 'approval required before save/export/overwrite/code execution with side effects', 'verified app-native route is missing and connected-agent buildout has been delegated', 'bridge lacks Accessibility, Screen Recording, MCP, or file grants needed for proof'],
+        recommendedTools: ['desktop.launch_app', 'desktop.focus_app', 'desktop.window_state', 'desktop.read_a11y_tree', 'desktop.screenshot', 'desktop.screen_size', 'desktop.menu_click', 'desktop.click_element', 'desktop.press_keys', 'desktop.type_text', 'desktop.paste_text', 'desktop.file_search', 'desktop.file_stat', 'desktop.open_path', 'office.list_agents', 'research.search', 'fetch_url', 'agent.build_app_capability', 'approvals.request'],
         bridgeRequirements: ['local desktop bridge', 'macOS Accessibility permission for input', 'Screen Recording permission for drawing/model verification', 'file read/write grant for approved CAD/project folders', 'managed Codex/connected agent session for missing CAD adapter buildout'],
         maxBlindActions: 0,
       };
@@ -575,16 +737,29 @@ export function buildComputerAppTaskStrategy(
 ): ComputerAppTaskStrategy | null {
   const decision = pipelineDecision || buildUserTaskPipelineDecision(message, { includeFallback: false });
   const text = String(message || '');
+  if (isDirectLocalImageFormatConversionTask(text)) return baseStrategy('file_readonly');
   if (textMatchesVerificationGate(text)) return baseStrategy('human_verification_pause');
   if (textMatchesAgentAssetAcquisition(text)) return baseStrategy('agent_asset_acquisition');
+  if (textMatchesWordPressAdminTask(text)) {
+    const strategy = textMatchesBrowserFileTransfer(text)
+      ? baseStrategy('browser_file_transfer')
+      : baseStrategy('credentialed_browser');
+    return withWordPressAdminWorkflow(strategy, text);
+  }
   if (textMatchesEngineeringCadApp(text)) return baseStrategy('engineering_cad_control');
-  if (textMatchesBrowserFileTransfer(text)) return baseStrategy('browser_file_transfer');
+  if (textMatchesBrowserFileTransfer(text)) {
+    const strategy = baseStrategy('browser_file_transfer');
+    return textMatchesWordPressWorkflow(text) ? withWordPressAdminWorkflow(strategy, text) : strategy;
+  }
   if (textMatchesCreativeLayoutApp(text)) return withDesignAppAutomationPlan(baseStrategy('creative_layout_control'), text);
   if (textMatchesAdobeCreativeCloudApp(text)) return withAdobeCreativeCloudProfile(baseStrategy('adobe_cc_control'), text);
   if (textMatchesCanvasApp(text)) return baseStrategy('desktop_canvas_vision');
-  if (textMatchesUniversalAppControl(text)) return withGenericAppNavigator(baseStrategy('universal_app_control'), text);
   if (textMatchesLocalFileWorkflow(text)) return baseStrategy('file_readonly');
-  if (textMatchesCredentialedBrowser(text)) return baseStrategy('credentialed_browser');
+  if (textMatchesUniversalAppControl(text)) return withGenericAppNavigator(baseStrategy('universal_app_control'), text);
+  if (textMatchesCredentialedBrowser(text)) {
+    const strategy = baseStrategy('credentialed_browser');
+    return textMatchesWordPressWorkflow(text) ? withWordPressAdminWorkflow(strategy, text) : strategy;
+  }
 
   const ids = [
     decision?.primary.id,
@@ -597,6 +772,7 @@ export function buildComputerAppTaskStrategy(
       const strategy = baseStrategy(mapped);
       if (mapped === 'creative_layout_control') return withDesignAppAutomationPlan(strategy, text);
       if (mapped === 'universal_app_control') return withGenericAppNavigator(strategy, text);
+      if (id === 'wordpress_cms' || textMatchesWordPressWorkflow(text)) return withWordPressAdminWorkflow(strategy, text);
       return mapped === 'adobe_cc_control' ? withAdobeCreativeCloudProfile(strategy, text) : strategy;
     }
   }
@@ -627,6 +803,9 @@ export function buildComputerAppTaskStrategyPromptBlock(
     `Stop conditions: ${strategy.stopConditions.join(' | ')}`,
     `Bridge requirements: ${strategy.bridgeRequirements.join(' | ')}`,
     `Blind action budget: ${strategy.maxBlindActions}. Never perform blind clicks/typing when this is 0.`,
+    shouldUseProfessionalAppAutonomy(message)
+      ? formatProfessionalAppAutonomyPromptBlock(message)
+      : '',
     strategy.id === 'universal_app_control' || shouldUseGenericAppNavigator(message)
       ? formatGenericAppNavigatorPromptBlock(message)
       : '',

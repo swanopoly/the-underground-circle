@@ -45,6 +45,62 @@ import type {
 } from './runChatAutomationPlan';
 
 /**
+ * R7 — handler state-request contract.
+ *
+ * Migrated handlers used to mutate ChatTab state inside their closures
+ * (`setBotTyping`, `startCodingWorkbench`, `setShowMemoryViewer`, …). A
+ * plan-mode/approval-gate refusal or a mid-handler throw skipped that
+ * cleanup, leaving the typing indicator stuck or the composer locked.
+ * Instead, a handler RETURNS the state it wants applied; the caller
+ * (ChatTab.sendMessage) applies these AFTER dispatch in a `try/finally`,
+ * so cleanup runs no matter how the dispatch ended.
+ *
+ * State that must be visible WHILE the handler runs (e.g. turning typing
+ * ON, starting the coding workbench before a long executor call) stays
+ * mid-handler — each such site carries a comment saying why.
+ */
+export type ChatTransportStateRequests = {
+  /** Desired typing-indicator state after dispatch (usually `false`). */
+  typing?: boolean;
+  /** A ChatTab modal to open (e.g. `'memory_viewer'` for __SHOW_MEMORIES__). */
+  modalToOpen?: string;
+  /**
+   * Workbench transition. Only `stop` is meaningful post-dispatch — a
+   * `start` that the user should see during execution must happen
+   * mid-handler (it would otherwise appear after the work finished).
+   */
+  workbench?: { action: 'start' | 'stop'; kind?: string };
+  /** Desired composer send-lock state after dispatch. */
+  composerLock?: boolean;
+};
+
+/**
+ * The outcome a transport handler actually produces: the dispatcher's
+ * normalized envelope plus the optional R7 state requests. The dispatcher
+ * (`dispatchChatAutomationPlan`) returns handler outcomes verbatim, so the
+ * extra field rides through it untouched — read it back with
+ * `getOutcomeStateRequests`.
+ */
+export type ChatTransportOutcome = ChatAutomationOutcome & {
+  stateRequests?: ChatTransportStateRequests;
+};
+
+/**
+ * Read the R7 state requests off a dispatched outcome. Returns `null` when
+ * the dispatch failed/was gated before the handler attached any (the
+ * dispatcher's own synthesized outcomes — gate deferral, plan-mode refusal,
+ * missing handler, handler throw — never carry state requests, which is
+ * exactly what makes the caller's `finally` fail-safe).
+ */
+export function getOutcomeStateRequests(
+  outcome: ChatAutomationOutcome | null | undefined,
+): ChatTransportStateRequests | null {
+  if (!outcome) return null;
+  const requests = (outcome as ChatTransportOutcome).stateRequests;
+  return requests ?? null;
+}
+
+/**
  * What a dep may return. Returning `void`/`undefined` means "handled, no
  * extra payload"; a partial lets the dep surface a message / data / runId
  * / warnings / a non-completed status that the handler folds into the
@@ -67,6 +123,11 @@ export type ChatTransportDepResult =
        * handler returns `skipped` and the caller's legacy fallback runs.
        */
       handled?: boolean;
+      /**
+       * R7 — UI state the caller should apply AFTER dispatch (try/finally),
+       * instead of the dep mutating ChatTab state inside its closure.
+       */
+      stateRequests?: ChatTransportStateRequests;
     };
 
 export type ChatTransportDep = (
@@ -111,11 +172,13 @@ const ALL_KINDS: ChatAutomationExecutionKind[] = [
 
 /** Wrap one dep into a contract-safe `ChatTransportHandler`. */
 function toHandler(kind: ChatAutomationExecutionKind, dep: ChatTransportDep): ChatTransportHandler {
-  return async (plan: ChatAutomationPlan, ctx: ChatTransportContext): Promise<ChatAutomationOutcome> => {
+  return async (plan: ChatAutomationPlan, ctx: ChatTransportContext): Promise<ChatTransportOutcome> => {
     try {
       const res = await dep(plan, ctx);
       // A dep that explicitly declines (`handled: false`) → skipped, so the
-      // caller's legacy fallback can take over without an error.
+      // caller's legacy fallback can take over without an error. State
+      // requests still pass through: a dep that mutated mid-handler before
+      // declining can ask for its cleanup.
       if (res && res.handled === false) {
         return {
           executionKind: 'skipped',
@@ -123,6 +186,7 @@ function toHandler(kind: ChatAutomationExecutionKind, dep: ChatTransportDep): Ch
           message: res.message ?? `Transport for "${kind}" declined; falling back to legacy path.`,
           ...(res.data ? { data: res.data } : {}),
           ...(res.warnings ? { warnings: res.warnings } : {}),
+          ...(res.stateRequests ? { stateRequests: res.stateRequests } : {}),
         };
       }
       return {
@@ -133,13 +197,21 @@ function toHandler(kind: ChatAutomationExecutionKind, dep: ChatTransportDep): Ch
         ...(res?.warnings ? { warnings: res.warnings } : {}),
         ...(res?.runId !== undefined ? { runId: res.runId } : {}),
         ...(res?.approvalId !== undefined ? { approvalId: res.approvalId } : {}),
+        ...(res?.stateRequests ? { stateRequests: res.stateRequests } : {}),
       };
     } catch (err) {
-      // Transports MUST NOT throw across the dispatcher boundary.
+      // Transports MUST NOT throw across the dispatcher boundary. NOTE: a
+      // throw deliberately carries NO stateRequests — the caller's finally
+      // falls back to its fail-safe defaults (typing off, workbench stopped)
+      // so a mid-handler crash cannot leave the UI stuck.
       return {
         executionKind: kind,
         status: 'failed',
-        message: `Transport "${kind}" threw: ${err instanceof Error ? err.message : String(err)}`,
+        message: 'That automation step hit an internal error. Technical details were saved for recovery.',
+        warnings: [`Transport "${kind}" threw: ${err instanceof Error ? err.message : String(err)}`],
+        data: {
+          rawError: err instanceof Error ? err.message : String(err),
+        },
       };
     }
   };

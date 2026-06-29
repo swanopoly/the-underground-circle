@@ -9,6 +9,8 @@ export interface DigitalBrainDbTableConfig {
   label: string;
   description: string;
   filter: 'circle' | 'user' | 'owner' | 'id';
+  probe?: 'auto' | 'skip';
+  skipReason?: string;
 }
 
 export interface DigitalBrainDbStat {
@@ -16,6 +18,7 @@ export interface DigitalBrainDbStat {
   label: string;
   count: number | null;
   ok: boolean;
+  skipped?: boolean;
   error?: string;
 }
 
@@ -66,11 +69,11 @@ export const DIGITAL_BRAIN_DB_TABLES: DigitalBrainDbTableConfig[] = [
   { table: 'circles', label: 'Circle', description: 'Circle root settings, ownership, and workspace identity.', filter: 'id' },
   { table: 'circle_members', label: 'Members', description: 'Circle membership, permissions, and collaboration access.', filter: 'circle' },
   { table: 'messages', label: 'Chat messages', description: 'Main chat conversation messages.', filter: 'circle' },
-  { table: 'chat_sessions', label: 'Chat sessions', description: 'Persistent chat sessions and model context.', filter: 'circle' },
+  { table: 'chat_sessions', label: 'Chat sessions', description: 'Optional legacy agent chat sessions and model context.', filter: 'circle', probe: 'skip', skipReason: 'Optional legacy table; skipped to avoid noisy missing-table probes.' },
   { table: 'agent_runs', label: 'Agent runs', description: 'Unified automation run records across chat, office, feed, and scheduled work.', filter: 'circle' },
   { table: 'memory_entries', label: 'Memories', description: 'Durable user, circle, session, and agent memory.', filter: 'circle' },
-  { table: 'circle_second_brain_notes', label: 'Brain notes', description: 'Digital Brain notes, clips, summaries, and imported memories.', filter: 'circle' },
-  { table: 'circle_second_brain_links', label: 'Brain links', description: 'Saved note-to-note and note-to-memory relationships.', filter: 'circle' },
+  { table: 'circle_second_brain_notes', label: 'Brain notes', description: 'Digital Brain notes, clips, summaries, and imported memories.', filter: 'circle', probe: 'skip', skipReason: 'Covered by the graph loader; skipped here to avoid duplicate failing probes.' },
+  { table: 'circle_second_brain_links', label: 'Brain links', description: 'Saved note-to-note and note-to-memory relationships.', filter: 'circle', probe: 'skip', skipReason: 'Covered by the graph loader; skipped here to avoid duplicate failing probes.' },
   { table: 'circle_integrations', label: 'Integrations', description: 'Marketplace integrations enabled for the circle.', filter: 'circle' },
   { table: 'user_api_keys', label: 'User model keys', description: 'Per-user BYO model/API credentials.', filter: 'user' },
   { table: 'circle_site_credentials', label: 'Circle vault', description: 'Circle-scoped website credentials for automation.', filter: 'circle' },
@@ -83,7 +86,7 @@ export const DIGITAL_BRAIN_DB_TABLES: DigitalBrainDbTableConfig[] = [
   { table: 'circle_rooms', label: 'Rooms', description: 'Circle rooms and project collaboration surfaces.', filter: 'circle' },
   { table: 'project_rooms', label: 'Projects', description: 'Project rooms, files, and shared project context.', filter: 'circle' },
   { table: 'claude_api_usage', label: 'Claude usage', description: 'Provider usage tracking and cost audit data.', filter: 'user' },
-  { table: 'user_ai_usage', label: 'User AI usage', description: 'Per-user AI usage tracking for owner-safe billing.', filter: 'user' },
+  { table: 'user_ai_usage', label: 'User AI usage', description: 'Optional per-user AI usage tracking for owner-safe billing.', filter: 'user', probe: 'skip', skipReason: 'Optional cost telemetry table; skipped to avoid noisy missing-table probes.' },
 ];
 
 const STATIC_NODES: DigitalBrainSystemNode[] = [

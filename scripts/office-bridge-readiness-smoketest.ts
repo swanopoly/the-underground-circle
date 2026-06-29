@@ -32,6 +32,23 @@ assert.equal(allHealthy.tone, 'good', 'healthy fleet uses good tone');
 assert.equal(allHealthy.score, 100, 'healthy fleet scores 100');
 assert.equal(allHealthy.activeSessions, 4, 'active session count is summed');
 assert.equal(allHealthy.summary.includes('5/5 bridges reachable'), true, 'healthy summary includes reachable count');
+assert.equal(allHealthy.coreReady, true, 'healthy fleet has OpenSwan core ready');
+assert.equal(allHealthy.executionReady, true, 'healthy fleet has an execution bridge ready');
+assert.equal(allHealthy.readyForAgentTasks, true, 'healthy fleet can run agent tasks');
+
+const optionalOffline = buildOfficeBridgeReadinessSnapshot([
+  result('claude-code', 'Claude Code', 'healthy', { sessionCount: 1, port: 7778 }),
+  result('codex', 'Codex', 'healthy', { sessionCount: 1, port: 7779 }),
+  result('gemini-cli', 'Gemini CLI', 'offline', { detail: 'connection failed', hint: 'Restart with: node scripts/gemini-bridge.js', port: 7780 }),
+  result('cursor', 'Cursor', 'offline', { detail: 'connection failed', hint: 'Restart with: node scripts/cursor-bridge.js', port: 7781 }),
+  result('openswan-proxy', 'OpenSwan Proxy', 'healthy', { port: 18790 }),
+]);
+
+assert.equal(optionalOffline.statusLabel, 'CORE BRIDGES READY', 'optional bridge outages keep the core path ready');
+assert.equal(optionalOffline.tone, 'warn', 'optional bridge outages use warning tone');
+assert.equal(optionalOffline.readyForAgentTasks, true, 'core plus one execution bridge is enough to run work');
+assert.equal(optionalOffline.optionalIssues.length, 2, 'optional issues are preserved separately');
+assert.equal(optionalOffline.requiredIssue, undefined, 'optional outages do not create required issue');
 
 const mixed = buildOfficeBridgeReadinessSnapshot([
   result('claude-code', 'Claude Code', 'healthy', { sessionCount: 1, port: 7778 }),
@@ -45,17 +62,19 @@ assert.equal(mixed.tone, 'danger', 'offline bridge uses danger tone');
 assert.equal(mixed.healthy, 2, 'mixed healthy count');
 assert.equal(mixed.degraded, 1, 'mixed degraded count');
 assert.equal(mixed.offline, 1, 'mixed offline count');
-assert.equal(mixed.primaryIssue, 'Codex: connection failed', 'primary issue uses first unhealthy bridge');
-assert.equal(mixed.actionDetail, 'Restart with: node scripts/codex-bridge.js', 'action detail surfaces restart hint');
+assert.equal(mixed.readyForAgentTasks, false, 'missing OpenSwan core blocks agent task readiness');
+assert.equal(mixed.primaryIssue, 'OpenSwan Proxy: not checked', 'primary issue names missing core bridge');
+assert.equal(mixed.actionDetail, 'OpenSwan Proxy: not checked', 'action detail surfaces required issue');
 
 const degradedOnly = buildOfficeBridgeReadinessSnapshot([
   result('gemini-cli', 'Gemini CLI', 'degraded', { detail: 'bridge up but not authenticated', port: 7780 }),
   result('cursor', 'Cursor', 'healthy', { port: 7781 }),
 ]);
 
-assert.equal(degradedOnly.statusLabel, 'BRIDGES PARTIAL', 'degraded-only fleet is partial');
-assert.equal(degradedOnly.tone, 'warn', 'degraded-only fleet uses warning tone');
+assert.equal(degradedOnly.statusLabel, 'BRIDGES NEED ATTENTION', 'degraded-only fleet without OpenSwan needs attention');
+assert.equal(degradedOnly.tone, 'danger', 'missing OpenSwan core uses danger tone');
 assert.equal(degradedOnly.score, 75, 'degraded bridge scores half credit');
+assert.equal(degradedOnly.requiredIssue, 'OpenSwan Proxy: not checked', 'degraded-only snapshot names missing OpenSwan core');
 
 const unavailable = buildOfficeBridgeReadinessSnapshot([], {
   available: false,
@@ -66,6 +85,7 @@ assert.equal(unavailable.available, false, 'unavailable snapshot records bridge 
 assert.equal(unavailable.statusLabel, 'BRIDGES DISABLED', 'unavailable snapshot labels disabled');
 assert.equal(unavailable.tone, 'muted', 'unavailable snapshot stays muted');
 assert.equal(unavailable.summary.includes('production web'), true, 'unavailable summary explains production web skip');
+assert.equal(unavailable.readyForAgentTasks, false, 'unavailable bridge runtime cannot run agent tasks');
 
 const failedAudit = buildOfficeBridgeReadinessSnapshot([], {
   available: true,
@@ -75,5 +95,6 @@ const failedAudit = buildOfficeBridgeReadinessSnapshot([], {
 assert.equal(failedAudit.statusLabel, 'BRIDGE AUDIT FAILED', 'audit error labels failure');
 assert.equal(failedAudit.tone, 'danger', 'audit error uses danger tone');
 assert.equal(failedAudit.primaryIssue, 'fetch exploded', 'audit error preserves message');
+assert.equal(failedAudit.readyForAgentTasks, false, 'failed audit cannot claim readiness');
 
 console.log('All Office bridge readiness smoke cases passed.');

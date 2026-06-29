@@ -5,8 +5,10 @@ import type { PromptMemoryReference } from '../../../../lib/memoryService';
 import type { ResearchDocumentReference } from '../../../../lib/researchControl';
 import type { WikiArticleReference } from '../../../../lib/wikiData';
 import type { SwanBotStructuredArtifact } from '../../../../lib/swanbot';
+import ChatAutomationPlanCard from './ChatAutomationPlanCard';
 import {
   readMessageArtifacts,
+  readMessageChatAutomationPlanPreview,
   readMessageMemoriesUsed,
   readMessageMemoryRefs,
   readMessageRecoveryOptions,
@@ -224,6 +226,7 @@ function AssistantBubble({ entry, accentColor }: { entry: ChatEntry; accentColor
   const memoriesUsed = readMessageMemoriesUsed(entry.metadata);
   const artifacts = readMessageArtifacts(entry.metadata) as SwanBotStructuredArtifact[];
   const recoveryOptions = readMessageRecoveryOptions(entry.metadata);
+  const planPreview = readMessageChatAutomationPlanPreview(entry.metadata);
   const source = readEntryRouteSource(entry.metadata);
   const routeChips = buildEntryRouteChips(entry);
   const assistantLabel = source?.actor?.trim() || 'OpenSwan';
@@ -266,6 +269,9 @@ function AssistantBubble({ entry, accentColor }: { entry: ChatEntry; accentColor
           </View>
         ) : null}
         <Text style={styles.assistantText}>{visibleContent}</Text>
+        {planPreview ? (
+          <ChatAutomationPlanCard preview={planPreview} accentColor={accentColor} />
+        ) : null}
         {recoveryOptions.length > 0 ? (
           <View style={styles.recoveryOptionStack}>
             <Text style={styles.recoveryOptionLabel}>Recovery Options</Text>
@@ -315,7 +321,7 @@ function AssistantBubble({ entry, accentColor }: { entry: ChatEntry; accentColor
         ) : null}
         {wikiRefs.length > 0 ? (
           <View style={styles.wikiRefsWrap}>
-            <Text style={styles.wikiRefsLabel}>Sources from the Knowledge Wiki</Text>
+            <Text style={styles.wikiRefsLabel}>Sources from the Wiki</Text>
             {wikiRefs.slice(0, 4).map(ref => (
               <View key={ref.id} style={[styles.wikiRefCard, { borderColor: ref.color + '40', backgroundColor: ref.color + '10' }]}>
                 <Text style={[styles.wikiRefTitle, { color: ref.color }]}>{ref.title}</Text>

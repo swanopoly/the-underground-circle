@@ -9,6 +9,10 @@ import {
   formatAppAdapterGapPromptBlock,
 } from './appAdapterGapContract';
 import {
+  buildEngineeringCadOperationRunbookPlan,
+  buildEngineeringCadOperationRunbookPromptBlock,
+} from './engineeringCadOperationRunbooks';
+import {
   buildDesignAppAdapterGapPlan,
   buildDesignAppAdapterGapPromptBlock,
 } from './designAppAdapterGaps';
@@ -709,6 +713,8 @@ export function buildAgentAppCapabilityBuildoutPolicy(input: AgentAppCapabilityB
     ? null
     : buildAppAdapterGapPlan(task, appName ? { appName } : undefined);
   const genericAppGapPromptBlock = formatAppAdapterGapPromptBlock(genericAppGapPlan);
+  const engineeringCadOperationRunbookPlan = buildEngineeringCadOperationRunbookPlan(task);
+  const engineeringCadOperationRunbookPromptBlock = buildEngineeringCadOperationRunbookPromptBlock(task, { maxRunbooks: 4 });
   const designCreativeAiRecipePlan = buildDesignAppCreativeAiRecipePlan(task);
   const designCreativeAiRecipePromptBlock = buildDesignAppCreativeAiRecipePromptBlock(task, { maxRecipes: 4 });
   const designExecutionPipelinePlan = buildDesignAppExecutionPipelinePlan(task);
@@ -721,6 +727,8 @@ export function buildAgentAppCapabilityBuildoutPolicy(input: AgentAppCapabilityB
     ...(designAdapterGapPlan?.sourceRefs || []).map((ref) => `Use design-app gap source ref: ${ref.label} - ${ref.url} (${ref.takeaway})`),
     ...(genericAppGapPlan?.sourceRefs || []).map((ref) => `Use app-control gap source ref: ${ref.label} - ${ref.url} (${ref.takeaway})`),
     ...(genericAppGapPlan ? genericAppGapPlan.contract.researchPlan.map((item) => `Research before guessing: ${item}`) : []),
+    ...(engineeringCadOperationRunbookPlan?.sourceRefs || []).map((ref) => `Use engineering/CAD source ref: ${ref.label} - ${ref.url} (${ref.takeaway})`),
+    ...(engineeringCadOperationRunbookPlan?.runbooks || []).map((runbook) => `Preserve engineering/CAD runbook contract for ${runbook.label}: ${runbook.fallbackBuildoutTrigger}`),
     ...(designCreativeAiRecipePlan?.buildoutTools || []).map((tool) => `Satisfy creative-AI recipe buildout tool: ${tool}`),
     ...(designCreativeAiRecipePlan?.recoveryHints || []).map((hint) => `Carry creative-AI recovery hint into retry behavior: ${hint}`),
     ...(designExecutionPipelinePlan?.requiredToolSequence || []).map((tool) => `Preserve design execution pipeline tool order around: ${tool}`),
@@ -730,6 +738,9 @@ export function buildAgentAppCapabilityBuildoutPolicy(input: AgentAppCapabilityB
     ...buildVerification(kind),
     ...(designCreativeAiRecipePlan
       ? ['Verify the creative-AI recipe with generation/action receipt, app inventory, proof export, and fail-closed recovery evidence.']
+      : []),
+    ...(engineeringCadOperationRunbookPlan
+      ? [`Verify the engineering/CAD buildout against operation runbooks: ${engineeringCadOperationRunbookPlan.operations.join(', ')}.`]
       : []),
   ]);
   const outputContract = [
@@ -755,6 +766,7 @@ export function buildAgentAppCapabilityBuildoutPolicy(input: AgentAppCapabilityB
     `Risk tier: ${risk}`,
     designAdapterGapPromptBlock ? `\n${designAdapterGapPromptBlock}` : '',
     genericAppGapPromptBlock ? `\n${genericAppGapPromptBlock}` : '',
+    engineeringCadOperationRunbookPromptBlock ? `\n${engineeringCadOperationRunbookPromptBlock}` : '',
     designCreativeAiRecipePromptBlock ? `\n${designCreativeAiRecipePromptBlock}` : '',
     designExecutionPipelinePromptBlock ? `\n${designExecutionPipelinePromptBlock}` : '',
     '',

@@ -20,7 +20,7 @@
  * failure mode we've seen in logs. Nothing here is decorative.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
@@ -49,6 +49,8 @@ import {
   shouldDelegateToSubagents,
 } from '../../lib/subagentRegistry';
 import { analyzeMessageRouting } from '../../lib/messageRouting';
+import { cronToHuman, relTime } from '../../lib/automationCadenceFormat';
+import { OPENSWAN_AUTOMATION_INTENT_SEED } from '../../lib/openswanAutomationLaunch';
 import { rageForget } from '../../lib/memoryActions';
 import { supabase } from '../../lib/supabase';
 import { useClaudeSpendBreakdown } from '../../lib/circleCostTelemetry';
@@ -77,6 +79,14 @@ import {
 } from '../../lib/siteAgentReadiness';
 import { listSiteCredentialVault } from '../../lib/siteAutomation';
 import { classifyBrowserbaseWorkflow } from '../../lib/browserbaseWorkflowIntent';
+import {
+  useCircleAutomations,
+  toggleAutomation,
+  triggerAutomation,
+  createAutomation,
+  type CircleAutomation,
+  type TriggerType,
+} from '../../services/automationService';
 
 // Rough output-budget heuristic per mode. Used by the cost preview to give
 // the user a conservative preflight estimate before LAUNCH.
@@ -251,7 +261,7 @@ const HELPER_INTENTS: ReadonlyArray<HelperIntent> = [
     title: 'Build an automation',
     description: 'Turn a task into a repeatable run with approvals.',
     mode: 'plan',
-    seed: 'Turn this into a repeatable automation: ',
+    seed: OPENSWAN_AUTOMATION_INTENT_SEED,
     starter: 'Turn this into a repeatable automation: [task]. Define trigger, required access, allowed actions, approval points, retry limits, budget cap, and completion checks.',
     placeholder: 'Turn this into a repeatable automation: log into WordPress every Friday, draft the weekly update, preview it, and ask before publishing.',
     doneSignal: 'The automation has a trigger, access plan, approval gates, cost guardrails, retries, and completion checks.',
@@ -528,6 +538,7 @@ interface Props {
   /** Fires when the user confirms. ChatTab hands the task to the planner. */
   onSubmit: (payload: {
     task: string;
+    displayTask?: string;
     mode: OpenSwanChatMode;
     model?: string | null;
   }) => void;
@@ -607,6 +618,27 @@ export default function OpenSwanConsole({
   const [automationReadiness, setAutomationReadiness] = useState<SiteAgentReadinessSnapshot | null>(null);
   const [automationReadinessLoading, setAutomationReadinessLoading] = useState(false);
   const [automationReadinessError, setAutomationReadinessError] = useState<string | null>(null);
+  // Saved automations for this circle (live-subscribed). Only attached while
+  // the panel is open so a closed panel doesn't hold a realtime channel.
+  const { automations, isLoading: automationsLoading, refresh: refreshAutomations } =
+    useCircleAutomations(visible ? (circleId || null) : null);
+  const [automationActionId, setAutomationActionId] = useState<string | null>(null);
+  const [automationActionError, setAutomationActionError] = useState<string | null>(null);
+  const [runFeedback, setRunFeedback] = useState<string | null>(null);
+  // Synchronous lock so two presses in the same tick can't both pass the
+  // closure-captured automationActionId guard before a re-render commits.
+  const actionLock = useRef(false);
+  const runFeedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Session-local trend of readiness scores so the user can see whether
+  // fixing blockers is actually moving the number. Capped at 8 points.
+  const [readinessHistory, setReadinessHistory] = useState<{ score: number; at: string }[]>([]);
+  const [showAllAutomations, setShowAllAutomations] = useState(false);
+  const [saveAutomationOpen, setSaveAutomationOpen] = useState(false);
+  const [saveAutomationName, setSaveAutomationName] = useState('');
+  const [saveAutomationCadence, setSaveAutomationCadence] = useState<TriggerType>('schedule');
+  const [saveAutomationCron, setSaveAutomationCron] = useState<string>('0 9 * * 1');
+  const [savingAutomation, setSavingAutomation] = useState(false);
+  const [saveAutomationMessage, setSaveAutomationMessage] = useState<string | null>(null);
   const [launchFixBusy, setLaunchFixBusy] = useState(false);
   const [launchFixMessage, setLaunchFixMessage] = useState<string | null>(null);
   const [maintenanceOpen, setMaintenanceOpen] = useState(false);
@@ -1060,8 +1092,13 @@ export default function OpenSwanConsole({
   // Build the task plan once per (task, surface) and reuse it for
   // both the subagent-delegation preview and the new PLAN PREVIEW
   // section. Avoids analyzing the task twice on every keystroke.
+  // Decouple per-keystroke routing/plan analysis from typing latency.
+  // value={task} keeps the input instant; the heavier analysis below
+  // reads the deferred value and catches up after the brief defer.
+  const deferredTask = useDeferredValue(task);
+
   const taskPlan = useMemo(() => {
-    const trimmed = task.trim();
+    const trimmed = deferredTask.trim();
     if (!trimmed) return null;
     try {
       const routingSurface = surface === 'room_chat' ? 'room_chat' : 'main_chat';
@@ -1071,10 +1108,10 @@ export default function OpenSwanConsole({
     } catch {
       return null;
     }
-  }, [task, surface]);
+  }, [deferredTask, surface]);
 
   const subagentPlan = useMemo(() => {
-    const trimmed = task.trim();
+    const trimmed = deferredTask.trim();
     if (!trimmed || !taskPlan) return { willSpawn: false, specs: [] as { role: string; displayName: string }[] };
     try {
       const willSpawn = shouldDelegateToSubagents(trimmed, taskPlan.plan);
@@ -1087,7 +1124,7 @@ export default function OpenSwanConsole({
     } catch {
       return { willSpawn: false, specs: [] };
     }
-  }, [task, taskPlan]);
+  }, [deferredTask, taskPlan]);
 
   const planCostPreview = useMemo(() => {
     if (!taskPlan) return null;
@@ -1095,7 +1132,7 @@ export default function OpenSwanConsole({
     const modelKey = isAutoModel ? AUTO_MODEL_COST_BASELINE : currentModel;
     const inputTokens =
       BASE_INPUT_TOKENS
-      + Math.ceil(task.length / 3)
+      + Math.ceil(deferredTask.length / 3)
       + (taskPlan.plan.recommendedTools.length * 60)
       + (subagentPlan.specs.length * 1500);
     const outputTokens = OUTPUT_TOKEN_BUDGET_BY_MODE[mode] || 1200;
@@ -1116,7 +1153,7 @@ export default function OpenSwanConsole({
       spentToday,
       projected24h,
     };
-  }, [budgetCap, currentModel, mode, subagentPlan.specs.length, task.length, taskPlan, spend?.totalCost]);
+  }, [budgetCap, currentModel, mode, subagentPlan.specs.length, deferredTask.length, taskPlan, spend?.totalCost]);
 
   // Memory count probe — counts active memory_entries for this circle so
   // the user sees how much context the agent will scan. Cheap query, runs
@@ -1553,13 +1590,14 @@ export default function OpenSwanConsole({
     trimmed,
   ]);
 
+  const canLaunch = canSubmit && launchReadiness.grade !== 'blocked';
   const accentFaded = `${accentColor}22`;
   const accentBorder = `${accentColor}66`;
 
   const handleSubmit = useCallback(() => {
-    if (!canSubmit) return;
-    onSubmit({ task: launchTask, mode, model: currentModel });
-  }, [canSubmit, currentModel, launchTask, mode, onSubmit]);
+    if (!canLaunch) return;
+    onSubmit({ task: launchTask, displayTask: trimmed, mode, model: currentModel });
+  }, [canLaunch, currentModel, launchTask, mode, onSubmit, trimmed]);
 
   const applyIntent = useCallback((intent: HelperIntent) => {
     setSelectedIntent(intent.key);
@@ -1687,6 +1725,111 @@ export default function OpenSwanConsole({
     task,
   ]);
 
+  // ── Automation section: trend + saved-automation actions ──────────────
+  // Append a point whenever the readiness snapshot's score/timestamp moves,
+  // so the section can show "is the number going up as I fix things?".
+  useEffect(() => {
+    if (!automationReadiness) return;
+    setReadinessHistory((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.score === automationReadiness.score && last.at === automationReadiness.updatedAt) {
+        return prev;
+      }
+      return [...prev, { score: automationReadiness.score, at: automationReadiness.updatedAt }].slice(-8);
+    });
+  }, [automationReadiness]);
+
+  const handleToggleAutomation = useCallback(async (automation: CircleAutomation) => {
+    if (automationActionId || actionLock.current) return;
+    actionLock.current = true;
+    setAutomationActionId(automation.id);
+    setAutomationActionError(null);
+    try {
+      const { error } = await toggleAutomation(automation.id, !automation.enabled);
+      if (error) setAutomationActionError(error);
+      await refreshAutomations();
+      if (!error) setAutomationActionError(null);
+    } catch (error: any) {
+      setAutomationActionError(error?.message || 'Could not update automation.');
+    } finally {
+      setAutomationActionId(null);
+      actionLock.current = false;
+    }
+  }, [automationActionId, refreshAutomations]);
+
+  const handleRunAutomationNow = useCallback(async (automation: CircleAutomation) => {
+    if (automationActionId || actionLock.current || !circleId) return;
+    actionLock.current = true;
+    setAutomationActionId(automation.id);
+    setAutomationActionError(null);
+    try {
+      const { error } = await triggerAutomation(automation.id, circleId);
+      if (error) setAutomationActionError(error);
+      await refreshAutomations();
+      if (!error) {
+        setAutomationActionError(null);
+        setRunFeedback(`Run started for “${automation.name}”.`);
+        if (runFeedbackTimer.current) clearTimeout(runFeedbackTimer.current);
+        runFeedbackTimer.current = setTimeout(() => setRunFeedback(null), 4000);
+      }
+    } catch (error: any) {
+      setAutomationActionError(error?.message || 'Could not run automation.');
+    } finally {
+      setAutomationActionId(null);
+      actionLock.current = false;
+    }
+  }, [automationActionId, circleId, refreshAutomations]);
+
+  const handleSaveTaskAsAutomation = useCallback(async () => {
+    if (savingAutomation) return;
+    if (!circleId) {
+      setSaveAutomationMessage('No circle selected — open this from inside a circle.');
+      return;
+    }
+    const prompt = launchTask.trim();
+    if (!prompt) {
+      setSaveAutomationMessage('Add a task in Task + Mode first.');
+      return;
+    }
+    setSavingAutomation(true);
+    setSaveAutomationMessage(null);
+    try {
+      const derivedDefault = prompt.length > 48 ? `${prompt.slice(0, 48).trim()}…` : prompt;
+      const name = saveAutomationName.trim() || derivedDefault;
+      const { error } = await createAutomation({
+        circleId,
+        name,
+        description: `Saved from the OpenSwan Control Panel (${mode} mode).`,
+        icon: '🦢',
+        triggerType: saveAutomationCadence,
+        cronExpression: saveAutomationCadence === 'schedule' ? saveAutomationCron : undefined,
+        prompt,
+        model: currentModel && currentModel !== 'auto' ? currentModel : undefined,
+        outputTarget: 'activity',
+      });
+      if (error) {
+        setSaveAutomationMessage(error);
+      } else {
+        setSaveAutomationMessage(
+          saveAutomationCadence === 'manual'
+            ? 'Saved as a manual automation — run it any time from the list.'
+            : 'Scheduled. It now lives in this circle’s automations.',
+        );
+        setSaveAutomationOpen(false);
+        await refreshAutomations();
+      }
+    } catch (error: any) {
+      setSaveAutomationMessage(error?.message || 'Could not save automation.');
+    } finally {
+      setSavingAutomation(false);
+    }
+  }, [savingAutomation, circleId, launchTask, mode, saveAutomationCadence, saveAutomationCron, saveAutomationName, currentModel, refreshAutomations]);
+
+  // Clear the transient run-now feedback timer on unmount.
+  useEffect(() => () => {
+    if (runFeedbackTimer.current) clearTimeout(runFeedbackTimer.current);
+  }, []);
+
   // Keyboard shortcuts (web only) — power-user shortcuts so daily
   // launches don't require leaving the keyboard for the mouse.
   // Listens at window level so the shortcut works whether focus is
@@ -1739,11 +1882,18 @@ export default function OpenSwanConsole({
     >
       <Pressable
         onPress={onClose}
-        accessibilityRole="button"
-        accessibilityLabel="Close OpenSwan console"
+        importantForAccessibility="no"
+        accessibilityElementsHidden
+        aria-hidden={true as any}
+        tabIndex={-1 as any}
         style={[styles.backdrop, { backgroundColor: `${accentColor}10` }]}
       />
-      <View style={[styles.card, { borderColor: accentBorder }]}>
+      <View
+        style={[styles.card, { borderColor: accentBorder }]}
+        accessibilityRole={'dialog' as any}
+        aria-modal={true as any}
+        aria-labelledby={'openswan-console-title' as any}
+      >
         {/* ── Header ────────────────────────────────────────────────── */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
@@ -1751,7 +1901,7 @@ export default function OpenSwanConsole({
               <Text style={[styles.headerGlyphText, { color: accentColor }]}>{'OS'}</Text>
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={styles.headerTitle}>OpenSwan Control Panel</Text>
+              <Text style={styles.headerTitle} nativeID="openswan-console-title">OpenSwan Control Panel</Text>
               <Text style={styles.headerSub}>
                 Tell it what to do, confirm access, then let the agent use chat, browser, desktop, files, and saved logins. Currently:{' '}
                 <Text style={{ color: modeAccent }}>
@@ -1764,13 +1914,17 @@ export default function OpenSwanConsole({
             onPress={onClose}
             accessibilityRole="button"
             accessibilityLabel="Close"
+            hitSlop={{ top: 11, bottom: 11, left: 11, right: 11 }}
             style={styles.closeBtn}
           >
             <Text style={styles.closeText}>{'×'}</Text>
           </Pressable>
         </View>
 
-        <ScrollView style={{ maxHeight: 620 }} contentContainerStyle={{ gap: 14 }}>
+        <ScrollView
+          style={{ maxHeight: Platform.OS === 'web' ? ('76vh' as any) : 680 }}
+          contentContainerStyle={styles.scrollContent}
+        >
           <LaunchReadinessPanel
             readiness={launchReadiness}
             accentColor={modeAccent}
@@ -1780,6 +1934,8 @@ export default function OpenSwanConsole({
             onShowAll={expandAllSections}
             onCollapse={collapseToLaunchSections}
           />
+
+          <GroupHeader label="LAUNCH" hint="What to run and how" accentColor={modeAccent} />
 
           {/* ── Intent launcher ──────────────────────────────────────── */}
           <AccordionSection
@@ -2012,6 +2168,8 @@ export default function OpenSwanConsole({
           </AccordionSection>
 
           {/* ── Access readiness ──────────────────────────────────────── */}
+          <GroupHeader label="AUTOMATION & ACCESS" hint="Get the agent ready and connected" accentColor={modeAccent} />
+
           <AccordionSection
             title="Automation Readiness"
             meta={automationReadiness ? `${automationReadiness.score}/100` : automationReadinessLoading ? 'checking' : 'not checked'}
@@ -2020,16 +2178,6 @@ export default function OpenSwanConsole({
             onToggle={() => toggleSection('readiness')}
           >
           <View style={styles.section}>
-            <View style={styles.readinessHeader}>
-              <Text style={styles.label}>AUTOMATION READINESS</Text>
-              <Text style={styles.readinessMeta}>
-                {automationReadinessLoading
-                  ? 'checking...'
-                  : automationReadiness
-                    ? `${automationReadiness.score}/100 · ${automationReadiness.statusLabel}`
-                    : 'not checked'}
-              </Text>
-            </View>
             <AutomationReadinessPanel
               snapshot={automationReadiness}
               loading={automationReadinessLoading}
@@ -2087,6 +2235,272 @@ export default function OpenSwanConsole({
                 </View>
               </View>
             ) : null}
+
+            {/* ── Quick automation actions ─────────────────────────── */}
+            <View style={styles.readinessSubHeader}>
+              <Text style={styles.readinessSubTitle}>Quick Actions</Text>
+            </View>
+            <View style={styles.automationQuickRow}>
+              <QuickActionButton
+                label="RE-SCAN READINESS"
+                busyLabel="SCANNING…"
+                busy={automationReadinessLoading}
+                onPress={() => refreshAutomationReadiness()}
+                accessibilityLabel="Re-scan automation readiness"
+                accentColor={modeAccent}
+              />
+              <QuickActionButton
+                label="FIX BLOCKERS"
+                busyLabel="FIXING…"
+                busy={launchFixBusy}
+                onPress={handleFixLaunchBlockers}
+                accessibilityLabel="Fix launch blockers"
+                accentColor={modeAccent}
+              />
+              <QuickActionButton
+                label="SCAN + PAIR BRIDGES"
+                busyLabel="SCANNING…"
+                busy={bridgeBusy}
+                onPress={handleScanBridges}
+                accessibilityLabel="Scan and pair bridges"
+                accentColor={modeAccent}
+              />
+            </View>
+
+            {automationReadiness ? (
+              <>
+                <View style={styles.diagGrid}>
+                  <DiagCard
+                    title="BRIDGES"
+                    value={`${automationReadiness.stats.activeBridgeProviders}`}
+                    hint={`${automationReadiness.stats.activeMcpToolCount} MCP tools`}
+                    color={modeAccent}
+                  />
+                </View>
+                {automationReadiness.blockers.length > 0 ? null : (
+                  <Text style={[styles.inputHint, { color: SUCCESS }]}>No blockers — ready to launch automated work.</Text>
+                )}
+                {readinessHistory.length > 1 ? (
+                  <View
+                    style={styles.historyWrap}
+                    accessible
+                    accessibilityRole="image"
+                    accessibilityLabel={`Readiness score trend: ${readinessHistory[0].score} to ${readinessHistory[readinessHistory.length - 1].score} across ${readinessHistory.length} scans`}
+                  >
+                    <Text style={styles.historyLabel}>SCORE TREND</Text>
+                    <View style={styles.historyBars}>
+                      {readinessHistory.map((point, index) => {
+                        const barColor = point.score >= 80 ? SUCCESS : point.score >= 50 ? '#f59e0b' : DANGER;
+                        return (
+                          <View key={index} style={styles.historyBarSlot} importantForAccessibility="no-hide-descendants">
+                            <View style={[styles.historyBar, { height: 4 + Math.round((point.score / 100) * 34), backgroundColor: barColor }]} />
+                            <Text style={styles.historyBarValue}>{point.score}</Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  </View>
+                ) : null}
+              </>
+            ) : (
+              <Text style={styles.inputHint}>Run a readiness scan to see capability, vault, and bridge detail.</Text>
+            )}
+
+            {/* ── Saved automations for this circle ────────────────── */}
+            <View style={styles.readinessSubHeader}>
+              <Text style={styles.readinessSubTitle}>Scheduled Automations</Text>
+              <Text style={styles.readinessMeta}>
+                {automationsLoading ? 'loading…' : `${automations.length} saved`}
+              </Text>
+            </View>
+            {automationActionError ? (
+              <Text style={[styles.inputHint, { color: DANGER }]} accessibilityLiveRegion="assertive" aria-live={'assertive' as any}>{automationActionError}</Text>
+            ) : null}
+            {runFeedback ? (
+              <Text style={[styles.inputHint, { color: SUCCESS }]} accessibilityLiveRegion="polite" aria-live={'polite' as any}>{runFeedback}</Text>
+            ) : null}
+            {automations.length === 0 && !automationsLoading ? (
+              <Text style={styles.inputHint}>No saved automations yet. Draft a task above and save it as one.</Text>
+            ) : (
+              <View style={styles.automationList}>
+                {automations.slice(0, showAllAutomations ? undefined : 6).map((automation) => {
+                  const busy = automationActionId === automation.id;
+                  const cadence = automation.triggerType === 'schedule'
+                    ? cronToHuman(automation.cronExpression)
+                    : automation.triggerType.toUpperCase();
+                  const timing = automation.enabled && automation.nextRunAt
+                    ? `next ${relTime(automation.nextRunAt)}`
+                    : automation.lastRunAt
+                      ? `ran ${relTime(automation.lastRunAt)}`
+                      : '';
+                  return (
+                    <View key={automation.id} style={styles.automationItem}>
+                      <Text style={styles.automationIcon}>{automation.icon}</Text>
+                      <View style={styles.automationItemMain}>
+                        <Text style={styles.automationItemName} numberOfLines={1}>{automation.name}</Text>
+                        <Text style={[styles.automationItemMeta, !automation.enabled && { color: MUTED }]} numberOfLines={1}>
+                          {automation.enabled ? cadence : `PAUSED · ${cadence}`}
+                          {automation.runCount > 0 ? ` · ${automation.runCount} runs` : ''}
+                          {timing ? ` · ${timing}` : ''}
+                        </Text>
+                        {automation.lastError ? (
+                          <Text style={[styles.automationItemMeta, { color: DANGER }]} numberOfLines={2}>
+                            ⚠ {automation.lastError}
+                          </Text>
+                        ) : null}
+                      </View>
+                      <Pressable
+                        onPress={() => handleRunAutomationNow(automation)}
+                        disabled={busy || !circleId}
+                        hitSlop={{ top: 11, bottom: 11, left: 11, right: 11 }}
+                        style={({ hovered }: any) => [
+                          styles.automationRunBtn,
+                          hovered && !busy && { borderColor: `${modeAccent}99`, backgroundColor: `${modeAccent}14` },
+                          (busy || !circleId) && { opacity: 0.5 },
+                        ]}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Run ${automation.name} now`}
+                      >
+                        {busy ? (
+                          <ActivityIndicator size="small" color={modeAccent} />
+                        ) : (
+                          <Text style={[styles.automationRunText, { color: modeAccent }]}>RUN</Text>
+                        )}
+                      </Pressable>
+                      <Pressable
+                        onPress={() => handleToggleAutomation(automation)}
+                        disabled={busy}
+                        hitSlop={{ top: 11, bottom: 11, left: 11, right: 11 }}
+                        style={({ hovered, pressed }: any) => [
+                          styles.automationToggle,
+                          {
+                            backgroundColor: automation.enabled ? `${SUCCESS}22` : FIELD_BG,
+                            borderColor: automation.enabled ? `${SUCCESS}88` : CARD_BORDER,
+                          },
+                          hovered && { borderColor: automation.enabled ? `${SUCCESS}cc` : `${modeAccent}99` },
+                          pressed && { transform: [{ scale: 0.96 }] },
+                        ]}
+                        accessibilityRole="switch"
+                        accessibilityState={{ checked: automation.enabled }}
+                        accessibilityLabel={`${automation.enabled ? 'Disable' : 'Enable'} ${automation.name}`}
+                      >
+                        <View
+                          style={[
+                            styles.automationToggleKnob,
+                            {
+                              backgroundColor: automation.enabled ? SUCCESS : MUTED,
+                              alignSelf: automation.enabled ? 'flex-end' : 'flex-start',
+                            },
+                          ]}
+                        />
+                      </Pressable>
+                    </View>
+                  );
+                })}
+                {automations.length > 6 ? (
+                  <Pressable
+                    onPress={() => setShowAllAutomations((v) => !v)}
+                    style={({ hovered }: any) => [
+                      styles.automationShowMore,
+                      hovered && { borderColor: `${modeAccent}66` },
+                    ]}
+                    accessibilityRole="button"
+                    accessibilityLabel={showAllAutomations ? 'Show fewer automations' : `Show ${automations.length - 6} more automations`}
+                  >
+                    <Text style={[styles.automationShowMoreText, { color: modeAccent }]}>
+                      {showAllAutomations ? 'SHOW FEWER' : `+${automations.length - 6} MORE`}
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            )}
+
+            {/* ── Save current task as an automation ───────────────── */}
+            <View style={styles.automationSaveWrap}>
+              {!saveAutomationOpen ? (
+                <Pressable
+                  onPress={() => {
+                    const trimmed = launchTask.trim();
+                    const derivedDefault = trimmed.length > 48 ? `${trimmed.slice(0, 48).trim()}…` : trimmed;
+                    setSaveAutomationName(derivedDefault);
+                    setSaveAutomationOpen(true);
+                    setSaveAutomationMessage(null);
+                  }}
+                  style={({ hovered, pressed }: any) => [
+                    styles.automationSaveBtn,
+                    { borderColor: `${modeAccent}66` },
+                    hovered && { backgroundColor: `${modeAccent}14`, borderColor: modeAccent },
+                    pressed && { transform: [{ scale: 0.99 }] },
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Save current task as an automation"
+                >
+                  <Text style={[styles.automationSaveText, { color: modeAccent }]}>＋ SAVE CURRENT TASK AS AUTOMATION</Text>
+                </Pressable>
+              ) : (
+                <View style={[styles.automationSavePanel, { borderColor: `${modeAccent}55` }]}>
+                  <Text style={styles.automationSaveHeading} numberOfLines={1}>
+                    Save “{launchTask.trim().slice(0, 40) || 'your task'}{launchTask.trim().length > 40 ? '…' : ''}”
+                  </Text>
+                  <TextInput
+                    value={saveAutomationName}
+                    onChangeText={setSaveAutomationName}
+                    placeholder="Automation name"
+                    placeholderTextColor={MUTED}
+                    style={styles.automationNameInput}
+                    accessibilityLabel="Automation name"
+                  />
+                  <View style={styles.cadenceRow}>
+                    {([
+                      { key: 'schedule', cron: '0 9 * * 1', label: 'WEEKLY' },
+                      { key: 'schedule', cron: '0 9 * * *', label: 'DAILY' },
+                      { key: 'schedule', cron: '0 * * * *', label: 'HOURLY' },
+                      { key: 'manual', cron: '', label: 'MANUAL' },
+                    ] as const).map((opt) => {
+                      const active = saveAutomationCadence === opt.key && (opt.key !== 'schedule' || saveAutomationCron === opt.cron);
+                      return (
+                        <Pressable
+                          key={opt.label}
+                          onPress={() => {
+                            setSaveAutomationCadence(opt.key as TriggerType);
+                            if (opt.cron) setSaveAutomationCron(opt.cron);
+                          }}
+                          hitSlop={{ top: 11, bottom: 11, left: 11, right: 11 }}
+                          style={[
+                            styles.cadenceChip,
+                            { borderColor: active ? modeAccent : CARD_BORDER, backgroundColor: active ? `${modeAccent}1c` : FIELD_BG },
+                          ]}
+                          accessibilityRole="button"
+                          accessibilityState={{ selected: active }}
+                          accessibilityLabel={`Cadence ${opt.label}${active ? ', selected' : ''}`}
+                        >
+                          <Text style={[styles.cadenceChipText, { color: active ? modeAccent : TEXT_DIM }]}>{opt.label}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                  <View style={styles.automationSaveActions}>
+                    <Pressable onPress={() => setSaveAutomationOpen(false)} style={styles.ghostBtn} accessibilityRole="button" accessibilityLabel="Cancel save">
+                      <Text style={styles.ghostBtnText}>CANCEL</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={handleSaveTaskAsAutomation}
+                      disabled={savingAutomation}
+                      style={[styles.primaryBtn, { backgroundColor: modeAccent }, savingAutomation && { opacity: 0.6 }]}
+                      accessibilityRole="button"
+                      accessibilityLabel="Confirm save automation"
+                    >
+                      {savingAutomation ? (
+                        <ActivityIndicator size="small" color="#0b1220" />
+                      ) : (
+                        <Text style={[styles.primaryBtnText, { color: '#0b1220' }]}>SAVE AUTOMATION</Text>
+                      )}
+                    </Pressable>
+                  </View>
+                </View>
+              )}
+              {saveAutomationMessage ? <Text style={[styles.inputHint, { marginTop: 6 }]} accessibilityLiveRegion="polite" aria-live={'polite' as any}>{saveAutomationMessage}</Text> : null}
+            </View>
           </View>
           </AccordionSection>
 
@@ -2364,6 +2778,8 @@ export default function OpenSwanConsole({
             </View>
           </View>
           </AccordionSection>
+
+          <GroupHeader label="INSIGHTS" hint="See history and plan posture" accentColor={modeAccent} />
 
           {/* ── Templates — saved (task, mode) shortcuts ────────────── */}
           <AccordionSection
@@ -3095,6 +3511,10 @@ export default function OpenSwanConsole({
           </View>
           </AccordionSection>
 
+          {circleId && userId ? (
+            <GroupHeader label="MAINTENANCE" hint="Housekeeping — prune stale state" accentColor={DANGER} />
+          ) : null}
+
           {/* ── Maintenance ─────────────────────────────────────────── */}
           {circleId && userId ? (
             <AccordionSection
@@ -3202,10 +3622,10 @@ export default function OpenSwanConsole({
           </Pressable>
           <Pressable
             onPress={handleSubmit}
-            disabled={!canSubmit}
+            disabled={!canLaunch}
             style={[
               styles.primaryBtn,
-              { backgroundColor: canSubmit ? modeAccent : '#1e293b' },
+              { backgroundColor: canLaunch ? modeAccent : '#1e293b' },
             ]}
             accessibilityRole="button"
             accessibilityLabel="Launch OpenSwan Control Panel turn (Cmd-Enter)"
@@ -3213,13 +3633,13 @@ export default function OpenSwanConsole({
             <Text
               style={[
                 styles.primaryBtnText,
-                { color: canSubmit ? '#020617' : MUTED },
+                { color: canLaunch ? '#020617' : MUTED },
               ]}
             >
               LAUNCH TASK  ›
             </Text>
             {Platform.OS === 'web' ? (
-              <Text style={[styles.primaryBtnKbd, { color: canSubmit ? '#02061799' : MUTED }]}>
+              <Text style={[styles.primaryBtnKbd, { color: canLaunch ? '#02061799' : MUTED }]}>
                 ⌘↵
               </Text>
             ) : null}
@@ -3363,6 +3783,21 @@ function LaunchReadinessPanel({
   );
 }
 
+// ── Group divider ────────────────────────────────────────────────────────
+// Splits the long accordion stack into labelled clusters (Launch, Automation
+// & Access, Insights, Maintenance) so the panel reads as a few calm groups
+// instead of one undifferentiated pile of sections.
+const GroupHeader = React.memo(function GroupHeader({ label, hint, accentColor }: { label: string; hint?: string; accentColor: string }) {
+  return (
+    <View style={styles.groupHeader}>
+      <View style={[styles.groupHeaderTick, { backgroundColor: accentColor }]} />
+      <Text style={styles.groupHeaderLabel} accessibilityRole="header" aria-level={2 as any}>{label}</Text>
+      {hint ? <Text style={styles.groupHeaderHint} numberOfLines={1}>{hint}</Text> : null}
+      <View style={styles.groupHeaderRule} />
+    </View>
+  );
+});
+
 function AccordionSection({
   title,
   meta,
@@ -3416,7 +3851,7 @@ function AccordionSection({
 // ── Budget strip ─────────────────────────────────────────────────────────
 // Compact horizontal bar: "SPEND · $0.42 / $10.00 (4%)" with a colored
 // fill bar. Colors shift from green → amber → red as spend climbs.
-function BudgetStrip({
+const BudgetStrip = React.memo(function BudgetStrip({
   spent,
   cap,
   loading,
@@ -3453,10 +3888,10 @@ function BudgetStrip({
       ) : null}
     </View>
   );
-}
+});
 
 // ── Small helper card for the diagnostics grid ──────────────────────────
-function DiagCard({
+const DiagCard = React.memo(function DiagCard({
   title,
   value,
   hint,
@@ -3473,6 +3908,43 @@ function DiagCard({
       <Text style={styles.diagValue}>{value}</Text>
       <Text style={styles.diagHint}>{hint}</Text>
     </View>
+  );
+});
+
+// ── Quick automation action button ──────────────────────────────────────
+// Collapses the three repeated Quick Action pressables (re-scan / fix /
+// scan+pair) that differ only by label, busy flag, and handler.
+function QuickActionButton({
+  label,
+  busyLabel,
+  busy,
+  onPress,
+  accessibilityLabel,
+  accentColor,
+}: {
+  label: string;
+  busyLabel: string;
+  busy: boolean;
+  onPress: () => void;
+  accessibilityLabel: string;
+  accentColor: string;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={busy}
+      style={({ hovered, pressed }: any) => [
+        styles.automationQuickBtn,
+        hovered && { borderColor: `${accentColor}99`, backgroundColor: `${accentColor}14` },
+        pressed && { transform: [{ scale: 0.99 }] },
+        busy && { opacity: 0.6 },
+      ]}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ disabled: busy, busy }}
+    >
+      <Text style={styles.automationQuickText}>{busy ? busyLabel : label}</Text>
+    </Pressable>
   );
 }
 
@@ -3753,10 +4225,10 @@ const styles = StyleSheet.create({
     backgroundColor: `${CARD_BG}f2`,
     borderWidth: 1,
     borderRadius: 14,
-    width: '100%' as any,
-    maxWidth: 760,
+    width: '94%' as any,
+    maxWidth: 1180,
     maxHeight: '92vh' as any,
-    padding: 18,
+    padding: 22,
     gap: 14,
     ...(Platform.OS === 'web' ? ({
       boxShadow:
@@ -4127,12 +4599,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     textTransform: 'capitalize',
   },
-  readinessHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
-  },
   readinessMeta: {
     color: MUTED,
     fontSize: 10,
@@ -4153,7 +4619,7 @@ const styles = StyleSheet.create({
   readinessSubTitle: {
     color: TEXT_DIM,
     fontSize: 10,
-    fontWeight: '900',
+    fontWeight: '700',
     letterSpacing: 0.8,
     textTransform: 'uppercase',
   },
@@ -4904,6 +5370,38 @@ const styles = StyleSheet.create({
     lineHeight: 15,
   },
   section: { gap: 6 },
+  groupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 4,
+    paddingTop: 6,
+    paddingBottom: 2,
+  },
+  groupHeaderTick: {
+    width: 7,
+    height: 7,
+    borderRadius: 999,
+  },
+  groupHeaderLabel: {
+    color: TEXT,
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    fontFamily: Platform.select({ web: 'ui-monospace, SFMono-Regular, Menlo, monospace', default: 'monospace' }) as string,
+  },
+  groupHeaderHint: {
+    color: TEXT_DIM,
+    fontSize: 10,
+    fontWeight: '700',
+    flexShrink: 1,
+  },
+  groupHeaderRule: {
+    flex: 1,
+    height: 1,
+    backgroundColor: CARD_BORDER,
+  },
   accordionSection: {
     borderWidth: 1,
     borderColor: CARD_BORDER,
@@ -5508,6 +6006,7 @@ const styles = StyleSheet.create({
   },
   diagGrid: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 8,
   },
   diagCard: {
@@ -5748,5 +6247,210 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
     opacity: 0.7,
+  },
+
+  // ── Automation section: quick actions ──────────────────────────────────
+  automationQuickRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  automationQuickBtn: {
+    flexGrow: 1,
+    flexBasis: 150,
+    alignItems: 'center',
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    backgroundColor: FIELD_BG,
+  },
+  automationQuickText: {
+    color: TEXT_DIM,
+    fontFamily: 'monospace',
+    fontSize: 10,
+    letterSpacing: 1,
+    fontWeight: '700',
+  },
+
+  // ── Automation section: readiness detail + trend ───────────────────────
+  historyWrap: {
+    marginTop: 4,
+    gap: 6,
+  },
+  historyLabel: {
+    color: TEXT_DIM,
+    fontFamily: 'monospace',
+    fontSize: 9,
+    letterSpacing: 1.2,
+    fontWeight: '700',
+  },
+  historyBars: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: 8,
+    height: 50,
+  },
+  historyBarSlot: {
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 3,
+  },
+  historyBar: {
+    width: 16,
+    borderRadius: 3,
+  },
+  historyBarValue: {
+    color: TEXT_DIM,
+    fontSize: 9,
+    fontFamily: 'monospace',
+  },
+
+  // ── Automation section: saved automations list ─────────────────────────
+  automationList: {
+    gap: 6,
+  },
+  automationShowMore: {
+    alignItems: 'center',
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    backgroundColor: 'transparent',
+    ...(Platform.OS === 'web' ? { cursor: 'pointer', transition: 'all 0.15s ease' } as any : {}),
+  },
+  automationShowMoreText: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    letterSpacing: 1,
+    fontWeight: '700',
+  },
+  automationNameInput: {
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    backgroundColor: FIELD_BG,
+    color: TEXT,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    fontSize: 12,
+    fontFamily: Platform.OS === 'web' ? 'inherit' : 'System',
+  },
+  scrollContent: {
+    gap: 12,
+    maxWidth: 1040,
+    width: '100%',
+    alignSelf: 'center',
+  },
+  automationItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    backgroundColor: FIELD_BG,
+  },
+  automationIcon: {
+    fontSize: 16,
+  },
+  automationItemMain: {
+    flex: 1,
+    gap: 2,
+  },
+  automationItemName: {
+    color: TEXT,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  automationItemMeta: {
+    color: TEXT_DIM,
+    fontSize: 10,
+    fontFamily: 'monospace',
+  },
+  automationRunBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: CARD_BORDER,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 46,
+  },
+  automationRunText: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    letterSpacing: 1,
+    fontWeight: '800',
+  },
+  automationToggle: {
+    width: 38,
+    height: 22,
+    borderRadius: 999,
+    borderWidth: 1,
+    padding: 2,
+    justifyContent: 'center',
+  },
+  automationToggleKnob: {
+    width: 16,
+    height: 16,
+    borderRadius: 999,
+  },
+
+  // ── Automation section: save current task ──────────────────────────────
+  automationSaveWrap: {
+    marginTop: 4,
+  },
+  automationSaveBtn: {
+    alignItems: 'center',
+    paddingVertical: 11,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    backgroundColor: 'transparent',
+  },
+  automationSaveText: {
+    fontFamily: 'monospace',
+    fontSize: 11,
+    letterSpacing: 1.2,
+    fontWeight: '800',
+  },
+  automationSavePanel: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+    gap: 10,
+    backgroundColor: FIELD_BG,
+  },
+  automationSaveHeading: {
+    color: TEXT,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  cadenceRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  cadenceChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  cadenceChipText: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    letterSpacing: 1,
+    fontWeight: '700',
+  },
+  automationSaveActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 8,
   },
 });

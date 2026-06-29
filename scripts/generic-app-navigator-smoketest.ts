@@ -16,7 +16,9 @@ import {
   classifyGenericAppTaskFamily,
   formatGenericAppTaskFamilyForUser,
   formatGenericAppNavigatorPromptBlock,
+  formatProfessionalAppAutonomyPromptBlock,
   inferGenericAppName,
+  shouldUseProfessionalAppAutonomy,
   shouldUseGenericAppNavigator,
 } from '../src/lib/genericAppNavigator';
 import {
@@ -66,14 +68,33 @@ assert(blenderPlan.actionLadder.findIndex((step) => step.includes('agent.build_a
 assert.equal(shouldUseGenericAppNavigator(abletonTask), true);
 assert.equal(shouldUseGenericAppNavigator('Open Photoshop and export a PNG proof'), false);
 assert.equal(shouldUseGenericAppNavigator('Build whatever is needed so the chat can control any app without previous configuration'), true);
+assert.equal(
+  shouldUseProfessionalAppAutonomy('I want chat to open any app, figure out how to use it, research what it needs, and do the task'),
+  true,
+  'professional autonomy trigger catches broad any-app request',
+);
+assert.equal(
+  shouldUseProfessionalAppAutonomy('Open Reminders and add a reminder to call mom'),
+  true,
+  'professional autonomy still applies to known scriptable app tasks',
+);
 
 const promptBlock = formatGenericAppNavigatorPromptBlock(abletonPlan);
 assert(promptBlock.includes('## Generic App Navigator'));
+assert(promptBlock.includes('research_control_surface'));
 assert(promptBlock.includes('Task family: file_open_save_export (file/save/export work)'));
 assert(promptBlock.includes('one bounded semantic step'));
 assert(promptBlock.includes('hide internal route'));
 assert(promptBlock.includes('agent.build_app_capability'));
 assert(promptBlock.includes('Apple UI scripting and Accessibility'));
+
+const autonomyPromptBlock = formatProfessionalAppAutonomyPromptBlock(abletonTask) || '';
+assert(autonomyPromptBlock.includes('## Professional App Autonomy'));
+assert(autonomyPromptBlock.includes('Open/focus first'));
+assert(autonomyPromptBlock.includes('Research-first rule'));
+assert(autonomyPromptBlock.includes('app-native API/script/plugin/CLI'));
+assert(autonomyPromptBlock.includes('desktop.run_applescript'));
+assert(autonomyPromptBlock.includes('agent.build_app_capability'));
 
 const strategy = buildComputerAppTaskStrategy(abletonTask);
 assert.equal(strategy?.id, 'universal_app_control');
@@ -84,6 +105,7 @@ assert(strategy?.verificationOrder.some((step) => step.includes('hide internal r
 
 const strategyPrompt = buildComputerAppTaskStrategyPromptBlock(abletonTask) || '';
 assert(strategyPrompt.includes('## Computer/App Execution Strategy'));
+assert(strategyPrompt.includes('## Professional App Autonomy'));
 assert(strategyPrompt.includes('## Generic App Navigator'));
 assert(strategyPrompt.includes('Can navigate without a dedicated adapter: yes'));
 assert(strategyPrompt.includes('Visibility rule: hide internal route'));
@@ -120,5 +142,25 @@ const fallbackContext = buildGenericAppNavigatorRouteContext(
 assert.equal(fallbackContext.targetAppName, 'Native desktop app');
 assert.equal(fallbackContext.plan.targetAppName, 'Unfamiliar desktop app');
 assert.equal(fallbackContext.taskFamilyLabel, 'file/save/export work');
+
+// Scriptable Mac apps (Notes, Reminders, Calendar) have a native AppleScript
+// surface — they must NOT be routed through the unfamiliar-app / buildout
+// path (that's what made "create a note" stall on "unknown app -> buildout").
+assert.equal(
+  shouldUseGenericAppNavigator('open the notes app and create a note that says hi'),
+  false,
+  'Notes is scriptable -> skips the generic navigator / buildout path',
+);
+assert.equal(
+  shouldUseGenericAppNavigator('open reminders and add a reminder to buy milk'),
+  false,
+  'Reminders is scriptable -> skips the generic navigator',
+);
+// A genuinely unfamiliar app still routes through the generic navigator.
+assert.equal(
+  shouldUseGenericAppNavigator('open Ableton Live and create a drum loop'),
+  true,
+  'a non-scriptable unfamiliar app still uses the generic navigator',
+);
 
 console.log('All generic app navigator smoke cases passed.');

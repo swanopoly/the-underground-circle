@@ -88,6 +88,10 @@ export function prepareComputerTaskExecution(args: {
   audit: ComputerCapabilityAudit | null;
   grantedIds?: import('./computerTaskGrants').ComputerTaskGrantId[];
   businessModelPlan?: BusinessModelTaskPlan | null;
+  /** Route-level app choice (task→best-app resolution). When present the
+   *  complexity plan's dispatch block carries the App-choice contract
+   *  (open chosen app first, verify frontmost, one named fallback). */
+  appResolution?: import('./computerTaskComplexityPlan').ComputerTaskAppChoiceResolution | null;
 }): ComputerTaskExecutionEnvelope {
   const preview = planComputerTaskPreview(args.task);
   const readiness = summarizeComputerTaskCapabilityReadiness(preview, args.audit);
@@ -106,6 +110,7 @@ export function prepareComputerTaskExecution(args: {
   const complexityPlan = buildComputerTaskComplexityPlan({
     task: args.task,
     preview,
+    appResolution: args.appResolution ?? null,
   });
   const stagePreflightBlockers = validateComputerTaskStageSurfaces(complexityPlan.stages, args.audit);
   // A stage whose surface is unavailable makes the WHOLE task not ready —

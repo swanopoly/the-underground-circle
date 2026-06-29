@@ -33,7 +33,28 @@ import {
 } from '../../lib/computerUseUserTemplates';
 import { buildComputerTaskChecklistCard, resolveComputerTaskPendingQuestionState } from '../../lib/computerTaskState';
 import { buildComputerTaskRecipeDraft } from '../../lib/computerTaskStateModel';
+import { useComputerUseQueue } from '../../lib/useComputerUseQueue';
+import { resolveComputerUseConfirmation } from '../../lib/computerUseConfirmations';
+import {
+  applyStickyScopes,
+  buildStickyScopeOfferFromTask,
+  isStickyScopeExpired,
+  STICKY_GRANTABLE_CATEGORIES,
+  type StickyAllowScope,
+  type StickyAllowScopeKind,
+} from '../../lib/computerGrantGate';
+import {
+  grantStickyAllowScope,
+  loadStickyAllowScopes,
+  revokeStickyAllowScope,
+} from '../../lib/computerGrantGateStore';
+import {
+  detectChatComputerConstraintCategories,
+  type ChatComputerConstraintCategory,
+} from '../../lib/chatComputerRequestRouter';
 import { fileComputerTaskRecipeProposal } from '../../lib/skillLibraryWrite';
+import { loadSkillHealthByName, type SkillHealth } from '../../lib/skillLibrary';
+import { loadAppLearnedFacts, normalizeAppKey, type AppLearnedFactsUnmetProposal } from '../../lib/appLearnedFacts';
 import { parseComputerTaskSchedule } from '../../lib/automationChatParser';
 import { createAutomationFromProposal } from '../../lib/automationChatBuilder';
 import type { ComputerTaskStateRecord } from '../../lib/computerTaskState';
@@ -78,10 +99,28 @@ export default function ComputerUseConsole({
   // D7: save-as-recipe lifecycle for the current completed task.
   const [recipeStatus, setRecipeStatus] = useState<'idle' | 'filing' | 'filed' | 'error'>('idle');
   const [recipeMessage, setRecipeMessage] = useState('');
+  // L2 lifecycle: device-stored run-outcome health for this task's recipe
+  // name — failing/stale recipes get a review hint next to "Save as recipe".
+  const [recipeHealth, setRecipeHealth] = useState<SkillHealth | null>(null);
   // D7b: schedule-this-task ("friday at 9am") for the completed task.
   const [scheduleDraft, setScheduleDraft] = useState('');
   const [scheduleStatus, setScheduleStatus] = useState<'idle' | 'creating' | 'created' | 'error'>('idle');
   const [scheduleMessage, setScheduleMessage] = useState('');
+  // T7 UX: sticky per-site/per-app "always allow" scopes — reviewable,
+  // revocable, with bounded history. Loading also hydrates the in-memory
+  // registry the chat router consumes.
+  const [stickyScopes, setStickyScopes] = useState<StickyAllowScope[]>([]);
+  const [stickyHistory, setStickyHistory] = useState<StickyAllowScope[]>([]);
+  const [permKindDraft, setPermKindDraft] = useState<StickyAllowScopeKind>('site');
+  const [permKeyDraft, setPermKeyDraft] = useState('');
+  const [permCategoriesDraft, setPermCategoriesDraft] = useState<ChatComputerConstraintCategory[]>([]);
+  const [permMessage, setPermMessage] = useState('');
+  const [stickyOfferStatus, setStickyOfferStatus] = useState<'idle' | 'granting' | 'granted'>('idle');
+  // Parallel task queue (fan-out, opt-in). circleId rides on the persisted
+  // task record — the queue only makes sense once a task exists anyway.
+  const queue = useComputerUseQueue(taskState?.circleId || '', userId || undefined);
+  const [queueDraft, setQueueDraft] = useState('');
+  const [queueNotice, setQueueNotice] = useState('');
 
   useEffect(() => {
     if (!visible) return;
@@ -94,10 +133,133 @@ export default function ComputerUseConsole({
     setScheduleDraft('');
     setScheduleStatus('idle');
     setScheduleMessage('');
+    setPermMessage('');
+    setStickyOfferStatus('idle');
+    void loadStickyAllowScopes().then(({ active, history }) => {
+      setStickyScopes(active);
+      setStickyHistory(history);
+    });
   }, [visible, initialTask]);
+
+  // L2: when a completed task is on screen, look up the recipe-name health
+  // from device-stored run outcomes (skillLifecycle). Failing/stale recipes
+  // show a review hint — informational only, never blocks saving (HITL:
+  // a human decides what to do about a flagged recipe).
+  useEffect(() => {
+    if (!visible || taskState?.phase !== 'completed') {
+      setRecipeHealth(null);
+      return;
+    }
+    const draftName = buildComputerTaskRecipeDraft(taskState, taskState.actionTrace ?? null)?.name;
+    if (!draftName) {
+      setRecipeHealth(null);
+      return;
+    }
+    let cancelled = false;
+    void loadSkillHealthByName(taskState.circleId).then((healthByName) => {
+      if (!cancelled) setRecipeHealth(healthByName[draftName] || null);
+    });
+    return () => { cancelled = true; };
+  }, [visible, taskState]);
+
+  // L3 follow-up: surface an unmet buildout proposal ({reason, atIso} recorded
+  // by appLearnedFacts when an auto-propose fired with no connected agent or
+  // run anchor). The lib only exposes a per-app load (no store enumeration),
+  // so the appKey derives from the current task's app: the capability-buildout
+  // app name, or the most recent escalation breadcrumb that names one.
+  const [unmetBuildout, setUnmetBuildout] = useState<AppLearnedFactsUnmetProposal | null>(null);
+  useEffect(() => {
+    const escalationAppName = [...(taskState?.surfaceEscalations || [])]
+      .reverse()
+      .find((item) => item.appName)?.appName;
+    const appKey = normalizeAppKey(taskState?.capabilityBuildout?.appName || escalationAppName || '');
+    if (!visible || !taskState?.circleId || !appKey) {
+      setUnmetBuildout(null);
+      return;
+    }
+    let cancelled = false;
+    void loadAppLearnedFacts(taskState.circleId, appKey).then((facts) => {
+      if (!cancelled) setUnmetBuildout(facts?.unmetBuildoutProposal || null);
+    });
+    return () => { cancelled = true; };
+  }, [visible, taskState]);
 
   const trimmed = task.trim();
   const canSubmit = trimmed.length > 0;
+
+  const refreshStickyScopes = useCallback((result: { active: StickyAllowScope[]; history: StickyAllowScope[] }) => {
+    setStickyScopes(result.active);
+    setStickyHistory(result.history);
+  }, []);
+
+  const handleRevokeStickyScope = useCallback((scopeId: string) => {
+    void revokeStickyAllowScope(scopeId, userId || null).then(refreshStickyScopes);
+  }, [refreshStickyScopes, userId]);
+
+  const togglePermCategory = useCallback((category: ChatComputerConstraintCategory) => {
+    setPermCategoriesDraft((prev) => (
+      prev.includes(category) ? prev.filter((item) => item !== category) : [...prev, category]
+    ));
+  }, []);
+
+  const handleGrantStickyScope = useCallback(() => {
+    setPermMessage('');
+    void grantStickyAllowScope({
+      scopeKind: permKindDraft,
+      scopeKey: permKeyDraft,
+      allowedCategories: permCategoriesDraft,
+      grantedByUserId: userId || null,
+    }).then((result) => {
+      if (!result.ok) {
+        setPermMessage(result.error);
+        return;
+      }
+      if (result.scopes) refreshStickyScopes(result.scopes);
+      setPermKeyDraft('');
+      setPermCategoriesDraft([]);
+      setPermMessage(`Standing grant added for ${result.scope.scopeKey} (30 days).`);
+    });
+  }, [permCategoriesDraft, permKeyDraft, permKindDraft, refreshStickyScopes, userId]);
+
+  // One-tap post-task offer: a COMPLETED task that needed approval suggests
+  // "always allow <non-floor categories> on <site/app>". Floor categories
+  // (pay/delete/login/grant) are never offered, and the offer is skipped
+  // when an existing active scope already covers the target.
+  const stickyOffer = useMemo(() => {
+    if (!taskState || taskState.phase !== 'completed') return null;
+    const hadApproval = taskState.steps.some((step) => step.id === 'approval' && step.status === 'completed')
+      || Boolean(taskState.accessPlan)
+      || (taskState.grantedAccess?.length || 0) > 0;
+    if (!hadApproval) return null;
+    const offer = buildStickyScopeOfferFromTask({
+      task: taskState.task,
+      categories: detectChatComputerConstraintCategories(taskState.task),
+    });
+    if (!offer) return null;
+    const target = offer.scopeKind === 'site' ? { hostname: offer.scopeKey } : { appName: offer.scopeKey };
+    const existing = applyStickyScopes(stickyScopes, target, offer.categories);
+    if (existing.usedScopeIds.length > 0 && existing.stillRequired.length === 0) return null;
+    return offer;
+  }, [taskState, stickyScopes]);
+
+  const handleAcceptStickyOffer = useCallback(() => {
+    if (!stickyOffer) return;
+    setStickyOfferStatus('granting');
+    void grantStickyAllowScope({
+      scopeKind: stickyOffer.scopeKind,
+      scopeKey: stickyOffer.scopeKey,
+      allowedCategories: stickyOffer.categories,
+      grantedByUserId: userId || null,
+    }).then((result) => {
+      if (result.ok && result.scopes) {
+        refreshStickyScopes(result.scopes);
+        setStickyOfferStatus('granted');
+      } else {
+        setStickyOfferStatus('idle');
+        if (!result.ok) setPermMessage(result.error);
+      }
+    });
+  }, [refreshStickyScopes, stickyOffer, userId]);
 
   const applyTemplate = useCallback((t: ComputerUseTemplate) => {
     if (t.needsInput) {
@@ -126,6 +288,31 @@ export default function ComputerUseConsole({
     if (!canSubmit) return;
     onSubmit(trimmed);
   }, [canSubmit, onSubmit, trimmed]);
+
+  const handleEnqueue = useCallback(() => {
+    const result = queue.enqueue(queueDraft);
+    if (result.id) {
+      setQueueDraft('');
+      setQueueNotice(queue.autoStartEnabled
+        ? 'Queued — it starts automatically when a slot frees.'
+        : 'Queued — enable auto-start or press START to run it.');
+    } else {
+      setQueueNotice(result.reason || 'Could not queue that task.');
+    }
+  }, [queue, queueDraft]);
+
+  const handleStartPending = useCallback((id: string) => {
+    void queue.startPending(id).then((result) => {
+      if (!result.id) setQueueNotice(result.reason || 'Could not start the queued task.');
+    });
+  }, [queue]);
+
+  const handleQueueConfirmation = useCallback((confirmationId: string | null, choice: string) => {
+    if (!confirmationId) return;
+    void resolveComputerUseConfirmation(confirmationId, choice).then((result) => {
+      if (!result.ok) setQueueNotice(`Confirmation could not be recorded: ${result.error || 'unknown error'}`);
+    });
+  }, []);
 
   const categorized = useMemo(() => {
     const byCat = new Map<ComputerUseTemplate['category'], ComputerUseTemplate[]>();
@@ -182,6 +369,13 @@ export default function ComputerUseConsole({
           </Pressable>
         </View>
 
+        {/* Scrollable body — header and footer stay fixed; everything between
+            scrolls so no section is ever clipped off the bottom. */}
+        <ScrollView
+          style={styles.body}
+          contentContainerStyle={styles.bodyContent}
+          showsVerticalScrollIndicator={false}
+        >
         {taskState && (
           <View style={[styles.section, styles.statusCard]}>
             <View style={styles.statusRow}>
@@ -291,8 +485,50 @@ export default function ComputerUseConsole({
                 </View>
               );
             })()}
+            {(() => {
+              // E1: surface-escalation breadcrumbs — the run switched control
+              // surfaces mid-task ("↳ switched to screenshot control: a11y
+              // tree empty (Photoshop)"). Dim, informational only.
+              const checklist = buildComputerTaskChecklistCard(taskState);
+              if (!checklist || checklist.surfaceChanges.length === 0) return null;
+              return (
+                <View style={{ marginTop: 4, gap: 2 }}>
+                  <Text style={[styles.label, { fontSize: 9 }]}>SURFACE CHANGES</Text>
+                  {checklist.surfaceChanges.map((line, index) => (
+                    <Text key={`surface_change_${index}`} style={[styles.statusMeta, { color: MUTED }]} numberOfLines={2}>
+                      {line}
+                    </Text>
+                  ))}
+                </View>
+              );
+            })()}
+            {unmetBuildout ? (
+              // L3 follow-up: an auto-proposed capability buildout could not
+              // be filed (no connected agent / run anchor). Informational
+              // only — the Office pointer is the action; no buttons here.
+              <View style={{ marginTop: 4, gap: 2 }}>
+                <Text style={[styles.label, { fontSize: 9 }]}>CAPABILITY GAP</Text>
+                <Text style={[styles.statusMeta, { color: MUTED }]} numberOfLines={3}>
+                  {`⚒ Capability gap: ${unmetBuildout.reason} — connect a code agent in Office to build this`}
+                  {unmetBuildout.atIso ? ` (${unmetBuildout.atIso.slice(0, 10)})` : ''}
+                </Text>
+              </View>
+            ) : null}
             {taskState.phase === 'completed' ? (
               <View style={{ marginTop: 8 }}>
+                {recipeHealth && recipeHealth.status !== 'healthy' ? (
+                  // L2 lifecycle: health from recorded run outcomes. Failing
+                  // is the deprecation signal (finding 2) — review, never
+                  // auto-retire. Stale just nudges a freshness check.
+                  <Text
+                    style={[styles.statusMeta, { marginBottom: 6, color: recipeHealth.status === 'failing' ? '#f87171' : MUTED }]}
+                    numberOfLines={2}
+                  >
+                    {recipeHealth.status === 'failing'
+                      ? `⚠ This recipe is failing (${recipeHealth.reason}) — review it before saving or reusing.`
+                      : `This recipe looks stale (${recipeHealth.reason}) — re-verify the steps before reusing.`}
+                  </Text>
+                ) : null}
                 {recipeStatus === 'filed' || recipeStatus === 'error' ? (
                   <Text style={[styles.statusMeta, recipeStatus === 'error' ? { color: '#f87171' } : { color: '#4ade80' }]} numberOfLines={2}>
                     {recipeMessage}
@@ -301,7 +537,12 @@ export default function ComputerUseConsole({
                   <Pressable
                     disabled={recipeStatus === 'filing'}
                     onPress={() => {
-                      const draft = buildComputerTaskRecipeDraft(taskState);
+                      // L2 hybrid recipes: pass the persisted action trace
+                      // (set by the computerTaskRuntime producer — another
+                      // agent lands that) so the draft embeds the verified
+                      // deterministic-replay steps + parameter slots. Null
+                      // trace → plain procedural recipe, unchanged.
+                      const draft = buildComputerTaskRecipeDraft(taskState, taskState.actionTrace ?? null);
                       if (!draft) return;
                       setRecipeStatus('filing');
                       void fileComputerTaskRecipeProposal({
@@ -397,6 +638,33 @@ export default function ComputerUseConsole({
                     </Pressable>
                   </View>
                 )}
+                {stickyOffer ? (
+                  stickyOfferStatus === 'granted' ? (
+                    <Text style={[styles.statusMeta, { marginTop: 6, color: '#4ade80' }]} numberOfLines={2}>
+                      Standing grant added for {stickyOffer.scopeKey} — review or revoke it in PERMISSIONS below.
+                    </Text>
+                  ) : (
+                    <Pressable
+                      disabled={stickyOfferStatus === 'granting'}
+                      onPress={handleAcceptStickyOffer}
+                      style={{
+                        alignSelf: 'flex-start',
+                        marginTop: 8,
+                        paddingHorizontal: 12,
+                        paddingVertical: 7,
+                        borderRadius: 8,
+                        borderWidth: 1,
+                        borderColor: accentColor,
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel={stickyOffer.label}
+                    >
+                      <Text style={{ color: accentColor, fontSize: 12, fontWeight: '700' }}>
+                        {stickyOfferStatus === 'granting' ? 'Saving grant…' : stickyOffer.label}
+                      </Text>
+                    </Pressable>
+                  )
+                ) : null}
               </View>
             ) : null}
             {taskState.grounding ? (
@@ -636,7 +904,7 @@ export default function ComputerUseConsole({
         {/* ── Template chips (curated) ──────────────────────────────────── */}
         <View style={styles.section}>
           <Text style={styles.label}>TEMPLATES</Text>
-          <ScrollView style={{ maxHeight: 180 }}>
+          <ScrollView style={{ maxHeight: 340 }}>
             {categorized.map(([cat, items]) => (
               <View key={cat} style={{ marginBottom: 10 }}>
                 <Text style={styles.categoryLabel}>{cat.toUpperCase()}</Text>
@@ -667,7 +935,7 @@ export default function ComputerUseConsole({
             <Text style={styles.label}>
               SAVED ({savedTemplates.length})
             </Text>
-            <ScrollView style={{ maxHeight: 110 }}>
+            <ScrollView style={{ maxHeight: 220 }}>
               {savedTemplates.slice(0, 8).map((s) => (
                 <View key={s.id} style={styles.savedRow}>
                   <Pressable
@@ -692,6 +960,274 @@ export default function ComputerUseConsole({
             </ScrollView>
           </View>
         )}
+
+        {/* ── Permissions: sticky "always allow" scopes (T7 UX) ─────────── */}
+        <View style={styles.section}>
+          <Text style={styles.label}>
+            PERMISSIONS{stickyScopes.length > 0 ? ` (${stickyScopes.length})` : ''}
+          </Text>
+          <Text style={styles.statusMeta}>
+            Standing grants auto-approve non-destructive actions on a site or
+            app. Pay, delete, login, and account-grant steps always ask.
+          </Text>
+          <ScrollView style={{ maxHeight: 320 }}>
+            {stickyScopes.map((scope) => (
+              <View key={scope.id} style={styles.savedRow}>
+                <View style={styles.savedTextWrap}>
+                  <Text numberOfLines={1} style={styles.savedText}>
+                    <Text style={{ fontWeight: '700' }}>{scope.scopeKey}</Text>
+                    {'  '}
+                    <Text style={{ color: TEXT_DIM }}>[{scope.scopeKind}] {scope.allowedCategories.join(', ')}</Text>
+                  </Text>
+                  <Text numberOfLines={1} style={[styles.statusMeta, { fontSize: 11 }]}>
+                    {scope.expiresAtIso ? `expires ${scope.expiresAtIso.slice(0, 10)}` : 'no expiry'}
+                    {` · used ${scope.useCount}×`}
+                    {scope.lastUsedAtIso ? ` · last ${scope.lastUsedAtIso.slice(0, 10)}` : ''}
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={() => handleRevokeStickyScope(scope.id)}
+                  style={[styles.ghostBtn, { paddingHorizontal: 10, paddingVertical: 6 }]}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Revoke standing grant for ${scope.scopeKey}`}
+                >
+                  <Text style={[styles.ghostBtnText, { color: '#f87171', fontSize: 10 }]}>REVOKE</Text>
+                </Pressable>
+              </View>
+            ))}
+            {stickyScopes.length === 0 ? (
+              <Text style={[styles.statusMeta, { paddingVertical: 4 }]}>
+                No standing grants. Add one below, or accept the offer after a
+                completed task that needed approval.
+              </Text>
+            ) : null}
+            {stickyHistory.slice(0, 10).map((scope) => (
+              <View key={`hist_${scope.id}_${scope.revoked?.atIso || scope.expiresAtIso || ''}`} style={[styles.savedRow, { opacity: 0.45 }]}>
+                <View style={styles.savedTextWrap}>
+                  <Text numberOfLines={1} style={styles.savedText}>
+                    {scope.scopeKey}
+                    {'  '}
+                    <Text style={{ color: TEXT_DIM }}>
+                      [{scope.scopeKind}] {scope.allowedCategories.join(', ')} · {scope.revoked ? `revoked ${scope.revoked.atIso.slice(0, 10)}` : isStickyScopeExpired(scope) ? 'expired' : 'inactive'}
+                    </Text>
+                  </Text>
+                </View>
+              </View>
+            ))}
+          </ScrollView>
+          {/* Add form: site/app + non-floor category checkboxes. Floor
+              categories (pay/delete/login/grant) are not offered, ever. */}
+          <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
+            {(['site', 'app'] as StickyAllowScopeKind[]).map((kind) => (
+              <Pressable
+                key={kind}
+                onPress={() => setPermKindDraft(kind)}
+                style={[styles.chip, { borderColor: permKindDraft === kind ? accentColor : CARD_BORDER }]}
+              >
+                <Text style={[styles.chipText, permKindDraft === kind ? { color: accentColor, fontWeight: '700' } : null]}>
+                  {kind.toUpperCase()}
+                </Text>
+              </Pressable>
+            ))}
+            <TextInput
+              value={permKeyDraft}
+              onChangeText={setPermKeyDraft}
+              placeholder={permKindDraft === 'site' ? 'acme.com' : 'app name (e.g. notion)'}
+              placeholderTextColor={MUTED}
+              style={[styles.input, { flex: 1, minHeight: 34, maxHeight: 34, paddingVertical: 6, paddingHorizontal: 10 }]}
+            />
+          </View>
+          <View style={styles.chipRow}>
+            {STICKY_GRANTABLE_CATEGORIES.map((category) => (
+              <Pressable
+                key={category}
+                onPress={() => togglePermCategory(category)}
+                style={[styles.chip, { borderColor: permCategoriesDraft.includes(category) ? accentColor : CARD_BORDER }]}
+              >
+                <Text style={[styles.chipText, permCategoriesDraft.includes(category) ? { color: accentColor, fontWeight: '700' } : null]}>
+                  {permCategoriesDraft.includes(category) ? '✓ ' : ''}{category}
+                </Text>
+              </Pressable>
+            ))}
+            <Pressable
+              onPress={handleGrantStickyScope}
+              disabled={!permKeyDraft.trim() || permCategoriesDraft.length === 0}
+              style={[
+                styles.fillBtn,
+                { paddingVertical: 6, backgroundColor: permKeyDraft.trim() && permCategoriesDraft.length > 0 ? accentColor : '#1e293b' },
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel="Add standing grant"
+            >
+              <Text style={[styles.fillBtnText, { color: permKeyDraft.trim() && permCategoriesDraft.length > 0 ? '#020617' : MUTED }]}>
+                GRANT 30D
+              </Text>
+            </Pressable>
+          </View>
+          {permMessage ? (
+            <Text style={[styles.statusMeta, { color: permMessage.startsWith('Standing grant added') ? '#4ade80' : '#f87171' }]} numberOfLines={2}>
+              {permMessage}
+            </Text>
+          ) : null}
+        </View>
+
+        {/* ── Queue: parallel browser-task fan-out (opt-in) ─────────────── */}
+        {(taskState || queue.slots.length > 0 || queue.pending.length > 0) ? (
+          <View style={styles.section}>
+            <Text style={styles.label}>
+              QUEUE
+              {queue.pending.length > 0 || queue.slots.length > 0
+                ? ` (${queue.slots.length} slot${queue.slots.length === 1 ? '' : 's'} · ${queue.pending.length} waiting)`
+                : ''}
+            </Text>
+            <Text style={styles.statusMeta}>
+              Line up additional browser tasks while one is running (max {queue.maxConcurrent} in
+              parallel). Every task still pauses for approval before anything risky.
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+              <Pressable
+                onPress={() => queue.setAutoStartEnabled(!queue.autoStartEnabled)}
+                style={[styles.chip, { borderColor: queue.autoStartEnabled ? accentColor : CARD_BORDER }]}
+                accessibilityRole="switch"
+                accessibilityState={{ checked: queue.autoStartEnabled }}
+                accessibilityLabel="Auto-start queued tasks when a slot frees"
+              >
+                <Text style={[styles.chipText, queue.autoStartEnabled ? { color: accentColor, fontWeight: '700' } : null]}>
+                  {queue.autoStartEnabled ? '✓ ' : ''}AUTO-START
+                </Text>
+              </Pressable>
+              <Text style={[styles.statusMeta, { flex: 1, fontSize: 11 }]} numberOfLines={2}>
+                {queue.autoStartEnabled
+                  ? 'On — queued tasks start themselves when a slot frees.'
+                  : 'Off (default) — queued tasks wait until you press START.'}
+              </Text>
+            </View>
+            <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+              <TextInput
+                value={queueDraft}
+                onChangeText={setQueueDraft}
+                placeholder="Queue the next task…"
+                placeholderTextColor={MUTED}
+                style={[styles.input, { flex: 1, minHeight: 36, maxHeight: 36, paddingVertical: 7, paddingHorizontal: 10 }]}
+                onSubmitEditing={handleEnqueue}
+              />
+              <Pressable
+                onPress={handleEnqueue}
+                disabled={!queueDraft.trim()}
+                style={[styles.fillBtn, { paddingVertical: 8, backgroundColor: queueDraft.trim() ? accentColor : '#1e293b' }]}
+                accessibilityRole="button"
+                accessibilityLabel="Add task to the queue"
+              >
+                <Text style={[styles.fillBtnText, { color: queueDraft.trim() ? '#020617' : MUTED }]}>QUEUE</Text>
+              </Pressable>
+            </View>
+            {queueNotice ? (
+              <Text style={[styles.statusMeta, { color: queueNotice.startsWith('Queued') ? '#4ade80' : '#f87171' }]} numberOfLines={2}>
+                {queueNotice}
+              </Text>
+            ) : null}
+            {queue.pending.map((item) => (
+              <View key={item.id} style={styles.savedRow}>
+                <Text style={[styles.groundingPill, { borderColor: CARD_BORDER, color: TEXT_DIM }]}>WAITING</Text>
+                <Text numberOfLines={2} style={[styles.savedText, { flex: 1 }]}>{item.task}</Text>
+                <Pressable
+                  onPress={() => handleStartPending(item.id)}
+                  style={[styles.ghostBtn, { paddingHorizontal: 10, paddingVertical: 6 }]}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Start queued task: ${item.task}`}
+                >
+                  <Text style={[styles.ghostBtnText, { color: accentColor, fontSize: 10 }]}>START</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => queue.removePending(item.id)}
+                  style={styles.savedDeleteBtn}
+                  accessibilityRole="button"
+                  accessibilityLabel="Remove queued task"
+                >
+                  <Text style={styles.savedDeleteText}>×</Text>
+                </Pressable>
+              </View>
+            ))}
+            {queue.slots.map((slot) => {
+              const status = slot.state.pendingConfirmation
+                ? { label: 'NEEDS APPROVAL', color: '#e8b339' }
+                : slot.state.status === 'running'
+                  ? { label: 'RUNNING', color: accentColor }
+                  : slot.state.status === 'starting'
+                    ? { label: 'STARTING', color: TEXT_DIM }
+                    : slot.state.status === 'done'
+                      ? { label: 'DONE', color: '#4ade80' }
+                      : { label: 'ERROR', color: '#f87171' };
+              const active = slot.state.status === 'running' || slot.state.status === 'starting';
+              return (
+                <View key={slot.id} style={[styles.groundingBox, { marginTop: 2 }]}>
+                  <View style={styles.statusRow}>
+                    <Text numberOfLines={2} style={[styles.savedText, { flex: 1, fontWeight: '600' }]}>
+                      {slot.state.task}
+                    </Text>
+                    <Text style={[styles.groundingPill, { borderColor: `${status.color}66`, color: status.color }]}>
+                      {status.label}
+                    </Text>
+                  </View>
+                  {slot.state.pendingConfirmation ? (
+                    <View style={{ gap: 4 }}>
+                      <Text style={[styles.statusMeta, { color: '#e8b339' }]} numberOfLines={3}>
+                        {slot.state.pendingConfirmation.question}
+                      </Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                        {(slot.state.pendingConfirmation.options.length > 0
+                          ? slot.state.pendingConfirmation.options
+                          : ['Yes, continue', 'No, stop']
+                        ).slice(0, 3).map((option) => (
+                          <Pressable
+                            key={option}
+                            onPress={() => handleQueueConfirmation(slot.state.pendingConfirmation?.id || null, option)}
+                            style={[styles.chip, { borderColor: '#e8b33966' }]}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Answer: ${option}`}
+                          >
+                            <Text style={[styles.chipText, { color: '#e8b339' }]}>{option}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </View>
+                  ) : null}
+                  {slot.state.liveUrl && Platform.OS === 'web' ? (
+                    <Pressable
+                      onPress={() => { try { window.open(slot.state.liveUrl!, '_blank', 'noopener'); } catch {} }}
+                      accessibilityRole="link"
+                      accessibilityLabel="Open live browser view"
+                    >
+                      <Text style={[styles.statusMeta, { color: accentColor }]} numberOfLines={1}>
+                        Watch live ↗
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                  {slot.state.result?.summary ? (
+                    <Text style={styles.statusMeta} numberOfLines={3}>{slot.state.result.summary}</Text>
+                  ) : null}
+                  {slot.state.errorMessage ? (
+                    <Text style={styles.statusBlockers} numberOfLines={2}>{slot.state.errorMessage}</Text>
+                  ) : null}
+                  <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 6 }}>
+                    <Pressable
+                      onPress={() => (active ? queue.cancel(slot.id) : queue.dismiss(slot.id))}
+                      style={[styles.ghostBtn, { paddingHorizontal: 10, paddingVertical: 5 }]}
+                      accessibilityRole="button"
+                      accessibilityLabel={active ? 'Cancel this task' : 'Dismiss this task card'}
+                    >
+                      <Text style={[styles.ghostBtnText, { color: active ? '#f87171' : TEXT_DIM, fontSize: 10 }]}>
+                        {active ? 'CANCEL' : 'DISMISS'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        ) : null}
+
+        </ScrollView>
 
         {/* ── Footer ────────────────────────────────────────────────────── */}
         <View style={styles.footer}>
@@ -752,9 +1288,13 @@ const styles = StyleSheet.create({
     backgroundColor: `${CARD_BG}f2`,
     borderWidth: 1,
     borderRadius: 14,
-    width: '100%' as any,
-    maxWidth: 620,
-    maxHeight: '92vh' as any,
+    // Near-full-screen: the console carries enough sections (status, queue,
+    // permissions, templates, recipes) that a 620px card clipped its bottom.
+    // Header/footer are fixed; the body scrolls (styles.body below).
+    width: '96%' as any,
+    maxWidth: 1100,
+    height: Platform.OS === 'web' ? ('94vh' as any) : ('94%' as any),
+    maxHeight: Platform.OS === 'web' ? ('94vh' as any) : ('94%' as any),
     padding: 18,
     gap: 14,
     ...(Platform.OS === 'web'
@@ -763,6 +1303,17 @@ const styles = StyleSheet.create({
             '0 24px 70px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.02) inset',
         } as any)
       : {}),
+  },
+  // The scrollable middle of the card. minHeight 0 is required on web so the
+  // flex child actually shrinks below content height and scrolls instead of
+  // pushing the footer off-screen.
+  body: {
+    flex: 1,
+    minHeight: 0 as any,
+  },
+  bodyContent: {
+    gap: 14,
+    paddingBottom: 4,
   },
   header: {
     flexDirection: 'row',

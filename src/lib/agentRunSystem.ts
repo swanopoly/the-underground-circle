@@ -250,14 +250,19 @@ export async function appendRunToolEvent(opts: {
   circleId: string;
   event: {
     tool: string;
-    status: 'planned' | 'running' | 'passed' | 'failed' | 'manual_required' | 'blocked';
+    status: 'planned' | 'running' | 'passed' | 'failed' | 'manual_required' | 'blocked' | 'not_applicable';
     summary: string;
     command?: string;
     metadata?: Record<string, unknown>;
   };
 }): Promise<boolean> {
   const stepIndex = await getNextRunStepIndex(opts.runId);
-  const stepStatus = mapLegacyToolEventToLedgerStatus(opts.event.status).rowStatus;
+  // O5: not_applicable is a terminal "nothing to run" state — recorded as a
+  // skipped step but kept out of the typed ledger event stream below, whose
+  // LegacyToolEventStatus union (and downstream event types) doesn't carry it.
+  const stepStatus = opts.event.status === 'not_applicable'
+    ? 'skipped'
+    : mapLegacyToolEventToLedgerStatus(opts.event.status).rowStatus;
   const added = await addStep({
     runId: opts.runId,
     circleId: opts.circleId,
@@ -270,7 +275,7 @@ export async function appendRunToolEvent(opts: {
     status: stepStatus,
     metadata: opts.event.metadata,
   });
-  if (added) {
+  if (added && opts.event.status !== 'not_applicable') {
     const metadata = opts.event.metadata || {};
     void persistAgentRunToolEvent({
       runId: opts.runId,
@@ -279,7 +284,7 @@ export async function appendRunToolEvent(opts: {
       scenarioId: typeof metadata.scenarioId === 'string' ? metadata.scenarioId : null,
       surface: typeof metadata.surface === 'string' ? metadata.surface : null,
       risk: typeof metadata.risk === 'string' ? metadata.risk : null,
-      event: opts.event,
+      event: { ...opts.event, status: opts.event.status },
     });
   }
   return !!added;
@@ -545,6 +550,172 @@ export async function getActiveRuns(circleId: string): Promise<AgentRun[]> {
     .order('created_at', { ascending: false });
   if (error || !data) return [];
   return data.map(mapRun);
+}
+
+/**
+ * Live-runs query for the Office ops board: every "building" run in the
+ * circle plus runs that completed/failed within the recent window, newest
+ * first. Selects only the columns the board model (officeOpsBoard.ts) needs.
+ */
+const LIVE_RUN_BOARD_FIELDS =
+  'id,circle_id,title,status,surface,parent_run_id,delegated_to,started_at,created_at,completed_at,input_tokens,output_tokens,cached_tokens,estimated_cost,metadata';
+
+export async function listCircleLiveRuns(
+  circleId: string,
+  opts?: { limit?: number; recentFinishedMs?: number },
+): Promise<AgentRun[]> {
+  const recentFinishedMs = opts?.recentFinishedMs ?? 10 * 60_000;
+  const cutoffIso = new Date(Date.now() - recentFinishedMs).toISOString();
+  const { data, error } = await supabase
+    .from('agent_runs')
+    .select(LIVE_RUN_BOARD_FIELDS)
+    .eq('circle_id', circleId)
+    .or(
+      `status.in.(queued,planning,running,waiting_approval,paused),and(status.in.(completed,failed),completed_at.gte.${cutoffIso})`,
+    )
+    .order('created_at', { ascending: false })
+    .limit(opts?.limit || 40);
+  if (error || !data) {
+    if (error) console.error('[AgentRunSystem] listCircleLiveRuns error:', error);
+    return [];
+  }
+  return data.map(mapRun);
+}
+
+// ── 6b. L1: Desktop action-trace retrieval (learning loop) ──────────────────
+// Client-side twin of the browser guided-replay query (D7c) in
+// `supabase/functions/computer-use-agent/index.ts` (~lines 338-360): completed
+// runs only, 45-day window, newest first, EXACT normalized-task match, first
+// match wins. Traces are written by `computerTaskRuntime` into
+// `agent_runs.metadata.desktopActionTrace` on successful desktop/app/hybrid
+// runs. Additive helpers — no schema change.
+
+/** Shape persisted at `agent_runs.metadata.desktopActionTrace` (v1). */
+export interface DesktopRunActionTrace {
+  v: 1;
+  normalizedTask: string;
+  capturedAtIso: string;
+  actions: Array<{ tool: string; input: unknown }>;
+}
+
+function asDesktopRunActionTrace(candidate: unknown, normalizedTask: string): DesktopRunActionTrace | null {
+  if (!candidate || typeof candidate !== 'object') return null;
+  const trace = candidate as DesktopRunActionTrace;
+  if (trace.v !== 1) return null;
+  if (typeof trace.normalizedTask !== 'string' || trace.normalizedTask.length === 0) return null;
+  // EXACT match only — no fuzzy retrieval (conservative per verified finding
+  // 5: self-experience retrieval can regress strong models).
+  if (trace.normalizedTask !== normalizedTask) return null;
+  if (!Array.isArray(trace.actions) || trace.actions.length === 0) return null;
+  return trace;
+}
+
+/**
+ * Find the most recent successful desktop action trace in this circle whose
+ * normalized task text EXACTLY matches `normalizedTask` (normalize with
+ * `normalizeDesktopTaskText` from computerTaskRuntime before calling).
+ * jsonb-path filtering narrows the fetch; the exact match itself is applied
+ * client-side over the recent window. Tolerant of errors → null.
+ */
+export async function findRecentDesktopActionTrace(
+  circleId: string,
+  normalizedTask: string,
+  opts?: { windowDays?: number; limit?: number },
+): Promise<DesktopRunActionTrace | null> {
+  if (!circleId || !normalizedTask) return null;
+  const windowDays = opts?.windowDays ?? 45;
+  const sinceIso = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString();
+  try {
+    const { data, error } = await supabase
+      .from('agent_runs')
+      .select('id, created_at, metadata')
+      .eq('circle_id', circleId)
+      .eq('status', 'completed')
+      .gte('created_at', sinceIso)
+      .not('metadata->desktopActionTrace', 'is', null)
+      .order('created_at', { ascending: false })
+      .limit(opts?.limit ?? 20);
+    if (error || !data) return null;
+    for (const row of data) {
+      const trace = asDesktopRunActionTrace((row as any)?.metadata?.desktopActionTrace, normalizedTask);
+      if (trace) return trace; // newest-first → newest successful trace wins
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Event kinds that carry full tool inputs in `agent_run_events.payload`:
+// `tool_call_start` (server-dispatched + typed-core persisted runs) and
+// `client_tool_call_pending` (swanbot-v2 client-delegated desktop tools).
+const DESKTOP_TRACEABLE_RUN_EVENT_KINDS = ['tool_call_start', 'client_tool_call_pending'];
+
+async function listRunActionEntriesForTrace(runId: string): Promise<Array<{ tool: string; input: unknown }>> {
+  const { data, error } = await supabase
+    .from('agent_run_events')
+    .select('kind, payload, at')
+    .eq('run_id', runId)
+    .in('kind', DESKTOP_TRACEABLE_RUN_EVENT_KINDS)
+    .order('at', { ascending: true })
+    .limit(80);
+  if (error || !data) return [];
+  return data
+    .map((row: any) => ({
+      tool: String(row?.payload?.tool || '').trim(),
+      input: row?.payload?.input,
+    }))
+    .filter((entry) => entry.tool.length > 0);
+}
+
+/**
+ * Harvest the raw `{tool, input}` action stream for a finished desktop/app
+ * task so computerTaskRuntime can redact/bound/persist it as a trace.
+ *
+ * Two sources, in order:
+ *   1. `agent_run_events` for the wrapper run id itself (typed-core /
+ *      createPersistedRun paths write `tool_call_start` with input there).
+ *   2. The swanbot-v2 sibling run: the chat computer-task path executes its
+ *      desktop tools through the `swanbot-v2-ai` continuation loop, which
+ *      persists tool inputs under ITS OWN `agent_runs` row
+ *      (metadata.version = 'swanbot-v2-ai'), not the wrapper run created by
+ *      `executeAgentRun`. Find the newest sibling created inside the task
+ *      window for the same circle/user and harvest its events.
+ *
+ * Returns RAW inputs — callers must redact before persisting or injecting.
+ * Tolerant of errors → [].
+ */
+export async function harvestDesktopRunActionEntries(args: {
+  runId?: string | null;
+  circleId?: string | null;
+  userId?: string | null;
+  sinceIso?: string | null;
+}): Promise<Array<{ tool: string; input: unknown }>> {
+  try {
+    if (args.runId) {
+      const direct = await listRunActionEntriesForTrace(args.runId);
+      if (direct.length > 0) return direct;
+    }
+    if (!args.circleId || !args.sinceIso) return [];
+    let query = supabase
+      .from('agent_runs')
+      .select('id, created_at')
+      .eq('circle_id', args.circleId)
+      .gte('created_at', args.sinceIso)
+      .eq('metadata->>version', 'swanbot-v2-ai')
+      .order('created_at', { ascending: false })
+      .limit(3);
+    if (args.userId) query = query.eq('user_id', args.userId);
+    const { data, error } = await query;
+    if (error || !data) return [];
+    for (const row of data) {
+      const entries = await listRunActionEntriesForTrace(String((row as any).id));
+      if (entries.length > 0) return entries;
+    }
+    return [];
+  } catch {
+    return [];
+  }
 }
 
 export async function getRunSteps(runId: string): Promise<RunStep[]> {
@@ -961,6 +1132,53 @@ export function subscribeToApprovals(circleId: string, callback: (approval: RunA
       callback(mapApproval(payload.new));
     })
     .subscribe();
+}
+
+/**
+ * Subscribe to INSERT/UPDATE on agent_runs for a circle (ops-board live
+ * tracking). The callback is debounced so bursty tool-loop updates trigger
+ * one refresh; it receives the most recent changed run (callers typically
+ * just refetch via listCircleLiveRuns). Returns an unsubscribe function.
+ */
+export function subscribeToCircleRuns(
+  circleId: string,
+  callback: (latest: AgentRun | null) => void,
+  opts?: { debounceMs?: number },
+): () => void {
+  const debounceMs = opts?.debounceMs ?? 400;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let latest: AgentRun | null = null;
+
+  const handleChange = (payload: { new: unknown }) => {
+    try {
+      latest = payload?.new ? mapRun(payload.new) : latest;
+    } catch {}
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      try {
+        callback(latest);
+      } catch (err) {
+        console.error('[AgentRunSystem] subscribeToCircleRuns callback error:', err);
+      }
+    }, debounceMs);
+  };
+
+  const channel = supabase
+    .channel(`circle-runs:${circleId}`)
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'agent_runs', filter: `circle_id=eq.${circleId}` }, handleChange)
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'agent_runs', filter: `circle_id=eq.${circleId}` }, handleChange)
+    .subscribe();
+
+  return () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    try {
+      supabase.removeChannel(channel);
+    } catch {}
+  };
 }
 
 // ── 9. High-Level Orchestrated Run ──────────────────────────────────────────

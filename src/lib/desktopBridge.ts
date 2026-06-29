@@ -98,10 +98,112 @@ function writeToken(value: string) {
   }
 }
 
+// ── Secondary token copy (gap #9: survive a localStorage clear) ───────────
+//
+// localStorage is the fast/sync primary, but "Clear site data" wipes it and
+// forces a re-pair. The secondary copy lives where that clear does not
+// reach by accident:
+//   - web: IndexedDB (own tiny DB), value AES-GCM-encrypted via
+//     `webCrypto.encryptString` when available (plaintext fallback —
+//     same posture as `localSecrets`).
+//   - native: `localSecrets` (expo-secure-store keychain/keystore).
+// Every helper is silent — storage problems must never break bridge calls.
+
+const SECONDARY_DB_NAME = 'uc_desktop_bridge_v1';
+const SECONDARY_DB_STORE = 'kv';
+const SECONDARY_TOKEN_KEY = 'pair_token_v1';
+const SECONDARY_SECRET_NAMESPACE = 'desktop_bridge';
+const SECONDARY_SECRET_ID = 'pair_token';
+
+function openSecondaryDb(): Promise<IDBDatabase | null> {
+  return new Promise((resolve) => {
+    try {
+      if (typeof indexedDB === 'undefined') { resolve(null); return; }
+      const req = indexedDB.open(SECONDARY_DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(SECONDARY_DB_STORE)) {
+          db.createObjectStore(SECONDARY_DB_STORE);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch { resolve(null); }
+  });
+}
+
+function secondaryIdbGet(db: IDBDatabase, key: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(SECONDARY_DB_STORE, 'readonly');
+      const req = tx.objectStore(SECONDARY_DB_STORE).get(key);
+      req.onsuccess = () => resolve(typeof req.result === 'string' ? req.result : null);
+      req.onerror = () => resolve(null);
+    } catch { resolve(null); }
+  });
+}
+
+function secondaryIdbPut(db: IDBDatabase, key: string, value: string | null): Promise<void> {
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(SECONDARY_DB_STORE, 'readwrite');
+      const store = tx.objectStore(SECONDARY_DB_STORE);
+      const req = value === null ? store.delete(key) : store.put(value, key);
+      req.onsuccess = () => resolve();
+      req.onerror = () => resolve();
+    } catch { resolve(); }
+  });
+}
+
+async function writeSecondaryToken(value: string | null): Promise<void> {
+  try {
+    if (typeof indexedDB !== 'undefined') {
+      const db = await openSecondaryDb();
+      if (!db) return;
+      let stored = value;
+      if (value) {
+        try {
+          // Lazy import — webCrypto pulls in react-native; this module must
+          // stay loadable in dependency-light runtimes.
+          const { encryptString, isWebCryptoAvailable } = await import('./webCrypto');
+          if (isWebCryptoAvailable()) stored = (await encryptString(value)) || value;
+        } catch { /* plaintext fallback */ }
+      }
+      await secondaryIdbPut(db, SECONDARY_TOKEN_KEY, stored);
+      return;
+    }
+    // Native (no IndexedDB): OS keychain via localSecrets.
+    const { writeLocalSecret } = await import('./localSecrets');
+    await writeLocalSecret(SECONDARY_SECRET_NAMESPACE, SECONDARY_SECRET_ID, value || '');
+  } catch { /* silent — storage must never break bridge calls */ }
+}
+
+async function readSecondaryToken(): Promise<string | null> {
+  try {
+    if (typeof indexedDB !== 'undefined') {
+      const db = await openSecondaryDb();
+      if (!db) return null;
+      const raw = await secondaryIdbGet(db, SECONDARY_TOKEN_KEY);
+      if (!raw) return null;
+      try {
+        const { decryptString, isEncryptedBlob } = await import('./webCrypto');
+        if (isEncryptedBlob(raw)) return await decryptString(raw);
+      } catch { /* fall through to raw */ }
+      return raw;
+    }
+    const { readLocalSecret } = await import('./localSecrets');
+    const stored = await readLocalSecret(SECONDARY_SECRET_NAMESPACE, SECONDARY_SECRET_ID);
+    return stored || null;
+  } catch {
+    return null;
+  }
+}
+
 export function clearDesktopBridgeToken(): void {
   try {
     if (typeof localStorage !== 'undefined') localStorage.removeItem(TOKEN_KEY);
   } catch {}
+  void writeSecondaryToken(null);
 }
 
 /**
@@ -111,6 +213,17 @@ export function clearDesktopBridgeToken(): void {
 export function isDesktopBridgePaired(): boolean {
   const t = readToken();
   return !!t && t.length >= 32;
+}
+
+/**
+ * Returns the cached desktop-bridge token (synchronously, localStorage only)
+ * so credentialed callers like credentialService can attach the
+ * `X-UC-Desktop-Token` header. Returns null when not yet paired — callers
+ * should fall back to `ensureDesktopBridgePaired()` to auto-pair.
+ */
+export function getDesktopBridgeToken(): string | null {
+  const t = readToken();
+  return t && t.length >= 32 ? t : null;
 }
 
 /**
@@ -125,6 +238,13 @@ export async function ensureDesktopBridgePaired(): Promise<DesktopResult<{ token
   const cached = readToken();
   if (cached && cached.length >= 32) {
     return { ok: true, data: { token: cached, autoPaired: false } };
+  }
+  // Read-through fallback (gap #9): localStorage was cleared but the
+  // secondary copy survived — repopulate the primary and skip re-pairing.
+  const recovered = await readSecondaryToken();
+  if (recovered && recovered.length >= 32) {
+    writeToken(recovered);
+    return { ok: true, data: { token: recovered, autoPaired: false } };
   }
   const health = await getDesktopBridgeHealth();
   if (!health) {
@@ -164,6 +284,8 @@ export async function pairDesktopBridge(): Promise<DesktopResult<{ token: string
       return { ok: false, error: json.error || 'pairing response missing token', errorCode: 'unknown' };
     }
     writeToken(json.token);
+    // Dual-write: secondary copy survives a localStorage clear (gap #9).
+    void writeSecondaryToken(json.token);
     return { ok: true, data: { token: json.token } };
   } catch (err: any) {
     return { ok: false, error: err?.message || 'bridge unreachable', errorCode: 'bridge_offline' };
@@ -176,6 +298,103 @@ export async function listRunningApps(): Promise<DesktopResult<string[]>> {
   const r = await callBridge('GET', '/desktop/running-apps');
   if (!r.ok) return r as DesktopResult<string[]>;
   return { ok: true, data: ((r.data as any)?.apps as string[]) || [] };
+}
+
+// ─── Installed-application detection ──────────────────────────────────────
+//
+// Feeds task→app resolution ("is Photoshop actually installed?"). The
+// bridge already caches enumeration server-side for 5 minutes; the client
+// cache below saves the HTTP round-trip too, keyed by bridge base URL so a
+// bridge URL change never serves another machine's app list.
+
+export type InstalledAppEntry = { name: string; path?: string };
+
+export type InstalledAppsResult = {
+  apps: InstalledAppEntry[];
+  source: 'spotlight' | 'fs';
+  truncated: boolean;
+};
+
+const INSTALLED_APPS_CLIENT_CACHE_TTL_MS = 5 * 60 * 1000;
+const installedAppsClientCache = new Map<string, { ts: number; data: InstalledAppsResult }>();
+
+/** Test/diagnostic hook — drops the client-side installed-apps cache. */
+export function clearInstalledAppsClientCache(): void {
+  installedAppsClientCache.clear();
+}
+
+/**
+ * Lists applications installed on the local Mac (Spotlight when fast,
+ * standard app folders otherwise). Bounded at 400 entries, names deduped
+ * case-insensitively by the bridge. Cached client-side for 5 minutes.
+ */
+export async function listInstalledApps(): Promise<DesktopResult<InstalledAppsResult>> {
+  const base = getDesktopBridgeBaseUrl();
+  const cacheKey = base || 'no-bridge';
+  const cached = installedAppsClientCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < INSTALLED_APPS_CLIENT_CACHE_TTL_MS) {
+    return { ok: true, data: cached.data };
+  }
+  const r = await callBridge('GET', '/desktop/installed-apps');
+  if (!r.ok) return r as DesktopResult<InstalledAppsResult>;
+  const d = r.data as any;
+  const apps: InstalledAppEntry[] = (Array.isArray(d?.apps) ? d.apps : [])
+    .map((entry: any): InstalledAppEntry | null => {
+      const name = String(entry?.name || '').trim();
+      if (!name) return null;
+      const path = String(entry?.path || '').trim();
+      return path ? { name, path } : { name };
+    })
+    .filter((entry: InstalledAppEntry | null): entry is InstalledAppEntry => !!entry);
+  const data: InstalledAppsResult = {
+    apps,
+    source: d?.source === 'spotlight' ? 'spotlight' : 'fs',
+    truncated: d?.truncated === true,
+  };
+  installedAppsClientCache.set(cacheKey, { ts: Date.now(), data });
+  return { ok: true, data };
+}
+
+/**
+ * Silent-fail convenience for the model layer's `installedApps?: string[]`
+ * field: lowercased installed-app names, `[]` on any bridge/availability
+ * failure. Never throws.
+ */
+export async function listInstalledAppNamesLower(): Promise<string[]> {
+  try {
+    const r = await listInstalledApps();
+    if (!r.ok || !r.data) return [];
+    return r.data.apps.map((app) => app.name.toLowerCase());
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Cheap point query: is a single named app installed? Uses the bridge's
+ * `open -Ra` LaunchServices check plus its fuzzy bundle resolver, so
+ * "Photoshop" reports installed even when the bundle is
+ * "Adobe Photoshop 2025" (returned via `resolvedName`/`appPath`).
+ */
+export async function checkAppInstalled(
+  appName: string,
+): Promise<DesktopResult<{ appName: string; installed: boolean; resolvedName?: string; appPath?: string }>> {
+  const clean = String(appName || '').trim();
+  if (!isValidAppName(clean)) {
+    return { ok: false, error: 'Invalid app name.', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('GET', `/desktop/app-installed?name=${encodeURIComponent(clean)}`);
+  if (!r.ok) return r as DesktopResult<{ appName: string; installed: boolean; resolvedName?: string; appPath?: string }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      appName: String(d?.appName || clean),
+      installed: d?.installed === true,
+      ...(d?.resolvedName ? { resolvedName: String(d.resolvedName) } : {}),
+      ...(d?.appPath ? { appPath: String(d.appPath) } : {}),
+    },
+  };
 }
 
 export type DesktopBrowserTab = {
@@ -268,6 +487,108 @@ export async function clearClipboard(): Promise<DesktopResult<Record<string, nev
   const r = await callBridge('POST', '/desktop/clipboard_clear', {});
   if (!r.ok) return r as DesktopResult<Record<string, never>>;
   return { ok: true, data: {} };
+}
+
+/**
+ * Create a note in the macOS Notes app via a deterministic AppleScript recipe
+ * (`make new note with properties {body:…}`). The body text is passed to the
+ * bridge as an argv item, so arbitrary content never needs escaping. Notes
+ * launches itself if it isn't already open.
+ */
+export async function createNote(
+  args: { text: string; title?: string },
+): Promise<DesktopResult<{ title: string; chars: number }>> {
+  const text = typeof args?.text === 'string' ? args.text : '';
+  const title = typeof args?.title === 'string' ? args.title : '';
+  if (!text.trim() && !title.trim()) {
+    return { ok: false, error: 'text is required', errorCode: 'invalid_input' };
+  }
+  if (text.length > 20_000) {
+    return { ok: false, error: 'text too long (max 20000 chars)', errorCode: 'invalid_input' };
+  }
+  const r = await callBridge('POST', '/desktop/notes_create', { text, title });
+  if (!r.ok) return r as DesktopResult<{ title: string; chars: number }>;
+  return {
+    ok: true,
+    data: {
+      title: String((r.data as any)?.title || ''),
+      chars: Number((r.data as any)?.chars ?? text.length),
+    },
+  };
+}
+
+/**
+ * Run a small AppleScript program against any scriptable macOS app — the
+ * general "research how, then do it" surface. Pass `scriptLines` (osascript
+ * `-e` lines, typically an `on run argv` program) and `args` (read as
+ * `item N of argv`, so user content needs no escaping). Build these with
+ * `scriptableMacApps` recipes for common intents, or supply your own for an
+ * app the agent researched. Mutating — the runtime gates it behind approval.
+ */
+export async function runDesktopAppleScript(
+  program: { scriptLines: string[]; args?: string[] },
+): Promise<DesktopResult<{ output: string }>> {
+  const scriptLines = Array.isArray(program?.scriptLines)
+    ? program.scriptLines.map((l) => String(l)).filter((l) => l.length > 0)
+    : [];
+  if (scriptLines.length === 0) {
+    return { ok: false, error: 'scriptLines is required', errorCode: 'invalid_input' };
+  }
+  if (scriptLines.join('\n').length > 10_000) {
+    return { ok: false, error: 'script too long (max 10000 chars)', errorCode: 'invalid_input' };
+  }
+  const args = Array.isArray(program?.args) ? program.args.map((a) => String(a)).slice(0, 16) : [];
+  const r = await callBridge('POST', '/desktop/applescript', { scriptLines, args });
+  if (!r.ok) return r as DesktopResult<{ output: string }>;
+  return { ok: true, data: { output: String((r.data as any)?.output || '') } };
+}
+
+/**
+ * Convert an image to another format (PNG/JPG/TIFF/GIF/BMP/HEIC) deterministically
+ * via macOS sips — no GUI, no modal dialogs. This is the reliable path for
+ * "save/convert/export this image as PNG": it never depends on a desktop app's
+ * scriptable export (which stalls on color-profile / format dialogs). `source`
+ * may be a full path OR a bare name resolved across Desktop/Downloads/
+ * Documents/Pictures. Mutating (writes a new file next to the source), but
+ * bounded and non-clobbering so the runtime can use it as the fast path.
+ */
+export async function convertImage(
+  args: { source: string; format?: string },
+): Promise<DesktopResult<{ sourcePath: string; outputPath: string; format: string; bytes: number }>> {
+  const source = typeof args?.source === 'string' ? args.source.trim() : '';
+  if (!source) return { ok: false, error: 'source (image path or name) is required', errorCode: 'invalid_input' };
+  const grantRoots = inferConvertImageGrantRoots(source);
+  const grantHeaders = await ensureLocalFileGrantHeaders(grantRoots, 'write', `Convert local image ${source}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ sourcePath: string; outputPath: string; format: string; bytes: number }>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/convert_image', {
+    source,
+    format: typeof args?.format === 'string' ? args.format : 'png',
+  }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<{ sourcePath: string; outputPath: string; format: string; bytes: number }>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      sourcePath: String(d?.sourcePath || ''),
+      outputPath: String(d?.outputPath || ''),
+      format: String(d?.format || ''),
+      bytes: Number(d?.bytes ?? 0),
+    },
+  };
+}
+
+function inferConvertImageGrantRoots(source: string): string[] {
+  const value = String(source || '').trim();
+  if (
+    value.startsWith('/')
+    || value.startsWith('~/')
+    || value.startsWith('./')
+    || value.startsWith('../')
+    || /^[A-Za-z0-9 ._-]+\/.+/.test(value)
+  ) {
+    return [value];
+  }
+  return ['~/Desktop', '~/Downloads', '~/Documents', '~/Pictures'];
 }
 
 export type DesktopFileEntry = {
@@ -908,10 +1229,30 @@ export async function waitForApp(
 }
 
 /** Phase 1c — full-screen screenshot as a base64 PNG data URL. Lets
- *  the agent verify what happened after a destructive tool call. */
-export async function takeScreenshot(): Promise<DesktopResult<{ base64: string; mimeType: string; sizeBytes: number; dataUrl: string }>> {
-  const r = await callBridge('GET', '/desktop/screenshot');
-  if (!r.ok) return r as DesktopResult<{ base64: string; mimeType: string; sizeBytes: number; dataUrl: string }>;
+ *  the agent verify what happened after a destructive tool call.
+ *  E3 — pass `region: [x1, y1, x2, y2]` to crop the capture
+ *  (`screencapture -R`): re-observe a SMALL target at full resolution
+ *  (zoom) before a coordinate click instead of squinting at a scaled
+ *  full-screen frame. Bounds are validated against the screen size. */
+export async function takeScreenshot(args: {
+  region?: [number, number, number, number];
+} = {}): Promise<DesktopResult<{ base64: string; mimeType: string; sizeBytes: number; dataUrl: string; region?: [number, number, number, number] }>> {
+  type ScreenshotData = { base64: string; mimeType: string; sizeBytes: number; dataUrl: string; region?: [number, number, number, number] };
+  let path = '/desktop/screenshot';
+  if (args.region) {
+    const region = args.region;
+    const valid = Array.isArray(region)
+      && region.length === 4
+      && region.every((value) => Number.isInteger(value) && value >= 0)
+      && region[2] > region[0]
+      && region[3] > region[1];
+    if (!valid) {
+      return { ok: false, error: 'region must be [x1, y1, x2, y2] with non-negative integers, x2 > x1, y2 > y1', errorCode: 'invalid_input' };
+    }
+    path += `?region=${region.join(',')}`;
+  }
+  const r = await callBridge('GET', path);
+  if (!r.ok) return r as DesktopResult<ScreenshotData>;
   const d = r.data as any;
   const base64 = String(d?.base64 || '');
   const mimeType = String(d?.mimeType || 'image/png');
@@ -919,9 +1260,12 @@ export async function takeScreenshot(): Promise<DesktopResult<{ base64: string; 
   if (!base64) {
     return { ok: false, error: 'bridge returned empty screenshot payload', errorCode: 'unknown' };
   }
+  const regionEcho = Array.isArray(d?.region) && d.region.length === 4
+    ? (d.region.map((value: unknown) => Number(value)) as [number, number, number, number])
+    : undefined;
   return {
     ok: true,
-    data: { base64, mimeType, sizeBytes, dataUrl: `data:${mimeType};base64,${base64}` },
+    data: { base64, mimeType, sizeBytes, dataUrl: `data:${mimeType};base64,${base64}`, ...(regionEcho ? { region: regionEcho } : {}) },
   };
 }
 
@@ -1066,6 +1410,10 @@ export interface A11yNode {
   label?: string;                 // title / description / identifier
   value?: string;                 // state (text-field contents etc.)
   bbox?: [number, number, number, number]; // [x, y, w, h] in screen coords
+  /** E2 — SoM-style stable node index ([#1], [#2], …) assigned by the
+   *  bridge per tree read. clickElement/setElementValue accept
+   *  `elementIndex` resolved against the LAST tree read for the pid. */
+  index?: number;
   children?: A11yNode[];
 }
 
@@ -1074,6 +1422,18 @@ export interface A11yTreeResult {
   pid: number;                    // used for click_element path resolution
   budget_used: number;            // nodes walked before the maxNodes cap
   tree: A11yNode;
+  /** E2 — 'interactive' when the bridge returned a pruned targeting slice. */
+  slice?: 'interactive' | 'full';
+  /** E2 — the target string the slice was pruned around (sliced reads only). */
+  target?: string | null;
+  /** E2 — node counts before/after pruning (sliced reads only). */
+  totalNodes?: number;
+  slicedNodes?: number;
+  /** E2 — bridge-built slice marker, e.g. `[slice: 38 of 412 nodes — …]`.
+   *  Safe to surface OUTSIDE an untrusted-content fence. */
+  sliceMarker?: string | null;
+  /** E2 — generation of the bridge's index→path map for this read. */
+  indexGeneration?: number;
 }
 
 /**
@@ -1086,39 +1446,108 @@ export interface A11yTreeResult {
  * Returns `helper_missing` when the Swift helper binary isn't compiled
  * yet — callers should fall back to the vision path.
  */
+/** One retry, then fail closed with the screenshot fallback hint. */
+const A11Y_EMPTY_TREE_RETRY_DELAY_MS = 800;
+
+/**
+ * True when an a11y payload is effectively empty: no tree at all, or
+ * a bare root with no children and no label/value. Apps frequently
+ * report this transiently right after launch or a focus change while
+ * their AX server is still wiring up — which is why the read path
+ * retries once before declaring the tree empty.
+ */
+export function isEmptyA11yTreePayload(payload: unknown): boolean {
+  const tree = (payload as { tree?: A11yNode } | null | undefined)?.tree;
+  if (!tree) return true;
+  const hasChildren = Array.isArray(tree.children) && tree.children.length > 0;
+  const hasContent = !!(tree.label || tree.value);
+  return !hasChildren && !hasContent;
+}
+
+/** E2 — last index-map generation per pid (from the bridge's tree read).
+ *  Passed alongside `elementIndex` so the bridge can detect that the tree
+ *  was re-read since the index was issued (`index_stale`). */
+const lastA11yIndexGenerationByPid = new Map<number, number>();
+
 export async function readA11yTree(args: {
   appName?: string;
   maxDepth?: number;
   maxNodes?: number;
+  /** E2 — label/value the caller wants to act on. When set, the bridge
+   *  defaults to a pruned 'interactive' targeting slice (matches +
+   *  ancestors + ±2 siblings + actionable roles, capped ~120 nodes). */
+  target?: string;
+  /** E2 — 'interactive' forces a pruned slice; 'full' forces the legacy
+   *  full tree. Default: 'interactive' when `target` is set, else 'full'. */
+  slice?: 'interactive' | 'full';
 } = {}): Promise<DesktopResult<A11yTreeResult>> {
   const params = new URLSearchParams();
   if (args.appName) params.set('app', args.appName);
   if (typeof args.maxDepth === 'number') params.set('max_depth', String(args.maxDepth));
   if (typeof args.maxNodes === 'number') params.set('max_nodes', String(args.maxNodes));
+  if (args.target && args.target.trim()) params.set('target', args.target.trim().slice(0, 200));
+  if (args.slice === 'interactive' || args.slice === 'full') params.set('slice', args.slice);
   const qs = params.toString();
-  const r = await callBridge('GET', `/desktop/a11y_tree${qs ? `?${qs}` : ''}`);
-  if (!r.ok) {
-    // The bridge returns 503 when the helper binary isn't compiled
-    // yet. Normalise that into a specific error code so callers can
-    // fall back to screenshot grounding without guessing from text.
-    const looksMissing = /not compiled|xcode-select/i.test(r.error || '');
+  const pathWithQuery = `/desktop/a11y_tree${qs ? `?${qs}` : ''}`;
+
+  let d: any = null;
+  // Empty/stale-tree retry ladder (LOCAL, bounded): one retry after a
+  // short backoff — apps often need a beat after focus changes before
+  // their AX tree populates. No further escalation here; failure-time
+  // recovery stays owned by the existing last-resort surface.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, A11Y_EMPTY_TREE_RETRY_DELAY_MS));
+    }
+    const r = await callBridge('GET', pathWithQuery);
+    if (!r.ok) {
+      // The bridge returns 503 when the helper binary isn't compiled
+      // yet. Normalise that into a specific error code so callers can
+      // fall back to screenshot grounding without guessing from text.
+      const looksMissing = /not compiled|xcode-select/i.test(r.error || '');
+      return {
+        ok: false,
+        error: r.error || 'a11y tree unavailable',
+        errorCode: looksMissing ? 'helper_missing' : (r.errorCode || 'unknown'),
+      } as DesktopResult<A11yTreeResult>;
+    }
+    d = r.data as any;
+    if (!isEmptyA11yTreePayload(d)) break;
+    d = null;
+  }
+  if (!d) {
     return {
       ok: false,
-      error: r.error || 'a11y tree unavailable',
-      errorCode: looksMissing ? 'helper_missing' : (r.errorCode || 'unknown'),
-    } as DesktopResult<A11yTreeResult>;
+      error: `a11y_tree_empty: the accessibility tree for ${args.appName || 'the frontmost app'} came back empty twice (retried once after ${A11Y_EMPTY_TREE_RETRY_DELAY_MS}ms).`,
+      errorCode: 'a11y_tree_empty',
+      recoveryHint: 'The a11y path returned nothing for this app. Use the screenshot + coordinate path as the fallback: take a desktop screenshot, locate the target visually, then click at its coordinates.',
+    };
   }
-  const d = r.data as any;
-  if (!d?.tree) {
-    return { ok: false, error: 'bridge returned empty a11y payload', errorCode: 'unknown' };
+  const pid = Number(d.pid || 0);
+  const indexGeneration = Number(d.index_generation || 0) || undefined;
+  if (pid > 0 && indexGeneration) {
+    lastA11yIndexGenerationByPid.set(pid, indexGeneration);
+    // Bounded: this map only needs the handful of apps in a session.
+    if (lastA11yIndexGenerationByPid.size > 16) {
+      const firstKey = lastA11yIndexGenerationByPid.keys().next().value;
+      if (typeof firstKey === 'number') lastA11yIndexGenerationByPid.delete(firstKey);
+    }
   }
   return {
     ok: true,
     data: {
       app: String(d.app || args.appName || ''),
-      pid: Number(d.pid || 0),
+      pid,
       budget_used: Number(d.budget_used || 0),
       tree: d.tree as A11yNode,
+      ...(d.slice === 'interactive' ? {
+        slice: 'interactive' as const,
+        target: typeof d.target === 'string' ? d.target : null,
+        totalNodes: Number(d.total_nodes || 0) || undefined,
+        slicedNodes: Number(d.sliced_nodes || 0) || undefined,
+        sliceMarker: typeof d.slice_marker === 'string' ? d.slice_marker : null,
+      } : {}),
+      ...(indexGeneration ? { indexGeneration } : {}),
     },
   };
 }
@@ -1131,25 +1560,54 @@ export async function readA11yTree(args: {
  * synthesised CGEvent at the bbox centre for elements that don't
  * implement Press.
  */
-export async function clickElement(args: { pid: number; path: string }): Promise<DesktopResult<{ method: string }>> {
+export async function clickElement(args: {
+  pid: number;
+  path?: string;
+  /** E2 — SoM node index ([#N]) from the LAST tree read for this pid.
+   *  Resolved server-side; structured `index_stale` / `no_indexed_tree`
+   *  errors when the map is superseded or missing. Use `path` OR this. */
+  elementIndex?: number;
+  /** App name the tree was read from. When set, the bridge verifies
+   *  the app's CURRENT PID still matches `pid` before clicking and
+   *  returns `a11y_path_stale` on mismatch (app restarted → element
+   *  paths are invalid) instead of clicking a wrong element. */
+  appName?: string;
+}): Promise<DesktopResult<{ method: string }>> {
   if (!args.pid || args.pid <= 0) {
     return { ok: false, error: 'pid required', errorCode: 'invalid_input' };
   }
-  if (!args.path || !/^[0-9]+(\.[0-9]+)*$/.test(args.path)) {
-    return { ok: false, error: 'path must be a dotted integer sequence', errorCode: 'invalid_input' };
+  const hasIndex = typeof args.elementIndex === 'number' && Number.isInteger(args.elementIndex) && args.elementIndex > 0;
+  if (!hasIndex && (!args.path || !/^[0-9]+(\.[0-9]+)*$/.test(args.path))) {
+    return { ok: false, error: 'path must be a dotted integer sequence (or pass elementIndex from the last tree read)', errorCode: 'invalid_input' };
   }
-  const r = await callBridge('POST', '/desktop/click_element', { pid: args.pid, path: args.path });
+  const knownGeneration = hasIndex ? lastA11yIndexGenerationByPid.get(args.pid) : undefined;
+  const r = await callBridge('POST', '/desktop/click_element', {
+    pid: args.pid,
+    ...(args.path ? { path: args.path } : {}),
+    ...(hasIndex ? { elementIndex: args.elementIndex } : {}),
+    ...(hasIndex && knownGeneration ? { indexGeneration: knownGeneration } : {}),
+    ...(args.appName ? { expectApp: args.appName } : {}),
+  });
   if (!r.ok) return r as DesktopResult<{ method: string }>;
   const d = r.data as any;
   return { ok: true, data: { method: String(d?.method || 'unknown') } };
 }
 
-export async function setElementValue(args: { pid: number; path: string; text: string }): Promise<DesktopResult<{ method: string; chars: number }>> {
+export async function setElementValue(args: {
+  pid: number;
+  path?: string;
+  text: string;
+  /** E2 — SoM node index from the last tree read. See clickElement. */
+  elementIndex?: number;
+  /** See clickElement — PID-staleness guard before mutating. */
+  appName?: string;
+}): Promise<DesktopResult<{ method: string; chars: number }>> {
   if (!args.pid || args.pid <= 0) {
     return { ok: false, error: 'pid required', errorCode: 'invalid_input' };
   }
-  if (!args.path || !/^[0-9]+(\.[0-9]+)*$/.test(args.path)) {
-    return { ok: false, error: 'path must be a dotted integer sequence', errorCode: 'invalid_input' };
+  const hasIndex = typeof args.elementIndex === 'number' && Number.isInteger(args.elementIndex) && args.elementIndex > 0;
+  if (!hasIndex && (!args.path || !/^[0-9]+(\.[0-9]+)*$/.test(args.path))) {
+    return { ok: false, error: 'path must be a dotted integer sequence (or pass elementIndex from the last tree read)', errorCode: 'invalid_input' };
   }
   if (typeof args.text !== 'string' || args.text.length === 0) {
     return { ok: false, error: 'text must be a non-empty string', errorCode: 'invalid_input' };
@@ -1157,10 +1615,14 @@ export async function setElementValue(args: { pid: number; path: string; text: s
   if (args.text.length > 20_000) {
     return { ok: false, error: 'text too long (max 20000 chars)', errorCode: 'invalid_input' };
   }
+  const knownGeneration = hasIndex ? lastA11yIndexGenerationByPid.get(args.pid) : undefined;
   const r = await callBridge('POST', '/desktop/set_element_value', {
     pid: args.pid,
-    path: args.path,
+    ...(args.path ? { path: args.path } : {}),
     text: args.text,
+    ...(hasIndex ? { elementIndex: args.elementIndex } : {}),
+    ...(hasIndex && knownGeneration ? { indexGeneration: knownGeneration } : {}),
+    ...(args.appName ? { expectApp: args.appName } : {}),
   });
   if (!r.ok) return r as DesktopResult<{ method: string; chars: number }>;
   const d = r.data as any;
@@ -1175,7 +1637,11 @@ export async function setElementValue(args: { pid: number; path: string; text: s
  */
 export function renderA11yTree(node: A11yNode, depth = 0, out: string[] = []): string[] {
   const indent = '  '.repeat(depth);
-  const parts = [`${indent}[${node.id}]`, node.role];
+  // E2 — SoM index prefix ([#N]) when the bridge numbered this read.
+  // Distinct from the dotted-path [id] so neither is ambiguous.
+  const parts = typeof node.index === 'number' && node.index > 0
+    ? [`${indent}[#${node.index}]`, `[${node.id}]`, node.role]
+    : [`${indent}[${node.id}]`, node.role];
   if (node.label) parts.push(`"${node.label.replace(/"/g, '\\"').slice(0, 120)}"`);
   if (node.value && node.value !== node.label) parts.push(`= "${node.value.replace(/"/g, '\\"').slice(0, 80)}"`);
   out.push(parts.join(' '));
@@ -2746,10 +3212,15 @@ async function callBridge(
     if (!res.ok) return failFromStatus(res.status, await safeText(res));
     const json = (await res.json()) as { ok?: boolean; error?: string; [k: string]: unknown };
     if (!json.ok) {
+      // Honor explicit structured codes from the bridge body (e.g. the
+      // PID-staleness guard's `a11y_path_stale`) instead of re-deriving
+      // a code from prose and losing the machine-readable class.
+      const explicitCode = normalizeExplicitBridgeBodyCode(json.errorCode);
       return {
         ok: false,
         error: json.error || `bridge returned ok:false`,
-        errorCode: mapBodyErrorToCode(json.error),
+        errorCode: explicitCode || mapBodyErrorToCode(json.error),
+        recoveryHint: typeof json.recoveryHint === 'string' ? json.recoveryHint : undefined,
       };
     }
     return { ok: true, data: json };
@@ -2785,11 +3256,36 @@ function failFromStatus(status: number, bodyText: string): DesktopResult {
   return { ok: false, error: bodyText || `HTTP ${status}`, errorCode: mapBodyErrorToCode(bodyText || '') };
 }
 
+// Structured codes the bridge sets explicitly in ok:false bodies.
+// Kept to a whitelist so an arbitrary string can't masquerade as a
+// typed DesktopBridgeError.
+const EXPLICIT_BRIDGE_BODY_CODES = new Set<DesktopBridgeError>([
+  'a11y_path_stale',
+  'a11y_tree_empty',
+  'helper_missing',
+  'human_verification_required',
+  'invalid_input',
+  // E2/E3 bridge-issued codes. The canonical union lives in
+  // desktopBridgeProtocol.ts; until it is extended there these ride
+  // through as bridge-body codes (callers read errorCode as string).
+  'index_stale' as DesktopBridgeError,
+  'no_indexed_tree' as DesktopBridgeError,
+  'region_out_of_bounds' as DesktopBridgeError,
+]);
+
+function normalizeExplicitBridgeBodyCode(value: unknown): DesktopBridgeError | null {
+  const code = String(value || '').trim().toLowerCase() as DesktopBridgeError;
+  return EXPLICIT_BRIDGE_BODY_CODES.has(code) ? code : null;
+}
+
 function mapBodyErrorToCode(err: string | undefined | null): DesktopBridgeError {
   const m = String(err || '').toLowerCase();
   if (m.includes('unknown /desktop endpoint')) return 'stale_bridge';
   if (m.includes('local file access') || m.includes('file access grant')) return 'file_access_not_granted';
-  if (m.includes('app_not_found') || m.includes('not found')) return 'app_not_found';
+  if (m.includes('path_not_found') || m.includes('path does not exist') || m.includes('file or folder does not exist') || m.includes('no such file')) return 'path_not_found';
+  if (m.includes('could not find an image') || m.includes('no file named') || m.includes('no file matches')) return 'file_not_found';
+  if (m.includes('ambiguous_file_match') || m.includes('multiple images matched') || m.includes('multiple matches found')) return 'ambiguous_file_match';
+  if (m.includes('app_not_found') || m.includes('app not found')) return 'app_not_found';
   if (m.includes('not allowed') || m.includes('permission')) return 'permission_denied';
   if (m.includes('timed out')) return 'timeout';
   if (m.includes('invalid')) return 'invalid_input';

@@ -1,0 +1,329 @@
+/**
+ * office-ops-board-smoketest — exercises the pure ops-board model in
+ * src/lib/officeOpsBoard.ts. No stubs needed: the module has zero runtime
+ * imports (import type only), so tsx loads it directly.
+ *
+ * Covers:
+ *   1. Building board nesting, orphans, ordering, bounds + overflow counts
+ *   2. building vs recentlyFinished cutoffs (10-min window, ≤5)
+ *   3. durationMs computed from caller nowMs (no Date.now in pure fns)
+ *   4. Token tracker with full / partial / empty inputs + cache-hit math
+ *   5. formatTokenCount k/M formatting + formatRelativeTime labels
+ *   6. Per-agent live ops bounds, dedupe, relative time, subagent counts
+ *   7. Determinism: identical output for identical inputs + nowMs
+ *
+ * Usage:
+ *   npm run smoke:office-ops-board
+ */
+
+import {
+  buildOfficeBuildingBoard,
+  buildOfficeTokenTracker,
+  buildAgentLiveOps,
+  formatTokenCount,
+  formatRelativeTime,
+  OFFICE_BOARD_MAX_ROOTS,
+  OFFICE_BOARD_MAX_CHILDREN_PER_ROOT,
+  OFFICE_BOARD_MAX_RECENTLY_FINISHED,
+  type AgentRunLike,
+} from '../src/lib/officeOpsBoard';
+
+let passed = 0;
+let failed = 0;
+
+function check(name: string, cond: boolean, detail?: string) {
+  if (cond) {
+    passed += 1;
+    console.log(`  ✓ ${name}`);
+  } else {
+    failed += 1;
+    console.error(`  ✗ ${name}${detail ? ` — ${detail}` : ''}`);
+  }
+}
+
+const NOW = Date.parse('2026-06-10T12:00:00.000Z');
+const iso = (offsetMs: number) => new Date(NOW + offsetMs).toISOString();
+
+function run(partial: Partial<AgentRunLike> & { id: string }): AgentRunLike {
+  return {
+    status: 'running',
+    title: `Run ${partial.id}`,
+    created_at: iso(-5 * 60_000),
+    ...partial,
+  };
+}
+
+// ─── 1. Board nesting / orphans / ordering ──────────────────────────────────
+
+console.log('\n[1] building board — nesting, orphans, ordering');
+{
+  const runs: AgentRunLike[] = [
+    run({ id: 'root-1', status: 'running', started_at: iso(-90_000), title: 'Build the dashboard' }),
+    run({
+      id: 'child-1a',
+      status: 'running',
+      parent_run_id: 'root-1',
+      delegated_to: 'coder',
+      started_at: iso(-60_000),
+      metadata: { delegationDepth: 1, runtimeToolActions: [{ tool: 'fs.read', title: 'fs > read', status: 'completed' }] },
+    }),
+    run({ id: 'child-1b', status: 'queued', parent_run_id: 'root-1', delegated_to: 'reviewer', started_at: iso(-30_000) }),
+    run({ id: 'orphan-1', status: 'running', parent_run_id: 'missing-parent', delegated_to: 'tester', started_at: iso(-20_000) }),
+    run({ id: 'root-2', status: 'queued', started_at: iso(-10_000), title: 'Queued job' }),
+    run({ id: 'old-done', status: 'completed', started_at: iso(-20 * 60_000), completed_at: iso(-15 * 60_000) }),
+  ];
+  const board = buildOfficeBuildingBoard(runs, { nowMs: NOW });
+
+  check('root count', board.building.length === 3, `got ${board.building.length}`);
+  const root1 = board.building.find((n) => n.runId === 'root-1');
+  check('root-1 present with 2 children', root1?.children.length === 2);
+  check('root-1 not a subagent', root1?.isSubagent === false);
+  check('child running before child queued', root1?.children[0]?.runId === 'child-1a');
+  check('child depth from metadata', root1?.children[0]?.depth === 1);
+  check('child agentName from delegated_to', root1?.children[0]?.agentName === 'Coder');
+  check('child stepHint from runtimeToolActions', root1?.children[0]?.stepHint === 'fs > read');
+  const orphan = board.building.find((n) => n.runId === 'orphan-1');
+  check('orphan renders as root', !!orphan);
+  check('orphan flagged subagent', orphan?.isSubagent === true);
+  check('orphan keeps parentRunId', orphan?.parentRunId === 'missing-parent');
+  check('orphan depth ≥ 1', (orphan?.depth ?? 0) >= 1);
+  // active (running) first, then queued — and among running, newest start first
+  check('ordering: running roots before queued root', board.building[2]?.runId === 'root-2');
+  check('ordering: newest running root first', board.building[0]?.runId === 'orphan-1');
+  check(
+    'counts',
+    board.counts.activeRoots === 2 &&
+      board.counts.activeSubagents === 3 &&
+      board.counts.waitingApproval === 0 &&
+      board.counts.queued === 2,
+    JSON.stringify(board.counts),
+  );
+  check('old finished run excluded everywhere', board.recentlyFinished.length === 0);
+  check('overflowRoots zero', board.overflowRoots === 0);
+}
+
+// ─── 2. Bounds + overflow counts ────────────────────────────────────────────
+
+console.log('\n[2] bounds + overflow');
+{
+  const runs: AgentRunLike[] = [];
+  for (let i = 0; i < 12; i += 1) {
+    runs.push(run({ id: `root-${i}`, status: 'running', started_at: iso(-i * 1000) }));
+  }
+  for (let i = 0; i < 9; i += 1) {
+    runs.push(run({ id: `kid-${i}`, status: 'running', parent_run_id: 'root-0', delegated_to: 'coder', started_at: iso(-i * 500) }));
+  }
+  const board = buildOfficeBuildingBoard(runs, { nowMs: NOW });
+  check(`roots bounded to ${OFFICE_BOARD_MAX_ROOTS}`, board.building.length === OFFICE_BOARD_MAX_ROOTS);
+  check('overflowRoots = 4', board.overflowRoots === 4, `got ${board.overflowRoots}`);
+  const root0 = board.building.find((n) => n.runId === 'root-0');
+  check(`children bounded to ${OFFICE_BOARD_MAX_CHILDREN_PER_ROOT}`, root0?.children.length === OFFICE_BOARD_MAX_CHILDREN_PER_ROOT);
+  check('childOverflow = 3', root0?.childOverflow === 3, `got ${root0?.childOverflow}`);
+
+  const smaller = buildOfficeBuildingBoard(runs, { nowMs: NOW, maxRoots: 3, maxChildrenPerRoot: 2 });
+  check('custom maxRoots respected', smaller.building.length === 3 && smaller.overflowRoots === 9);
+  const smallRoot0 = smaller.building.find((n) => n.runId === 'root-0');
+  check('custom maxChildren respected', smallRoot0?.children.length === 2 && smallRoot0?.childOverflow === 7);
+
+  const oversized = buildOfficeBuildingBoard(runs, { nowMs: NOW, maxRoots: 99, maxChildrenPerRoot: 99 });
+  check('oversized opts clamped to hard caps', oversized.building.length === OFFICE_BOARD_MAX_ROOTS);
+}
+
+// ─── 3. building vs recentlyFinished cutoffs + duration ─────────────────────
+
+console.log('\n[3] recentlyFinished cutoffs + durations');
+{
+  const runs: AgentRunLike[] = [
+    run({ id: 'live-1', status: 'running', started_at: iso(-90_000) }),
+    run({ id: 'done-recent', status: 'completed', started_at: iso(-8 * 60_000), completed_at: iso(-5 * 60_000) }),
+    run({ id: 'fail-recent', status: 'failed', started_at: iso(-4 * 60_000), completed_at: iso(-2 * 60_000) }),
+    run({ id: 'done-old', status: 'completed', started_at: iso(-30 * 60_000), completed_at: iso(-11 * 60_000) }),
+    run({ id: 'cancelled-1', status: 'cancelled', completed_at: iso(-1 * 60_000) }),
+  ];
+  for (let i = 0; i < 7; i += 1) {
+    runs.push(run({ id: `done-${i}`, status: 'completed', started_at: iso(-9 * 60_000), completed_at: iso(-(i + 1) * 30_000) }));
+  }
+  const board = buildOfficeBuildingBoard(runs, { nowMs: NOW });
+
+  check('running run on building board only', board.building.length === 1 && board.building[0].runId === 'live-1');
+  check('running durationMs from nowMs', board.building[0].durationMs === 90_000, `got ${board.building[0].durationMs}`);
+  check(
+    `recentlyFinished bounded to ${OFFICE_BOARD_MAX_RECENTLY_FINISHED}`,
+    board.recentlyFinished.length === OFFICE_BOARD_MAX_RECENTLY_FINISHED,
+    `got ${board.recentlyFinished.length}`,
+  );
+  check('newest finished first', board.recentlyFinished[0]?.runId === 'done-0');
+  const ids = board.recentlyFinished.map((n) => n.runId);
+  check('11-min-old completion excluded', !ids.includes('done-old'));
+  check('cancelled excluded', !ids.includes('cancelled-1'));
+  const finishedDurations = buildOfficeBuildingBoard(
+    [run({ id: 'done-recent', status: 'completed', started_at: iso(-8 * 60_000), completed_at: iso(-5 * 60_000) })],
+    { nowMs: NOW },
+  );
+  check(
+    'finished durationMs = completed - started',
+    finishedDurations.recentlyFinished[0]?.durationMs === 3 * 60_000,
+    `got ${finishedDurations.recentlyFinished[0]?.durationMs}`,
+  );
+}
+
+// ─── 4. Token tracker — full / partial / empty ──────────────────────────────
+
+console.log('\n[4] token tracker');
+{
+  const full = buildOfficeTokenTracker({
+    summary: {
+      total_cost: 12.3456,
+      total_input: 250_000,
+      total_output: 80_000,
+      total_cache_creation: 40_000,
+      total_cache_read: 750_000,
+      request_count: 321,
+      cache_hit_rate: 0.42, // tokens-derived math should win over this
+    },
+    byModel: [
+      { model: 'claude-haiku-4-5', total_cost: 2, input_tokens: 1, output_tokens: 1 },
+      { model: 'claude-sonnet-4-6', total_cost: 6, input_tokens: 1, output_tokens: 1 },
+      { model: 'claude-opus-4-5', total_cost: 1.5, input_tokens: 1, output_tokens: 1 },
+      { model: 'gpt-5', total_cost: 0.5, input_tokens: 1, output_tokens: 1 },
+    ],
+    liveRuns: [
+      run({ id: 'a', status: 'running', input_tokens: 1000, output_tokens: 500, cached_tokens: 200, estimated_cost: 0.05 }),
+      run({ id: 'b', status: 'waiting_approval', input_tokens: 300, output_tokens: 0, cached_tokens: 0, estimated_cost: 0.011 }),
+      run({ id: 'c', status: 'completed', input_tokens: 9999, output_tokens: 9999, estimated_cost: 99 }),
+    ],
+    periodCosts: { today: 3.14159, week: 12.3456 },
+    nowMs: NOW,
+  });
+  check('spendTodayUsd 2dp', full.spendTodayUsd === 3.14);
+  check('spendWeekUsd 2dp', full.spendWeekUsd === 12.35);
+  check('tokens carried', full.tokens?.input === 250_000 && full.tokens?.cacheRead === 750_000 && full.tokens?.cacheWrite === 40_000);
+  check('cacheHitPct = 750k/(750k+250k) = 75', full.cacheHitPct === 75, `got ${full.cacheHitPct}`);
+  check('topModels ≤ 3', full.topModels.length === 3);
+  check('topModels sorted by cost', full.topModels[0].model === 'claude-sonnet-4-6' && full.topModels[2].model === 'claude-opus-4-5');
+  check('sharePct ints sum sensibly', full.topModels[0].sharePct === 60 && full.topModels[1].sharePct === 20 && full.topModels[2].sharePct === 15);
+  check('liveBurn counts only building runs', full.liveBurn?.activeRuns === 2);
+  check('liveBurn tokensInFlight', full.liveBurn?.tokensInFlight === 2000, `got ${full.liveBurn?.tokensInFlight}`);
+  check('liveBurn cost 2dp', full.liveBurn?.costInFlightUsd === 0.06, `got ${full.liveBurn?.costInFlightUsd}`);
+  check('updatedAtMs = nowMs', full.updatedAtMs === NOW);
+
+  const partial = buildOfficeTokenTracker({
+    summary: { total_cost: 5, cache_hit_rate: 0.5 },
+    nowMs: NOW,
+  });
+  check('partial: week falls back to summary.total_cost', partial.spendWeekUsd === 5);
+  check('partial: no today spend', partial.spendTodayUsd === undefined);
+  check('partial: fraction cache rate normalized to 50', partial.cacheHitPct === 50, `got ${partial.cacheHitPct}`);
+  check('partial: no liveBurn without liveRuns', partial.liveBurn === undefined);
+  check('partial: topModels empty array', Array.isArray(partial.topModels) && partial.topModels.length === 0);
+
+  const pctRate = buildOfficeTokenTracker({ summary: { cache_hit_rate: 62 }, nowMs: NOW });
+  check('percent-style cache rate passes through', pctRate.cacheHitPct === 62);
+
+  const empty = buildOfficeTokenTracker({ nowMs: NOW });
+  check(
+    'empty input does not crash and stays optional',
+    empty.spendTodayUsd === undefined &&
+      empty.spendWeekUsd === undefined &&
+      empty.tokens === undefined &&
+      empty.cacheHitPct === undefined &&
+      empty.liveBurn === undefined &&
+      empty.topModels.length === 0 &&
+      empty.updatedAtMs === NOW,
+  );
+}
+
+// ─── 5. Formatting helpers ──────────────────────────────────────────────────
+
+console.log('\n[5] formatting helpers');
+{
+  check('formatTokenCount 0', formatTokenCount(0) === '0');
+  check('formatTokenCount 950', formatTokenCount(950) === '950');
+  check('formatTokenCount 1234 → 1.2k', formatTokenCount(1234) === '1.2k', formatTokenCount(1234));
+  check('formatTokenCount 12000 → 12k', formatTokenCount(12_000) === '12k', formatTokenCount(12_000));
+  check('formatTokenCount 3.4M', formatTokenCount(3_400_000) === '3.4M', formatTokenCount(3_400_000));
+  check('formatTokenCount negative clamps to 0', formatTokenCount(-50) === '0');
+
+  check('relative: 10s → just now', formatRelativeTime(10_000) === 'just now');
+  check('relative: 60s → 1m ago', formatRelativeTime(60_000) === '1m ago');
+  check('relative: 5m', formatRelativeTime(5 * 60_000) === '5m ago');
+  check('relative: 2h', formatRelativeTime(2 * 60 * 60_000) === '2h ago');
+  check('relative: 3d', formatRelativeTime(3 * 24 * 60 * 60_000) === '3d ago');
+  check('relative: negative → just now', formatRelativeTime(-5000) === 'just now');
+}
+
+// ─── 6. Per-agent live ops ──────────────────────────────────────────────────
+
+console.log('\n[6] per-agent live ops');
+{
+  const board = buildOfficeBuildingBoard(
+    [
+      run({ id: 'p', status: 'running', started_at: iso(-60_000) }),
+      run({ id: 'k1', status: 'running', parent_run_id: 'p', delegated_to: 'coder', started_at: iso(-30_000) }),
+      run({ id: 'k2', status: 'queued', parent_run_id: 'p', delegated_to: 'tester', started_at: iso(-20_000) }),
+    ],
+    { nowMs: NOW },
+  );
+  const flatNodes = [...board.building, ...board.building.flatMap((n) => n.children)];
+
+  const ops = buildAgentLiveOps(
+    {
+      currentToolName: 'browser.find',
+      currentToolFile: '/Users/x/repo/src/lib/officeOpsBoard.ts',
+      recentToolCalls: [
+        { tool: 'fs.read', file: 'a.ts', ts: iso(-1000) },
+        { tool: 'fs.read', file: 'b.ts', ts: iso(-2000) },
+        { tool: 'bash.run', file: '', ts: iso(-3000) },
+        { tool: 'browser.find', file: '', ts: iso(-4000) },
+        { tool: 'fs.write', file: 'c.ts', ts: iso(-5000) },
+      ],
+      activeFiles: ['/Users/x/repo/src/screens/circles/tabs/OfficeTab.tsx'],
+      uptime: '3h',
+      lastActive: iso(-5 * 60_000),
+      subagentCount: 9,
+    },
+    flatNodes,
+    NOW,
+  );
+  check('statusLine built', ops.statusLine === 'Now: browser.find officeOpsBoard.ts', ops.statusLine);
+  check('recentTools deduped + ≤3', ops.recentTools.length === 3 && JSON.stringify(ops.recentTools) === JSON.stringify(['fs.read', 'bash.run', 'browser.find']));
+  check('activeFile basename', ops.activeFile === 'OfficeTab.tsx');
+  check('uptimeLabel passthrough', ops.uptimeLabel === '3h');
+  check('lastActiveLabel relative', ops.lastActiveLabel === '5m ago', ops.lastActiveLabel);
+  check('subagents counted from runs (not fallback)', ops.subagents.active === 2 && ops.subagents.label === '2 subagents active');
+
+  const sparse = buildAgentLiveOps({ subagentCount: 4 }, [], NOW);
+  check('sparse agent: all optional fields absent', sparse.statusLine === undefined && sparse.activeFile === undefined && sparse.uptimeLabel === undefined && sparse.lastActiveLabel === undefined);
+  check('sparse agent: subagent fallback count', sparse.subagents.active === 4 && sparse.subagents.label === '4 subagents active');
+  check('sparse agent: recentTools empty', sparse.recentTools.length === 0);
+
+  const idle = buildAgentLiveOps({}, [], NOW);
+  check('idle agent: zero subagents, no label', idle.subagents.active === 0 && idle.subagents.label === undefined);
+}
+
+// ─── 7. Determinism (no Date.now in pure fns) ───────────────────────────────
+
+console.log('\n[7] determinism');
+{
+  const runs: AgentRunLike[] = [
+    run({ id: 'r1', status: 'running', started_at: iso(-90_000), input_tokens: 10, output_tokens: 5 }),
+    run({ id: 'r2', status: 'queued', parent_run_id: 'r1', delegated_to: 'coder' }),
+    run({ id: 'r3', status: 'completed', started_at: iso(-6 * 60_000), completed_at: iso(-60_000) }),
+  ];
+  const a = buildOfficeBuildingBoard(runs, { nowMs: NOW });
+  const b = buildOfficeBuildingBoard(runs, { nowMs: NOW });
+  check('board deterministic for same nowMs', JSON.stringify(a) === JSON.stringify(b));
+
+  const t1 = buildOfficeTokenTracker({ summary: { total_cost: 1 }, liveRuns: runs, nowMs: NOW });
+  const t2 = buildOfficeTokenTracker({ summary: { total_cost: 1 }, liveRuns: runs, nowMs: NOW });
+  check('tracker deterministic for same nowMs', JSON.stringify(t1) === JSON.stringify(t2));
+
+  const o1 = buildAgentLiveOps({ lastActive: iso(-60_000) }, a.building, NOW);
+  const o2 = buildAgentLiveOps({ lastActive: iso(-60_000) }, b.building, NOW);
+  check('live ops deterministic for same nowMs', JSON.stringify(o1) === JSON.stringify(o2));
+}
+
+// ─── Summary ────────────────────────────────────────────────────────────────
+
+console.log(`\noffice-ops-board smoketest: ${passed} passed, ${failed} failed`);
+if (failed > 0) process.exit(1);

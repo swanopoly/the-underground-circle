@@ -24,6 +24,7 @@ import {
   buildSecondBrainGraph,
   createSecondBrainNote,
   createSecondBrainNoteFromMemory,
+  getSecondBrainUnavailableMessage,
   getSecondBrainReviewState,
   promoteSecondBrainNoteToMemory,
   reviewSecondBrainNote,
@@ -99,6 +100,25 @@ interface CanvasState {
 interface OtherCircle { id: string; name: string; }
 
 type ReviewQueueItem = { note: SecondBrainNote; state: SecondBrainReviewState };
+
+const DB_STAT_FAILURE_COOLDOWN_MS = 60_000;
+const dbStatUnavailableUntil = new Map<string, number>();
+
+function shouldCacheDbStatError(error: any): boolean {
+  if (!error) return false;
+  const status = Number(error?.status || error?.statusCode || 0);
+  const code = String(error?.code || '');
+  const message = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`.toLowerCase();
+  return status === 404
+    || status >= 500
+    || code === '42P01'
+    || code === 'PGRST204'
+    || code === 'PGRST205'
+    || code.startsWith('XX')
+    || message.includes('does not exist')
+    || message.includes('schema cache')
+    || message.includes('relation');
+}
 
 interface SystemSimNode extends DigitalBrainSystemNode {
   x: number;
@@ -1519,6 +1539,8 @@ export default function SecondBrainDashboard({
     setMemories(loaded);
     setStatus(graphResult.missing
       ? 'Second brain migration is not deployed yet. Run the SQL migration and refresh.'
+      : graphResult.unavailable
+        ? 'Second brain storage is temporarily unavailable. Check the Supabase table/RLS health and refresh.'
       : graphResult.error || '');
     setLoading(false);
   }, [circleId, userId, brainMode]);
@@ -1552,9 +1574,31 @@ export default function SecondBrainDashboard({
 
   const loadDbStats = useCallback(async () => {
     const entries = await Promise.all(DIGITAL_BRAIN_DB_TABLES.map(async (cfg) => {
+      if (cfg.probe === 'skip') {
+        return [cfg.table, {
+          table: cfg.table,
+          label: cfg.label,
+          count: null,
+          ok: true,
+          skipped: true,
+          error: cfg.skipReason || 'Probe skipped',
+        }] as const;
+      }
       if ((cfg.filter === 'user' || cfg.filter === 'owner') && !userId) {
         return [cfg.table, { table: cfg.table, label: cfg.label, count: null, ok: false, error: 'No user session' }] as const;
       }
+      const unavailableUntil = dbStatUnavailableUntil.get(cfg.table) || 0;
+      if (unavailableUntil > Date.now()) {
+        return [cfg.table, {
+          table: cfg.table,
+          label: cfg.label,
+          count: null,
+          ok: false,
+          skipped: true,
+          error: 'Temporarily skipped after a failed table probe',
+        }] as const;
+      }
+      if (unavailableUntil > 0) dbStatUnavailableUntil.delete(cfg.table);
       try {
         let query = (supabase as any)
           .from(cfg.table)
@@ -1564,6 +1608,9 @@ export default function SecondBrainDashboard({
         if (cfg.filter === 'user') query = query.eq('user_id', userId);
         if (cfg.filter === 'owner') query = query.eq('owner_id', userId);
         const { count, error } = await query;
+        if (error && shouldCacheDbStatError(error)) {
+          dbStatUnavailableUntil.set(cfg.table, Date.now() + DB_STAT_FAILURE_COOLDOWN_MS);
+        }
         return [cfg.table, {
           table: cfg.table,
           label: cfg.label,
@@ -1572,6 +1619,9 @@ export default function SecondBrainDashboard({
           error: error?.message,
         }] as const;
       } catch (err: any) {
+        if (shouldCacheDbStatError(err)) {
+          dbStatUnavailableUntil.set(cfg.table, Date.now() + DB_STAT_FAILURE_COOLDOWN_MS);
+        }
         return [cfg.table, {
           table: cfg.table,
           label: cfg.label,
@@ -1590,6 +1640,7 @@ export default function SecondBrainDashboard({
 
   useEffect(() => {
     if (loading || autoMapFiredRef.current || brainMode !== 'mine' || !userId || Platform.OS !== 'web') return;
+    if (status || getSecondBrainUnavailableMessage()) return;
     const siteMapCount = notes.filter(n => (n.metadata as any)?.siteMapKey).length;
     if (siteMapCount < 5) {
       autoMapFiredRef.current = true;
@@ -1597,7 +1648,7 @@ export default function SecondBrainDashboard({
         if (!result.error && result.created > 0) load();
       });
     }
-  }, [loading, brainMode, userId, notes, circleId, load]);
+  }, [loading, brainMode, userId, notes, circleId, load, status]);
 
   const processBrainFiles = useCallback(async (files: File[]) => {
     if (Platform.OS !== 'web') return;
@@ -1949,6 +2000,12 @@ export default function SecondBrainDashboard({
   const handleMapSite = async () => {
     if (!userId) { setStatus('Sign in before mapping the site.'); return; }
     if (mapping) return;
+    const unavailable = getSecondBrainUnavailableMessage();
+    if (unavailable) {
+      setMapStatus(`Map paused: ${unavailable}`);
+      setTimeout(() => setMapStatus(''), 4000);
+      return;
+    }
     setMapping(true);
     setMapStatus('Starting site map…');
     const result = await autoMapSiteToSecondBrain(
@@ -2271,8 +2328,8 @@ export default function SecondBrainDashboard({
                     <View key={cfg.table} style={styles.dbRow}>
                       <View style={styles.dbRowHeader}>
                         <Text style={styles.cardTitle}>{cfg.label}</Text>
-                        <Text style={[styles.cardMeta, { color: stat?.ok ? '#22c55e' : '#f59e0b' }]}>
-                          {stat?.ok ? `${stat.count ?? 0}` : 'pending'}
+                        <Text style={[styles.cardMeta, { color: stat?.skipped ? '#94a3b8' : stat?.ok ? '#22c55e' : '#f59e0b' }]}>
+                          {stat?.skipped ? 'skipped' : stat?.ok ? `${stat.count ?? 0}` : 'pending'}
                         </Text>
                       </View>
                       <Text style={styles.sourceUrl}>{cfg.table}</Text>

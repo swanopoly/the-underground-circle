@@ -41,6 +41,7 @@ function assertIntent(
   message: string,
   expectedKind: LocalComputerAwarenessKind,
   expected?: Partial<{ appQuery: string; url: string; path: string; text: string; x: number; y: number; mouseButton: 'left' | 'right'; clickCount: number }>,
+  expectedExecution: 'run_openswan' | 'run_computer_task' = 'run_openswan',
 ) {
   const intent = detectLocalComputerAwarenessIntent(message);
   assert(intent.route, `"${message}" routes to local desktop bridge`, intent.reason);
@@ -72,14 +73,16 @@ function assertIntent(
 
   const plan = buildChatAutomationPlan({ message });
   assert(
-    plan.execution.kind === 'run_openswan',
-    `"${message}" stays in OpenSwan/local bridge routing`,
+    plan.execution.kind === expectedExecution,
+    `"${message}" uses ${expectedExecution}`,
     `saw ${plan.execution.kind}`,
   );
-  assert(
-    plan.execution.kind !== 'run_computer_task',
-    `"${message}" does not start Computer Use`,
-  );
+  if (expectedExecution !== 'run_computer_task') {
+    assert(
+      plan.execution.kind !== 'run_computer_task',
+      `"${message}" does not start Computer Use`,
+    );
+  }
 }
 
 function assertExtraIntent(
@@ -211,6 +214,57 @@ function main() {
     'run_computer_task',
   );
   assertExtraIntent(
+    'Use my computer to open Photoshop',
+    'launch_app',
+    (intent) => assert(intent.appQuery === 'Photoshop', 'computer-prefixed Photoshop app parsed', `saw ${intent.appQuery}`),
+    'run_computer_task',
+  );
+  // Notes: "create a note that says X" is a Notes-app action (notes_create),
+  // NOT a local text-file write. Regression guard for the mis-route that sent
+  // "create a note…" into local-file-write-text and spiraled into the generic
+  // unknown-app navigator + connected-agent buildout.
+  assertExtraIntent(
+    'create a note that says hell ya fuckin right bitch',
+    'notes_create',
+    (intent) => {
+      assert(intent.text === 'hell ya fuckin right bitch', 'note body captured', `saw ${JSON.stringify(intent.text)}`);
+      assert(intent.appQuery === 'Notes', 'notes_create targets Notes', `saw ${intent.appQuery}`);
+      assert(intent.reason === 'local-notes-create', 'notes_create reason is set', `saw ${intent.reason}`);
+    },
+    'run_computer_task',
+  );
+  assertExtraIntent(
+    "make a note saying don't forget the milk",
+    'notes_create',
+    (intent) => assert(intent.text === "don't forget the milk", 'saying-form body captured', `saw ${JSON.stringify(intent.text)}`),
+    'run_computer_task',
+  );
+  assertExtraIntent(
+    'create a note thats says hell ya fuckin right bitch',
+    'notes_create',
+    (intent) => assert(intent.text === 'hell ya fuckin right bitch', 'tolerates the "thats says" typo', `saw ${JSON.stringify(intent.text)}`),
+    'run_computer_task',
+  );
+  // The exact phrasing the user reported, as a multi-step sequence: open Notes
+  // THEN create the note. Step 2 must be notes_create, never file_write_text.
+  assertSequence(
+    'open the notes app and create a note thats says hell ya fuckin right bitch',
+    (sequence) => {
+      const noteStep = sequence.find((step) => step.kind === 'notes_create');
+      assert(!!noteStep, 'sequence contains a notes_create step', `saw ${sequence.map((s) => s.kind).join(', ')}`);
+      assert(noteStep?.text === 'hell ya fuckin right bitch', 'sequence note body captured', `saw ${JSON.stringify(noteStep?.text)}`);
+      assert(!sequence.some((step) => step.kind === 'file_write_text'), 'no step mis-parses as file_write_text');
+    },
+  );
+  // A genuine text-FILE write still routes to file_write_text (not hijacked).
+  assertExtraIntent(
+    'write a text file to my desktop called todo.txt',
+    'file_write_text',
+    () => {},
+    'run_computer_task',
+  );
+
+  assertExtraIntent(
     'inspect Photoshop document status',
     'photoshop_document_status',
     (intent) => assert(intent.appQuery === 'Photoshop', 'Photoshop status targets app', `saw ${intent.appQuery}`),
@@ -290,6 +344,7 @@ function main() {
     'open ~/Downloads',
     'open_path',
     { path: '~/Downloads' },
+    'run_computer_task',
   );
   assertExtraIntent(
     'list files in Downloads',
@@ -338,6 +393,17 @@ function main() {
     (intent) => {
       assert(intent.rootPath === '~/Desktop', 'desktop image search root parsed', `saw ${intent.rootPath}`);
       assert(intent.query === 'landscaping-img.png', 'desktop image search query parsed', `saw ${intent.query}`);
+    },
+    'run_computer_task',
+  );
+  assertExtraIntent(
+    'open Gemini_Generated_Image_lppqo8lppqo8lppq.png from the desktop and make it a jpg',
+    'open_file_search_match',
+    (intent) => {
+      assert(intent.rootPath === '~/Desktop', 'desktop open-from-root search root parsed', `saw ${intent.rootPath}`);
+      assert(intent.query === 'Gemini_Generated_Image_lppqo8lppqo8lppq.png', 'desktop open-from-root filename parsed', `saw ${intent.query}`);
+      assert(intent.extensions?.includes('png'), 'desktop open-from-root extension parsed');
+      assert(intent.appQuery !== 'Gemini_Generated_Image_lppqo8lppqo8lppq.png from the desktop', 'desktop filename is not misclassified as an app');
     },
     'run_computer_task',
   );
@@ -807,8 +873,10 @@ function main() {
       assert(sequence[5]?.kind === 'paste_text' && sequence[5]?.text === 'test-it.jpg' && sequence[5]?.appQuery === 'Photoshop' && sequence[5]?.reason === 'local-save-dialog-output-path', 'save-image-as verifies and sets output path');
       assert(sequence[6]?.kind === 'press_keys' && sequence[6]?.combo === 'Return' && sequence[6]?.appQuery === 'Photoshop', 'save-image-as confirms dialog');
       const preview = planComputerTaskPreview('Open Photoshop and save the image as test-it.jpg');
-      assert(preview.kind === 'app_task', 'save-image-as previews as app task, not hybrid plan', `saw ${preview.kind}`);
-      assert(preview.label === 'Deterministic desktop sequence', 'save-image-as preview labels deterministic sequence', `saw ${preview.label}`);
+      assert(preview.kind === 'app_task', 'save-image-as previews as app workflow when no exact input file is named', `saw ${preview.kind}`);
+      assert(preview.label === 'Deterministic desktop sequence', 'save-image-as preview labels desktop sequence', `saw ${preview.label}`);
+      assert(preview.requiredCapabilities.includes('app_tools'), 'save-image-as preview requires app tools');
+      assert(preview.requiredCapabilities.includes('file_write'), 'save-image-as preview requires bounded output write');
     },
   );
 
@@ -841,7 +909,7 @@ function main() {
       const appActionGrant = grants.grants.find((grant) => grant.id === 'app_action');
       assert(fileReadGrant && fileReadGrant.approvalRequired === false, 'photoshop screenshot workflow auto-prepares file read access without separate approval');
       assert(fileWriteGrant && fileWriteGrant.approvalRequired === false, 'photoshop screenshot workflow auto-prepares file write access without separate approval');
-      assert(appActionGrant && appActionGrant.approvalRequired === false, 'photoshop screenshot workflow auto-prepares bounded Save for Web app actions without separate approval');
+      assert(appActionGrant && appActionGrant.approvalRequired === true, 'photoshop screenshot workflow requires approval for rename/export app actions');
       const directIntent = detectLocalComputerAwarenessIntent(PHOTOSHOP_SCREENSHOT_RENAME_REQUEST);
       assert(directIntent.kind !== 'screen_state' && directIntent.kind !== 'launch_app', 'photoshop screenshot filename does not downgrade to screen-state or bogus app-launch intent', `saw ${directIntent.kind}`);
     },
@@ -2097,6 +2165,38 @@ function main() {
     (sequence) => {
       assert(sequence.length === 2, 'wordpress media macro length', `saw ${sequence.length}`);
       assert(sequence[0]?.kind === 'open_url' && sequence[0]?.url === 'https://wordpress.com/media', 'wordpress media opens wordpress.com fallback URL', `saw ${sequence[0]?.url}`);
+    },
+  );
+
+  assertSequence(
+    'open wp-admin plugins for example.com',
+    (sequence) => {
+      assert(sequence.length === 2, 'wp-admin plugins macro length', `saw ${sequence.length}`);
+      assert(sequence[0]?.kind === 'open_url' && sequence[0]?.url === 'https://example.com/wp-admin/plugins.php', 'wp-admin plugins opens self-hosted plugins URL', `saw ${sequence[0]?.url}`);
+    },
+  );
+
+  assertSequence(
+    'open wp-admin settings for example.com',
+    (sequence) => {
+      assert(sequence.length === 2, 'wp-admin settings macro length', `saw ${sequence.length}`);
+      assert(sequence[0]?.kind === 'open_url' && sequence[0]?.url === 'https://example.com/wp-admin/options-general.php', 'wp-admin settings opens self-hosted settings URL', `saw ${sequence[0]?.url}`);
+    },
+  );
+
+  assertSequence(
+    'open Dealer Inspire slides for example.com',
+    (sequence) => {
+      assert(sequence.length === 2, 'Dealer Inspire slides macro length', `saw ${sequence.length}`);
+      assert(sequence[0]?.kind === 'open_url' && sequence[0]?.url === 'https://example.com/wp/wp-admin/edit.php?post_type=di_slide', 'Dealer Inspire slides opens DI Slides list URL', `saw ${sequence[0]?.url}`);
+    },
+  );
+
+  assertSequence(
+    'open new Dealer Inspire slide for example.com',
+    (sequence) => {
+      assert(sequence.length === 2, 'new Dealer Inspire slide macro length', `saw ${sequence.length}`);
+      assert(sequence[0]?.kind === 'open_url' && sequence[0]?.url === 'https://example.com/wp/wp-admin/post-new.php?post_type=di_slide', 'new Dealer Inspire slide opens DI Slide editor URL', `saw ${sequence[0]?.url}`);
     },
   );
 

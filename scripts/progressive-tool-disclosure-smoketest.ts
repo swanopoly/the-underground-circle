@@ -36,27 +36,12 @@ process.env.EXPO_PUBLIC_SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '
 process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || 'progressive-smoke-anon-key';
 
 const NATIVE_STUBS = new Set(['react-native', '@react-native-async-storage/async-storage']);
-const STUB_SOURCE = `
-export const Platform = { OS: 'web', select: (obj) => (obj ? (obj.web !== undefined ? obj.web : obj.default) : undefined) };
-export const AppState = { currentState: 'active', addEventListener: () => ({ remove() {} }) };
-export const Dimensions = { get: () => ({ width: 1280, height: 800, scale: 2, fontScale: 1 }) };
-export const NativeModules = {};
-export const StyleSheet = { create: (s) => s, flatten: (s) => s };
-const asyncStorageStub = {
-  getItem: async () => null, setItem: async () => {}, removeItem: async () => {},
-  multiGet: async () => [], multiSet: async () => {}, multiRemove: async () => {}, getAllKeys: async () => [],
-};
-export default asyncStorageStub;
-`;
+const STUB_URL = new URL('./native-module-stub.mjs', import.meta.url).href;
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (NATIVE_STUBS.has(specifier)) return { url: `stub:${specifier}`, shortCircuit: true };
+    if (NATIVE_STUBS.has(specifier)) return { url: STUB_URL, shortCircuit: true };
     return nextResolve(specifier, context);
-  },
-  load(url, context, nextLoad) {
-    if (url.startsWith('stub:')) return { format: 'module', source: STUB_SOURCE, shortCircuit: true };
-    return nextLoad(url, context);
   },
 });
 
@@ -127,7 +112,7 @@ async function main() {
     'tools.search', 'approvals.list', 'approvals.request', 'approvals.resolve',
     'search_memories', 'save_memory', 'fetch_url', 'list_circle_members',
     'schedule_action', 'browser.plan_task', 'messages.list', 'messages.create',
-    'tasks.list', 'goals.list', 'missions.list',
+    'tasks.list', 'goals.list', 'missions.list', 'context.search',
   ]) {
     assert(progressiveNames.includes(expected), `case2: pinned core includes ${expected}`);
   }
@@ -160,6 +145,12 @@ async function main() {
 
   const familyBrowse = runtime.searchOpenSwanToolCatalog('', { family: 'vault' });
   assert(familyBrowse.length > 0 && familyBrowse.every((m) => m.family === 'vault'), 'case3: empty query + family browses the family');
+
+  const savedLoginSearch = runtime.searchOpenSwanToolCatalog('saved login', { family: 'browser', surface: 'task_run' });
+  assert(
+    savedLoginSearch.some((m) => m.name === 'browser.fill_credential_field'),
+    'case3: saved-login search finds browser.fill_credential_field',
+  );
 
   // ── Case 4/5 — search-unlocked tool becomes callable next iteration ───────
   const run = bridge.getProgressiveOpenSwanTools('main_chat', ctx);
@@ -210,7 +201,7 @@ async function main() {
   );
 
   // ── Case 6 — always-pinned guarantees + deferred-only invisibility ────────
-  for (const name of ['tools.search', 'approvals.list', 'approvals.request', 'approvals.resolve'] as const) {
+  for (const name of ['tools.search', 'context.search', 'approvals.list', 'approvals.request', 'approvals.resolve'] as const) {
     assert(runtime.getOpenSwanToolDisclosure(name) === 'pinned', `case6: ${name} is always pinned`);
   }
   assert(
@@ -220,6 +211,18 @@ async function main() {
   assert(
     !progressiveNames.includes('desktop.photoshop_export_proof'),
     'case6: deferred-only tool absent from the initial progressive set',
+  );
+  assert(
+    runtime.getOpenSwanToolDisclosure('browser.fill_credential_field') === 'deferred',
+    'case6: browser.fill_credential_field is searchable/deferred, not pinned',
+  );
+  assert(
+    !progressiveNames.includes('browser.fill_credential_field'),
+    'case6: browser.fill_credential_field absent from the initial progressive set',
+  );
+  assert(
+    fullMain.includes('browser.fill_credential_field'),
+    'case6: browser.fill_credential_field still present on the default full path',
   );
   assert(
     fullMain.includes('desktop.photoshop_export_proof'),

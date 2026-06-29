@@ -229,7 +229,7 @@ function includeLaneForTask(lane: ComputerCapabilityExpansionLane, task: string)
     case 'desktop_semantic_control':
       return /\b(desktop|app|application|window|menu|dialog|popup|click|type|shortcut|open|launch|focus|take over)\b/.test(text);
     case 'app_native_adapter':
-      return /\b(photoshop|indesign|illustrator|adobe|autocad|fusion|solidworks|revit|rhino|inventor|cad|figma|blender|ableton|logic pro|garageband|pro tools|premiere|after effects|maya|cinema 4d|sketchup|excel|spreadsheet|layers?|model|render|export|script|plugin|api|adapter)\b/.test(text);
+      return /\b(photoshop|indesign|illustrator|adobe|autocad|fusion|solidworks|matlab|mathworks|simulink|simscape|revit|rhino|inventor|cad|figma|blender|ableton|logic pro|garageband|pro tools|premiere|after effects|maya|cinema 4d|sketchup|excel|spreadsheet|layers?|model|render|export|script|plugin|api|mcp|adapter)\b/.test(text);
     case 'local_file_contract':
       return /\b(file|folder|desktop|downloads?|documents?|upload|download|export|save|save as|rename|copy|replace|png|jpe?g|pdf|psd|indd|dwg|csv|xlsx)\b/.test(text);
     case 'connected_agent_buildout':
@@ -237,6 +237,20 @@ function includeLaneForTask(lane: ComputerCapabilityExpansionLane, task: string)
     default:
       return false;
   }
+}
+
+/**
+ * The lane that owns L3 auto-DRAFTed buildout proposals
+ * (appLearnedFacts.shouldProposeCapabilityBuildout binds its laneId here so
+ * the propose decision always references a real expansion lane).
+ */
+export const CONNECTED_AGENT_BUILDOUT_LANE_ID: ComputerCapabilityExpansionLaneId = 'connected_agent_buildout';
+
+/** Lookup a single expansion lane by id (deep-copied like the list helper). */
+export function getComputerCapabilityExpansionLane(
+  id: ComputerCapabilityExpansionLaneId,
+): ComputerCapabilityExpansionLane | null {
+  return listComputerCapabilityExpansionLanes().find((lane) => lane.id === id) || null;
 }
 
 export function listComputerCapabilityExpansionLanes(): ComputerCapabilityExpansionLane[] {

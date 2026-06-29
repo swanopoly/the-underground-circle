@@ -56,6 +56,25 @@ function resolveComputerUseModel(model?: string | null): string {
 
 // Anthropic's computer-use tool spec. The viewport is a reasonable
 // middle-ground — matches what Browserbase ships by default.
+//
+// TODO(zoom / E3): `computer_20251124` (+ beta header "computer-use-2025-11-24"
+// + `enable_zoom: true`) adds the `zoom` action — region re-screenshot at full
+// resolution, Anthropic's prescribed fix for missed small targets. The default
+// model (claude-sonnet-4-6) supports it, but the upgrade is NOT contained here:
+//   1. `resolveComputerUseModel` accepts ANY Sonnet-family model (e.g.
+//      claude-sonnet-4-5), and computer_20251124 only works on Opus 4.5+ /
+//      Sonnet 4.6 — the tool version + beta header would have to become
+//      model-conditional (per-request tool array instead of this const).
+//   2. The zoom action sends `{ action: "zoom", region: [x1, y1, x2, y2] }`
+//      and the client must return a cropped, full-resolution screenshot of
+//      that region. Our Browserbase command bridge (`bbCommand` →
+//      /v1/sessions/{id}/commands) only exposes full-viewport `screenshot`
+//      with no clip/region parameter, so honoring zoom needs either a
+//      Browserbase clip param (unverified) or PNG decode/crop/encode inside
+//      this edge function (new image dependency). Returning the full
+//      screenshot for a zoom call would be silently wrong (the model would
+//      treat it as the zoomed region), so do not fake it.
+// docs/EXECUTION_LADDER_RESEARCH_2026-06-11.md, finding #5 / E3.
 const COMPUTER_USE_TOOL = {
   type: "computer_20250124",
   name: "computer",
@@ -63,6 +82,59 @@ const COMPUTER_USE_TOOL = {
   display_height_px: 800,
   display_number: 1,
 };
+
+// ── Screenshot-history pruning (E5) ─────────────────────────────────────
+// Anthropic guidance: screenshots cost ~1,000–1,800 input tokens each, so
+// keep only the last few in model context — but prune in byte-identical
+// BATCHES. Replacing one old screenshot per turn would rewrite the message
+// prefix on every call, shifting the prompt-cache prefix every turn and
+// defeating caching entirely. Instead we let screenshots accumulate until
+// the count exceeds PRUNE_HIGH_WATER, then collapse everything except the
+// newest KEEP_RECENT in ONE pass. Between prunes the already-pruned
+// placeholders stay byte-identical, so the prefix is stable and cache reads
+// keep hitting; each batch prune pays one cache re-create from the earliest
+// pruned block, amortized over the next ~(PRUNE_HIGH_WATER - KEEP_RECENT)
+// turns. See docs/EXECUTION_LADDER_RESEARCH_2026-06-11.md (finding #5, E5).
+const PRUNE_HIGH_WATER = 8; // prune only once history holds more screenshots than this
+const KEEP_RECENT = 3;      // always keep the newest N screenshots intact
+
+// Placeholders must be deterministic so a pruned block never changes bytes
+// on later passes. "step" is the screenshot's ordinal across the whole run
+// (already-pruned placeholders are counted too so numbering stays true).
+const PRUNED_PLACEHOLDER_RE = /^\[screenshot from step \d+ pruned/;
+const prunedPlaceholder = (step: number) =>
+  `[screenshot from step ${step} pruned — re-screenshot if you need this state]`;
+
+/** Replace all but the newest KEEP_RECENT screenshot image blocks with text
+ *  placeholders, in one batch, only when the count exceeds PRUNE_HIGH_WATER.
+ *  Mutates `messages` in place. tool_use/tool_result pairing is never split:
+ *  only the image content block INSIDE a tool_result is swapped for a text
+ *  block, so the tool_result stays valid. Returns how many were pruned. */
+function pruneScreenshotHistory(messages: Array<{ role: string; content: any }>): number {
+  const images: Array<{ blocks: any[]; index: number; step: number }> = [];
+  let step = 0;
+  for (const msg of messages) {
+    if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+    for (const part of msg.content) {
+      if (part?.type !== "tool_result" || !Array.isArray(part.content)) continue;
+      for (let i = 0; i < part.content.length; i++) {
+        const block = part.content[i];
+        if (block?.type === "image") {
+          step += 1;
+          images.push({ blocks: part.content, index: i, step });
+        } else if (block?.type === "text" && PRUNED_PLACEHOLDER_RE.test(String(block.text || ""))) {
+          step += 1; // keep ordinals stable across previous prunes
+        }
+      }
+    }
+  }
+  if (images.length <= PRUNE_HIGH_WATER) return 0;
+  const toPrune = images.slice(0, images.length - KEEP_RECENT);
+  for (const { blocks, index, step: n } of toPrune) {
+    blocks[index] = { type: "text", text: prunedPlaceholder(n) };
+  }
+  return toPrune.length;
+}
 
 // Basic bash tool so the agent can think out loud or do small shell tasks
 // inside the Browserbase container (rare but useful for file downloads).
@@ -728,6 +800,16 @@ Deno.serve(async (req: Request) => {
             }
           }
           messages.push({ role: "user", content: toolResults });
+
+          // Batch screenshot pruning (E5) — runs before the next Claude
+          // call. No cost-math change is needed here: the token budget and
+          // cost cap above read the API-reported usage of each call, so a
+          // pruned (smaller) history shows up automatically as fewer
+          // uncached-input / cache-create tokens on the next iteration.
+          const prunedCount = pruneScreenshotHistory(messages);
+          if (prunedCount > 0) {
+            emit("screenshot_history_pruned", { pruned: prunedCount, kept: KEEP_RECENT });
+          }
         }
 
         // Fire usage log to claude_api_usage (best-effort). The shared
@@ -844,10 +926,35 @@ Format, verbatim including the tags:
 
 - The EXTRACTED_DATA payload must be valid JSON object or array. Keep it small and include only data actually observed.`;
 
+// Incremental conversation caching (E5 companion). The shared callClaude()
+// only puts a cache breakpoint on the system prompt, so without this the
+// growing screenshot-heavy message history is re-billed as uncached input
+// on EVERY iteration. Moving a single ephemeral breakpoint to the last
+// content block of the latest message makes each turn a cache read of the
+// previous turn's prefix plus a small cache-create increment — which is
+// what makes batch pruning's "stable prefix between prunes" pay off.
+// (2 breakpoints total with the system one; API max is 4.)
+function applyIncrementalCacheBreakpoint(messages: Array<{ role: string; content: any }>) {
+  for (const msg of messages) {
+    if (!Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block && typeof block === "object" && block.cache_control) delete block.cache_control;
+    }
+  }
+  const last = messages[messages.length - 1];
+  if (Array.isArray(last?.content) && last.content.length > 0) {
+    const lastBlock = last.content[last.content.length - 1];
+    if (lastBlock && typeof lastBlock === "object") {
+      lastBlock.cache_control = { type: "ephemeral" };
+    }
+  }
+}
+
 // Thin wrapper around the shared `callClaude()` — pins the computer-use
 // beta header + the frozen system prompt (cached automatically). The
 // agent loop uses `.content`, `.stop_reason`, and `.usage` directly.
 async function callClaudeWithTools(apiKey: string, messages: Array<{ role: string; content: any }>, model = DEFAULT_AGENT_MODEL) {
+  applyIncrementalCacheBreakpoint(messages);
   return await callClaude({
     apiKey,
     model,

@@ -3,7 +3,17 @@ import {
   View, Text, StyleSheet, Pressable, ScrollView,
   Platform, Animated, Easing,
 } from 'react-native';
-import { WikiArticle, WikiSection, WIKI_ARTICLES, getArticle, getRelatedArticles } from '../../lib/wikiData';
+import {
+  WikiArticle,
+  WikiBuilderPrompt,
+  WikiArticleLearningLoopStep,
+  WikiSection,
+  WIKI_ARTICLES,
+  getArticle,
+  getRelatedArticles,
+  getWikiArticleLearningLoop,
+  getWikiArticleBuilderPrompts,
+} from '../../lib/wikiData';
 import { getLesson, getModule } from '../../lib/schoolsData';
 import { getWikiProgress, markWikiArticleRead, WikiProgress } from '../../lib/wikiProgress';
 
@@ -125,6 +135,105 @@ function RelatedArticleCard({ article, onPress }: {
   );
 }
 
+function BuilderPromptCard({
+  prompt,
+  color,
+  targetArticle,
+  onOpenArticle,
+}: {
+  prompt: WikiBuilderPrompt;
+  color: string;
+  targetArticle?: WikiArticle;
+  onOpenArticle: (articleId: string) => void;
+}) {
+  return (
+    <Pressable
+      onPress={() => {
+        if (targetArticle) onOpenArticle(targetArticle.id);
+      }}
+      disabled={!targetArticle}
+      accessibilityRole="button"
+      accessibilityLabel={targetArticle ? `Open supporting article for ${prompt.title}` : prompt.title}
+      style={[s.builderPromptCard, targetArticle && s.builderPromptCardActive]}
+    >
+      <View style={[s.builderPromptMarker, { backgroundColor: color }]} />
+      <View style={s.builderPromptBody}>
+        <Text style={[s.builderPromptLabel, { color }]}>{prompt.label}</Text>
+        <Text style={s.builderPromptTitle}>{prompt.title}</Text>
+        <Text style={s.builderPromptText}>{prompt.prompt}</Text>
+        <Text style={s.builderPromptFollowUp}>{prompt.followUp}</Text>
+        {targetArticle ? (
+          <Text style={[s.builderPromptLink, { color }]}>Supporting read: {targetArticle.title}</Text>
+        ) : null}
+      </View>
+    </Pressable>
+  );
+}
+
+function BuilderPromptsPanel({
+  prompts,
+  article,
+  color,
+  onOpenArticle,
+}: {
+  prompts: WikiBuilderPrompt[];
+  article: WikiArticle;
+  color: string;
+  onOpenArticle: (articleId: string) => void;
+}) {
+  if (prompts.length === 0) return null;
+  return (
+    <View style={s.builderWrap} nativeID="section-wiki-builder-prompts">
+      <Text style={s.builderKicker}>Future Builder Notebook</Text>
+      <Text style={s.builderTitle}>Use this article as a starting point</Text>
+      <Text style={s.builderSubtitle}>
+        These prompts help turn reading into imagination, prototypes, and responsible questions.
+      </Text>
+      <View style={s.builderPromptGrid}>
+        {prompts.map(prompt => {
+          const targetArticle = prompt.articleIds
+            .map(getArticle)
+            .find(item => item && item.id !== article.id);
+          return (
+            <BuilderPromptCard
+              key={prompt.id}
+              prompt={prompt}
+              color={color}
+              targetArticle={targetArticle}
+              onOpenArticle={onOpenArticle}
+            />
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+function LearningLoopPanel({ steps, color }: { steps: WikiArticleLearningLoopStep[]; color: string }) {
+  if (steps.length === 0) return null;
+  return (
+    <View style={s.learningLoopWrap} nativeID="section-wiki-learning-loop">
+      <Text style={s.learningLoopKicker}>Research Learning Loop</Text>
+      <Text style={s.learningLoopTitle}>Make the idea stick</Text>
+      <Text style={s.learningLoopSubtitle}>
+        Use the article in four passes: remember it, transfer it, build from it, then imagine what it changes.
+      </Text>
+      <View style={s.learningLoopGrid}>
+        {steps.map(step => (
+          <View key={step.id} style={s.learningLoopCard}>
+            <View style={[s.learningLoopBadge, { borderColor: `${color}45`, backgroundColor: `${color}12` }]}>
+              <Text style={[s.learningLoopBadgeText, { color }]}>{step.label}</Text>
+            </View>
+            <Text style={s.learningLoopStepTitle}>{step.title}</Text>
+            <Text style={s.learningLoopPrompt}>{step.prompt}</Text>
+            <Text style={s.learningLoopSource}>{step.sourceLabel}</Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
 // ── Main Screen ───────────────────────────────────────────────────────────
 export default function WikiArticleScreen({ navigation, route }: any) {
   const { articleId } = route.params as { articleId: string };
@@ -168,6 +277,8 @@ export default function WikiArticleScreen({ navigation, route }: any) {
   }
 
   const hasLessons = article.relatedLessonIds && article.relatedLessonIds.length > 0;
+  const learningLoopSteps = getWikiArticleLearningLoop(article.id);
+  const builderPrompts = getWikiArticleBuilderPrompts(article.id);
   const nextArticle =
     relatedArticles.find(item => !wikiProgress.readArticleIds.includes(item.id)) ||
     WIKI_ARTICLES.find(item =>
@@ -217,6 +328,15 @@ export default function WikiArticleScreen({ navigation, route }: any) {
             <ContentSection key={index} section={section} color={article.color} index={index} />
           ))}
         </View>
+
+        <LearningLoopPanel steps={learningLoopSteps} color={article.color} />
+
+        <BuilderPromptsPanel
+          prompts={builderPrompts}
+          article={article}
+          color={article.color}
+          onOpenArticle={(articleId) => navigation.navigate('WikiArticle', { articleId })}
+        />
 
         {/* ── SECTION: Related Articles ── */}
         {relatedArticles.length > 0 && (
@@ -424,6 +544,59 @@ const s = StyleSheet.create({
     fontSize: 12, fontWeight: '400', color: TEXT_SEC,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
+
+  // Research learning loop
+  learningLoopWrap: { maxWidth: 720, width: '100%', alignSelf: 'center', marginBottom: 28 },
+  learningLoopKicker: { fontSize: 10, fontWeight: '800', letterSpacing: 1.1, color: '#22c55e', textTransform: 'uppercase', marginBottom: 6 },
+  learningLoopTitle: { fontSize: 19, fontWeight: '700', color: TEXT_PRI, marginBottom: 4 },
+  learningLoopSubtitle: { fontSize: 13, lineHeight: 20, color: TEXT_SEC, marginBottom: 12 },
+  learningLoopGrid: { gap: 10 },
+  learningLoopCard: {
+    backgroundColor: BG_SURFACE,
+    borderWidth: 1,
+    borderColor: BORDER_DEF,
+    borderRadius: R_CARD,
+    padding: 16,
+  },
+  learningLoopBadge: {
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderRadius: R_PILL,
+    paddingHorizontal: 9,
+    paddingVertical: 3,
+    marginBottom: 8,
+  },
+  learningLoopBadgeText: { fontSize: 10, fontWeight: '800', letterSpacing: 0.8, textTransform: 'uppercase' },
+  learningLoopStepTitle: { fontSize: 15, fontWeight: '700', color: TEXT_PRI, marginBottom: 6 },
+  learningLoopPrompt: { fontSize: 13, lineHeight: 20, color: TEXT_SEC, marginBottom: 8 },
+  learningLoopSource: { fontSize: 11, lineHeight: 16, color: TEXT_TER, fontWeight: '700' },
+
+  // Builder prompts
+  builderWrap: { maxWidth: 720, width: '100%', alignSelf: 'center', marginBottom: 28 },
+  builderKicker: { fontSize: 10, fontWeight: '800', letterSpacing: 1.1, color: '#38bdf8', textTransform: 'uppercase', marginBottom: 6 },
+  builderTitle: { fontSize: 19, fontWeight: '700', color: TEXT_PRI, marginBottom: 4 },
+  builderSubtitle: { fontSize: 13, lineHeight: 20, color: TEXT_SEC, marginBottom: 12 },
+  builderPromptGrid: { gap: 10 },
+  builderPromptCard: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    backgroundColor: BG_SURFACE,
+    borderWidth: 1,
+    borderColor: BORDER_DEF,
+    borderRadius: R_CARD,
+    padding: 16,
+  },
+  builderPromptCardActive: {
+    ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
+  },
+  builderPromptMarker: { width: 4, minHeight: 74, borderRadius: 2, flexShrink: 0 },
+  builderPromptBody: { flex: 1, minWidth: 0 },
+  builderPromptLabel: { fontSize: 10, fontWeight: '800', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4 },
+  builderPromptTitle: { fontSize: 15, fontWeight: '700', color: TEXT_PRI, marginBottom: 6 },
+  builderPromptText: { fontSize: 13, lineHeight: 20, color: TEXT_SEC, marginBottom: 8 },
+  builderPromptFollowUp: { fontSize: 12, lineHeight: 18, color: TEXT_TER, marginBottom: 8 },
+  builderPromptLink: { fontSize: 12, lineHeight: 17, fontWeight: '700' },
 
   // Related Articles
   relatedWrap: { maxWidth: 720, width: '100%', alignSelf: 'center', marginBottom: 24 },

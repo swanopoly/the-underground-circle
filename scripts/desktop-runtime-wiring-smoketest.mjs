@@ -19,14 +19,19 @@ const files = {
   browserClient: fs.readFileSync('src/lib/browserBridge.ts', 'utf8'),
   browserServer: fs.readFileSync('scripts/browser-bridge.js', 'utf8'),
   computerUse: fs.readFileSync('src/lib/computerUse.ts', 'utf8'),
+  computerUseTask: fs.readFileSync('src/lib/useComputerUseTask.ts', 'utf8'),
   appAdapter: fs.readFileSync('src/lib/computerAppAdapter.ts', 'utf8'),
   intent: fs.readFileSync('src/lib/localComputerAwarenessIntent.ts', 'utf8'),
   capabilities: fs.readFileSync('src/lib/computerCapabilityRegistry.ts', 'utf8'),
   fileAdapter: fs.readFileSync('src/lib/computerFileAdapter.ts', 'utf8'),
+  directLocalFileRuntime: fs.readFileSync('src/lib/directLocalFileRuntime.ts', 'utf8'),
+  directImageConversionRuntime: fs.readFileSync('src/lib/directImageConversionRuntime.ts', 'utf8'),
   fileSearchQuery: fs.readFileSync('src/lib/fileSearchQuery.ts', 'utf8'),
   failureRecovery: fs.readFileSync('src/lib/agentFailureRecovery.ts', 'utf8'),
   connectedAgentDispatch: fs.readFileSync('src/lib/connectedAgentDispatch.ts', 'utf8'),
   chatFailureRecovery: fs.readFileSync('src/lib/chatFailureRecovery.ts', 'utf8'),
+  chatTransportHandlers: fs.readFileSync('src/lib/chatTransportHandlers.ts', 'utf8'),
+  runChatAutomationPlan: fs.readFileSync('src/lib/runChatAutomationPlan.ts', 'utf8'),
   assetAcquisitionPolicy: fs.readFileSync('src/lib/agentAssetAcquisitionPolicy.ts', 'utf8'),
   aiModalAdvisor: fs.readFileSync('src/lib/desktopAIModalAdvisor.ts', 'utf8'),
   browserAiModalAdvisor: fs.readFileSync('src/lib/browserAIModalAdvisor.ts', 'utf8'),
@@ -47,6 +52,7 @@ function assert(condition, name, detail) {
 }
 
 const tools = [
+  { name: 'desktop.list_installed_apps', endpoint: '/desktop/installed-apps', client: 'listInstalledApps', health: 'installed_apps', readOnly: true },
   { name: 'desktop.list_browser_tabs', endpoint: '/desktop/browser_tabs', client: 'listBrowserTabs', health: 'browser_tabs', readOnly: true },
   { name: 'desktop.window_state', endpoint: '/desktop/window_state', client: 'getWindowState', health: 'window_state', readOnly: true },
   { name: 'desktop.clipboard', endpoint: '/desktop/clipboard', client: 'readClipboard', health: 'clipboard', readOnly: true },
@@ -61,6 +67,7 @@ const tools = [
   { name: 'desktop.file_copy', endpoint: '/desktop/file_copy', client: 'copyFile', health: 'file_copy', writeMode: true },
   { name: 'desktop.file_trash', endpoint: '/desktop/file_trash', client: 'trashFile', health: 'file_trash', writeMode: true },
   { name: 'desktop.file_mkdir', endpoint: '/desktop/file_mkdir', client: 'createDirectory', health: 'file_mkdir', writeMode: true },
+  { name: 'desktop.convert_image', endpoint: '/desktop/convert_image', client: 'convertImage', health: 'convert_image', writeMode: true },
   { name: 'desktop.shortcuts_list', endpoint: '/desktop/shortcuts/list', client: 'listShortcuts', health: 'shortcuts_list', readOnly: true },
   { name: 'desktop.shortcuts_run', endpoint: '/desktop/shortcuts/run', client: 'runShortcut', health: 'shortcuts_run', writeMode: true },
   { name: 'desktop.window_manage', endpoint: '/desktop/window_manage', client: 'manageWindow', health: 'window_manage', writeMode: true },
@@ -186,8 +193,15 @@ assert(Boolean(files.pkg.scripts['smoke:desktop-ai-modal-advisor']), 'package sc
 assert(Boolean(files.pkg.scripts['smoke:browser-ai-modal-advisor']), 'package script: smoke:browser-ai-modal-advisor');
 assert(Boolean(files.pkg.scripts['smoke:openswan-task-planner']), 'package script: smoke:openswan-task-planner');
 assert(Boolean(files.pkg.scripts['smoke:desktop-runtime-wiring']), 'package script: smoke:desktop-runtime-wiring');
+assert(Boolean(files.pkg.scripts['smoke:direct-local-file-runtime']), 'package script: smoke:direct-local-file-runtime');
+assert(Boolean(files.pkg.scripts['smoke:direct-image-conversion-runtime']), 'package script: smoke:direct-image-conversion-runtime');
+assert(Boolean(files.pkg.scripts['smoke:desktop-task-ai-need']), 'package script: smoke:desktop-task-ai-need');
 assert(Boolean(files.pkg.scripts['smoke:computer-use-backend']), 'package script: smoke:computer-use-backend');
 assert(Boolean(files.pkg.scripts['build:input-helper']), 'package script: build:input-helper');
+assert(files.pkg.scripts['smoke:all'].includes('smoke:direct-local-file-runtime'), 'smoke:all includes direct local file runtime');
+assert(files.pkg.scripts['smoke:all'].includes('smoke:direct-image-conversion-runtime'), 'smoke:all includes direct image conversion runtime');
+assert(files.pkg.scripts['smoke:all'].includes('smoke:desktop-task-ai-need'), 'smoke:all includes desktop task AI-need smoke');
+assert(files.pkg.scripts['smoke:all'].includes('smoke:computer-grant-gate'), 'smoke:all includes computer grant gate smoke');
 assert(files.bridge.includes('ensureInputHelper();'), 'bridge boot auto-builds input helper');
 assert(files.computerUse.includes('localBrowserOpenUrl'), 'computerUse: local navigation uses browser bridge directly');
 assert(files.computerUse.includes('runLocalBrowserReadAction'), 'computerUse: local observe/extract uses browser bridge DOM snapshot');
@@ -218,6 +232,15 @@ assert(files.chatTab.includes('addRecoverableChatErrorMessage') && files.chatTab
 assert(files.chatTab.includes('bridge_probe_command_error') && files.chatTab.includes('assign_agent_command_error') && files.chatTab.includes('schedule_command_error') && files.chatTab.includes('github_command_error') && files.chatTab.includes('web_search_failure') && files.chatTab.includes('pair_desktop_bridge_error'), 'ChatTab: command/bridge/provider exceptions use shared recovery handoff');
 assert(files.chatFailureRecovery.includes('buildChatFailureRecoveryFingerprint') && files.chatFailureRecovery.includes('shouldSuppressDuplicateChatFailureHandoff') && files.chatFailureRecovery.includes('lastSuccessfulHandoffAt') && files.chatTab.includes('CHAT_FAILURE_RECOVERY_REPEAT_WINDOW_MS'), 'ChatTab: repeated chat failures are fingerprinted and duplicate handoffs are success-aware');
 assert(files.chatTab.includes('Resolved send model:') && files.chatTab.includes('Connected providers:') && files.chatTab.includes('Route intent:'), 'ChatTab: recovery prompt includes route, model, and provider context');
+assert(files.chatTab.includes('Recovery could not start automatically. Try again, or open the details for support.') && !files.chatTab.includes('Chat failure recovery: handoff failed: ${recoveryError'), 'ChatTab: recovery-handoff failures use customer-safe copy');
+assert(files.chatTab.includes('sanitizeVisibleComputerTaskMessage') && files.chatTab.includes('I could not finish that app or file action. Technical details were saved for recovery.'), 'ChatTab: computer-task output has a customer-safe raw-error sanitizer');
+assert(files.chatTab.includes('rawWarnings: rawOutcomeWarnings') && files.chatTab.includes('visibleWarnings: outcomeWarnings'), 'ChatTab: raw computer-task warnings are separated from visible warnings');
+assert(files.chatTab.includes('I could not finish the page build stream. Try again in a moment.') && !files.chatTab.includes('Build-page stream failed: ${msg}'), 'ChatTab: build-page stream failures hide raw stream errors');
+assert(files.chatTab.includes('I could not clear this thread. Try again in a moment.') && !files.chatTab.includes('Could not clear this thread: ${error.message}'), 'ChatTab: clear-thread failures hide raw Supabase errors');
+assert(files.chatTab.includes('I could not connect the wallet. Check the wallet popup and try again.') && files.chatTab.includes('I could not finish the transaction. Check your wallet and try again.') && !files.chatTab.includes('Wallet connection failed: ${e.message}') && !files.chatTab.includes('Transaction failed: ${result.error}'), 'ChatTab: wallet failures use customer-safe copy');
+assert(files.chatTab.includes('did not upload cleanly. Remove it or upload it again') && !files.chatTab.includes('did not upload cleanly: ${failed.error}'), 'ChatTab: attachment upload failures hide raw upload errors');
+assert(files.chatTab.includes('I could not spawn those agents. Check the bridge connection and try again.') && !files.chatTab.includes('Agent spawn failed: ${result.message}'), 'ChatTab: agent-spawn failures hide raw bridge errors');
+assert(files.chatTab.includes('I could not record that confirmation. Try again in a moment.') && !files.chatTab.includes('Confirmation could not be recorded: ${err'), 'ChatTab: confirmation failures hide raw errors');
 assert(files.chatFailureRecovery.includes('buildChatFailureRecoveryVerificationPlan') && files.chatFailureRecovery.includes('verificationCommands') && files.chatFailureRecovery.includes('recoveryRunbook') && files.chatFailureRecovery.includes('npm run smoke:openswan-task-planner') && files.chatFailureRecovery.includes('npm run smoke:browser-bridge') && files.chatFailureRecovery.includes('npm run typecheck'), 'Chat failure recovery includes source-specific verification commands and runbook metadata');
 assert(files.failureRecovery.includes('AgentFailureRecoveryRunbook') && files.failureRecovery.includes('coordinationMode') && files.failureRecovery.includes('decompose-complex-task') && files.failureRecovery.includes('CHECKPOINTS') && files.runtime.includes('recoveryRunbook'), 'failure recovery exposes a machine-readable runbook with complex-task checkpoints through OpenSwan tools');
 assert(files.assetAcquisitionPolicy.includes('buildAgentAssetAcquisitionPolicy') && files.runtime.includes('formatAgentAssetAcquisitionPolicySummary'), 'asset acquisition runtime uses the bounded acquisition policy');
@@ -228,6 +251,23 @@ assert(files.bridge.includes('function buildCorsHeaders'), 'bridge security: per
 assert(files.bridge.includes("'Access-Control-Allow-Origin': origin") && files.bridge.includes("'Vary': 'Origin'"), 'bridge security: CORS reflects allowed origin instead of wildcard for browser requests');
 assert(/const\s+url\s*=\s*req\.url\.split\(['"]\?['"]\)\[0\]/.test(files.bridge), 'bridge routing: desktop endpoints ignore query string');
 assert(files.client.includes("openPath(rawPath: string, options: { appName?: string }") && files.bridge.includes("'-a', resolved?.appPath || targetAppName") && files.appAdapter.includes("bridgeOpenPath(openPath, intent.appQuery ? { appName: intent.appQuery }"), 'open file search: app-specific file open is wired for design documents');
+assert(files.bridge.includes('const targetPath = expandDesktopPath(validated.path)') && files.bridge.includes("targetPath]") && files.bridge.includes('[targetPath]'), 'bridge open_path expands Desktop/home aliases before macOS open');
+assert(files.bridge.includes('fs.chownSync(outPath, sourceStat.uid, sourceStat.gid)'), 'bridge convert_image preserves source file ownership for generated outputs');
+assert(files.bridge.includes('sourceHasExtension') && files.bridge.includes('!sourceHasExtension && e.replace'), 'bridge convert_image honors explicit source extensions before basename fallback');
+assert(files.bridge.includes('multiple images matched') && files.bridge.includes("errorCode: 'ambiguous_file_match'"), 'bridge convert_image fails closed on ambiguous bare filenames');
+assert(files.bridge.includes('output_conflict') && files.bridge.includes('while (fs.existsSync(candidate)'), 'bridge convert_image avoids overwriting existing converted outputs');
+assert(files.client.includes('inferConvertImageGrantRoots(source)') && files.client.includes("ensureLocalFileGrantHeaders(grantRoots, 'write'"), 'desktopBridge: convert_image auto-prepares scoped write grant headers');
+assert(files.bridge.includes("if (url === '/desktop/convert_image'") && files.bridge.includes("requireLocalFileAccessGrant(req, parsedUrl, target, 'write'") && files.bridge.includes("requireLocalFileAccessGrant(req, parsedUrl, realSrc, 'write'"), 'bridge convert_image requires scoped write grants before conversion');
+assert(files.directLocalFileRuntime.includes('statFile(plan.path)') && files.directLocalFileRuntime.includes('searchFiles(searchTarget.rootPath') && files.directLocalFileRuntime.includes('resolved.path'), 'direct local file runtime verifies and resolves open_path before launch');
+assert(files.directLocalFileRuntime.includes('directLocalFileSafeFailureMessage') && files.directLocalFileRuntime.includes('I found more than one matching file. Send the exact path') && files.directLocalFileRuntime.includes('A file or folder already exists at the requested destination'), 'direct local file runtime rewrites raw adapter failures to customer-safe copy');
+assert(files.directImageConversionRuntime.includes('extractDirectLocalImageFormatConversionTask') && files.directImageConversionRuntime.includes('desktop.convert_image missing output proof') && files.directImageConversionRuntime.includes('The image tool did not return output proof'), 'direct image conversion runtime validates parser and proof before success');
+assert(files.directImageConversionRuntime.includes('output_conflict') && files.directImageConversionRuntime.includes('try {') && files.directImageConversionRuntime.includes('bridge_offline'), 'direct image conversion runtime normalizes bridge throws and output conflicts');
+assert(files.chatTransportHandlers.includes('That automation step hit an internal error. Technical details were saved for recovery.') && files.chatTransportHandlers.includes('rawError'), 'chat transport handlers hide thrown transport details from visible messages');
+assert(files.runChatAutomationPlan.includes('That automation step hit an internal error. Technical details were saved for recovery.') && files.runChatAutomationPlan.includes('rawError'), 'chat automation dispatcher hides thrown transport details from visible messages');
+assert(files.computerUseTask.includes('sanitizeComputerUseErrorMessage') && files.computerUseTask.includes('rawErrorMessage') && files.computerUseTask.includes('Computer Use could not finish. Technical details were saved for recovery.'), 'Computer Use live task state hides raw edge/fetch errors while retaining diagnostics');
+assert(files.chatTab.includes('executeDirectImageConversionRequest') && files.chatTab.includes('directImageConversion'), 'ChatTab: direct image conversion runtime is wired');
+assert(files.chatTab.includes('routeHasDirectLocalFileActionItems') && files.chatTab.includes('executeDirectLocalFileRequest') && files.chatTab.includes('directLocalFileAction'), 'ChatTab: direct local file runtime is wired');
+assert(files.fileAdapter.includes('selectUnambiguousFileMatchForMutation') && files.fileAdapter.includes('Ambiguous local file mutation target'), 'file adapter: rename/copy/trash fail closed on ambiguous search matches');
 assert(files.client.includes("focusMode?: 'require' | 'best_effort' | 'skip'"), 'desktopBridge: paste supports focus modes');
 assert(files.bridge.includes("focusMode === 'best_effort'") && files.bridge.includes("focusMode === 'skip'"), 'bridge paste: supports best-effort and skip focus');
 assert(files.bridge.includes('focusWarning') && files.client.includes('focusWarning'), 'bridge paste: returns non-fatal focus warnings');
@@ -349,6 +389,8 @@ assert(files.intent.includes('local-save-for-web-save-button') && files.intent.i
 assert(files.intent.includes('expandPhotoshopTaskMacro') && files.intent.includes('local-photoshop-generative-fill') && files.intent.includes('local-photoshop-generate-image'), 'local intent: Photoshop edit and AI task macros are wired');
 assert(files.intent.includes('expandInDesignTaskMacro') && files.intent.includes('local-indesign-place-file') && files.intent.includes('local-indesign-export-file'), 'local intent: InDesign layout and export task macros are wired');
 assert(files.intent.includes('expandMacDashboardMacro') && files.intent.includes('local-mac-mission-control') && files.intent.includes('local-mac-system-settings-query'), 'local intent: Mac dashboard macros are wired');
+assert(files.intent.includes('COMPUTER_LAUNCH_APP_RE') && files.intent.includes('use\\s+') && files.intent.includes("kind: 'launch_app'"), 'local intent: computer-prefixed app launch routes to desktop.launch_app');
+assert(files.chatTab.includes('shouldRunImmediateLocalAppLaunch') && files.chatTab.includes("launch_app: { tool: 'desktop.launch_app'") && files.chatTab.includes('currentAttachments.length === 0 && shouldRunImmediateLocalAppLaunch(content)'), 'ChatTab: pure open-app requests execute through the desktop bridge before full computer-task planning');
 assert(!files.chatTab.includes('getPredictiveChatCommands') && files.chatTab.includes('const showPredictiveCommands = false'), 'chat composer: predictive command pop-up is hidden');
 assert(files.appAdapter.includes('clickSaveForWebSaveButton') && files.appAdapter.includes('desktop_save_for_web_save_clicked'), 'app adapter: verifies Save for Web dialog before clicking Save');
 assert(files.capabilities.includes("bridgeTools.has('file_search')") && files.capabilities.includes("bridgeTools.has('file_read')") && files.capabilities.includes("bridgeTools.has('file_stat')") && files.capabilities.includes("bridgeTools.has('file_rename')"), 'capability audit: desktop bridge advertises file_search/file_read/file_stat/file_rename');

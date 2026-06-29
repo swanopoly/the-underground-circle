@@ -11,6 +11,13 @@ import {
   makeAliasResolver,
   BLACKSWAN_ALIASES,
 } from '../src/lib/multiAgentDispatch';
+import {
+  buildSubagentLoopSummary,
+  buildSubagentParentSummary,
+  runSubagentTypedCoreLoop,
+  type SubagentParentSummary,
+} from '../src/lib/delegationGate';
+import type { AgentProvider, AgentToolDefinition } from '../src/lib/agentExecutionCore';
 
 let failures = 0;
 
@@ -159,5 +166,85 @@ expectPlan('run a debate about the bridge handoff design', 'dispatch', ['default
 expectPlan('/multi help', 'help', [], '/multi help returns help plan');
 expectPlan('/multi all', 'help', [], '/multi all without a task returns help plan');
 
-console.log('\n' + (failures > 0 ? `FAILED — ${failures} assertion(s)` : 'PASSED — all assertions ok'));
-process.exit(failures > 0 ? 1 : 0);
+// ─── O3: typed-core subagent fan-out ─────────────────────────────────────
+//
+// Mirrors `delegateToSubagents`' Promise.allSettled fan-out, with each
+// child running the REAL typed-core loop (`runSubagentTypedCoreLoop` is
+// the production composition delegateToSubagent injects its impure deps
+// into). Verifies the parent's fan-in only ever sees the summary-only
+// contract — including for a child whose loop rejects.
+
+async function typedCoreFanOut() {
+  console.log('\ntyped-core subagent fan-out (O3)');
+
+  const childProvider = (label: string): AgentProvider => ({
+    turn: async () => ({
+      stop_reason: 'end_turn' as const,
+      content: [{ type: 'text' as const, text: `${label}: ` + 'r'.repeat(2000) + ' FULL_CHILD_TRANSCRIPT' }],
+      usage: { input_tokens: 100, output_tokens: 40 },
+    }),
+  });
+  const noTools: AgentToolDefinition[] = [{
+    name: 'noop.tool',
+    description: 'noop',
+    input_schema: { type: 'object', properties: {} },
+    handler: async () => ({ ok: true, data: { text: 'ok' } }),
+  }];
+  const throwingProvider: AgentProvider = {
+    turn: async () => { throw new Error('child transport exploded'); },
+  };
+
+  const specs = ['architect', 'coder', 'reviewer'];
+  const settled = await Promise.allSettled([
+    runSubagentTypedCoreLoop({ userMessage: 'design it', tools: noTools, provider: childProvider('architect'), maxIterations: 5 }),
+    runSubagentTypedCoreLoop({ userMessage: 'build it', tools: noTools, provider: childProvider('coder'), maxIterations: 5 }),
+    runSubagentTypedCoreLoop({ userMessage: 'review it', tools: noTools, provider: throwingProvider, maxIterations: 5 }),
+  ]);
+
+  // Fan-in exactly like delegateToSubagents: fulfilled → summary contract;
+  // rejected → short failed contract (never a throw to the caller).
+  const parentView: SubagentParentSummary[] = settled.map((entry, index) => {
+    if (entry.status === 'fulfilled') {
+      const payload = buildSubagentLoopSummary({
+        finalText: entry.value.runResult.text,
+        toolCalls: entry.value.toolCalls,
+        completedCleanly: !entry.value.runResult.hitMaxIterations,
+        usage: entry.value.usage,
+      });
+      return buildSubagentParentSummary({ payload, status: 'completed', runId: `run-${specs[index]}` });
+    }
+    const failMsg = `Specialist failed: ${(entry.reason as Error)?.message || 'unknown error'}`;
+    return buildSubagentParentSummary({
+      payload: { summary: failMsg, toolCallCount: 0, completed: false },
+      status: 'failed',
+    });
+  });
+
+  if (parentView.length === 3) ok('fan-out: 3 children → 3 parent summaries');
+  else fail('fan-out: expected 3 summaries', parentView.length);
+
+  const [a, b, c] = parentView;
+  if (a.status === 'completed' && b.status === 'completed' && c.status === 'failed') {
+    ok('fan-out: statuses reflect per-child outcomes (2 completed, 1 failed)');
+  } else fail('fan-out: status mismatch', parentView.map((p) => p.status));
+
+  if (a.summary.length <= 1200 && a.summary.endsWith('...') && b.summary.length <= 1200) {
+    ok('fan-out: each child summary independently bounded');
+  } else fail('fan-out: summary bound violated', { a: a.summary.length, b: b.summary.length });
+
+  if (a.tokens.input === 100 && a.tokens.output === 40 && c.tokens.input === null) {
+    ok('fan-out: per-child token accounting (failed child → null, never 0)');
+  } else fail('fan-out: token accounting mismatch', parentView.map((p) => p.tokens));
+
+  const merged = JSON.stringify(parentView);
+  if (!merged.includes('FULL_CHILD_TRANSCRIPT')) {
+    ok('fan-out: no child transcript leaks into the merged parent view');
+  } else fail('fan-out: transcript leaked into parent view');
+}
+
+typedCoreFanOut()
+  .catch((err) => { fail('typed-core fan-out threw', String(err)); })
+  .finally(() => {
+    console.log('\n' + (failures > 0 ? `FAILED — ${failures} assertion(s)` : 'PASSED — all assertions ok'));
+    process.exit(failures > 0 ? 1 : 0);
+  });

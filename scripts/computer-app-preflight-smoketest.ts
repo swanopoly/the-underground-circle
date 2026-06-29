@@ -15,6 +15,7 @@ import type {
   ComputerCapabilityId,
   ComputerCapabilityStatus,
 } from '../src/lib/computerCapabilityRegistry';
+import { isAgentBridgeCapabilityReady } from '../src/lib/computerCapabilityReadiness';
 
 const CAPABILITY_IDS: ComputerCapabilityId[] = [
   'browser_automation',
@@ -191,6 +192,16 @@ assertPreflight('Open AutoCAD and create a 2D floor plan with two rooms and dime
   expansionVerify: 'npm run smoke:engineering-cad-operation-runbooks',
 });
 
+assertPreflight('Open MATLAB and build a Simulink model, run the simulation, and export plots after approval', {
+  strategy: 'engineering_cad_control',
+  status: 'partial',
+  required: ['desktop_control', 'app_tools', 'file_search', 'file_write'],
+  hasWarning: 'engineering:precision-checkpoint',
+  routeStatus: 'needs_observation',
+  expansionLane: 'app_native_adapter',
+  expansionVerify: 'npm run smoke:engineering-cad-operation-runbooks',
+});
+
 assertPreflight('Use Ableton Live to create a four-bar drum loop and export it after approval', {
   strategy: 'universal_app_control',
   status: 'partial',
@@ -323,6 +334,27 @@ if (readyNoBuildout.appCapabilityBuildout) {
   fail('ready capabilities should not attach a buildout');
 } else {
   pass('ready capabilities attach no buildout');
+}
+
+// ─── agent_bridges readiness: a live bridge satisfies it (no phantom block) ──
+// Regression guard for "create a Notes note → Agent bridges missing" while the
+// local bridge was demonstrably alive: a live health probe means the agent
+// bridge (claude-bridge.js on :7778) is reachable, even with zero persisted
+// connection records.
+if (isAgentBridgeCapabilityReady({ enabledConnectionCount: 0, bridgeAlive: true })) {
+  pass('agent_bridges: a live local bridge satisfies the capability with no persisted connections');
+} else {
+  fail('agent_bridges: a live local bridge should satisfy the capability');
+}
+if (isAgentBridgeCapabilityReady({ enabledConnectionCount: 2, bridgeAlive: false })) {
+  pass('agent_bridges: enabled persisted connections satisfy the capability');
+} else {
+  fail('agent_bridges: enabled connections should satisfy the capability');
+}
+if (!isAgentBridgeCapabilityReady({ enabledConnectionCount: 0, bridgeAlive: false })) {
+  pass('agent_bridges: no connections AND no live bridge → genuinely missing');
+} else {
+  fail('agent_bridges: with neither source it must read missing');
 }
 
 if (failures > 0) {

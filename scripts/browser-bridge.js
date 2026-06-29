@@ -409,11 +409,26 @@ const PAGE_WALKER = `(function walk(opts) {
 
   var maxNodes = opts.maxNodes || 150;
   var interestingOnly = opts.interestingOnly !== false;
-  var counter = { n: 0 };
+  // n = nodes that consumed walk budget (capped at maxNodes);
+  // total = nodes the walk WOULD have visited with unlimited budget,
+  // so the caller can report "showing N of M" instead of silently
+  // dropping the rest of the page.
+  var counter = { n: 0, total: 0 };
+
+  // Count-only traversal for the subtree beyond the budget. Mirrors
+  // visit()'s reachability rules (invisible subtrees stay unvisited)
+  // without building nodes.
+  function countRemaining(el) {
+    counter.total += 1;
+    if (!isVisible(el)) return;
+    var children = el.children || [];
+    for (var c = 0; c < children.length; c += 1) countRemaining(children[c]);
+  }
 
   function visit(el, pathId) {
-    if (counter.n >= maxNodes) return null;
+    if (counter.n >= maxNodes) { countRemaining(el); return null; }
     counter.n += 1;
+    counter.total += 1;
 
     if (!isVisible(el)) return null;
     var role = implicitRole(el);
@@ -424,7 +439,8 @@ const PAGE_WALKER = `(function walk(opts) {
     var i = 0;
     var children = el.children || [];
     for (var c = 0; c < children.length; c += 1) {
-      if (counter.n >= maxNodes) break;
+      // No early break: past the budget visit() degrades to counting
+      // so totalNodes stays honest.
       var sub = visit(children[c], pathId + '.' + kids.length);
       if (sub) kids.push(sub);
     }
@@ -452,7 +468,12 @@ const PAGE_WALKER = `(function walk(opts) {
   }
 
   var root = visit(document.body || document.documentElement, '0');
-  return { tree: root || { id: '0', role: 'document' }, nodeCount: counter.n };
+  return {
+    tree: root || { id: '0', role: 'document' },
+    nodeCount: counter.n,
+    totalNodes: counter.total,
+    truncated: counter.total > counter.n,
+  };
 })`;
 
 const HUMAN_VERIFICATION_PAUSE_MESSAGE =
@@ -511,6 +532,33 @@ const VERIFICATION_DETECTORS = [
       /\btrusted\s+device\b/i,
       /\bapprove\s+(?:this\s+)?(?:login|sign[-\s]?in)\b/i,
       /\bdevice\s+verification\b/i,
+    ],
+  },
+  {
+    kind: 'passkey',
+    label: 'Passkey / WebAuthn / biometric verification',
+    reason: 'The page or target appears to require a passkey, hardware security key, or device biometric that only the human can complete.',
+    patterns: [
+      /\bpasskey(?:s)?\b/i,
+      /\bwebauthn\b/i,
+      /\bsecurity\s+key\b/i,
+      /\bwindows\s+hello\b/i,
+      /\b(?:face|touch)\s*id\b/i,
+      /\bfingerprint\b/i,
+      /\bnavigator\.credentials\b/i,
+      /\binsert\s+your\s+security\s+key\b/i,
+    ],
+  },
+  {
+    kind: 'push_2fa',
+    label: 'Push / device approval',
+    reason: 'The page or target appears to require a human to approve a push notification or device prompt.',
+    patterns: [
+      /\btap\s+yes\s+on\s+your\s+phone\b/i,
+      /\bapprove\s+the\s+notification\b/i,
+      /\bcheck\s+your\s+phone\b/i,
+      /\bwe\s+sent\s+a\s+notification\s+to\s+your\s+device\b/i,
+      /\bopen\s+your\s+authenticator\s+app\s+and\s+approve\b/i,
     ],
   },
 ];
@@ -813,11 +861,37 @@ async function handleDomSnapshot(req, res, CORS, parsedUrl) {
       url: launched.page.url(),
       title: await launched.page.title(),
       nodeCount: result.nodeCount,
+      totalNodes: typeof result.totalNodes === 'number' ? result.totalNodes : result.nodeCount,
+      truncated: !!result.truncated,
       tree: result.tree,
     }));
   } catch (e) {
     res.writeHead(200, CORS);
     res.end(JSON.stringify({ ok: false, error: (e && e.message) || 'snapshot failed' }));
+  }
+}
+
+async function handlePageSource(req, res, CORS, parsedUrl) {
+  const launched = await ensureContext();
+  if (!launched.ok) { res.writeHead(503, CORS); res.end(JSON.stringify({ ok: false, error: launched.error })); return; }
+  const maxChars = Math.max(10_000, Math.min(300_000, Number(parsedUrl.searchParams.get('max_chars')) || 180_000));
+  try {
+    const source = await launched.page.content();
+    const sourceLength = source.length;
+    const truncated = sourceLength > maxChars;
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({
+      ok: true,
+      url: launched.page.url(),
+      title: await launched.page.title(),
+      sourceLength,
+      truncated,
+      maxChars,
+      source: truncated ? source.slice(0, maxChars) : source,
+    }));
+  } catch (e) {
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: false, error: (e && e.message) || 'page source failed' }));
   }
 }
 
@@ -876,22 +950,97 @@ function extractSemanticName(selector) {
   return null;
 }
 
+// ── Ambiguous-locator guard ─────────────────────────────────────────────
+//
+// Playwright's `.click()`/`.fill()` act on the FIRST match when a
+// locator resolves to multiple elements (unless strict mode trips),
+// which silently clicks the wrong thing on pages with repeated
+// labels ("Edit", "Delete", "Add to cart"...). Before acting we
+// resolve the match count: >1 match with no explicit `nth`
+// disambiguator returns a structured `ambiguous_locator` error with
+// up to 5 candidate descriptions so the model can pick one and retry
+// with `nth`. Single match (or count unavailable) keeps the old
+// behavior. Count 0 also falls through so the normal timeout path
+// still produces `selector_not_found`.
+const AMBIGUOUS_CANDIDATE_LIMIT = 5;
+
+async function detectAmbiguousLocator(locator, body) {
+  if (typeof body.nth === 'number') return null; // explicit disambiguator
+  let count = 0;
+  try { count = await locator.count(); } catch { return null; }
+  if (count <= 1) return null;
+  const candidates = [];
+  const limit = Math.min(count, AMBIGUOUS_CANDIDATE_LIMIT);
+  for (let i = 0; i < limit; i += 1) {
+    try {
+      const info = await locator.nth(i).evaluate((el) => {
+        const text = (el.innerText || el.value || el.textContent || '')
+          .replace(/\s+/g, ' ').trim().slice(0, 80);
+        return {
+          role: (el.getAttribute && el.getAttribute('role')) || (el.tagName || '').toLowerCase() || 'unknown',
+          name: (el.getAttribute && (
+            el.getAttribute('aria-label')
+            || el.getAttribute('name')
+            || el.getAttribute('title')
+            || el.getAttribute('placeholder')
+          )) || null,
+          snippet: text,
+        };
+      });
+      const candidate = { role: info.role };
+      if (info.name) candidate.name = String(info.name).slice(0, 120);
+      if (info.snippet) candidate.snippet = info.snippet;
+      candidates.push(candidate);
+    } catch {
+      candidates.push({ role: 'unknown', snippet: `(could not inspect match ${i})` });
+    }
+  }
+  return { matches: count, candidates };
+}
+
+function writeAmbiguousLocator(res, CORS, body, ambiguity) {
+  const target = body.selector || body.name || body.role || 'locator';
+  res.writeHead(200, CORS);
+  res.end(JSON.stringify({
+    ok: false,
+    error: `ambiguous locator: ${ambiguity.matches} elements match "${String(target).slice(0, 160)}". Pass nth (0-based) or a more specific selector to disambiguate.`,
+    errorCode: 'ambiguous_locator',
+    matches: ambiguity.matches,
+    candidates: ambiguity.candidates,
+    recoveryHint: 'Pick the intended element from `candidates` and retry the same action with the matching `nth` index (0-based), or use a more specific selector.',
+    requiredEvidence: ['browser.dom_snapshot', 'user.confirm_target'],
+  }));
+}
+
 // Build a Playwright Locator from any of the three input shapes.
 // Returns the locator without trying a fill/click yet — caller handles
 // the action so timeout/submit logic stays at the call site.
 function resolveLocator(page, role, body) {
-  // 1. Explicit selector
+  const isStr = (v) => typeof v === 'string' && v.trim().length > 0;
+  const exact = body.exact === true;
+  // 1. Explicit selector — highest precedence.
   if (body.selector && typeof body.selector === 'string') {
     return page.locator(body.selector);
   }
-  // 2. `name` that's actually a CSS selector
+  // 2. `name` that's actually a CSS selector.
   if (body.name && looksLikeCssSelector(body.name)) {
     return page.locator(body.name);
   }
-  // 3. Canonical role + accessible name
+  // 3. Semantic-locator ladder (additive optional fields). Strict order, each
+  //    only used when the field is a non-empty string. These are resilient to
+  //    DOM churn and preferred over a raw CSS guess but still below an explicit
+  //    selector. `exact` is forwarded where the getBy* API supports it
+  //    (getByTestId has no exact option). NOTE: there is intentionally no
+  //    `text` rung — body.text is the fill VALUE, not a locator hint.
+  if (isStr(body.testId)) return page.getByTestId(String(body.testId).trim());
+  if (isStr(body.label)) return page.getByLabel(String(body.label), exact ? { exact: true } : undefined);
+  if (isStr(body.placeholder)) return page.getByPlaceholder(String(body.placeholder), exact ? { exact: true } : undefined);
+  if (isStr(body.altText)) return page.getByAltText(String(body.altText), exact ? { exact: true } : undefined);
+  if (isStr(body.title)) return page.getByTitle(String(body.title), exact ? { exact: true } : undefined);
+  // 4. Canonical role + accessible name (default).
   const opts = {};
   if (body.name) opts.name = String(body.name);
-  if (body.exact === true) opts.exact = true;
+  if (exact) opts.exact = true;
   return page.getByRole(role, opts);
 }
 
@@ -907,6 +1056,8 @@ async function handleClickRole(req, res, CORS) {
     if (gate) { writeHumanVerificationPause(res, CORS, gate); return; }
     const timeout = Math.max(500, Math.min(30000, Number(body.timeoutMs) || 5000));
     let locator = resolveLocator(launched.page, role, body);
+    const ambiguity = await detectAmbiguousLocator(locator, body);
+    if (ambiguity) { writeAmbiguousLocator(res, CORS, body, ambiguity); return; }
     if (typeof body.nth === 'number') locator = locator.nth(body.nth);
     try {
       const dialogRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
@@ -952,7 +1103,10 @@ async function handleFill(req, res, CORS) {
     const gate = await guardHumanVerification(launched.page, [role, body.name, body.selector, body.text]);
     if (gate) { writeHumanVerificationPause(res, CORS, gate); return; }
     const timeout = Math.max(500, Math.min(30000, Number(body.timeoutMs) || 5000));
-    const locator = resolveLocator(launched.page, role, body);
+    let locator = resolveLocator(launched.page, role, body);
+    const ambiguity = await detectAmbiguousLocator(locator, body);
+    if (ambiguity) { writeAmbiguousLocator(res, CORS, body, ambiguity); return; }
+    if (typeof body.nth === 'number') locator = locator.nth(body.nth);
     try {
       const dialogRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
         await locator.fill(text, { timeout });
@@ -970,8 +1124,10 @@ async function handleFill(req, res, CORS) {
       if (!semantic) throw firstErr;
       const opts = { name: semantic };
       if (body.exact === true) opts.exact = true;
+      const fallback = launched.page.getByRole(role, opts);
+      const fb = typeof body.nth === 'number' ? fallback.nth(body.nth) : fallback;
       const dialogRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
-        await launched.page.getByRole(role, opts).fill(text, { timeout });
+        await fb.fill(text, { timeout });
         return null;
       });
       if (!dialogRun.ok) { writeBrowserDialogBlocked(res, CORS, dialogRun.blockedDecision); return; }
@@ -1002,7 +1158,10 @@ async function handleSelect(req, res, CORS) {
     const gate = await guardHumanVerification(launched.page, [role, body.name, body.selector, body.value]);
     if (gate) { writeHumanVerificationPause(res, CORS, gate); return; }
     const timeout = Math.max(500, Math.min(30000, Number(body.timeoutMs) || 5000));
-    const locator = resolveLocator(launched.page, role, body);
+    let locator = resolveLocator(launched.page, role, body);
+    const ambiguity = await detectAmbiguousLocator(locator, body);
+    if (ambiguity) { writeAmbiguousLocator(res, CORS, body, ambiguity); return; }
+    if (typeof body.nth === 'number') locator = locator.nth(body.nth);
     try {
       const valueRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
         await locator.selectOption(value, { timeout });
@@ -1195,6 +1354,7 @@ module.exports = {
   handleHealth,
   handleOpenUrl,
   handleDomSnapshot,
+  handlePageSource,
   handleVerificationState,
   handleClickRole,
   handleFill,

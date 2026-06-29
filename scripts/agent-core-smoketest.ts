@@ -15,6 +15,8 @@
  *   6. Event stream ordering matches expectations.
  *   7. Dependency-aware tool parallelism (T8/O6) — `toolParallelPolicyProvider`
  *      partitions a round into ordered groups; absent provider = legacy.
+ *   8. `onRoundComplete` round-boundary hook (O1 nudge parity) — note appended
+ *      between rounds, skipped on the final round, errors swallowed, async ok.
  *
  * Run with: `npx tsx scripts/agent-core-smoketest.ts`
  *
@@ -512,6 +514,118 @@ async function case10_dependencyAwareParallelism() {
   );
 }
 
+// ─── Case 11 — onRoundComplete round-boundary hook (O1 nudge parity) ────────
+
+async function case11_onRoundCompleteHook() {
+  const okTool: AgentToolDefinition = {
+    name: 'probe',
+    description: 'returns ok',
+    input_schema: { type: 'object', properties: {} },
+    async handler() { return { ok: true, data: { seen: true } }; },
+  };
+  const badTool: AgentToolDefinition = {
+    name: 'breaker',
+    description: 'always fails',
+    input_schema: { type: 'object', properties: {} },
+    async handler() { return { ok: false, error: 'nope' }; },
+  };
+  const use = (id: string, name: string): AgentMessageContentBlock =>
+    ({ type: 'tool_use', id, name, input: {} });
+  const toolTurn = (id: string, name = 'probe'): ProviderTurnResult =>
+    ({ stop_reason: 'tool_use', content: [use(id, name)] });
+  const endTurn: ProviderTurnResult =
+    { stop_reason: 'end_turn', content: [{ type: 'text', text: 'done' }] };
+
+  // a) Note appended between rounds, after the tool_result message, and the
+  //    next provider turn sees it. Hook ctx carries iteration/max/toolResults.
+  const hookCtxs: Array<{ iteration: number; maxIterations: number; toolResults: Array<{ toolName: string; ok: boolean; resultText?: string }> }> = [];
+  const providerSawNote: boolean[] = [];
+  const scripted = scriptedProvider([toolTurn('tu_h1'), toolTurn('tu_h2', 'breaker'), endTurn]);
+  const watchingProvider: AgentProvider = {
+    async turn(args) {
+      const last = args.messages[args.messages.length - 1];
+      providerSawNote.push(typeof last?.content === 'string' && last.content === 'NOTE round 1');
+      return scripted.turn(args as any);
+    },
+  };
+  const resultA = await runAgent({
+    initialMessages: [{ role: 'user', content: 'go' }],
+    tools: [okTool, badTool],
+    provider: watchingProvider,
+    maxIterations: 5,
+    onRoundComplete: (ctx) => {
+      hookCtxs.push({ iteration: ctx.iteration, maxIterations: ctx.maxIterations, toolResults: ctx.toolResults });
+      return ctx.iteration === 1 ? { appendUserNote: 'NOTE round 1' } : undefined;
+    },
+  });
+  assertEqual(resultA.text, 'done', 'case11a: run completes');
+  // History: user, assistant(tu1), user(tool_result), user(NOTE),
+  //          assistant(tu2), user(tool_result), assistant(done) = 7
+  assertEqual(resultA.messages.length, 7, 'case11a: exactly one note message added');
+  const noteMsg = resultA.messages[3];
+  assert(noteMsg.role === 'user' && noteMsg.content === 'NOTE round 1',
+    'case11a: note is a user-role text message after the tool_result');
+  const beforeNote = resultA.messages[2].content as AgentMessageContentBlock[];
+  assert(Array.isArray(beforeNote) && beforeNote[0]?.type === 'tool_result',
+    'case11a: note sits directly after the tool_result message');
+  assertEqual(providerSawNote, [false, true, false],
+    'case11a: the NEXT provider turn (and only it) sees the note as the last message');
+  assertEqual(hookCtxs.length, 2, 'case11a: hook fired once per tool round');
+  assertEqual(hookCtxs[0].iteration, 1, 'case11a: ctx.iteration is 1-indexed');
+  assertEqual(hookCtxs[0].maxIterations, 5, 'case11a: ctx.maxIterations forwarded');
+  assertEqual(hookCtxs[0].toolResults.map((t) => ({ toolName: t.toolName, ok: t.ok })),
+    [{ toolName: 'probe', ok: true }], 'case11a: round 1 toolResults summarized');
+  assert(typeof hookCtxs[0].toolResults[0].resultText === 'string'
+    && hookCtxs[0].toolResults[0].resultText!.includes('seen'),
+    'case11a: resultText carries the model-visible content');
+  assertEqual(hookCtxs[1].toolResults.map((t) => ({ toolName: t.toolName, ok: t.ok })),
+    [{ toolName: 'breaker', ok: false }], 'case11a: failed tool reported ok:false');
+
+  // b) Not fired on the final round (no next turn to guide).
+  let finalRoundCalls = 0;
+  const resultB = await runAgent({
+    initialMessages: [{ role: 'user', content: 'go' }],
+    tools: [okTool],
+    provider: scriptedProvider([toolTurn('tu_f1'), toolTurn('tu_f2')]),
+    maxIterations: 2,
+    onRoundComplete: () => { finalRoundCalls += 1; return { appendUserNote: 'late note' }; },
+  });
+  assertEqual(resultB.hitMaxIterations, true, 'case11b: run hit the cap');
+  assertEqual(finalRoundCalls, 1, 'case11b: hook skipped on the final round');
+  assert(!resultB.messages.some((m) => m.content === 'late note' && resultB.messages.indexOf(m) > 4),
+    'case11b: no note after the final round');
+
+  // c) Hook errors are swallowed (sync throw + async reject) — loop unaffected.
+  const resultC = await runAgent({
+    initialMessages: [{ role: 'user', content: 'go' }],
+    tools: [okTool],
+    provider: scriptedProvider([toolTurn('tu_e1'), toolTurn('tu_e2'), endTurn]),
+    maxIterations: 5,
+    onRoundComplete: (ctx) => {
+      if (ctx.iteration === 1) throw new Error('boom');
+      return Promise.reject(new Error('async boom'));
+    },
+  });
+  assertEqual(resultC.text, 'done', 'case11c: hook errors never break the loop');
+  assertEqual(resultC.messages.length, 6, 'case11c: no note messages on error');
+
+  // d) Async hook supported; empty/whitespace notes are not appended.
+  const resultD = await runAgent({
+    initialMessages: [{ role: 'user', content: 'go' }],
+    tools: [okTool],
+    provider: scriptedProvider([toolTurn('tu_a1'), toolTurn('tu_a2'), endTurn]),
+    maxIterations: 5,
+    onRoundComplete: async (ctx) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return ctx.iteration === 1 ? { appendUserNote: 'async note' } : { appendUserNote: '   ' };
+    },
+  });
+  assertEqual(resultD.text, 'done', 'case11d: async hook completes');
+  assert(resultD.messages.some((m) => m.role === 'user' && m.content === 'async note'),
+    'case11d: awaited note appended');
+  assertEqual(resultD.messages.length, 7, 'case11d: whitespace-only note NOT appended');
+}
+
 // ─── Run all ────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -526,6 +640,7 @@ async function main() {
     ['case8_toolApprovalGate',     case8_toolApprovalGate],
     ['case9_checkpointAndMetadata', case9_checkpointAndMetadata],
     ['case10_dependencyAwareParallelism', case10_dependencyAwareParallelism],
+    ['case11_onRoundCompleteHook',  case11_onRoundCompleteHook],
   ];
   for (const [name, fn] of cases) {
     const before = failures;

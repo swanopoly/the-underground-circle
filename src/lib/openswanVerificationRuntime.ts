@@ -49,7 +49,10 @@ export async function executeOpenSwanVerificationCheck(
   const tool = getToolNameForCheck(check);
 
   if (check.kind !== 'typecheck' && check.kind !== 'tests' && check.kind !== 'lint') {
-    const status: OpenSwanExecutionStatus = check.required ? 'manual_required' : 'planned';
+    // O5: a non-automatic check that isn't required does not apply to this
+    // run — report it honestly as not_applicable instead of a 'planned'
+    // that would read as "will run later" forever.
+    const status: OpenSwanExecutionStatus = check.required ? 'manual_required' : 'not_applicable';
     callbacks.onToolEvent?.({
       tool,
       status,

@@ -12,7 +12,11 @@ import {
   type ComputerAppGroundingNextStep,
   type ComputerAppGroundingTrace,
 } from './computerAppGrounding';
-import { buildComputerAppTaskStrategy, type ComputerAppTaskStrategy } from './computerAppTaskStrategy';
+import {
+  buildComputerAppTaskStrategy,
+  detectWordPressTrashPostIntent,
+  type ComputerAppTaskStrategy,
+} from './computerAppTaskStrategy';
 import { detectAutomationVerificationGate } from './desktopAutomationSafety';
 import { detectLocalComputerAwarenessIntent } from './localComputerAwarenessIntent';
 import {
@@ -38,9 +42,11 @@ export type OpenSwanToolName =
   | 'browser.plan_task'
   | 'browser.open_url'
   | 'browser.dom_snapshot'
+  | 'browser.wp_admin_source_intelligence'
   | 'browser.verification_state'
   | 'browser.click_role'
   | 'browser.fill_field'
+  | 'browser.fill_credential_field'
   | 'browser.select_option'
   | 'browser.upload_file'
   | 'browser.press_key'
@@ -58,6 +64,12 @@ export type OpenSwanToolName =
   | 'fetch_url'
   | 'list_circle_members'
   | 'schedule_action'
+  | 'wp.discover_types'
+  | 'wp.list_posts'
+  | 'wp.upload_media'
+  | 'wp.create_slide'
+  | 'wp.trash_post'
+  | 'wp.update_post'
   | 'missions.list'
   | 'missions.create_task'
   | 'missions.complete_task'
@@ -200,7 +212,7 @@ const RESEARCH_RE = /\b(research|compare|investigate|deep dive|tradeoff|best pra
 const AUTOMATION_RE = /\b(automate|workflow|task|pipeline|schedule|agent|orchestrate|runbook)\b/i;
 const PREVIEW_RE = /\b(html|css|landing page|webpage|preview|ui|screen|room|sandbox)\b/i;
 const BROWSER_RE = /\b(browser|website|web site|webpage|site|login|dashboard|click|fill|form|submit|data entry|scrape|extract data|web data retrieval|structured data|navigate|open url|browserbase|stagehand|computer[- ]use)\b/i;
-const DESKTOP_RE = /\b(desktop|computer|native app|window|finder|terminal|chrome|safari|slack|figma|indesign|photoshop|illustrator|notion|excel|word|zoom|cursor|visual studio code|vscode|launch app|open app|focus app|keystroke|keyboard|screen shot|screenshot|click at|auto\s*cad|autocad|cad|fusion\s*360|solid\s*works|solidworks|sketch\s*up|sketchup|freecad|librecad|qcad|rhino|revit|civil\s*3d|inventor|onshape|dwg|dxf|engineering drawing|floor plan|technical drawing)\b/i;
+const DESKTOP_RE = /\b(desktop|computer|native app|window|finder|terminal|chrome|safari|slack|figma|indesign|photoshop|illustrator|notion|excel|word|zoom|cursor|visual studio code|vscode|launch app|open app|focus app|keystroke|keyboard|screen shot|screenshot|click at|auto\s*cad|autocad|cad|fusion\s*360|solid\s*works|solidworks|matlab|mathworks|simulink|simscape|sketch\s*up|sketchup|freecad|librecad|qcad|rhino|revit|civil\s*3d|inventor|onshape|dwg|dxf|mlx|slx|engineering drawing|floor plan|technical drawing)\b/i;
 const BOT_VERIFICATION_RE = /\b(captcha|recaptcha|hcaptcha|turnstile|not a robot|human verification|bot verification|security check|cloudflare|2fa|mfa|otp|verification code)\b/i;
 const VAULT_RE = /\b(vault|credential|credentials|password|passwords|saved login|login information|username|secret|secrets|access to|grant access|revoke access)\b/i;
 const TEST_RE = /\b(tests?|specs?|coverage|assert|jest|vitest|playwright|cypress)\b/i;
@@ -228,7 +240,7 @@ const PIPELINE_OPEN_SWAN_TOOLS: Partial<Record<UserTaskPipelineId, OpenSwanToolN
   knowledge_search: ['research.search', 'search_memories'],
   memory_second_brain: ['search_memories', 'save_memory'],
   browser_data_retrieval: ['browser.plan_task', 'browser.open_url', 'browser.dom_snapshot', 'browser.screenshot'],
-  browser_form_submission: ['browser.plan_task', 'browser.verification_state', 'browser.dom_snapshot', 'browser.fill_field', 'browser.upload_file', 'vault.resolve_for_task', 'approvals.request'],
+  browser_form_submission: ['browser.plan_task', 'browser.verification_state', 'browser.dom_snapshot', 'browser.fill_field', 'browser.fill_credential_field', 'browser.upload_file', 'vault.resolve_for_task', 'approvals.request'],
   browser_navigation: ['browser.plan_task', 'browser.open_url', 'browser.dom_snapshot', 'browser.click_role', 'browser.screenshot'],
   desktop_awareness: ['desktop.list_browser_tabs', 'desktop.window_state', 'desktop.list_running_apps', 'desktop.clipboard'],
   bridge_troubleshooting: ['desktop.list_browser_tabs', 'desktop.window_state', 'desktop.list_running_apps', 'integrations.list'],
@@ -236,8 +248,8 @@ const PIPELINE_OPEN_SWAN_TOOLS: Partial<Record<UserTaskPipelineId, OpenSwanToolN
   local_files: ['desktop.file_list', 'desktop.file_read', 'desktop.file_search', 'desktop.file_stat', 'desktop.file_rename', 'desktop.file_write_text', 'desktop.file_copy', 'desktop.file_trash', 'desktop.file_mkdir', 'desktop.open_path'],
   terminal_agents: ['office.list_agents', 'messages.create', 'approvals.request'],
   vault_credentials: ['vault.find', 'vault.grants', 'vault.runbook', 'vault.resolve_for_task', 'approvals.request'],
-  wordpress_cms: ['vault.resolve_for_task', 'browser.plan_task', 'browser.verification_state', 'approvals.request'],
-  website_platform_admin: ['vault.resolve_for_task', 'browser.plan_task', 'browser.verification_state', 'browser.dom_snapshot', 'browser.fill_field', 'browser.upload_file', 'browser.click_role', 'approvals.request'],
+  wordpress_cms: ['wp.discover_types', 'wp.list_posts', 'browser.wp_admin_source_intelligence', 'wp.upload_media', 'wp.create_slide', 'wp.update_post', 'vault.resolve_for_task', 'vault.runbook', 'browser.plan_task', 'browser.open_url', 'browser.verification_state', 'browser.dom_snapshot', 'browser.fill_credential_field', 'browser.upload_file', 'approvals.request'],
+  website_platform_admin: ['vault.resolve_for_task', 'browser.plan_task', 'browser.verification_state', 'browser.dom_snapshot', 'browser.fill_credential_field', 'browser.fill_field', 'browser.upload_file', 'browser.click_role', 'approvals.request'],
   coding_build: ['code.inspect', 'code.generate', 'verification.typecheck', 'verification.tests'],
   debug_fix: ['code.inspect', 'code.generate', 'verification.typecheck', 'verification.tests'],
   code_review: ['code.review', 'verification.typecheck', 'verification.tests', 'verification.lint'],
@@ -276,8 +288,8 @@ const PIPELINE_OPEN_SWAN_TOOLS: Partial<Record<UserTaskPipelineId, OpenSwanToolN
 
 const STRATEGY_OPEN_SWAN_TOOLS: Partial<Record<ComputerAppTaskStrategy['id'], OpenSwanToolName[]>> = {
   browser_semantic: ['browser.open_url', 'browser.dom_snapshot', 'browser.verification_state', 'browser.click_role', 'browser.fill_field', 'browser.press_key', 'browser.screenshot'],
-  credentialed_browser: ['vault.resolve_for_task', 'vault.runbook', 'vault.grants', 'browser.verification_state', 'browser.dom_snapshot', 'browser.fill_field', 'browser.upload_file', 'approvals.request'],
-  approval_sensitive_browser: ['browser.open_url', 'browser.dom_snapshot', 'browser.verification_state', 'browser.click_role', 'browser.fill_field', 'browser.upload_file', 'browser.screenshot', 'vault.resolve_for_task', 'approvals.request'],
+  credentialed_browser: ['vault.resolve_for_task', 'vault.runbook', 'vault.grants', 'browser.verification_state', 'browser.dom_snapshot', 'browser.fill_credential_field', 'browser.fill_field', 'browser.upload_file', 'approvals.request'],
+  approval_sensitive_browser: ['browser.open_url', 'browser.dom_snapshot', 'browser.verification_state', 'browser.click_role', 'browser.fill_credential_field', 'browser.fill_field', 'browser.upload_file', 'browser.screenshot', 'vault.resolve_for_task', 'approvals.request'],
   browser_file_transfer: ['desktop.file_search', 'desktop.file_stat', 'desktop.file_read', 'browser.open_url', 'browser.verification_state', 'browser.dom_snapshot', 'browser.upload_file', 'browser.click_role', 'browser.screenshot', 'approvals.request'],
   agent_asset_acquisition: ['office.list_agents', 'agent.codex_acquire_asset', 'desktop.file_search', 'desktop.file_stat', 'desktop.file_read', 'approvals.request'],
   desktop_readonly: ['desktop.list_browser_tabs', 'desktop.window_state', 'desktop.list_running_apps', 'desktop.clipboard', 'desktop.file_list'],
@@ -286,7 +298,7 @@ const STRATEGY_OPEN_SWAN_TOOLS: Partial<Record<ComputerAppTaskStrategy['id'], Op
   desktop_canvas_vision: ['desktop.launch_app', 'desktop.focus_app', 'desktop.screenshot', 'desktop.screen_size', 'desktop.read_a11y_tree', 'desktop.click_element', 'desktop.menu_click', 'desktop.click_at', 'desktop.mouse_down', 'desktop.mouse_up', 'desktop.mouse_drag', 'desktop.press_keys'],
   creative_layout_control: ['desktop.file_search', 'desktop.file_stat', 'desktop.open_path', 'desktop.launch_app', 'desktop.focus_app', 'desktop.indesign_document_status', 'desktop.indesign_text_inventory', 'desktop.indesign_set_layer_state', 'desktop.indesign_batch_update_text_layers', 'desktop.indesign_batch_find_change', 'desktop.indesign_update_text_layer', 'desktop.indesign_relink_asset', 'desktop.indesign_package_document', 'desktop.indesign_export_proof', 'desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory', 'desktop.photoshop_set_layer_state', 'desktop.photoshop_update_text_layer', 'desktop.photoshop_place_asset', 'desktop.photoshop_export_proof', 'desktop.read_a11y_tree', 'desktop.menu_click', 'desktop.screenshot', 'approvals.request'],
   adobe_cc_control: ['desktop.file_search', 'desktop.file_stat', 'desktop.open_path', 'desktop.launch_app', 'desktop.focus_app', 'desktop.window_state', 'desktop.read_a11y_tree', 'desktop.screenshot', 'desktop.screen_size', 'desktop.menu_click', 'desktop.click_element', 'desktop.set_element_value', 'desktop.type_text', 'desktop.paste_text', 'desktop.press_keys', 'office.list_agents', 'research.search', 'agent.build_app_capability', 'approvals.request'],
-  engineering_cad_control: ['desktop.list_running_apps', 'desktop.window_state', 'desktop.launch_app', 'desktop.focus_app', 'desktop.read_a11y_tree', 'desktop.screenshot', 'desktop.screen_size', 'desktop.menu_click', 'desktop.click_element', 'desktop.press_keys', 'desktop.type_text', 'desktop.paste_text', 'desktop.file_search', 'desktop.file_stat', 'desktop.open_path', 'approvals.request'],
+  engineering_cad_control: ['desktop.list_running_apps', 'desktop.window_state', 'desktop.launch_app', 'desktop.focus_app', 'desktop.read_a11y_tree', 'desktop.screenshot', 'desktop.screen_size', 'desktop.menu_click', 'desktop.click_element', 'desktop.press_keys', 'desktop.type_text', 'desktop.paste_text', 'desktop.file_search', 'desktop.file_stat', 'desktop.open_path', 'research.search', 'fetch_url', 'agent.build_app_capability', 'approvals.request'],
   universal_app_control: ['integrations.list', 'office.list_agents', 'research.search', 'agent.build_app_capability', 'desktop.list_running_apps', 'desktop.window_state', 'desktop.launch_app', 'desktop.focus_app', 'desktop.read_a11y_tree', 'desktop.screenshot', 'desktop.screen_size', 'desktop.menu_click', 'desktop.click_element', 'desktop.set_element_value', 'desktop.type_text', 'desktop.paste_text', 'desktop.press_keys', 'approvals.request'],
   document_data_workbench: ['desktop.file_list', 'desktop.file_search', 'desktop.file_read', 'browser.dom_snapshot', 'browser.screenshot', 'approvals.request'],
   ops_console_control: ['code.inspect', 'verification.tests', 'browser.open_url', 'browser.dom_snapshot', 'desktop.window_state', 'approvals.request'],
@@ -416,9 +428,19 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities
   const verificationGate = detectAutomationVerificationGate(message);
   const pipelineMatch = getBestUserTaskPipeline(message, { includeFallback: false });
   const strategy = buildComputerAppTaskStrategy(message);
+  const wantsWordPressTrashPost = detectWordPressTrashPostIntent(message);
   const tools: OpenSwanToolPlanItem[] = [
     { tool: 'code.inspect', reason: 'Inspect surrounding code and current context before acting.', priority: 'high' },
   ];
+
+  if (wantsWordPressTrashPost) {
+    tools.push(
+      { tool: 'wp.discover_types', reason: 'Discover WordPress post types before trashing posts, pages, or custom post type items.', priority: 'high' },
+      { tool: 'wp.list_posts', reason: 'List candidate WordPress posts/pages/CPT items so the trash target is exact before approval.', priority: 'high' },
+      { tool: 'wp.trash_post', reason: 'Move the approved WordPress post, page, or DI Slide target to trash instead of using a generic update path.', priority: 'high' },
+      { tool: 'approvals.request', reason: 'Gate destructive WordPress content trash/archive/remove actions behind explicit user approval.', priority: 'high' },
+    );
+  }
 
   if (pipelineMatch) {
     for (const tool of PIPELINE_OPEN_SWAN_TOOLS[pipelineMatch.pipeline.id] || []) {
@@ -431,6 +453,13 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities
   }
 
   if (strategy) {
+    if (strategy.recommendedTools.includes('browser.wp_admin_source_intelligence')) {
+      tools.push({
+        tool: 'browser.wp_admin_source_intelligence',
+        reason: `Use bounded redacted WordPress admin source facts before ${strategy.label} UI decisions.`,
+        priority: 'high',
+      });
+    }
     for (const tool of STRATEGY_OPEN_SWAN_TOOLS[strategy.id] || []) {
       tools.push({
         tool,
@@ -918,6 +947,7 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities
       { tool: 'vault.resolve_for_task', reason: 'Resolve the safest saved credential for login-dependent website automation without exposing secrets.', priority: 'high' },
       { tool: 'vault.runbook', reason: 'Give agents a credential ID, allowed actions, allowed origins, and safe login instructions.', priority: 'high' },
       { tool: 'vault.grants', reason: 'Inspect which agents or runtimes already have scoped credential access.', priority: 'medium' },
+      { tool: 'browser.fill_credential_field', reason: 'Fill login fields from an approved saved credential without returning the raw secret to the model.', priority: 'high' },
     );
   }
   if (/\bgrant|give .*access|allow .*access|can use\b/i.test(message) && VAULT_RE.test(message)) {

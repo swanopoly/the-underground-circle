@@ -88,7 +88,7 @@ const RULES: Record<string, CheckpointRule> = {
     safeNextStep: 'Re-observe the URL, DOM/role state, login state, and target element before any click, fill, upload, or submit.',
   },
   'observe-desktop': {
-    patterns: [/\b((desktop(?!\s+folder))|window|app|application|focus|a11y|accessibility|screenshot|screen recording|photoshop|indesign|autocad|illustrator|revit|solidworks|finder)\b/i],
+    patterns: [/\b((desktop(?!\s+folder))|window|app|application|focus|a11y|accessibility|screenshot|screen recording|photoshop|indesign|autocad|illustrator|revit|solidworks|matlab|simulink|finder)\b/i],
     reason: 'The desktop/app state, focus, accessibility tree, or screenshot evidence was not reliable enough.',
     safeNextStep: 'Refresh app/window focus, accessibility, and screenshot state before any keyboard, mouse, menu, or document action.',
   },

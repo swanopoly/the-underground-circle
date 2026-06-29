@@ -45,11 +45,17 @@ assert(indesignRoute.evidenceContract.sourceRefs.some((ref) => ref.url.includes(
 const cadRoute = buildChatComputerRequestRoute('Open AutoCAD and create a 2D floor plan with two rooms and dimensions, then export PDF after approval');
 assert(cadRoute?.evidenceContract, 'CAD route carries evidence contract');
 assert.equal(cadRoute.evidenceContract.kind, 'desktop_app');
-assert(cadRoute.evidenceContract.observeBefore.some((item) => /CAD document\/model state/i.test(item)), 'CAD contract requires units/model state before mutation');
+assert(cadRoute.evidenceContract.observeBefore.some((item) => /engineering document\/model\/project state/i.test(item)), 'CAD contract requires units/model state before mutation');
 assert(cadRoute.evidenceContract.actionabilityChecks.some((item) => /app API\/script\/add-in\/command surface/i.test(item)), 'CAD contract prefers app-native/script control');
 assert(cadRoute.evidenceContract.proofAfter.some((item) => /units\/dimensions\/layers/i.test(item)), 'CAD contract requires refreshed engineering proof');
 assert(cadRoute.evidenceContract.sourceRefs.some((ref) => ref.label.includes('AutoLISP')), 'CAD contract cites AutoLISP');
 assert(cadRoute.evidenceContract.sourceRefs.some((ref) => ref.url.includes('aps.autodesk.com/developer/overview/autocad-api')), 'CAD contract cites AutoCAD API');
+
+const matlabRoute = buildChatComputerRequestRoute('Open MATLAB and build a Simulink model, run the simulation, and export plots after approval');
+assert(matlabRoute?.evidenceContract, 'MATLAB route carries evidence contract');
+assert.equal(matlabRoute.evidenceContract.targetName, 'MATLAB / Simulink');
+assert(matlabRoute.evidenceContract.observeBefore.some((item) => /toolboxes/i.test(item)), 'MATLAB contract requires toolbox/project state before execution');
+assert(matlabRoute.evidenceContract.sourceRefs.some((ref) => ref.label.includes('MATLAB MCP Core Server')), 'MATLAB contract cites MCP Core Server');
 
 const abletonRoute = buildChatComputerRequestRoute('Use Ableton Live to create a four-bar drum loop and export it after approval');
 assert(abletonRoute?.evidenceContract, 'unfamiliar app route carries evidence contract');

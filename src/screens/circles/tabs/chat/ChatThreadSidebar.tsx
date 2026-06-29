@@ -12,7 +12,7 @@
  * Collapse state persists in localStorage. Collapsed = icon-only strip.
  */
 
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import {
   type CircleChatThread,
@@ -20,6 +20,7 @@ import {
   groupThreadsByDate,
   useThreads,
 } from '../../../../lib/circleChatThreads';
+import FlatIcon from '../../../../components/FlatIcon';
 
 const STORAGE_KEY = 'uc_chat_thread_sidebar_collapsed_v1';
 
@@ -28,6 +29,9 @@ interface Props {
   activeThreadId: string | null;
   onSelectThread: (threadId: string) => void;
   onNewThread: () => void;
+  onNewAgent?: () => void;
+  onOpenAutomations?: () => void;
+  onOpenMarketplace?: () => void;
   onDeleteThread?: (threadId: string) => void;
   refreshToken?: number;
   collapsed: boolean;
@@ -50,9 +54,17 @@ export function persistSidebarCollapsed(collapsed: boolean): void {
 // each dot pulses opacity slightly out-of-phase so the whole thing breathes.
 
 const DOT_COLORS = ['#22d3ee', '#facc15', '#22c55e', '#ef4444', '#a855f7', '#f97316'];
+const SIDEBAR_ACTIONS = [
+  { key: 'new', label: 'New', icon: 'create', tone: '#22d3ee' },
+  { key: 'agent', label: 'New Agent', icon: 'agents', tone: '#a855f7' },
+  { key: 'automations', label: 'Automations', icon: 'rocket', tone: '#22c55e' },
+  { key: 'marketplace', label: 'Marketplace', icon: 'integrations', tone: '#f59e0b' },
+] as const;
 const RING_SIZE = 22;
 const RING_RADIUS = 8;
 const DOT_SIZE = 4;
+
+type SidebarActionKey = typeof SIDEBAR_ACTIONS[number]['key'];
 
 function ensureSpinKeyframes() {
   if (typeof document === 'undefined') return;
@@ -70,6 +82,24 @@ function ensureSpinKeyframes() {
 }
 .uc-circle-chat-ring { animation: uc-circle-chat-spin 6s linear infinite; will-change: transform; }
 .uc-circle-chat-dot  { animation: uc-circle-chat-pulse 1.6s ease-in-out infinite; }
+`;
+  document.head.appendChild(el);
+}
+
+function ensureSidebarActionKeyframes() {
+  if (typeof document === 'undefined') return;
+  if (document.getElementById('uc-chat-sidebar-action-style')) return;
+  const el = document.createElement('style');
+  el.id = 'uc-chat-sidebar-action-style';
+  el.textContent = `
+@keyframes uc-chat-sidebar-rainbow-pan {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+.uc-chat-sidebar-action-hover {
+  animation: uc-chat-sidebar-rainbow-pan 2.4s ease infinite;
+}
 `;
   document.head.appendChild(el);
 }
@@ -153,10 +183,99 @@ function AnimatedCircleAvatar({ size = RING_SIZE }: { size?: number }) {
   return <Animated.View style={[containerStyle, { transform: [{ rotate: spin }] }]}>{Ring}</Animated.View>;
 }
 
+function SidebarActionButton({
+  label,
+  icon,
+  tone,
+  onPress,
+}: {
+  label: string;
+  icon: string;
+  tone: string;
+  onPress: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const [pressed, setPressed] = useState(false);
+  useEffect(() => {
+    if (Platform.OS === 'web') ensureSidebarActionKeyframes();
+  }, []);
+  const rainbowHover = Platform.OS === 'web' && hovered
+    ? ({
+        backgroundImage: 'linear-gradient(120deg, rgba(34,211,238,0.22), rgba(168,85,247,0.24), rgba(236,72,153,0.22), rgba(250,204,21,0.2), rgba(34,197,94,0.22))',
+        backgroundSize: '260% 260%',
+        boxShadow: '0 0 24px rgba(34,211,238,0.14), 0 0 34px rgba(168,85,247,0.16), inset 0 0 0 1px rgba(255,255,255,0.12)',
+      } as any)
+    : null;
+
+  return (
+    <Pressable
+      onPress={onPress}
+      onHoverIn={() => setHovered(true)}
+      onHoverOut={() => setHovered(false)}
+      onPressIn={() => setPressed(true)}
+      onPressOut={() => setPressed(false)}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      {...(Platform.OS === 'web' && hovered ? { className: 'uc-chat-sidebar-action-hover' } as any : {})}
+      style={[
+        styles.sidebarActionButton,
+        Platform.OS === 'web' && { transition: 'all 0.18s ease' } as any,
+        hovered && styles.sidebarActionButtonHovered,
+        pressed && styles.sidebarActionButtonPressed,
+        rainbowHover,
+      ]}
+    >
+      <View style={[
+        styles.sidebarActionIcon,
+        { borderColor: hovered ? tone : '#262626', backgroundColor: hovered ? `${tone}24` : '#050505' },
+      ]}>
+        <FlatIcon name={icon} size={15} mono={!hovered} glow={hovered} />
+      </View>
+      <Text style={[styles.sidebarActionLabel, hovered && styles.sidebarActionLabelHovered]} numberOfLines={1}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+function CompactActionButton({
+  action,
+  onPress,
+}: {
+  action: typeof SIDEBAR_ACTIONS[number];
+  onPress: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  useEffect(() => {
+    if (Platform.OS === 'web') ensureSidebarActionKeyframes();
+  }, []);
+  return (
+    <Pressable
+      onPress={onPress}
+      onHoverIn={() => setHovered(true)}
+      onHoverOut={() => setHovered(false)}
+      accessibilityRole="button"
+      accessibilityLabel={action.label}
+      {...(Platform.OS === 'web' ? { title: action.label } as any : {})}
+      style={[
+        styles.iconBtn,
+        Platform.OS === 'web' && { transition: 'all 0.16s ease' } as any,
+        hovered && {
+          borderColor: action.tone,
+          backgroundColor: `${action.tone}1f`,
+          boxShadow: `0 0 18px ${action.tone}55`,
+        } as any,
+      ]}
+    >
+      <FlatIcon name={action.icon} size={15} mono={!hovered} glow={hovered} />
+    </Pressable>
+  );
+}
+
 // ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 export default function ChatThreadSidebar({
-  circleId, activeThreadId, onSelectThread, onNewThread, onDeleteThread, refreshToken = 0, collapsed, onToggleCollapsed,
+  circleId, activeThreadId, onSelectThread, onNewThread, onNewAgent, onOpenAutomations, onOpenMarketplace, onDeleteThread, refreshToken = 0, collapsed, onToggleCollapsed,
 }: Props) {
   const { threads, loading } = useThreads(circleId, refreshToken);
   const widthAnim = useRef(new Animated.Value(collapsed ? 48 : 280)).current;
@@ -168,6 +287,12 @@ export default function ChatThreadSidebar({
     [threads],
   );
   const groups = useMemo(() => groupThreadsByDate(userThreads), [userThreads]);
+  const actionHandlers = useMemo<Record<SidebarActionKey, (() => void) | undefined>>(() => ({
+    new: onNewThread,
+    agent: onNewAgent,
+    automations: onOpenAutomations,
+    marketplace: onOpenMarketplace,
+  }), [onNewAgent, onNewThread, onOpenAutomations, onOpenMarketplace]);
 
   useEffect(() => {
     fadeAnim.setValue(0);
@@ -212,6 +337,11 @@ export default function ChatThreadSidebar({
         <Pressable onPress={onNewThread} style={styles.iconBtn}>
           <Text style={styles.iconText}>+</Text>
         </Pressable>
+        {SIDEBAR_ACTIONS.slice(1).map((action) => {
+          const handler = actionHandlers[action.key];
+          if (!handler) return null;
+          return <CompactActionButton key={action.key} action={action} onPress={handler} />;
+        })}
         {circleThread && (
           <Pressable
             onPress={() => onSelectThread(circleThread.id)}
@@ -238,13 +368,26 @@ export default function ChatThreadSidebar({
       <View style={styles.header}>
         <Text style={styles.headerTitle}>CHATS</Text>
         <View style={styles.headerActions}>
-          <Pressable onPress={onNewThread} style={styles.headerNewBtn}>
-            <Text style={styles.headerNewBtnText}>+ NEW</Text>
-          </Pressable>
           <Pressable onPress={onToggleCollapsed} style={styles.headerCollapseBtn}>
             <Text style={styles.headerCollapseBtnText}>‹</Text>
           </Pressable>
         </View>
+      </View>
+
+      <View style={styles.sidebarActionGrid}>
+        {SIDEBAR_ACTIONS.map((action) => {
+          const handler = actionHandlers[action.key];
+          if (!handler) return null;
+          return (
+            <SidebarActionButton
+              key={action.key}
+              label={action.label}
+              icon={action.icon}
+              tone={action.tone}
+              onPress={handler}
+            />
+          );
+        })}
       </View>
 
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
@@ -348,7 +491,7 @@ function ThreadRow({
   );
 }
 
-// ─── Styles — strict black + white, only the rotating ring is colored ───────
+// ─── Styles — black rail with restrained action accents and rainbow hover ───
 
 const styles = StyleSheet.create({
   rail: {
@@ -386,18 +529,65 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5, textTransform: 'uppercase',
   },
   headerActions: { flexDirection: 'row', gap: 6, alignItems: 'center' },
-  headerNewBtn: {
-    paddingHorizontal: 8, paddingVertical: 4,
-    borderRadius: 6, borderWidth: 1, borderColor: '#ffffff',
-    backgroundColor: '#000000',
-  },
-  headerNewBtnText: { color: '#ffffff', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
   headerCollapseBtn: {
     width: 24, height: 24, borderRadius: 6,
     alignItems: 'center', justifyContent: 'center',
     borderWidth: 1, borderColor: '#262626', backgroundColor: '#000000',
   },
   headerCollapseBtnText: { color: '#a3a3a3', fontWeight: '900', fontSize: 14, lineHeight: 14 },
+
+  sidebarActionGrid: {
+    paddingHorizontal: 10,
+    paddingTop: 10,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#101010',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  sidebarActionButton: {
+    width: '48%',
+    minHeight: 44,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1f1f1f',
+    backgroundColor: '#050505',
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  sidebarActionButtonHovered: {
+    borderColor: 'rgba(255,255,255,0.45)',
+  },
+  sidebarActionButtonPressed: {
+    transform: [{ scale: 0.98 }],
+  },
+  sidebarActionIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 7,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sidebarActionIconText: {
+    color: '#a3a3a3',
+    fontSize: 13,
+    fontWeight: '900',
+    lineHeight: 15,
+  },
+  sidebarActionLabel: {
+    flex: 1,
+    color: '#d4d4d4',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  sidebarActionLabelHovered: {
+    color: '#ffffff',
+  },
 
   scroll: { flex: 1 },
   scrollContent: { paddingVertical: 8, paddingHorizontal: 8, gap: 12 },

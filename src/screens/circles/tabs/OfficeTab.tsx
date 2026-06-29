@@ -65,6 +65,24 @@ import {
 } from '../../../lib/budgetAlerts';
 import BudgetAlertBanner from '../../../components/BudgetAlertBanner';
 import { calculatePeriodCosts } from '../../../lib/costCalculations';
+import {
+  OfficeBuildingNowCard,
+  OfficeTokensCard,
+  OfficeAgentLiveOpsLines,
+  OfficeBuildingBadge,
+  officeBoardHasContent,
+  officeTrackerHasContent,
+} from '../../../components/office/OfficeOpsBoardCards';
+// officeOpsBoard is a pure model module (zero runtime imports) — safe to
+// import statically for render-time helpers; data fetching stays lazy (D6).
+import { buildAgentLiveOps } from '../../../lib/officeOpsBoard';
+import type {
+  OfficeBuildingBoard,
+  OfficeRunNode,
+  OfficeTokenTrackerCard as OfficeTokenTrackerCardModel,
+} from '../../../lib/officeOpsBoard';
+import type { AgentRun } from '../../../lib/agentRunSystem';
+import type { ClaudeUsageSummary, ClaudeUsageByModel } from '../../../lib/claudeUsage';
 import OfficeActionPanel from '../../../components/OfficeActionPanel';
 import AgentActivityFeed from '../../../components/AgentActivityFeed';
 import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
@@ -272,6 +290,116 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     return () => { cancelled = true; clearInterval(timer); };
   }, [circleId]);
 
+  // ── Office ops board (Building Now + Token Tracker) ──────────────────────
+  // D6 pattern: lazy-import loader, bounded pure models, silent failures.
+  // Runs poll every 15s plus a realtime subscription for instant updates;
+  // Claude usage (summary + by-model, 7d) refreshes at most every 60s.
+  const [opsBoard, setOpsBoard] = useState<OfficeBuildingBoard | null>(null);
+  const [opsTokenTracker, setOpsTokenTracker] = useState<OfficeTokenTrackerCardModel | null>(null);
+  const opsLiveRunsRef = useRef<AgentRun[]>([]);
+  const opsUsageCacheRef = useRef<{
+    summary?: ClaudeUsageSummary;
+    byModel?: ClaudeUsageByModel[];
+    fetchedAtMs: number;
+  }>({ fetchedAtMs: 0 });
+  // Synced from enrichedSessions in render (declared below) so the loader can
+  // read the latest sessions without re-subscribing — same pattern as onReadyRef.
+  const opsSessionsRef = useRef<OpenSwanSession[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unsubscribeRuns: (() => void) | null = null;
+    // Reset per-circle so a circle switch can't show stale spend/runs.
+    opsLiveRunsRef.current = [];
+    opsUsageCacheRef.current = { fetchedAtMs: 0 };
+
+    const rebuildTracker = async () => {
+      try {
+        const { buildOfficeTokenTracker } = await import('../../../lib/officeOpsBoard');
+        if (cancelled) return;
+        const sessions = opsSessionsRef.current;
+        const pc = sessions.length > 0 ? calculatePeriodCosts(sessions) : null;
+        setOpsTokenTracker(buildOfficeTokenTracker({
+          summary: opsUsageCacheRef.current.summary,
+          byModel: opsUsageCacheRef.current.byModel,
+          liveRuns: opsLiveRunsRef.current,
+          periodCosts: pc ? { today: pc.today, week: pc.week } : undefined,
+          nowMs: Date.now(),
+        }));
+      } catch { /* dashboard extra — never break Office */ }
+    };
+
+    const reloadRuns = async () => {
+      try {
+        const [{ listCircleLiveRuns }, { buildOfficeBuildingBoard }] = await Promise.all([
+          import('../../../lib/agentRunSystem'),
+          import('../../../lib/officeOpsBoard'),
+        ]);
+        const runs = await listCircleLiveRuns(circleId);
+        if (cancelled) return;
+        opsLiveRunsRef.current = runs;
+        setOpsBoard(buildOfficeBuildingBoard(runs, { nowMs: Date.now() }));
+        void rebuildTracker(); // live-burn line tracks the fresh runs
+      } catch { /* dashboard extra — never break Office */ }
+    };
+
+    const reloadUsage = async () => {
+      // Cache: refresh Claude usage at most every 60s even if callers race.
+      if (Date.now() - opsUsageCacheRef.current.fetchedAtMs < 60_000) return;
+      opsUsageCacheRef.current.fetchedAtMs = Date.now(); // claim slot before await
+      try {
+        const { getClaudeUsageSummary, getClaudeUsageByModel } = await import('../../../lib/claudeUsage');
+        const [summary, byModel] = await Promise.all([
+          getClaudeUsageSummary(circleId, 7),
+          getClaudeUsageByModel(circleId, 7),
+        ]);
+        if (cancelled) return;
+        opsUsageCacheRef.current = { summary, byModel, fetchedAtMs: Date.now() };
+        void rebuildTracker();
+      } catch { /* dashboard extra — never break Office */ }
+    };
+
+    void reloadRuns();
+    void reloadUsage();
+    const runsTimer = setInterval(() => { void reloadRuns(); }, 15_000);
+    const usageTimer = setInterval(() => { void reloadUsage(); }, 60_000);
+
+    // Realtime: refetch on agent_runs INSERT/UPDATE (debounced in the lib).
+    (async () => {
+      try {
+        const { subscribeToCircleRuns } = await import('../../../lib/agentRunSystem');
+        if (cancelled) return;
+        const unsub = subscribeToCircleRuns(circleId, () => { void reloadRuns(); });
+        if (cancelled) { unsub(); return; } // raced with cleanup
+        unsubscribeRuns = unsub;
+      } catch { /* dashboard extra — never break Office */ }
+    })();
+
+    return () => {
+      cancelled = true;
+      clearInterval(runsTimer);
+      clearInterval(usageTimer);
+      try { unsubscribeRuns?.(); } catch {}
+      unsubscribeRuns = null;
+    };
+  }, [circleId]);
+
+  // Map building run nodes to roster agents by case-insensitive agentName.
+  // Limitation: OfficeRunNode.agentName is derived from delegated_to / a
+  // "Name: " title prefix / surface label, so runs without an explicit agent
+  // label (e.g. "Chat agent") won't attach to a specific roster agent.
+  const opsRunNodesByAgent = useMemo(() => {
+    const map = new Map<string, OfficeRunNode[]>();
+    const visit = (node: OfficeRunNode) => {
+      const key = node.agentName.trim().toLowerCase();
+      const list = map.get(key);
+      if (list) list.push(node); else map.set(key, [node]);
+      node.children.forEach(visit);
+    };
+    (opsBoard?.building ?? []).forEach(visit);
+    return map;
+  }, [opsBoard]);
+
   // Agent control hook for selected agent
   const selectedSessionKey = getAgentIdentityKey(selectedAgent);
   const agentControl = useAgentControl(circleId, selectedSessionKey);
@@ -380,6 +508,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const [actionResult, setActionResult] = useState<string>('');
   const [showActionResult, setShowActionResult] = useState(false);
   const [enrichedSessions, setEnrichedSessions] = useState<OpenSwanSession[]>([]);
+  // Keep the ops-board loader's view of sessions current without it needing
+  // enrichedSessions in its effect deps (it reads via ref at rebuild time).
+  opsSessionsRef.current = enrichedSessions;
   const enrichedSessionSignatureRef = useRef('');
   const {
     showCustomize, setShowCustomize,
@@ -3682,6 +3813,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               )).join(' ')} {computerTaskCard.stages.length} stages
             </Text>
           ) : null}
+          {/* E1: escalation breadcrumbs — dim, latest switch only */}
+          {computerTaskCard.surfaceChanges.length > 0 ? (
+            <Text style={{ color: '#64748b', fontSize: 10, marginTop: 2 }} numberOfLines={1}>
+              {computerTaskCard.surfaceChanges[computerTaskCard.surfaceChanges.length - 1]}
+            </Text>
+          ) : null}
           {computerTaskCard.needsYou.length > 0 ? (
             <Text style={{ color: '#64748b', fontSize: 10, marginTop: 2 }} numberOfLines={1}>
               Open Chat → Use Computer to answer or approve.
@@ -3763,6 +3900,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         {/* Mobile: Card-based agent list */}
         {!isDesktop ? (
           <ScrollView style={styles.mobileAgentScroll} showsVerticalScrollIndicator={true} contentContainerStyle={styles.mobileAgentList}>
+            {/* Ops board: live builds + token spend (after the computer-task
+                card above, before the agent roster). Hidden when empty. */}
+            <OfficeBuildingNowCard board={opsBoard} />
+            <OfficeTokensCard tracker={opsTokenTracker} />
+
             {/* Circle members' agents — shared office */}
             {mergedCircleAgents.length > 0 && (
               <CircleOfficePanel
@@ -3944,6 +4086,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                       </View>
                     </View>
                     <Text style={styles.mobileCardActivity} numberOfLines={1}>{agent.activity}</Text>
+                    {/* Live ops: "Now: tool" + recent tools / uptime / subagents.
+                        Runs attach by case-insensitive name match — see the
+                        opsRunNodesByAgent limitation note. */}
+                    <OfficeAgentLiveOpsLines
+                      ops={buildAgentLiveOps(
+                        agent,
+                        opsRunNodesByAgent.get(agent.name.trim().toLowerCase()) ?? [],
+                        Date.now(),
+                      )}
+                      accentColor={agent.color || accentColor}
+                    />
                   </Pressable>
                 );
               })
@@ -4031,8 +4184,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                     {agents.map((agent, i) => {
                       const pos = OFFICE_DESK_POSITIONS[i];
                       if (!pos) return null;
+                      // Ops board: small "building" badge when this agent has a
+                      // matching building root or active subagents (name match —
+                      // see the opsRunNodesByAgent limitation note). Sprite and
+                      // its own status indicator are untouched.
+                      const opsNodes = opsRunNodesByAgent.get(agent.name.trim().toLowerCase()) ?? [];
+                      const opsBuilding =
+                        opsNodes.some((n) => !n.isSubagent) ||
+                        buildAgentLiveOps(agent, opsNodes, Date.now()).subagents.active > 0;
                       return (
                         <View key={agent.id} style={[styles.agentPosition, { left: pos.x - 2, top: pos.y - 50 }]}>
+                          {opsBuilding ? <OfficeBuildingBadge /> : null}
                           <PixelAgent
                             agent={agent}
                             appearance={getAppearance(agent)}
@@ -4134,6 +4296,15 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                   </View>
                 </View>
               </ScrollView>
+
+              {/* Ops board row — live builds + token spend beneath the floor,
+                  next to the whiteboard/server-rack column. Hidden when empty. */}
+              {(officeBoardHasContent(opsBoard) || officeTrackerHasContent(opsTokenTracker)) ? (
+                <View style={styles.opsBoardRow}>
+                  <OfficeBuildingNowCard board={opsBoard} style={{ flex: 1.4, minWidth: 260 }} />
+                  <OfficeTokensCard tracker={opsTokenTracker} style={{ flex: 1, minWidth: 220 }} />
+                </View>
+              ) : null}
             </ScrollView>
 
             {/* Circle Office Panel — all members' bots */}
@@ -6187,6 +6358,15 @@ const styles = StyleSheet.create({
   mobileCardCostLabel: { fontSize: 11, color: '#666', fontFamily: 'monospace' },
   mobileCardActivity: { fontSize: 13, color: '#777', fontFamily: 'monospace', paddingLeft: 62 },
   officeScroll: { flex: 1 },
+  // Ops board (Building Now + Tokens) — desktop row beneath the office floor
+  opsBoardRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    alignItems: 'flex-start',
+  },
   officeScaleOuter: { overflow: 'hidden' },
   officeWrapper: { position: 'relative', transformOrigin: 'top left' as any },
   emptyOverlay: {

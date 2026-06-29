@@ -71,8 +71,8 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | Chat computer/app user notices | `src/lib/chatComputerRequestUx.ts` |
 | Computer task evidence contract | `src/lib/computerTaskEvidenceContract.ts`, `src/lib/computerTaskEvidenceRecovery.ts` |
 | Chat execution | `src/lib/runChatAutomationPlan.ts` |
-| BlackSwan response path | `src/lib/swanbot.ts`, `supabase/functions/swanbot-ai/index.ts` |
-| v2 SwanBot tool loop | `supabase/functions/swanbot-v2-ai/index.ts` |
+| BlackSwan response path | `src/lib/swanbot.ts`, `src/lib/swanbotClientToolDispatcher.ts`, `supabase/functions/swanbot-ai/index.ts` |
+| v2 SwanBot tool loop | `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/functions/_shared/swanbot-continuation.ts` |
 | Typed model/tool loop | `src/lib/agentExecutionCore.ts` |
 | OpenSwan sessions | `src/lib/openswanSessionRuntime.ts` |
 | Tool catalog | `src/lib/openswanToolRuntime.ts` |
@@ -83,6 +83,7 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | Computer task runtime | `src/lib/computerTaskRuntime.ts` |
 | Browser computer use | `src/lib/computerUse.ts`, `supabase/functions/computer-use-agent/index.ts` |
 | Local desktop intent | `src/lib/localComputerAwarenessIntent.ts` |
+| WordPress/Dealer Inspire admin automation | `src/lib/wpAdmin.ts`, `src/lib/computerAppTaskStrategy.ts`, `src/lib/chatComputerRequestRouter.ts`, `src/lib/userTaskPipelines.ts`, `src/lib/wordpressAdminSourceIntelligence.ts` |
 | Design creative AI | `src/lib/designAppCreativeAi.ts` |
 | Design execution pipeline | `src/lib/designAppExecutionPipeline.ts` |
 | Marketplace prompt context | `src/lib/marketplaceIntegrationContext.ts` |
