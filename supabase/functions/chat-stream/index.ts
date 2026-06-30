@@ -30,6 +30,11 @@ interface ChatStreamRequest {
   max_tokens?: number;
   temperature?: number;
   circleId?: string;
+  // Optional Anthropic tool definitions. When absent/empty, the stream is
+  // text-only and behaves exactly as before — every current caller sends no
+  // tools, so this is the safety boundary for the stream->tool seam.
+  tools?: unknown[];
+  tool_choice?: unknown;
 }
 
 Deno.serve(async (req: Request) => {
@@ -67,7 +72,11 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const { messages, system, max_tokens, temperature, circleId } = body;
+  const { messages, system, max_tokens, temperature, circleId, tools, tool_choice } = body;
+  // Single source of truth for "are we in tool mode": only true when the
+  // caller actually supplied tool definitions. Everything tool-related below
+  // is gated on this so the no-tools path stays byte-for-byte unchanged.
+  const hasTools = Array.isArray(tools) && tools.length > 0;
   if (!messages?.length) {
     return new Response(JSON.stringify({ error: "messages required" }), {
       status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -108,13 +117,17 @@ Deno.serve(async (req: Request) => {
   }
 
   // Model resolution: default Haiku, respect caller's pick.
-  // Canonical short IDs per Anthropic — no date suffixes. Opus points at 4.7
-  // (latest); callers who need 4.6 can pass `claude-opus-4-6` directly.
+  // Canonical short IDs per Anthropic — no date suffixes. Opus points at 4.8
+  // (latest Opus); callers who need 4.6/4.7 can pass those IDs directly.
   const MODEL_MAP: Record<string, string> = {
     "claude-haiku": "claude-haiku-4-5",
     "claude-haiku-4-5": "claude-haiku-4-5",
     "claude-sonnet": "claude-sonnet-4-6",
-    "claude-opus": "claude-opus-4-7",
+    "claude-fable": "claude-fable-5",
+    "claude-fable-5": "claude-fable-5",
+    "claude-opus": "claude-opus-4-8",
+    "claude-opus-4-8": "claude-opus-4-8",
+    "claude-opus-4-7": "claude-opus-4-7",
   };
   const rawModel = body.model || "claude-haiku-4-5";
   const model = MODEL_MAP[rawModel] || rawModel;
@@ -143,6 +156,14 @@ Deno.serve(async (req: Request) => {
   if (temperature !== undefined && !model.includes("opus")) {
     anthropicBody.temperature = temperature;
   }
+  // Tool mode: forward the caller's tool definitions to the Messages stream so
+  // it can emit tool_use content blocks. Default tool_choice to auto. Guarded
+  // by hasTools — when no tools are passed, neither field is added and the
+  // request to Anthropic is identical to the text-only path.
+  if (hasTools) {
+    anthropicBody.tools = tools;
+    anthropicBody.tool_choice = tool_choice ?? { type: "auto" };
+  }
 
   // Forward the stream via SSE
   const encoder = new TextEncoder();
@@ -150,6 +171,15 @@ Deno.serve(async (req: Request) => {
     async start(controller) {
       function emit(data: unknown) {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+      }
+      // Named SSE event (adds an `event:` line before `data:`). Only used for
+      // the tool_use channel introduced by the stream->tool seam; plain text
+      // deltas keep using the unnamed `emit` above so their wire bytes are
+      // unchanged.
+      function emitNamedEvent(eventName: string, data: unknown) {
+        controller.enqueue(
+          encoder.encode(`event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`),
+        );
       }
 
       try {
@@ -186,6 +216,14 @@ Deno.serve(async (req: Request) => {
         // output_tokens (and may restate cache read/create).
         const usage: UsageBreakdown = { uncachedIn: 0, cacheCreate: 0, cacheRead: 0, output: 0 };
 
+        // Tool-use reassembly state (tool mode only). Anthropic streams a
+        // tool_use block as content_block_start -> input_json_delta(s) ->
+        // content_block_stop; we accumulate the partial JSON per block index
+        // and parse it on stop. `stopReason` is captured from message_delta so
+        // it can ride along on the terminal `done` event.
+        const toolBlocks: Record<number, { id: string; name: string; jsonbuf: string }> = {};
+        let stopReason: string | null = null;
+
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -207,6 +245,32 @@ Deno.serve(async (req: Request) => {
                 const delta = event.delta;
                 if (delta?.type === "text_delta" && delta.text) {
                   emit({ type: "delta", text: delta.text });
+                } else if (hasTools && delta?.type === "input_json_delta") {
+                  // Accumulate streamed tool-input JSON for the matching block.
+                  const block = toolBlocks[event.index];
+                  if (block) block.jsonbuf += (delta.partial_json || "");
+                }
+              } else if (hasTools && eventType === "content_block_start") {
+                // Begin tracking a tool_use block; ignore text blocks (they go
+                // through the text_delta path above unchanged).
+                const cb = event.content_block;
+                if (cb?.type === "tool_use") {
+                  toolBlocks[event.index] = { id: cb.id, name: cb.name, jsonbuf: "" };
+                }
+              } else if (hasTools && eventType === "content_block_stop") {
+                // A tool_use block finished — parse its accumulated input and
+                // emit it as a named tool_use SSE event. Empty buffer means a
+                // no-argument tool, which parses as {}.
+                const block = toolBlocks[event.index];
+                if (block) {
+                  delete toolBlocks[event.index];
+                  let input: unknown = {};
+                  try {
+                    input = block.jsonbuf ? JSON.parse(block.jsonbuf) : {};
+                  } catch {
+                    input = {};
+                  }
+                  emitNamedEvent("tool_use", { id: block.id, name: block.name, input });
                 }
               } else if (eventType === "message_start") {
                 const u = event.message?.usage;
@@ -220,6 +284,12 @@ Deno.serve(async (req: Request) => {
               } else if (eventType === "message_delta") {
                 const u = event.usage;
                 if (u?.output_tokens !== undefined) usage.output = u.output_tokens;
+                // Capture the final stop_reason (e.g. "tool_use" | "end_turn")
+                // for the terminal done event. Tool mode only — keeps the
+                // text-only path untouched.
+                if (hasTools && event.delta?.stop_reason) {
+                  stopReason = event.delta.stop_reason;
+                }
               }
             } catch {
               // skip unparseable lines
@@ -275,7 +345,11 @@ Deno.serve(async (req: Request) => {
           ]);
         } catch { /* non-critical */ }
 
-        emit({ type: "done" });
+        // Terminal event. In tool mode, carry the captured stop_reason so the
+        // client can decide whether to escalate to the tool loop (stop_reason
+        // === "tool_use"). The text-only path emits the original {type:"done"}
+        // unchanged.
+        emit(hasTools ? { type: "done", stop_reason: stopReason } : { type: "done" });
       } catch (err) {
         emit({ type: "error", message: err instanceof Error ? err.message : String(err) });
       } finally {

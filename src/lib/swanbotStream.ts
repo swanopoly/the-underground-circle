@@ -22,6 +22,26 @@ import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './pr
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
 
+/** A reassembled `tool_use` content block emitted by the chat-stream SSE feed. */
+export interface StreamToolUse {
+  id: string;
+  name: string;
+  input: unknown;
+}
+
+/**
+ * The terminal result of a stream. Delivered additively: passed to `onDone(...)`
+ * and resolved by `StreamHandle.done`. Carries the tool_use blocks reassembled
+ * from the SSE feed plus the turn's `stop_reason`, so the stream→tool escalation
+ * seam (see `maybeEscalateStreamedTurnToToolLoop`) can decide whether to upgrade
+ * the streamed turn into the OpenSwan tool loop. Text-only turns leave `toolUses`
+ * empty and `stopReason` whatever the server reported (typically `end_turn`).
+ */
+export interface StreamChatResult {
+  toolUses: StreamToolUse[];
+  stopReason: string | null;
+}
+
 export interface StreamChatOpts {
   messages: Array<{ role: string; content: string }>;
   system?: string;
@@ -29,14 +49,33 @@ export interface StreamChatOpts {
   circleId?: string;
   maxTokens?: number;
   temperature?: number;
+  /**
+   * Optional Anthropic tool definitions. When omitted/empty the request is
+   * text-only and behavior is unchanged — all current callers send no tools.
+   * When present, chat-stream forwards them (with `tool_choice`) to the
+   * Anthropic messages stream and emits reassembled `tool_use` SSE events.
+   */
+  tools?: unknown[];
+  /** Optional tool_choice forwarded alongside `tools` (server defaults to {type:'auto'}). */
+  toolChoice?: unknown;
   onDelta: (text: string) => void;
   onUsage?: (usage: { model: string; input_tokens: number; output_tokens: number; total_tokens: number }) => void;
-  onDone: () => void;
+  /**
+   * Fired once when the stream completes. Receives the terminal result
+   * additively; existing callers that ignore the argument are unaffected.
+   */
+  onDone: (result?: StreamChatResult) => void;
   onError: (message: string) => void;
 }
 
 export interface StreamHandle {
   cancel: () => void;
+  /**
+   * Resolves with the terminal result when the stream completes successfully,
+   * or `null` if it errored/was cancelled. Additive — existing callers can keep
+   * using `cancel`/`onDone` and ignore this.
+   */
+  done: Promise<StreamChatResult | null>;
 }
 
 export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
@@ -49,6 +88,18 @@ export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
   const COALESCE_IDLE_MS = 80; // ms of idle before flushing whatever we have
   let coalesceBuf = '';
   let coalesceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Terminal-result accumulators. Collected from the additive `tool_use` SSE
+  // events and the `stop_reason` field on the terminal `done` event. When no
+  // tools were requested the server emits neither, so these stay empty/null and
+  // the result is shaped exactly like a text-only turn.
+  const toolUses: StreamToolUse[] = [];
+  let stopReason: string | null = null;
+
+  let resolveDone: (result: StreamChatResult | null) => void;
+  const donePromise = new Promise<StreamChatResult | null>((resolve) => {
+    resolveDone = resolve;
+  });
 
   const run = async () => {
     if (shouldBlockExternalAiProvider('anthropic')) {
@@ -77,6 +128,13 @@ export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
           max_tokens: opts.maxTokens,
           temperature: opts.temperature,
           circleId: opts.circleId,
+          // Additive: only present when the caller opts in. With no tools the
+          // body is byte-identical to before, keeping every current caller
+          // text-only. tool_choice rides along only when tools are sent
+          // (server defaults it to {type:'auto'}).
+          ...(opts.tools && opts.tools.length > 0
+            ? { tools: opts.tools, ...(opts.toolChoice !== undefined ? { tool_choice: opts.toolChoice } : {}) }
+            : {}),
         }),
         signal: controller.signal,
       });
@@ -100,6 +158,9 @@ export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = '';
+      // Most recent SSE `event:` field, applied to the next `data:` line in the
+      // same record. Only the additive `tool_use` event sets it.
+      let sseEventName: string | null = null;
 
       while (!cancelled) {
         const { done, value } = await reader.read();
@@ -110,12 +171,32 @@ export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
         buf = lines.pop() || '';
 
         for (const line of lines) {
+          // Track the SSE `event:` field so we can discriminate the additive
+          // `tool_use` event, whose `data:` payload ({id,name,input}) carries no
+          // `type` field. Existing events (delta/usage/done/error) still key off
+          // `event.type` below, so this only matters for the new branch.
+          if (line.startsWith('event: ')) {
+            sseEventName = line.slice(7).trim();
+            continue;
+          }
           if (!line.startsWith('data: ')) continue;
           const raw = line.slice(6).trim();
+          // An SSE record ends at the blank line between blocks. Consume the
+          // event name once per record so it can't leak onto a later data-only
+          // line; capture it before the [DONE]/empty guards below.
+          const recordEventName = sseEventName;
+          sseEventName = null;
           if (!raw || raw === '[DONE]') continue;
 
           try {
             const event = JSON.parse(raw);
+            // Additive: a reassembled tool_use content block. Identified by the
+            // SSE `event: tool_use` line (the payload has no `type`). Collect
+            // {id,name,input}; everything else is unchanged.
+            if (recordEventName === 'tool_use' && event && event.type === undefined) {
+              toolUses.push({ id: event.id, name: event.name, input: event.input });
+              continue;
+            }
             switch (event.type) {
               case 'delta': {
                 // Block coalescing — buffer small chunks and flush at
@@ -139,14 +220,22 @@ export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
               case 'usage':
                 opts.onUsage?.(event.usage);
                 break;
-              case 'done':
+              case 'done': {
                 // Flush any remaining coalesced text
                 if (coalesceTimer) clearTimeout(coalesceTimer);
                 if (coalesceBuf) { opts.onDelta(coalesceBuf); coalesceBuf = ''; }
-                opts.onDone();
+                // Additive: capture stop_reason from the terminal event without
+                // disturbing any existing `done` fields. Absent on text-only
+                // turns from servers that don't emit it → stays null.
+                if (typeof event.stop_reason === 'string') stopReason = event.stop_reason;
+                const result: StreamChatResult = { toolUses, stopReason };
+                opts.onDone(result);
+                resolveDone(result);
                 return;
+              }
               case 'error':
                 opts.onError(event.message || 'Stream error');
+                resolveDone(null);
                 return;
             }
           } catch { /* skip unparseable lines */ }
@@ -154,10 +243,17 @@ export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
       }
 
       // If we exited the loop without a done event
-      if (!cancelled) opts.onDone();
+      if (!cancelled) {
+        const result: StreamChatResult = { toolUses, stopReason };
+        opts.onDone(result);
+        resolveDone(result);
+      } else {
+        resolveDone(null);
+      }
     } catch (err: any) {
-      if (err?.name === 'AbortError') return;
+      if (err?.name === 'AbortError') { resolveDone(null); return; }
       opts.onError(err?.message || 'Stream failed');
+      resolveDone(null);
     }
   };
 
@@ -168,5 +264,6 @@ export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
       cancelled = true;
       controller.abort();
     },
+    done: donePromise,
   };
 }

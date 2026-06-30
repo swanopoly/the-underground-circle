@@ -6,15 +6,78 @@ export const BLACKSWAN_PUBLIC_MODEL_ID = `huggingface/${BLACKSWAN_MODEL_ID}`;
 export const BLACKSWAN_ENDPOINT_MODEL_ID = `huggingface_endpoint/${BLACKSWAN_MODEL_ID}`;
 export const BLACKSWAN_TOOL_EXECUTOR_MODEL_ID = 'claude-haiku-4-5';
 
-const MARKETPLACE_PREFIX_RE = /^(openai|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|cohere|perplexity|together_ai|fireworks_ai|deepseek|zai|z_ai|minimax|ollama)\//i;
+/**
+ * Canonical set of every model id that means "BlackSwan" across the app.
+ * Centralizing these here means a future app-trained checkpoint only has to
+ * be registered in one place (add its id + classify it as local/hosted) and
+ * every BlackSwan-aware code path picks it up.
+ *
+ * Two distinct routing classes live behind the BlackSwan brand:
+ *   - LOCAL: the on-device Ollama `blackswan` weight (runs through the local
+ *     `blackswanLLM` bridge, only available on native/desktop).
+ *   - HOSTED: the HuggingFace public model + dedicated inference endpoint
+ *     (`cswan801/BlackSwan-v5`), which must NOT take the local-Ollama path.
+ */
+export const BLACKSWAN_LOCAL_OLLAMA_MODEL_IDS = new Set<string>([
+  'blackswan',
+  'ollama/blackswan',
+]);
 
-export function isBlackSwanModel(modelId: string | null | undefined): boolean {
+export const BLACKSWAN_HOSTED_MODEL_IDS = new Set<string>([
+  BLACKSWAN_MODEL_ID.toLowerCase(),
+  BLACKSWAN_PUBLIC_MODEL_ID.toLowerCase(),
+  BLACKSWAN_ENDPOINT_MODEL_ID.toLowerCase(),
+]);
+
+/** Every known BlackSwan id (local + hosted), for callers that just need
+ *  "is this BlackSwan in any form?" membership without re-deriving it. */
+export const BLACKSWAN_MODEL_IDS: ReadonlySet<string> = new Set<string>([
+  ...BLACKSWAN_LOCAL_OLLAMA_MODEL_IDS,
+  ...BLACKSWAN_HOSTED_MODEL_IDS,
+]);
+
+const MARKETPLACE_PREFIX_RE = /^(openai|openai_compatible|openrouter|huggingface|huggingface_endpoint|replicate|github-models|groq|google_ai|mistral_ai|cohere|perplexity|together_ai|fireworks_ai|deepseek|zai|z_ai|minimax|ollama)\//i;
+
+/**
+ * True only for the LOCAL Ollama BlackSwan weight. Use this to gate the
+ * local `blackswanLLM` bridge path so the HOSTED HuggingFace endpoint id
+ * stops being misrouted through on-device Ollama.
+ */
+export function isLocalOllamaBlackSwan(modelId: string | null | undefined): boolean {
   const normalized = (modelId || '').trim().toLowerCase();
   if (!normalized) return false;
-  return normalized === 'blackswan'
-    || normalized === 'ollama/blackswan'
-    || normalized.includes('/blackswan')
-    || normalized.includes('cswan801/blackswan');
+  if (BLACKSWAN_LOCAL_OLLAMA_MODEL_IDS.has(normalized)) return true;
+  // A bare `ollama/<...>blackswan...>` weight is also local, but never treat a
+  // huggingface(_endpoint)/ id as local even though it contains "blackswan".
+  if (normalized.startsWith('huggingface/') || normalized.startsWith('huggingface_endpoint/')) {
+    return false;
+  }
+  return normalized.startsWith('ollama/') && normalized.includes('blackswan');
+}
+
+/**
+ * True for the HOSTED BlackSwan model: the HuggingFace public model, the
+ * dedicated inference endpoint, or the bare `cswan801/BlackSwan-v5` repo id.
+ */
+export function isHostedBlackSwanModel(modelId: string | null | undefined): boolean {
+  const normalized = (modelId || '').trim().toLowerCase();
+  if (!normalized) return false;
+  if (BLACKSWAN_HOSTED_MODEL_IDS.has(normalized)) return true;
+  if (normalized.startsWith('huggingface/') || normalized.startsWith('huggingface_endpoint/')) {
+    return normalized.includes('blackswan');
+  }
+  // Bare repo form, e.g. `cswan801/blackswan-v5` (no provider prefix).
+  return normalized.includes('cswan801/blackswan');
+}
+
+export function isBlackSwanModel(modelId: string | null | undefined): boolean {
+  if (isLocalOllamaBlackSwan(modelId) || isHostedBlackSwanModel(modelId)) return true;
+  // Backward-compat: the original greedy matcher treated any `*/blackswan*`
+  // or `*cswan801/blackswan*` id as BlackSwan. Preserve that so existing
+  // callers of this union predicate never lose a match after the split.
+  const normalized = (modelId || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized.includes('/blackswan') || normalized.includes('cswan801/blackswan');
 }
 
 export function isMarketplaceRoutedModel(modelId: string | null | undefined): boolean {
