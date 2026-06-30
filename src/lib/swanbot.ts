@@ -37,7 +37,31 @@ import { buildDesignAppObjectManifestPromptBlock } from './designAppObjectManife
 import { buildDesignAppOperationRunbookPromptBlock } from './designAppOperationRunbooks';
 import { buildDesignAppProofReviewPromptBlock } from './designAppProofReview';
 import { buildEngineeringCadOperationRunbookPromptBlock } from './engineeringCadOperationRunbooks';
-import { isBlackSwanModel } from './blackswanRouting';
+import { isBlackSwanModel, isLocalOllamaBlackSwan } from './blackswanRouting';
+// AI-models-first collaboration seam (DEFAULT OFF behind
+// uc_stream_escalate_on_tool_use). These three modules are pure / tsx-safe
+// (value imports only from blackswanRouting + serviceProfileSouls), so importing
+// their VALUES here does not pull react-native into a smoke graph. They decide
+// how the selected model + BlackSwan/OpenSwan grounding + a reliable executor
+// collaborate for a turn, and emit the compact capability menu the model uses to
+// SELECT what it pulls in. All consultation is advisory: it never overrides the
+// user's explicit model selection, and it is a no-op when the flag is OFF.
+import {
+  planModelCollaboration,
+  type CollaborationPlan,
+} from './modelCollaborationPolicy';
+import {
+  buildCapabilityManifestPrompt,
+  suggestCapabilitiesForMessage,
+} from './chatCapabilityManifest';
+import {
+  resolveBlackSwanInvocation,
+  type BlackSwanInvocationRoute,
+} from './hostedBlackSwanInvocation';
+// The seam's DEFAULT-OFF flag reader lives in chatTerminalTransportPolicy (its
+// owner). Static-imported so buildChatCollaborationContext can gate synchronously;
+// the reader is native-safe (no localStorage → fails closed to OFF).
+import { isStreamEscalateOnToolUseEnabled } from './chatTerminalTransportPolicy';
 import {
   dispatchSwanBotDesktopClientTool,
   serializeSwanBotClientToolError,
@@ -99,6 +123,14 @@ export type SwanBotContext = {
    * this flag the model would see the index twice.
    */
   omitCircleContextSnapshot?: boolean;
+  /**
+   * Set when the app-trained BlackSwan-v5 collaborator is available to ground a
+   * turn even if the user did not explicitly pick a BlackSwan id. Threaded into
+   * `planModelCollaboration` so a frontier turn that wants app grounding can
+   * bring BlackSwan-v5 in as the grounding voice. Foundation flag — defaults to
+   * undefined (no forced grounding) until a caller sets it.
+   */
+  appTrainedModelAvailable?: boolean;
 };
 
 async function resolveContextSpiritId(context: SwanBotContext): Promise<string | null> {
@@ -172,6 +204,128 @@ function buildOpenSwanRuntimeContextBundle(args: {
   ].join('\n'));
 
   return sections.filter(Boolean).join('\n\n') || null;
+}
+
+// ─── AI-models-first collaboration seam (DEFAULT OFF) ────────────────────────
+//
+// USER VISION: a normal turn streams a plain model answer; when a task needs
+// capability the model ACTIVATES SwanBot/OpenSwan tools or deploys agents; the
+// model SELECTS what it needs from the app; frontier models + BlackSwan/OpenSwan
+// COLLABORATE; and a future app-trained model (BlackSwan-v5) slots in.
+//
+// This helper turns one turn into a concrete collaboration view: which model is
+// primary, which (if any) BlackSwan/OpenSwan grounds the turn, which reliable
+// executor drives a tool loop, plus the compact capability menu the model reads
+// to decide what to pull in. It is purely ADVISORY — it never overrides the
+// user's explicit model selection (`primaryModel` for a plain frontier pick is
+// the same id the caller already resolved), and it is gated behind the EXISTING
+// default-off `uc_stream_escalate_on_tool_use` flag so a turn is byte-identical
+// to today when the flag is OFF.
+//
+// Purity: planModelCollaboration / buildCapabilityManifestPrompt /
+// resolveBlackSwanInvocation are all tsx-safe pure modules (no react-native, no
+// network, no secrets), so calling them here is synchronous and cheap.
+
+interface ChatCollaborationContext {
+  plan: CollaborationPlan;
+  /** Compact "what the model can pull in" menu for the system/grounding tail. */
+  manifestBlock: string;
+  /** Hosted BlackSwan invocation route — present only when the resolved
+   *  primary/grounding model is a BlackSwan id (foundation; does not change the
+   *  live routing the Tier ladder performs). */
+  blackswanRoute: BlackSwanInvocationRoute | null;
+  /** Capability families this message is likely to need (hint, not a gate). */
+  suggestedCapabilities: string[];
+}
+
+/**
+ * Map a chat message to the collaboration `task` shape. A plain conversational
+ * turn is 'chat'; a turn whose message points at deploying/buildout agents is
+ * 'agents'; any other turn that wants a real app capability is 'tools'. Derived
+ * from the SAME capability matchers the manifest uses, so the task class and the
+ * advertised menu stay consistent.
+ */
+function classifyCollaborationTask(
+  suggested: string[],
+): 'chat' | 'tools' | 'agents' {
+  if (suggested.length === 0) return 'chat';
+  if (suggested.some((f) => f === 'agent' || f === 'team.deploy_agents')) return 'agents';
+  return 'tools';
+}
+
+/**
+ * Build the advisory collaboration context for a turn, or `null` when the seam
+ * flag is OFF (off-path byte-identical) or there is no usable model. Never
+ * throws — any failure degrades to `null` and the turn proceeds exactly as it
+ * does today.
+ */
+function buildChatCollaborationContext(
+  context: SwanBotContext,
+  message: string,
+): ChatCollaborationContext | null {
+  let flagOn = false;
+  try {
+    // Same default-off seam flag the streaming escalation path checks. Native has
+    // no localStorage → the reader fails closed to OFF, so this returns null and
+    // the turn is byte-identical to today.
+    flagOn = isStreamEscalateOnToolUseEnabled();
+  } catch {
+    flagOn = false;
+  }
+  if (!flagOn) return null;
+
+  const selectedModel = (context.model || '').trim() || 'auto';
+  let suggestedCapabilities: string[] = [];
+  try {
+    suggestedCapabilities = suggestCapabilitiesForMessage(message || '');
+  } catch {
+    suggestedCapabilities = [];
+  }
+  const task = classifyCollaborationTask(suggestedCapabilities);
+
+  let plan: CollaborationPlan;
+  try {
+    plan = planModelCollaboration({
+      selectedModel,
+      task,
+      appTrainedModelAvailable: context.appTrainedModelAvailable === true,
+      connectedProviders: Array.from(context.connectedProviders ?? []),
+    });
+  } catch {
+    return null;
+  }
+
+  // Foundation: if the resolved primary OR grounding model is a BlackSwan id,
+  // resolve its hosted invocation route so the right grounding/executor split is
+  // known. This does NOT change the live Tier routing — it is carried metadata
+  // for a future hosted-BlackSwan hop. Prefer the grounding id (that's the
+  // BlackSwan voice); fall back to the primary id.
+  let blackswanRoute: BlackSwanInvocationRoute | null = null;
+  try {
+    const blackswanId =
+      (plan.groundingModel && isBlackSwanModel(plan.groundingModel) ? plan.groundingModel : null) ||
+      (isBlackSwanModel(plan.primaryModel) ? plan.primaryModel : null);
+    if (blackswanId) {
+      const route = resolveBlackSwanInvocation(blackswanId);
+      if (route.channel !== 'unsupported') blackswanRoute = route;
+    }
+  } catch {
+    blackswanRoute = null;
+  }
+
+  let manifestBlock = '';
+  try {
+    manifestBlock = buildCapabilityManifestPrompt({
+      surface: 'main_chat',
+      // Bias the advertised menu toward the families this turn likely needs,
+      // while still letting the model reach the long tail via tools.search.
+      enabledFamilies: suggestedCapabilities.length > 0 ? suggestedCapabilities : undefined,
+    });
+  } catch {
+    manifestBlock = '';
+  }
+
+  return { plan, manifestBlock, blackswanRoute, suggestedCapabilities };
 }
 
 async function buildCombinedKnowledgeBundle(
@@ -549,7 +703,7 @@ export async function getLastSessionContext(circleId: string, userId?: string): 
     // Session summaries, bridge context, and durable memories are all
     // member/agent/model-authored — untrusted (rule 5). Fence the whole
     // block so embedded directives read as data, not instructions.
-    return `<untrusted_quoted>\n${parts.join('\n\n')}\n</untrusted_quoted>`;
+    return wrapUntrusted(parts.join('\n\n'));
   } catch {
     return '';
   }
@@ -639,10 +793,19 @@ function pickProviderForModel(modelId: string | null | undefined): string | null
       'together_ai',
       'fireworks_ai',
       'deepseek',
+      'github-models',
       'minimax',
       'ollama',
     ].includes(head)) return head;
   }
+  const lower = normalized.toLowerCase();
+  if (/^(?:gpt-|o[134]\b|chatgpt-)/i.test(normalized)) return 'openai';
+  if (/^claude-/i.test(normalized)) return null;
+  if (/^gemini[-_./]/i.test(normalized)) return 'google_ai';
+  if (/^sonar(?:-|$)/i.test(normalized)) return 'perplexity';
+  if (/^(?:mistral-|codestral-)/i.test(normalized)) return 'mistral_ai';
+  if (/^deepseek-/i.test(normalized)) return 'deepseek';
+  if (lower === 'llama-3.3-70b-versatile' || lower.startsWith('mixtral-')) return 'groq';
   if (normalized === 'glm-5' || normalized.startsWith('glm-')) return 'zai';
   if (normalized.startsWith('MiniMax-') || normalized.startsWith('minimax-')) return 'minimax';
   return null;
@@ -1720,6 +1883,21 @@ async function dispatchVerification(
   }
 }
 
+interface SwanBotEdgeCallResult {
+  response: string | null;
+  error?: {
+    code?: string;
+    message: string;
+  };
+}
+
+function normalizeSwanBotEdgeError(data: any): SwanBotEdgeCallResult['error'] | null {
+  if (!data?.error) return null;
+  const message = typeof data.error === 'string' ? data.error : String(data.error);
+  const code = typeof data.code === 'string' ? data.code : undefined;
+  return { code, message };
+}
+
 async function callSwanBotAI(
   message: string,
   circleId: string,
@@ -1731,7 +1909,7 @@ async function callSwanBotAI(
   thinkingLevel: 'fast' | 'balanced' | 'deep' = 'balanced',
   maxTokens = 4096,
   systemDirective?: string,
-): Promise<string | null> {
+): Promise<SwanBotEdgeCallResult | null> {
   // Phase M1 router: if the user opted into v2, try v2 first. On any
   // v2 failure we fall through to v1 so a flaky v2 deploy never breaks
   // chat. See `docs/SWANBOT_V2_MIGRATION_PLAN.md`.
@@ -1742,7 +1920,7 @@ async function callSwanBotAI(
         message, circleId, userId, discordContext, model, wikiContext,
         conversationMessages, thinkingLevel, maxTokens, systemDirective,
       );
-      if (v2) return v2;
+      if (v2) return { response: v2 };
       console.log('[SwanBot] v2 returned null — falling back to v1.');
     }
   } catch (err) {
@@ -1750,7 +1928,7 @@ async function callSwanBotAI(
   }
   if (shouldBlockExternalAiProvider('anthropic')) {
     console.warn('[SwanBot] Strict local AI mode blocked swanbot-ai');
-    return null;
+    return { response: null, error: { message: getStrictLocalAiModeMessage('anthropic') } };
   }
   try {
     const accessToken = await getFreshAccessToken();
@@ -1791,9 +1969,9 @@ async function callSwanBotAI(
     if (data == null) return null;
     if (data?.error) {
       console.warn('[SwanBot] Edge function returned error:', data.error);
-      return null;
+      return { response: null, error: normalizeSwanBotEdgeError(data) || { message: 'The SwanBot edge function returned an error.' } };
     }
-    return data?.response || null;
+    return { response: data?.response || null };
   } catch (err: any) {
     console.warn('[SwanBot] Edge function call failed:', err?.message || err);
     return null;
@@ -1900,6 +2078,33 @@ async function buildSystemPromptAsync(
   const computerReceiptBlock = buildComputerAppExecutionReceiptPromptBlock(currentMessage || '');
   if (computerReceiptBlock) extras.push(computerReceiptBlock);
 
+  // AI-models-first collaboration menu (DEFAULT OFF). When the
+  // uc_stream_escalate_on_tool_use seam is ON, inject the compact capability
+  // manifest so the model knows what it can ACTIVATE / pull in from the app, plus
+  // a one-line note of how the selected model collaborates with BlackSwan/OpenSwan
+  // grounding + a reliable executor for this turn. Quiet-in-chat by construction
+  // (the manifest tells the model to keep discovery silent). When the flag is OFF
+  // buildChatCollaborationContext returns null and this is a no-op, so the prompt
+  // is byte-identical to today. Skipped during conversational builds — those turns
+  // are intentionally lean (the build directive is the behavior).
+  if (!(context as any).systemDirective) {
+    const collab = buildChatCollaborationContext(context, currentMessage || '');
+    if (collab) {
+      if (collab.manifestBlock) extras.push(collab.manifestBlock);
+      // One compact line so the model knows who is grounding / executing without
+      // surfacing routing chatter to the user. Keep the user's selected model
+      // authoritative — this only narrates the arrangement.
+      const collabNote = [
+        '## Model Collaboration (this turn)',
+        collab.plan.pattern + '.',
+        collab.plan.groundingModel
+          ? 'Treat the grounding model as highest-priority app context; the executor owns reliable tool calling.'
+          : 'You are answering directly; activate a capability only when the turn needs it.',
+      ].join('\n');
+      extras.push(collabNote);
+    }
+  }
+
   // Context tiers:
   //   trivial  → profile only (greeting, thanks, yes/no)
   //   simple   → profile + memory startup bundle + turn retrieval + skills
@@ -1950,9 +2155,9 @@ async function buildSystemPromptAsync(
         // cross-agent bridge context). Fence each so the model treats them as
         // data, not instructions (the v1 prompt already explains the tag; the
         // separate retrieveForTurn block is fenced at its source).
-        if (stores?.userProfile) extras.push(`<untrusted_quoted>\n${stores.userProfile}\n</untrusted_quoted>`);
-        if (stores?.runtimeMemory) extras.push(`<untrusted_quoted>\n${stores.runtimeMemory}\n</untrusted_quoted>`);
-        if (stores?.workingMemory) extras.push(`## Working Memory\n<untrusted_quoted>\n${stores.workingMemory}\n</untrusted_quoted>`);
+        if (stores?.userProfile) extras.push(wrapUntrusted(stores.userProfile));
+        if (stores?.runtimeMemory) extras.push(wrapUntrusted(stores.runtimeMemory));
+        if (stores?.workingMemory) extras.push(wrapUntrusted(stores.workingMemory, { heading: '## Working Memory' }));
       }
     } catch (e) { console.warn('[SwanBot] Memory context failed:', e); }
   }
@@ -2110,10 +2315,7 @@ async function buildSystemPromptAsync(
             }
           }
           extras.push([
-            '## Active Missions',
-            '<untrusted_quoted>',
-            missionLines.join('\n'),
-            '</untrusted_quoted>',
+            wrapUntrusted(missionLines.join('\n'), { heading: '## Active Missions' }),
             '',
             'When users ask about missions or progress, reference this data. Nudge on overdue missions. Celebrate completed ones.',
           ].join('\n'));
@@ -2641,6 +2843,35 @@ async function getSwanBotResponseImpl(
     buildExploring,
     context.connectedProviders,
   );
+
+  // AI-models-first collaboration (DEFAULT OFF behind uc_stream_escalate_on_tool_use):
+  // consult planModelCollaboration on the RESOLVED concrete model to learn the
+  // grounding/executor split for this turn (e.g. BlackSwan grounds while a
+  // reliable Claude executor drives a tool/agent loop). This is ADVISORY only —
+  // the user's selection stays authoritative: `effectiveModel` is what every Tier
+  // below actually calls, and for a plain frontier pick the plan's primaryModel
+  // equals it with no grounding/executor, so nothing changes. The plan is carried
+  // on enrichedContext so the system prompt and any downstream reader see one
+  // consistent arrangement. No-op (collabPlan stays undefined) when the flag is
+  // OFF, so the turn is byte-identical to today.
+  let collabPlan: CollaborationPlan | undefined;
+  try {
+    const collab = buildChatCollaborationContext(
+      { ...context, model: effectiveModel },
+      cleaned,
+    );
+    if (collab) {
+      collabPlan = collab.plan;
+      if (collabPlan.groundingModel || collabPlan.toolExecutorModel) {
+        console.log(
+          `[SwanBot] Collaboration: ${collabPlan.pattern} (selection ${effectiveModel} kept authoritative)`,
+        );
+      }
+    }
+  } catch (err) {
+    console.warn('[SwanBot] Collaboration plan skipped:', err);
+  }
+
   // During a conversational build, the SYSTEM DIRECTIVE is the behavior —
   // the LLM does NOT need wiki bundles, memory lookups, or personality
   // context to ask "who's the audience?". Skipping those saves ~1-2s of
@@ -2694,6 +2925,12 @@ async function getSwanBotResponseImpl(
   if (buildDirective) {
     (enrichedContext as any).systemDirective = buildDirective;
   }
+  // Carry the (advisory) collaboration plan so buildSystemPromptAsync and any
+  // downstream reader describe the SAME arrangement that was resolved here.
+  // Carried metadata only — it never changes which model the Tier ladder calls.
+  if (collabPlan) {
+    (enrichedContext as any).collaborationPlan = collabPlan;
+  }
 
   // Latency knobs for build conversations:
   //
@@ -2726,7 +2963,11 @@ async function getSwanBotResponseImpl(
 
   // Tier 1: BlackSwan is explicit-pick only. Auto and other selected models
   // must not silently route through BlackSwan and then fall through to Gemini.
-  if (isBlackSwanModel(enrichedContext.model)) {
+  // Gate strictly on the LOCAL Ollama weight: the HOSTED HuggingFace endpoint
+  // id (huggingface_endpoint/cswan801/BlackSwan-v5) also reads as BlackSwan but
+  // must NOT be driven through the on-device Ollama bridge — it routes to its
+  // hosted provider downstream instead.
+  if (isLocalOllamaBlackSwan(enrichedContext.model)) {
     try {
       const { isBlackSwanAvailable, callBlackSwan } = await import('./blackswanLLM');
       if (await isBlackSwanAvailable()) {
@@ -2790,25 +3031,56 @@ async function getSwanBotResponseImpl(
   // Tier 2: Try AI Edge Function (Claude Haiku — primary for web)
   if (enrichedContext.circleId && !shouldBlockExternalAiProvider('anthropic')) {
     console.log('[SwanBot] Tier 2: Calling swanbot-ai edge function...');
-    const aiResponse = await callSwanBotAI(
+    // Before the swanbot-v2 hop (inside callSwanBotAI), collapse any bare
+    // selection alias to a concrete claude-* id. `auto` is normally already
+    // resolved by resolveModelForSoul above, and a local-Ollama `blackswan`
+    // pick is consumed by Tier 1 — but on web (no local bridge) a `blackswan`
+    // pick falls through to here. v2's fail-closed guard rejects bare aliases,
+    // so hand it a concrete model. resolveModelForSoul drives the `auto` ladder
+    // (re-forced here so it can't echo the alias back); claude-opus-4-8 is the
+    // last-resort default if the ladder yields nothing concrete.
+    const selected = (enrichedContext.model || '').trim().toLowerCase();
+    let v2SafeModel = enrichedContext.model;
+    if (!selected || selected === 'auto' || selected === 'blackswan') {
+      const resolved = resolveModelForSoul(
+        spiritId,
+        'auto',
+        msgRoute.intent,
+        msgRoute.complexity,
+        buildConverging,
+        buildExploring,
+        context.connectedProviders,
+      );
+      const resolvedLower = (resolved || '').trim().toLowerCase();
+      v2SafeModel = (!resolvedLower || resolvedLower === 'auto' || resolvedLower === 'blackswan')
+        ? 'claude-opus-4-8'
+        : resolved;
+    }
+    const aiResult = await callSwanBotAI(
       cleaned,
       enrichedContext.circleId,
       enrichedContext.userId,
       enrichedContext.discordContext,
-      enrichedContext.model,
+      v2SafeModel,
       enrichedContext.wikiContext,
       enrichedContext.conversationMessages,
       enrichedContext.thinkingLevel || 'balanced',
       enrichedContext.maxTokens || 4096,
       (enrichedContext as any).systemDirective,
     );
+    const aiResponse = aiResult?.response || null;
     if (aiResponse) {
       console.log('[SwanBot] Tier 2: Got response from edge function');
       if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', aiResponse);
       return aiResponse;
     }
-    console.warn('[SwanBot] Tier 2: Edge function returned null');
-    lastFailureReason = 'the Claude edge function returned nothing — the Anthropic key may be missing or the service is rate-limited';
+    if (aiResult?.error?.message) {
+      lastFailureReason = aiResult.error.message;
+      console.warn('[SwanBot] Tier 2: Edge function returned user-actionable error:', aiResult.error.code || aiResult.error.message);
+    } else {
+      console.warn('[SwanBot] Tier 2: Edge function returned null');
+      lastFailureReason = 'the Claude edge function returned nothing — the Anthropic key may be missing or the service is rate-limited';
+    }
   } else if (!enrichedContext.circleId) {
     lastFailureReason = 'no circle context was available to route this request';
   }
@@ -2948,6 +3220,12 @@ async function getSwanBotStructuredResponseImpl(
     memoryStores: memoryStores || undefined,
     spiritId,
   };
+  // Advisory collaboration plan (DEFAULT OFF). Carried for consistency with the
+  // text path; never overrides effectiveModel. No-op when the seam flag is OFF.
+  try {
+    const collab = buildChatCollaborationContext({ ...context, model: effectiveModel }, cleaned);
+    if (collab) (enrichedContext as any).collaborationPlan = collab.plan;
+  } catch { /* advisory only — never block the structured turn */ }
 
   const structured = enrichedContext.circleId
       ? await callSwanBotAIStructured(
@@ -3279,6 +3557,134 @@ export async function executeToolUseLoop(opts: {
     incomplete: true,
     checkpoint: buildToolLoopCheckpoint(toolEvents, { maxRounds }),
   };
+}
+
+// ─── Phase 2: stream-by-default → escalate-on-tool-use seam (DEFAULT OFF) ────
+//
+// AI-models-first means a normal chat turn streams plainly and fast. To let the
+// model still *reach* a capability without paying the full tool-loop cost up
+// front, the plain streaming turn carries only a TINY pinned core +
+// `tools.search`. The instant the model emits a `tool_use` (or stops with a
+// tool-use intent), the caller upgrades THAT turn into the existing OpenSwan
+// tool loop (`executeToolUseLoop`) — "then it activates swanbot/openswan".
+//
+// This is the runtime half of the seam whose transport decision lives in
+// `chatTerminalTransportPolicy.ts` (`stream_then_escalate`). It is NOT
+// runtime-proven, so it ships DARK behind the SAME DEFAULT-OFF flag and is
+// instantly revertible: while OFF nothing here runs (the transport never
+// returns `stream_then_escalate`, so these helpers are never called, AND
+// `maybeEscalateStreamedTurnToToolLoop` itself re-checks the flag and no-ops),
+// so chat behavior is byte-for-byte the current plain stream.
+
+/**
+ * The tiny pinned tool set to advertise on the escalation-capable streaming
+ * turn: the surface's pinned high-frequency core plus `tools.search` (so the
+ * model can reach the rest of the catalog through one tool). Reuses the exact
+ * progressive-disclosure pin list from `openswanToolRuntime`, so the streaming
+ * palette stays consistent with the batch tools-first palette. Lazy-imported to
+ * keep the streaming module graph light while the flag is OFF.
+ */
+export async function getStreamEscalationPinnedToolNames(
+  surface: 'main_chat' | 'room_chat' | 'office' | 'task_run' = 'main_chat',
+): Promise<string[]> {
+  const { listPinnedOpenSwanToolsForSurface } = await import('./openswanToolRuntime');
+  const names = listPinnedOpenSwanToolsForSurface(surface).map((tool) => tool.name);
+  if (!names.includes('tools.search')) names.push('tools.search');
+  return names;
+}
+
+/**
+ * Pure detector for whether a completed streaming turn signaled that it needs a
+ * capability. Two signals (either is sufficient):
+ *   - the model produced one or more `tool_use` content blocks, OR
+ *   - the turn stopped with `stop_reason === 'tool_use'`.
+ *
+ * Kept dependency-free so the streaming SSE consumer can call it the moment the
+ * turn completes, before deciding whether to upgrade. Defensive against partial
+ * shapes (streaming surfaces may only forward a coarse stop reason).
+ */
+export function detectStreamedTurnToolUseIntent(turn: {
+  stopReason?: string | null;
+  content?: unknown;
+}): boolean {
+  if (turn.stopReason === 'tool_use') return true;
+  const content = turn.content;
+  if (Array.isArray(content)) {
+    return content.some((block) => (block as { type?: string } | null)?.type === 'tool_use');
+  }
+  return false;
+}
+
+export type StreamEscalationResult =
+  | { escalated: false; reason: 'flag_off' | 'no_tool_use_signal' }
+  | ({ escalated: true } & Awaited<ReturnType<typeof executeToolUseLoop>>);
+
+/**
+ * Conditional upgrade for a streamed turn: when the Phase 2 flag is ON AND the
+ * completed streaming turn signaled a tool-use intent, run the SAME OpenSwan
+ * tool loop (`executeToolUseLoop`) for THIS turn — reusing every existing
+ * reliability layer (approval gate, in-loop verification, re-observe, budget
+ * nudges, cap finalization). The streaming surface should advertise
+ * `getStreamEscalationPinnedToolNames()` and pass the same allow-list here so
+ * the escalated loop opens with the pinned core + `tools.search` and unlocks the
+ * rest through search exactly as the batch tools-first path does.
+ *
+ * Fail-safe / revertible: when the flag is OFF this returns
+ * `{ escalated: false, reason: 'flag_off' }` WITHOUT calling any model or tool,
+ * so wiring it into the streaming completion handler is a no-op until the flag
+ * is flipped. When there is no tool-use signal it returns
+ * `{ escalated: false, reason: 'no_tool_use_signal' }`, letting the caller keep
+ * the already-streamed plain text untouched.
+ */
+export async function maybeEscalateStreamedTurnToToolLoop(opts: {
+  /** The completed streamed turn's terminal signal (stop reason + content). */
+  streamedTurn: { stopReason?: string | null; content?: unknown };
+  systemPrompt: string;
+  userMessage: string;
+  model: string;
+  circleId: string;
+  userId: string;
+  threadId?: string;
+  runId?: string;
+  activeSoulKey?: string;
+  activePluginIds?: string[];
+  surface?: 'main_chat' | 'room_chat' | 'office' | 'task_run';
+  mode?: string | null;
+  maxToolRounds?: number;
+  /** Pre-resolved allow-list (defaults to the pinned core + `tools.search`). */
+  allowedToolNames?: string[];
+  toolApprovalGate?: (call: { name: string; input: any }) => Promise<'approve' | 'reject'>;
+  /**
+   * Explicit flag override (DEFAULT OFF). When omitted, the live
+   * `STREAM_ESCALATE_ON_TOOL_USE_FLAG` decides — so OFF is the default.
+   */
+  streamEscalateOnToolUse?: boolean;
+}): Promise<StreamEscalationResult> {
+  const { isStreamEscalateOnToolUseEnabled } = await import('./chatTerminalTransportPolicy');
+  const enabled = opts.streamEscalateOnToolUse ?? isStreamEscalateOnToolUseEnabled();
+  if (!enabled) return { escalated: false, reason: 'flag_off' };
+  if (!detectStreamedTurnToolUseIntent(opts.streamedTurn)) {
+    return { escalated: false, reason: 'no_tool_use_signal' };
+  }
+  const surface = opts.surface || 'main_chat';
+  const allowedToolNames = opts.allowedToolNames ?? (await getStreamEscalationPinnedToolNames(surface));
+  const loop = await executeToolUseLoop({
+    systemPrompt: opts.systemPrompt,
+    userMessage: opts.userMessage,
+    model: opts.model,
+    circleId: opts.circleId,
+    userId: opts.userId,
+    threadId: opts.threadId,
+    runId: opts.runId,
+    activeSoulKey: opts.activeSoulKey,
+    activePluginIds: opts.activePluginIds,
+    allowedToolNames,
+    surface,
+    mode: opts.mode,
+    maxToolRounds: opts.maxToolRounds,
+    toolApprovalGate: opts.toolApprovalGate,
+  });
+  return { escalated: true, ...loop };
 }
 
 /**

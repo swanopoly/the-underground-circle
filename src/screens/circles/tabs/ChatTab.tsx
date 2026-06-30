@@ -133,6 +133,7 @@ import {
 } from '../../../lib/computerUse';
 import ComputerUsePanel from '../../../components/computer-use/ComputerUsePanel';
 import BrowserSessionDrawer from '../../../components/computer-use/BrowserSessionDrawer';
+import AgentMonitorHost from '../../../components/agent-monitor/AgentMonitorHost';
 import ComputerUsePermissionDialog from '../../../components/computer-use/ComputerUsePermissionDialog';
 import ComputerUseButton from '../../../components/computer-use/ComputerUseButton';
 import AnimatedPopup from '../../../components/chat-animations/AnimatedPopup';
@@ -148,6 +149,7 @@ import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
 import RecordingBadge from '../../../components/RecordingBadge';
 import { useComputerUseTask } from '../../../lib/useComputerUseTask';
 import { resolveComputerUseConfirmation } from '../../../lib/computerUseConfirmations';
+import { buildAgentMonitorTaskFromComputerUseState } from '../../../lib/agentMonitorState';
 import {
   getMatchingChatSlashCommands,
   type ChatSlashCommand,
@@ -218,6 +220,7 @@ import type { PredictiveChatCommand } from '../../../lib/predictiveChatCommands'
 import { dispatchChatAutomationPlan, type ChatAutomationOutcome, type ChatClarificationResumeStore } from '../../../lib/runChatAutomationPlan';
 import { createChatTransportHandlers, getOutcomeStateRequests, type ChatTransportStateRequests } from '../../../lib/chatTransportHandlers';
 import { chooseChatTerminalTransport, looksLikeTerminalActionRequest as looksLikeActionRequest } from '../../../lib/chatTerminalTransportPolicy';
+import { decideChatOrchestration } from '../../../lib/aiFirstChatPolicy';
 import { attachPlanDecisionToRun } from '../../../lib/runChatAutomationPlanObserver';
 import { deriveChatActivityFlags, shapePersistedChatMessage } from '../../../lib/chatMessageShape';
 import {
@@ -1781,6 +1784,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // permission dialog's Allow handler hands a task to this hook, which
   // streams reasoning/actions/screenshots into ComputerUseLiveCard below.
   const computerUseTask = useComputerUseTask(circleId);
+  const agentMonitorTask = useMemo(
+    () => buildAgentMonitorTaskFromComputerUseState(computerUseTask.state, { sourceLabel: 'SwanBot' }),
+    [computerUseTask.state],
+  );
   const computerUsePostedKeyRef = useRef<string | null>(null);
   const capabilityAutoRetryKeyRef = useRef<string | null>(null);
   const capabilityBuildoutNoticeKeyRef = useRef<string | null>(null);
@@ -2879,7 +2886,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             );
             if (shouldRunDirectImageConversion) {
               const bridge = await import('../../../lib/desktopBridge');
-              const directConversion = await executeDirectImageConversionRequest(trimmed, bridge.convertImage);
+              const directConversion = await executeDirectImageConversionRequest(trimmed, bridge);
               if (!directConversion.handled) {
                 return {
                   executionKind: 'run_computer_task',
@@ -8286,7 +8293,51 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               looksLikeActionRequest: looksLikeActionRequest(cleanContent),
               canStreamAnthropic: canUseAnthropicChatStream(streamCandidateModel),
             });
-            const canStream = terminalTransport.path === 'stream_plain_chat';
+            // AI-first telemetry (NO behavior change): annotate which orchestration
+            // tier the product policy would pick for this turn — plain_model (stream
+            // a model answer), escalate_tools (stream first, activate SwanBot/OpenSwan
+            // tools on tool_use), or spawn_agents (deploy path). This is a pure,
+            // side-effect-free decision used only for a debug log; the actual transport
+            // and escalation are still driven entirely by `terminalTransport` above and
+            // the `uc_stream_escalate_on_tool_use` flag, so this is a no-op on every
+            // path regardless of flag state. (`spawn_agents` turns short-circuit far
+            // earlier via the `__SPAWN_AGENTS__` modal and never reach this stream path.)
+            try {
+              const orchestration = decideChatOrchestration({
+                message: cleanContent,
+                mode: effectiveChatMode,
+                modelId: streamCandidateModel,
+                hasAttachments: currentAttachments.length > 0,
+                // The explicit tool/agent quick-actions resolve to their own
+                // routes/modals before this point, so from the stream path's vantage
+                // these are caller-detected-false; the message heuristics still
+                // classify implicit action/capability intent for telemetry.
+                explicitToolRequest: false,
+                explicitAgentRequest: false,
+              });
+              console.debug(
+                '[ChatTab] AI-first orchestration tier:',
+                orchestration.tier,
+                '| transport:',
+                terminalTransport.path,
+                '| capabilities:',
+                orchestration.suggestedCapabilities.join(',') || 'none',
+                '|',
+                orchestration.reason,
+              );
+            } catch (orchestrationErr) {
+              // Telemetry only — never let the tier annotation affect a chat turn.
+              console.warn('[ChatTab] orchestration tier annotation failed:', orchestrationErr);
+            }
+            // Phase 2 seam (DEFAULT OFF): `stream_then_escalate` streams the
+            // turn plainly AND advertises the tiny pinned tool core + tools.search
+            // so the model can signal mid-turn that it needs a capability; on that
+            // signal this turn upgrades into the OpenSwan tool loop. The transport
+            // only returns this path while the `uc_stream_escalate_on_tool_use`
+            // flag is ON, so when the flag is OFF `escalateOnToolUse` is false and
+            // every branch below is byte-for-byte the legacy `stream_plain_chat`.
+            const escalateOnToolUse = terminalTransport.path === 'stream_then_escalate';
+            const canStream = terminalTransport.path === 'stream_plain_chat' || escalateOnToolUse;
 
             if (canStream) {
               try {
@@ -8309,10 +8360,38 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 // Falls back to platform Sonnet if the helper somehow
                 // returns null so we never send an unresolved 'auto'.
                 const streamModel = streamCandidateModel;
+                // Phase 2 seam (DEFAULT OFF): only when the transport chose
+                // `stream_then_escalate` do we advertise the pinned tool palette
+                // on the stream. `getStreamEscalationPinnedToolNames` resolves the
+                // same surface-pinned core + tools.search used by the batch
+                // tools-first path (via listPinnedOpenSwanToolsForSurface), and
+                // `getToolDefinitions` turns those names into Anthropic tool
+                // definitions. When the flag is OFF this whole block is skipped and
+                // `streamTools` stays undefined, so the stream request omits
+                // `tools` and is byte-identical to today's text-only call.
+                let streamTools: Array<{ name: string; description: string; input_schema: Record<string, unknown> }> | undefined;
+                if (escalateOnToolUse) {
+                  try {
+                    const { getStreamEscalationPinnedToolNames } = await import('../../../lib/swanbot');
+                    const { getToolDefinitions } = await import('../../../lib/openswanTools/index');
+                    const pinnedToolNames = await getStreamEscalationPinnedToolNames('main_chat');
+                    const defs = getToolDefinitions(pinnedToolNames, 'main_chat');
+                    streamTools = defs.length > 0 ? defs : undefined;
+                  } catch (toolResolveErr) {
+                    console.warn('[ChatTab] stream escalation tool resolve failed:', toolResolveErr);
+                    streamTools = undefined;
+                  }
+                }
                 const pendingMsg = addPendingBotMessage('');
                 setRunStatus('running');
                 let accumulated = '';
                 let streamingUsage: SwanBotStructuredResponse['usage'] | undefined;
+                // Captured only on the escalation path: the SSE parser exposes the
+                // reassembled tool_use blocks + terminal stop_reason on the done
+                // result (and via additive callbacks). Left untouched on the plain
+                // path so flag-off behavior is unchanged.
+                let streamToolUses: Array<{ id: string; name: string; input: unknown }> = [];
+                let streamStopReason: string | null = null;
                 const streamSource: ChatMessageSource = {
                   actor: agentName,
                   surface: 'main_chat_stream',
@@ -8327,6 +8406,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     ],
                     model: streamModel,
                     circleId,
+                    // Only set on the escalation path. The chat-stream contract
+                    // treats an absent/empty `tools` as the unchanged text-only
+                    // request, so the default flag-off path sends no tools.
+                    ...(streamTools ? { tools: streamTools } : {}),
                     onDelta: (text) => {
                       accumulated += text;
                       updateBotMessage(pendingMsg.id, { content: accumulated, isPending: false });
@@ -8334,13 +8417,55 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     onUsage: (usage) => {
                       streamingUsage = usage;
                     },
-                    onDone: () => resolve(),
+                    // The SSE parser delivers the reassembled tool_use blocks +
+                    // terminal stop_reason on the done result (additive — text-only
+                    // turns leave toolUses empty and report end_turn). Captured here
+                    // and only consulted under the `escalateOnToolUse` gate below.
+                    onDone: (result) => {
+                      if (result) {
+                        streamToolUses = result.toolUses;
+                        streamStopReason = result.stopReason;
+                      }
+                      resolve();
+                    },
                     onError: (msg) => reject(new Error(msg)),
                   });
                   // Store cancel handle in case we need to abort
                   streamingBuildCleanupRef.current = handle.cancel;
                 });
                 streamingBuildCleanupRef.current = null;
+                // Phase 2 seam (DEFAULT OFF): if this escalation-capable stream
+                // produced a tool_use (or stopped with stop_reason==='tool_use'),
+                // upgrade THIS turn into the OpenSwan tool loop, reusing every
+                // existing reliability layer. `maybeEscalateStreamedTurnToToolLoop`
+                // re-checks the flag and no-ops to `{escalated:false}` when OFF or
+                // when there is no tool-use signal, so on the default path (and on
+                // a plain streamed answer) we fall through to the existing render/
+                // persist path below with the streamed text untouched. When it
+                // escalates, the loop's response becomes the authoritative answer
+                // and flows through that same path.
+                if (escalateOnToolUse && (streamToolUses.length > 0 || streamStopReason === 'tool_use')) {
+                  try {
+                    const { maybeEscalateStreamedTurnToToolLoop } = await import('../../../lib/swanbot');
+                    const escalation = await maybeEscalateStreamedTurnToToolLoop({
+                      streamedTurn: { stopReason: streamStopReason, content: streamToolUses.map((t) => ({ type: 'tool_use', id: t.id, name: t.name, input: t.input })) },
+                      systemPrompt,
+                      userMessage: augmentedPrompt,
+                      model: streamModel,
+                      circleId,
+                      userId: currentUserId || 'anonymous',
+                      threadId: activeThreadId || undefined,
+                      activePluginIds: activePlugins,
+                      surface: 'main_chat',
+                      mode: 'talk',
+                    });
+                    if (escalation.escalated && typeof escalation.response === 'string' && escalation.response.length > 0) {
+                      accumulated = escalation.response;
+                    }
+                  } catch (escalationErr) {
+                    console.warn('[ChatTab] stream→tool escalation failed, keeping streamed text:', escalationErr);
+                  }
+                }
                 updateBotMessage(pendingMsg.id, {
                   content: accumulated,
                   isPending: false,
@@ -11221,24 +11346,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         </React.Suspense>
       )}
 
-      {Platform.OS === 'web' && computerUseTask.state.status !== 'idle' && (
-        <View
-          // Floating, draggable-feeling card pinned bottom-right while the
-          // Computer Use agent works. Collapses to summary when done.
-          style={{
-            position: 'fixed' as any,
-            bottom: 20,
-            right: 20,
-            width: 460,
-            maxWidth: 'calc(100vw - 40px)' as any,
-            maxHeight: '80vh' as any,
-            zIndex: 950,
-          }}
+      {Platform.OS === 'web' && agentMonitorTask && (
+        <AgentMonitorHost
+          task={agentMonitorTask}
+          accentColor={accentColor}
+          metrics={[
+            ...(agentMonitorTask.needsAttention ? [{ label: 'Needs', value: agentMonitorTask.attentionLabel || 'Review', tone: 'warning' as const }] : []),
+            ...(agentMonitorTask.liveUrl ? [{ label: 'Live', value: 'Ready', tone: 'info' as const }] : []),
+          ]}
+          onStop={() => computerUseTask.cancel()}
         >
           <React.Suspense fallback={null}>
             <ComputerUseLiveCard
               task={computerUseTask.state.task}
-              status={computerUseTask.state.status === 'starting' ? 'starting' : computerUseTask.state.status}
+              status={computerUseTask.state.status === 'idle' ? 'error' : computerUseTask.state.status}
               sessionId={computerUseTask.state.sessionId}
               liveUrl={computerUseTask.state.liveUrl}
               reasoning={computerUseTask.state.reasoning}
@@ -11258,7 +11379,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               onCancel={() => computerUseTask.cancel()}
             />
           </React.Suspense>
-        </View>
+        </AgentMonitorHost>
       )}
 
       {/* Enhanced input with model selector + quick actions + mode selector */}
@@ -12443,7 +12564,6 @@ const POPULAR_OPENROUTER_MODELS: ChatPickerModel[] = [
   { id: 'openrouter/deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash', desc: '#6 OpenRouter weekly usage | deepseek | 870B tokens | +111% weekly', color: '#ef4444', icon: '6', group: 'popular', tags: ['speed', 'code'] },
   { id: 'openrouter/deepseek/deepseek-v3.2', label: 'DeepSeek V3.2', desc: '#7 OpenRouter weekly usage | deepseek | 809B tokens | -29% weekly', color: '#ef4444', icon: '7', group: 'popular', tags: ['code', 'text'] },
   { id: 'openrouter/minimax/minimax-m2.7', label: 'MiniMax M2.7', desc: '#8 OpenRouter weekly usage | minimax | 745B tokens | -1% weekly', color: '#fb7185', icon: '8', group: 'popular', tags: ['text', 'long'] },
-  { id: 'openrouter/x-ai/grok-4.1-fast', label: 'Grok 4.1 Fast', desc: '#9 OpenRouter weekly usage | x-ai | 719B tokens | +1% weekly', color: '#22d3ee', icon: '9', group: 'popular', tags: ['speed', 'web'] },
   { id: 'openrouter/deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro', desc: '#10 OpenRouter weekly usage | deepseek | 652B tokens | +409% weekly', color: '#ef4444', icon: '10', group: 'popular', tags: ['reason', 'code'] },
   { id: 'openrouter/google/gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite', desc: '#11 OpenRouter weekly usage | google | 645B tokens | +3% weekly', color: '#3b82f6', icon: '11', group: 'popular', tags: ['speed', 'vision'] },
   { id: 'openrouter/stepfun/step-3.5-flash', label: 'Step 3.5 Flash', desc: '#12 OpenRouter weekly usage | stepfun | 616B tokens | -27% weekly', color: '#22c55e', icon: '12', group: 'popular', tags: ['speed', 'text'] },
@@ -12518,33 +12638,36 @@ function rememberOpenRouterRankingsFailure() {
 
 const CHAT_MODELS: ChatPickerModel[] = [
   // ── Auto ──
-  // Default. Routes by detected intent + complexity:
-  //   casual / status     → Haiku 4.5 (cheap + fast)
-  //   question / debug    → Sonnet 4.6 (or Haiku if simple)
-  //   research / architect → Opus 4.7 (deep reasoning)
-  //   build / review      → Sonnet 4.6, Opus when complex
-  // Picks the cheapest model that meets the bar so the per-turn cost
-  // stays sane while one-off heavy turns still get the headroom.
-  { id: 'auto', label: 'Auto', desc: 'Defaults to Haiku — escalates to Opus only for research / architecture / heavy tasks', color: '#22c55e', icon: 'A', group: 'auto', tags: ['text', 'code', 'reason'] },
+  // Routes by detected intent + complexity, then lets SwanBot/OpenSwan
+  // activate tools, apps, and agents instead of bypassing the runtime.
+  { id: 'auto', label: 'Auto', desc: 'Picks the best connected model, then activates OpenSwan/tools/agents for the task.', color: '#22c55e', icon: 'A', group: 'auto', tags: ['text', 'code', 'reason'] },
   // ── Coding & Engineering ──
-  { id: 'claude-opus-4-6', label: 'Opus 4.6', desc: 'Best coder alive. Complex architecture.', color: '#a855f7', icon: 'O', group: 'code', tags: ['code', 'text', 'web'] },
+  { id: 'gpt-5.5', label: 'GPT-5.5', desc: 'OpenAI frontier. Professional coding, reasoning, and agent work.', color: '#10b981', icon: '55', group: 'code', tags: ['code', 'text', 'web', 'reason'] },
+  { id: 'gpt-5.5-pro', label: 'GPT-5.5 Pro', desc: 'Highest-compute GPT-5.5 for the hardest professional tasks.', color: '#059669', icon: '5P', group: 'code', tags: ['code', 'text', 'web', 'reason'] },
+  { id: 'claude-fable-5', label: 'Fable 5', desc: 'Claude top tier for demanding long-horizon agent work.', color: '#7c3aed', icon: 'F', group: 'code', tags: ['code', 'text', 'web', 'reason'] },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8', desc: 'Claude Opus tier for complex architecture and agentic coding.', color: '#a855f7', icon: 'O', group: 'code', tags: ['code', 'text', 'web', 'reason'] },
+  { id: 'claude-opus-4-7', label: 'Opus 4.7', desc: 'Claude Opus fallback for complex architecture.', color: '#a855f7', icon: 'O7', group: 'code', tags: ['code', 'text', 'web'] },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', desc: 'Fast coding. Great for iteration.', color: '#6366f1', icon: 'S', group: 'code', tags: ['code', 'text', 'web'] },
-  { id: 'gpt-5.4', label: 'GPT-5.4', desc: 'OpenAI flagship. Strong at code + reasoning.', color: '#10b981', icon: '5', group: 'code', tags: ['code', 'text', 'web'] },
-  { id: 'gpt-5.2', label: 'GPT-5.2', desc: 'Fast, reliable. Good balance.', color: '#10b981', icon: 'G', group: 'code', tags: ['code', 'text', 'web'] },
+  { id: 'gpt-5.4', label: 'GPT-5.4', desc: 'OpenAI affordable flagship for code and professional work.', color: '#10b981', icon: '54', group: 'code', tags: ['code', 'text', 'web'] },
+  { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', desc: 'Strong mini model for coding, computer use, and subagents.', color: '#10b981', icon: '5m', group: 'code', tags: ['code', 'text', 'web'] },
   { id: 'codex-mini', label: 'Codex Mini', desc: 'Built for code. Cheap + fast.', color: '#10a37f', icon: 'Cx', group: 'code', tags: ['code'] },
   { id: 'deepseek-v3.2', label: 'DeepSeek V3.2', desc: 'MoE. Exceptional at code.', color: '#ef4444', icon: 'DS', group: 'code', tags: ['code', 'text'] },
   { id: 'qwen-3.5-coder', label: 'Qwen Coder', desc: 'Apache 2.0. Code specialist.', color: '#ec4899', icon: 'QC', group: 'code', tags: ['code'] },
 
   // ── Reasoning & Research ──
-  { id: 'o3', label: 'O3', desc: 'Deep reasoning. Math + science.', color: '#f59e0b', icon: 'o3', group: 'reason', tags: ['reason', 'code'] },
-  { id: 'o4-mini', label: 'O4 Mini', desc: 'Fast reasoning. Budget-friendly.', color: '#f59e0b', icon: 'o4', group: 'reason', tags: ['reason', 'code'] },
   { id: 'deepseek-r1', label: 'DeepSeek R1', desc: 'Chain-of-thought. Open source.', color: '#ef4444', icon: 'R1', group: 'reason', tags: ['reason', 'code'] },
-  { id: 'gemini-3.1-pro', label: 'Gemini 3.1 Pro', desc: 'Google. 2M context. Vision.', color: '#3b82f6', icon: 'G3', group: 'reason', tags: ['reason', 'vision', 'web'] },
+  { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', desc: 'Google stable frontier model for agentic and coding tasks.', color: '#3b82f6', icon: 'G5', group: 'reason', tags: ['reason', 'vision', 'web'] },
+  { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', desc: 'Google preview. Advanced agentic and coding work.', color: '#3b82f6', icon: 'G3', group: 'reason', tags: ['reason', 'vision', 'web'] },
   { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', desc: 'Google. Long context king.', color: '#3b82f6', icon: 'Gm', group: 'reason', tags: ['reason', 'vision', 'web'] },
+  { id: 'sonar-deep-research', label: 'Sonar Deep Research', desc: 'Perplexity exhaustive web research with cited synthesis.', color: '#0ea5e9', icon: 'DR', group: 'reason', tags: ['reason', 'web', 'text'] },
+  { id: 'sonar-reasoning-pro', label: 'Sonar Reasoning Pro', desc: 'Perplexity search-grounded reasoning for structured answers.', color: '#0ea5e9', icon: 'SR', group: 'reason', tags: ['reason', 'web', 'text'] },
 
   // ── Speed & Cost ──
   { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', desc: 'Lightning fast. Cheapest Claude.', color: '#22d3ee', icon: 'H', group: 'speed', tags: ['text', 'code', 'web'] },
+  { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite', desc: 'Google stable low-cost frontier-class speed.', color: '#3b82f6', icon: 'G1', group: 'speed', tags: ['text', 'code', 'vision', 'web'] },
   { id: 'gemini-2.5-flash', label: 'Gemini Flash', desc: 'Google. Fastest + free tier.', color: '#3b82f6', icon: 'Gf', group: 'speed', tags: ['text', 'code', 'vision', 'web'] },
+  { id: 'gemini-2.5-flash-lite', label: 'Gemini Flash-Lite', desc: 'Fastest budget model in the Gemini 2.5 family.', color: '#3b82f6', icon: 'Gl', group: 'speed', tags: ['text', 'code', 'vision', 'web'] },
+  { id: 'gpt-5.4-nano', label: 'GPT-5.4 Nano', desc: 'OpenAI cheapest GPT-5.4 class model for high-volume simple work.', color: '#10b981', icon: '5n', group: 'speed', tags: ['text', 'code'] },
   { id: 'gpt-4.1-nano', label: 'GPT-4.1 Nano', desc: 'OpenAI cheapest. Edge tasks.', color: '#10b981', icon: 'Gn', group: 'speed', tags: ['text', 'code'] },
   { id: 'qwen-3.5-flash', label: 'Qwen Flash', desc: 'Fast. Free tier on Alibaba.', color: '#ec4899', icon: 'Qf', group: 'speed', tags: ['text', 'code'] },
 

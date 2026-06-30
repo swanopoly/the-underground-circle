@@ -48,6 +48,7 @@ import {
 // claude_api_usage logging through one module so the dashboard shows real
 // numbers. See docs/AGENTS_ROADMAP.md §6 Rule #3.
 import { callClaude, addUsage, EMPTY_USAGE, logClaudeUsage, type UsageBreakdown } from "../_claude/anthropic.ts";
+import { wrapUntrusted } from "../_shared/untrusted.ts";
 
 // ─── Types (mirroring src/lib/agentExecutionCore.ts) ────────────────────────
 
@@ -286,7 +287,7 @@ const TOOLS: ToolDef[] = [
         id: row.id,
         createdAt: row.created_at,
         authorId: row.author_id,
-        excerpt: `<untrusted_quoted>${String(row.content).slice(0, 1200)}</untrusted_quoted>`,
+        excerpt: wrapUntrusted(row.content, { maxChars: 1200 }),
       }));
       return { ok: true, data: { count: results.length, results } };
     },
@@ -562,7 +563,7 @@ const TOOLS: ToolDef[] = [
             status: res.status,
             statusText: res.statusText,
             contentType: res.headers.get("content-type") || "",
-            content: text.slice(0, limit),
+            content: wrapUntrusted(text.slice(0, limit)),
             truncated: text.length > limit,
           },
         };
@@ -694,17 +695,73 @@ const TOOLS: ToolDef[] = [
     handler: async (_input, { supabase, circleId }) => {
       const { data, error } = await supabase
         .from("circle_integrations")
-        .select("provider, enabled, config")
+        .select("provider, label, display_name, status, capability_flags, metadata, is_active")
         .eq("circle_id", circleId);
       if (error) {
         if ((error as any).code === "PGRST205") return { ok: true, data: { integrations: [] } };
         return { ok: false, error: error.message };
       }
-      const integrations = (data || []).map((row: any) => ({
-        provider: row.provider,
-        enabled: !!row.enabled,
-        capabilities: Array.isArray(row.config?.capabilities) ? row.config.capabilities : [],
-      }));
+      const secretishKeyRe = /(secret|token|password|private|credential|api[_-]?key|access[_-]?key|refresh|client[_-]?secret)/i;
+      const safeMetadataKeys = new Set([
+        "workspaceName",
+        "defaultModel",
+        "defaultModelProvider",
+        "defaultOrg",
+        "defaultRegion",
+        "defaultBrowser",
+        "defaultProfile",
+        "defaultDatabase",
+        "defaultDatasetName",
+        "defaultActorId",
+        "defaultProjectKey",
+        "apiName",
+        "baseUrl",
+        "apiDocsUrl",
+        "defaultEndpoint",
+        "defaultMethod",
+        "allowedMethods",
+        "authScheme",
+        "apiKeyHeaderName",
+        "defaultAction",
+        "toolNamespace",
+        "dataBoundary",
+        "rateLimitPolicy",
+        "teamKey",
+        "projectRef",
+        "clusterName",
+        "workspace",
+        "siteUrl",
+      ]);
+      const clip = (value: unknown, max = 90): string | null => {
+        if (value === null || value === undefined) return null;
+        if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return null;
+        const text = String(value)
+          .replace(/<\s*\/?\s*untrusted_quoted\s*>/gi, "[untrusted_quoted-tag-removed]")
+          .replace(/[\r\n\t]+/g, " ")
+          .replace(/\s{2,}/g, " ")
+          .trim();
+        if (!text) return null;
+        return text.length > max ? `${text.slice(0, max - 1)}...` : text;
+      };
+      const sanitizeMetadata = (metadata: Record<string, unknown> | null | undefined): Record<string, string> => {
+        const safe: Record<string, string> = {};
+        for (const [key, value] of Object.entries(metadata || {})) {
+          if (secretishKeyRe.test(key) || !safeMetadataKeys.has(key)) continue;
+          const text = clip(value);
+          if (text) safe[key] = text;
+        }
+        return safe;
+      };
+      const integrations = (data || [])
+        .filter((row: any) => row?.is_active !== false)
+        .map((row: any) => ({
+          provider: row.provider,
+          label: row.display_name || row.label || row.provider,
+          status: row.status || "connected",
+          connected: row.status === "connected",
+          capabilities: Array.isArray(row.capability_flags) ? row.capability_flags : [],
+          metadata: sanitizeMetadata(row.metadata),
+        }));
       return { ok: true, data: { count: integrations.length, integrations } };
     },
   },
@@ -2070,6 +2127,16 @@ async function anthropicTurn(args: {
 const MAX_ITERATIONS = 5;
 const SWANBOT_CONTINUATION_MAX_AGE_MS = 10 * 60 * 1000;
 
+// Fix #2: per-model output budget. The old hardcoded 2048 starved fable/opus
+// turns. callClaude only sends model/max_tokens/messages (no temperature/top_p/
+// top_k/budget_tokens), so for claude-fable-5 we add NO sampling params — we only
+// raise max_tokens. Resolved (concrete) claude-* id is matched here.
+function turnMaxTokensForModel(model: string): number {
+  if (/fable|opus/.test(model)) return 8192;
+  if (/sonnet/.test(model))     return 4096;
+  return 2048;
+}
+
 // ─── M2: client-delegated tool call return shape ────────────────────────────
 //
 // When runLoop hits a `clientOnly: true` tool, it bundles the pending
@@ -2149,6 +2216,18 @@ function terminalRunLoopError(
     hitMax: false,
     toolCalls,
     usage,
+  };
+}
+
+function agentRunTokenUsageFields(usage: UsageBreakdown): {
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+} {
+  return {
+    input_tokens: Math.max(0, Math.floor(usage.uncachedIn || 0)),
+    output_tokens: Math.max(0, Math.floor(usage.output || 0)),
+    cached_tokens: Math.max(0, Math.floor((usage.cacheCreate || 0) + (usage.cacheRead || 0))),
   };
 }
 
@@ -2369,7 +2448,8 @@ async function runLoop(args: {
     if (runId) {
       void supabase.from("agent_run_events").insert({ run_id: runId, kind: "turn_start", payload: { iteration: iter } });
     }
-    const turn = await anthropicTurn({ apiKey, model, messages, tools: activeTools, systemBlocks, maxTokens: 2048 });
+    // Fix #2: per-model output budget instead of a flat 2048 (was starving fable/opus).
+    const turn = await anthropicTurn({ apiKey, model, messages, tools: activeTools, systemBlocks, maxTokens: turnMaxTokensForModel(model) });
     usageTotal = addUsage(usageTotal, turn.usage);
     if (runId) {
       void supabase.from("agent_run_events").insert({
@@ -2510,7 +2590,14 @@ async function runLoop(args: {
 const MODEL_MAP: Record<string, string> = {
   "claude-haiku":  "claude-haiku-4-5-20251001",
   "claude-sonnet": "claude-sonnet-4-6",
-  "claude-opus":   "claude-opus-4-7",
+  "claude-fable":  "claude-fable-5",
+  "claude-fable-5": "claude-fable-5",
+  "claude-opus":   "claude-opus-4-8",
+  "claude-opus-4-8": "claude-opus-4-8",
+  "claude-opus-4-7": "claude-opus-4-7",
+  "claude-opus-4-6": "claude-opus-4-6",
+  "claude-sonnet-4-6": "claude-sonnet-4-6",
+  "claude-haiku-4-5": "claude-haiku-4-5-20251001",
 };
 
 Deno.serve(async (req: Request) => {
@@ -2552,6 +2639,20 @@ Deno.serve(async (req: Request) => {
     getRequiredEnv("SUPABASE_URL"),
     getRequiredEnv("SUPABASE_SERVICE_ROLE_KEY"),
   );
+
+  // Authorization: the authenticated user must belong to the target circle.
+  // Without this, any signed-in user could drive service-role reads/writes against
+  // an arbitrary caller-supplied circleId (cross-circle IDOR). Mirrors swanbot-ai v1.
+  const { data: membership } = await supabase
+    .from("circle_members")
+    .select("user_id")
+    .eq("circle_id", circleId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (!membership) {
+    return errResponse(403, "forbidden", "Not authorized for this circle.");
+  }
+
   const resolvedApiKey = await resolveUserModelApiKey({
     supabase,
     userId,
@@ -2623,7 +2724,18 @@ Deno.serve(async (req: Request) => {
     mode = (["talk","build","plan","execute","review","research","support","design"] as Mode[])
       .includes(modeInput as Mode) ? modeInput as Mode : "talk";
     const modelKey = (body.model as string) || "claude-haiku";
-    model = MODEL_MAP[modelKey] || MODEL_MAP["claude-haiku"];
+    // The client sends fully-qualified ids (e.g. "claude-sonnet-4-6"); short aliases
+    // ("claude-sonnet") also arrive. Map aliases via MODEL_MAP, pass through any
+    // already-qualified anthropic id. Bare "auto"/"blackswan" are resolved to a
+    // concrete claude-* id upstream in src/lib/swanbot.ts, so they never reach here.
+    // Fail closed (#1): anything that is neither in MODEL_MAP nor a qualified
+    // claude-* id 400s instead of silently coercing to Haiku, so a non-anthropic
+    // model can never quietly run as a different model on the v2 typed loop.
+    const resolvedModel = MODEL_MAP[modelKey] || (/^claude-/.test(modelKey) ? modelKey : null);
+    if (!resolvedModel) {
+      return errResponse(400, "model_unsupported_on_v2", "This model is not supported on the v2 typed loop; route via swanbot-ai/llm-proxy.");
+    }
+    model = resolvedModel;
     targetAgentName = body.targetAgentName || "BlackSwan";
 
     // Create the agent_runs row up front so tool events have a parent.
@@ -2666,6 +2778,7 @@ Deno.serve(async (req: Request) => {
           // does not silently inflate the apparent end_turn rate. Status stays
           // as-is (still "running"); only the reason field is added.
           final_stop_reason: finalStopReason,
+          ...agentRunTokenUsageFields(result.usage),
           metadata: {
             version: "swanbot-v2-ai",
             targetAgent: targetAgentName,
@@ -2702,6 +2815,7 @@ Deno.serve(async (req: Request) => {
         tool_calls: result.toolCalls,
         iteration_count: result.iterations,
         final_stop_reason: finalStopReason,
+        ...agentRunTokenUsageFields(result.usage),
         status: terminalStatus,
         completed_at: new Date().toISOString(),
         // Clear the continuation blob on terminal completion — the run
@@ -2766,6 +2880,11 @@ Deno.serve(async (req: Request) => {
     if (runId) {
       await supabase.from("agent_runs").update({
         status: "failed",
+        input_tokens: 0,
+        output_tokens: 0,
+        cached_tokens: 0,
+        tool_calls: [],
+        iteration_count: 1,
         // AR4/G2: tag errored runs so the readiness gate counts them as
         // "error" rather than missing — matches the kind:"error" event below.
         final_stop_reason: "error",

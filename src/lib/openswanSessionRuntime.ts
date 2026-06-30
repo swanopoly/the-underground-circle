@@ -14,7 +14,7 @@ import {
   type OpenSwanRuntimeToolName,
 } from './openswanToolRuntime';
 import { runAgent, type AgentProvider, type AgentToolDefinition } from './agentExecutionCore';
-import { getOpenSwanToolsForSurface } from './openswanBridge';
+import { getOpenSwanToolsForSurface, getProgressiveOpenSwanTools } from './openswanBridge';
 import { dispatchToolDetailed, MAX_TOOL_ROUNDS } from './openswanTools/index';
 import { EDGE_INVOKE_RETRIES, edgeRetryBackoffMs, isRetryableEdgeFailure } from './edgeInvokeRetry';
 import { extractAssistantText } from './toolLoopProgress';
@@ -479,6 +479,29 @@ function isOpenSwanTypedCoreEnabled(): boolean {
   return true;
 }
 
+// ─── T2: progressive tool disclosure (DEFAULT OFF) ──────────────────────────
+
+const OPENSWAN_TOOLS_FIRST_FLAG = 'uc_openswan_tools_first';
+
+/**
+ * T2 opt-in switch — ships DARK (default OFF). Mirrors the typed-core flag's
+ * idiom but inverted: legacy full-catalog disclosure is the default, and the
+ * flag must be explicitly turned ON to enable progressive (pinned-core +
+ * `tools.search`) disclosure. While OFF, runTypedCoreToolLoop is byte-for-byte
+ * the legacy full-catalog path.
+ * Web: `localStorage.setItem('uc_openswan_tools_first', '1')` enables it for the
+ * next turn; remove the key (or any non-truthy value) to revert. Native has no
+ * localStorage — the try/catch leaves the default OFF.
+ */
+function isOpenSwanToolsFirstEnabled(): boolean {
+  try {
+    const store = (globalThis as { localStorage?: { getItem?: (k: string) => string | null } }).localStorage;
+    const value = store?.getItem?.(OPENSWAN_TOOLS_FIRST_FLAG);
+    if (value === '1' || value === 'true' || value === 'on') return true;
+  } catch { /* storage unavailable (native) → default OFF */ }
+  return false;
+}
+
 /**
  * Runs the session turn's tool loop on `agentExecutionCore.runAgent` while
  * preserving the legacy `executeToolUseLoop` contract end-to-end:
@@ -527,15 +550,31 @@ async function runTypedCoreToolLoop(args: {
     activePluginIds: args.activePluginIds,
     surface: args.surface,
   };
-  const bridgeTools = getOpenSwanToolsForSurface(args.surface, toolCtx, {
-    allowedToolNames: args.allowedToolNames as OpenSwanRuntimeToolName[],
-    mode: args.mode,
-  });
-  // O1 follow-up flip (T2/T8): see plan doc un-darking checklist
-  // const { tools: progressiveTools, resolveAdditionalTools } = getProgressiveOpenSwanTools(args.surface, toolCtx);
-  if (bridgeTools.length === 0) {
-    // Legacy parity: no advertised tools → no model round.
-    return { response: '', toolEvents: [] };
+  // T2 progressive disclosure (DEFAULT OFF). While OFF this is the exact
+  // legacy path: advertise the full allowed-names catalog up front and apply
+  // `allowedToolNames` as a HARD gate (empty ⇒ no model round). While ON,
+  // advertise only the pinned high-frequency core + `tools.search`, let the
+  // model unlock the rest mid-run via `resolveAdditionalTools` (wired into
+  // runAgent below), and treat `selectRuntimeToolNames`/`allowedToolNames` as
+  // a hint rather than a hard gate (progressive disclosure owns the palette).
+  const toolsFirstEnabled = isOpenSwanToolsFirstEnabled();
+  let bridgeTools: AgentToolDefinition[];
+  let resolveAdditionalTools:
+    | ((ctx: { session: Record<string, unknown>; iteration: number }) => AgentToolDefinition[])
+    | undefined;
+  if (toolsFirstEnabled) {
+    const progressive = getProgressiveOpenSwanTools(args.surface, toolCtx);
+    bridgeTools = progressive.tools;
+    resolveAdditionalTools = progressive.resolveAdditionalTools;
+  } else {
+    bridgeTools = getOpenSwanToolsForSurface(args.surface, toolCtx, {
+      allowedToolNames: args.allowedToolNames as OpenSwanRuntimeToolName[],
+      mode: args.mode,
+    });
+    if (bridgeTools.length === 0) {
+      // Legacy parity: no advertised tools → no model round.
+      return { response: '', toolEvents: [] };
+    }
   }
 
   const toolEvents: LegacyToolEvent[] = [];
@@ -723,8 +762,12 @@ async function runTypedCoreToolLoop(args: {
       const stage = mapAgentEventToOpenSwanStage(event);
       if (stage) args.onStage?.(stage.stage, stage.label);
     },
-    // O1 follow-up flip (T2/T8): see plan doc un-darking checklist
-    // resolveAdditionalTools,
+    // T2 progressive disclosure: when tools-first is ON this resolver returns
+    // the deferred tools the model has unlocked via `tools.search` so far and
+    // runAgent merges them additively each turn; when OFF it is `undefined`
+    // (set above) and runAgent skips it entirely — exact legacy behavior.
+    resolveAdditionalTools,
+    // O1 follow-up flip (T8 parallelism policy): see plan doc un-darking checklist
     // toolParallelPolicyProvider: createOpenSwanToolParallelPolicyProvider({ activePluginIds: args.activePluginIds }),
   });
 
@@ -762,6 +805,34 @@ async function runTypedCoreToolLoop(args: {
     finalizationText,
     usage: finalizeLoopUsage(usageAcc),
   });
+}
+
+type OpenSwanUsageLike = {
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+} | null | undefined;
+
+type OpenSwanTokenTotals = {
+  input: number;
+  output: number;
+  cached: number;
+};
+
+function emptyOpenSwanTokenTotals(): OpenSwanTokenTotals {
+  return { input: 0, output: 0, cached: 0 };
+}
+
+function addOpenSwanUsageTotals(target: OpenSwanTokenTotals, usage: OpenSwanUsageLike): void {
+  if (!usage) return;
+  const input = Math.max(0, Math.floor(usage.input_tokens || 0));
+  const output = Math.max(0, Math.floor(usage.output_tokens || 0));
+  const total = typeof usage.total_tokens === 'number' && Number.isFinite(usage.total_tokens)
+    ? Math.max(0, Math.floor(usage.total_tokens))
+    : null;
+  target.input += input;
+  target.output += output;
+  target.cached += total == null ? 0 : Math.max(0, total - input - output);
 }
 
 export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise<OpenSwanTurnResult> {
@@ -1054,6 +1125,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   }
 
   let delegationSummary = '';
+  const delegatedUsageTotals = emptyOpenSwanTokenTotals();
   if (delegationSpecs.length > 0 && opts.context.circleId) {
     opts.onDelegationPlan?.(delegatedAgents);
     emitStage(opts, 'delegating', `Delegating to ${delegationSpecs.map((spec) => spec.subagent.displayName).join(', ')}`);
@@ -1096,6 +1168,9 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       parentAgentId: opts.context.agentId || undefined,
       parentMode: opts.mode || null,
     });
+    for (const result of delegated.results) {
+      addOpenSwanUsageTotals(delegatedUsageTotals, result.usage);
+    }
 
     // CA-8d summary-only contract: use each child's redacted `summary`
     // (≤1200 chars) rather than the full `response`. The full response
@@ -1197,6 +1272,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
             status: action.status,
           })),
           memoryReferences: summarizeMemoryReferences(result.memoryReferences || []),
+          usage: result.usage || null,
         })),
         delegatedArtifactSummary: delegatedArtifacts,
       });
@@ -1700,14 +1776,17 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
           ...(verificationResults?.length ? ['', 'Verification results:', ...verificationResults.map((result) => `- ${result.summary}`)] : []),
         ].join('\n').slice(0, 5000),
       });
+      const finalUsageTotals = emptyOpenSwanTokenTotals();
+      addOpenSwanUsageTotals(finalUsageTotals, structured.usage);
+      finalUsageTotals.input += delegatedUsageTotals.input;
+      finalUsageTotals.output += delegatedUsageTotals.output;
+      finalUsageTotals.cached += delegatedUsageTotals.cached;
       await updateRunStatus(run.id, 'completed', {
         current_step_index: finalStepIndex,
         total_steps: finalTotalSteps,
-        input_tokens: structured.usage?.input_tokens || 0,
-        output_tokens: structured.usage?.output_tokens || 0,
-        cached_tokens: structured.usage?.total_tokens
-          ? Math.max(0, structured.usage.total_tokens - ((structured.usage.input_tokens || 0) + (structured.usage.output_tokens || 0)))
-          : 0,
+        input_tokens: finalUsageTotals.input,
+        output_tokens: finalUsageTotals.output,
+        cached_tokens: finalUsageTotals.cached,
       });
 
       memoryRecommendations = buildOpenSwanMemoryRecommendations({

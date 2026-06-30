@@ -34,6 +34,19 @@ import {
   selectVaultAutomationEntry,
   type VaultGranteeType,
 } from './vaultAgentAccess';
+// Capability manifest — "the AI models select what they need from the app".
+// This is the *menu* layer that sits on top of the `tools.search` retrieval
+// primitive: it tells the model which capability FAMILIES exist (browser,
+// desktop, WordPress, Adobe design, vault, deploy …) so it can browse/load
+// the concrete deferred tools on demand instead of concluding a power is
+// missing. `chatCapabilityManifest` only `import type`s back from this module
+// (erased at compile), so this value import creates no runtime cycle. Wiring
+// it here is purely ADDITIVE: it enriches discovery prose only and never
+// changes which tools are advertised by default.
+import {
+  buildCapabilityManifestPrompt,
+  suggestCapabilitiesForMessage,
+} from './chatCapabilityManifest';
 
 export type OpenSwanToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
 export type OpenSwanRuntimeToolName =
@@ -90,6 +103,8 @@ export type OpenSwanRuntimeToolName =
   | 'rooms.list_files'
   | 'rooms.read_file'
   | 'integrations.list'
+  | 'custom_api.read'
+  | 'custom_api.request'
   | 'office.list_agents'
   // ── Circle / Agent / Office editing (chat-driven UI mutations) ────
   // Anything a user can edit in Circle Settings / Office Customize
@@ -189,7 +204,12 @@ export type OpenSwanRuntimeToolName =
   | 'tools.search'
   // ── Circle context snapshot — pre-built entity-linked index search that
   //    replaces N sequential list calls for what/which/who discovery ──────
-  | 'context.search';
+  | 'context.search'
+  // ── Phase-3 mass-agent deploy (runtime-only; not a planner tool). Lets the
+  //    driving model fan a task out to a swarm of TRANSIENT agents. Gated
+  //    behind DEPLOY_AGENTS_TOOL_ENABLED (default OFF) so it is NOT advertised
+  //    until the deploy path is runtime-proven, and always approval-gated. ──
+  | 'team.deploy_agents';
 
 export type OpenSwanToolDefinition = {
   name: OpenSwanRuntimeToolName;
@@ -300,6 +320,25 @@ type FetchUrlArgs = {
   url: string;
 };
 
+type CustomApiBaseArgs = {
+  integrationId?: string;
+  apiName?: string;
+  toolNamespace?: string;
+  path?: string;
+  query?: Record<string, unknown>;
+  maxBytes?: number;
+  taskContext?: string;
+};
+
+type CustomApiReadArgs = CustomApiBaseArgs & {
+  method?: 'GET' | 'HEAD';
+};
+
+type CustomApiRequestArgs = CustomApiBaseArgs & {
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  body?: unknown;
+};
+
 type ScheduleActionArgs = {
   kind: string;
   payload: Record<string, unknown>;
@@ -390,10 +429,13 @@ export type OpenSwanToolExecutionArgs = {
   'rooms.list_files': { roomId: string; response_format?: ToolResponseFormat };
   'rooms.read_file': { fileId: string };
   'integrations.list': Record<string, never>;
+  'custom_api.read': CustomApiReadArgs;
+  'custom_api.request': CustomApiRequestArgs;
   'office.list_agents': Record<string, never>;
   'agent.codex_acquire_asset': { goal: string; outputDir?: string; expectedFileName?: string; sourceUrl?: string; taskContext?: string; sessionId?: string; launchIfMissing?: boolean };
   'agent.recover_failed_task': { task: string; failureMessage: string; failureStack?: string; outcomeStatus?: string; executionKind?: string; runId?: string; planSummary?: string; groundingSummary?: string; preflightSummary?: string; source?: string; sessionId?: string; launchIfMissing?: boolean };
   'agent.build_app_capability': { task: string; appName?: string; capabilityGap?: string; desiredOutcome?: string; currentPlanSummary?: string; sessionId?: string; launchIfMissing?: boolean };
+  'team.deploy_agents': { task: string; count?: number; model?: string };
   'approvals.list': Record<string, never>;
   'approvals.request': { runId: string; approvalKind: string; title: string; description?: string; payload?: Record<string, unknown>; timeoutSeconds?: number };
   'approvals.resolve': { approvalId: string; status: 'approved' | 'rejected' };
@@ -628,10 +670,13 @@ export type OpenSwanToolExecutionResultMap = {
   'rooms.list_files': { ok: boolean; resultsText: string };
   'rooms.read_file': { ok: boolean; resultsText: string };
   'integrations.list': { ok: boolean; resultsText: string };
+  'custom_api.read': { ok: boolean; resultsText: string; status?: number; approvalVerified?: boolean };
+  'custom_api.request': { ok: boolean; resultsText: string; status?: number; approvalVerified?: boolean; approvalRequest?: { id: string; required: boolean; status: string } };
   'office.list_agents': { ok: boolean; resultsText: string };
   'agent.codex_acquire_asset': { ok: boolean; resultsText: string; provider?: string; sessionId?: string; launched?: boolean };
   'agent.recover_failed_task': { ok: boolean; resultsText: string; provider?: string; sessionId?: string; launched?: boolean; recoveryAction?: string; recoveryRunbook?: Record<string, unknown> };
   'agent.build_app_capability': { ok: boolean; resultsText: string; provider?: string; sessionId?: string; launched?: boolean; buildoutKind?: string; risk?: string; appName?: string };
+  'team.deploy_agents': { ok: boolean; resultsText: string; deployed?: number; failed?: number; channel?: 'web' | 'bridge' | 'none'; truncated?: boolean; approvalRequired?: boolean; estimateUsd?: number };
   'circle.update_settings':    { ok: boolean; resultsText: string };
   'circle.update_budget_caps': { ok: boolean; resultsText: string };
   'circle.update_office_theme':{ ok: boolean; resultsText: string };
@@ -750,6 +795,40 @@ const RESPONSE_FORMAT_PROPERTY = {
   enum: ['concise', 'detailed'],
   description: "Defaults to 'concise' (bounded high-signal summary). Pass 'detailed' for the full payload.",
 } as const;
+
+/**
+ * DEFAULT-OFF feature flag for the model-callable mass-agent deploy tool
+ * (`team.deploy_agents`). The Phase-3 deploy stack (plan -> caps -> model
+ * policy -> orchestrator) is built and smoke-passing but NOT yet runtime-proven
+ * against a live circle, and it spends money + spawns agents. So it ships
+ * SAFE-DORMANT: while this is `false` the tool is NOT added to TOOL_DEFINITIONS
+ * (never advertised to the model on any surface, never loop-eligible) and the
+ * dispatch handler returns a clear `disabled` result if it is somehow called.
+ * Flip to `true` ONLY after the orchestrator's `// TODO(prove-web-path)` markers
+ * are proven; reverting is a one-line change. Even when enabled the tool is
+ * always approval-gated (policy approvalMode:'ask') and honors the 50/$10 caps.
+ */
+const DEPLOY_AGENTS_TOOL_ENABLED: boolean = false;
+
+/** Single definition for the gated deploy tool. Spread into TOOL_DEFINITIONS
+ *  only when the flag is on, and into TOOL_LOOP_SAFE_NAMES the same way, so the
+ *  one flag governs both advertising and loop-eligibility. */
+const TEAM_DEPLOY_AGENTS_TOOL_DEFINITION: OpenSwanToolDefinition = {
+  name: 'team.deploy_agents',
+  label: 'Deploy Agent Swarm On A Task',
+  surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+  description:
+    'Deploy a swarm of TRANSIENT agents to work a single task in parallel — the model selects how much capacity the task needs. Each agent runs the task through the in-app OpenSwan path and auto-retires when done (no persistent office agents). Hard ceiling 50 agents/deploy and a ~$10 per-deploy cost cap; large or costly fan-outs REQUIRE approval. Use only for genuinely parallelizable work; one agent is the default for ordinary tasks. Requires approval.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      task: { type: 'string', description: 'The task every deployed agent should work on.' },
+      count: { type: 'integer', description: 'How many agents to deploy (clamped to 1..50). Defaults to 1; only fan out for parallelizable work.' },
+      model: { type: 'string', description: 'Model id every agent runs (catalog id or "auto"). Defaults to a safe deploy model when omitted.' },
+    },
+    required: ['task'],
+  },
+};
 
 const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
   {
@@ -1525,6 +1604,48 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'custom_api.read',
+    label: 'Read Custom API',
+    surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+    description:
+      'Read from a connected Custom API through the guarded server-side proxy. Use integrations.list first, then call this for GET/HEAD only. The proxy enforces the saved baseUrl/defaultEndpoint/allowedMethods, blocks private hosts, injects stored auth server-side, and returns a capped response preview with no secret values.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        integrationId: { type: 'string', description: 'Exact custom_api integration id when known.' },
+        apiName: { type: 'string', description: 'Configured API name when the id is not known.' },
+        toolNamespace: { type: 'string', description: 'Configured Custom API tool namespace when known.' },
+        method: { type: 'string', enum: ['GET', 'HEAD'], description: 'Read method. Defaults to GET.' },
+        path: { type: 'string', description: 'Relative API path under the configured baseUrl/defaultEndpoint.' },
+        query: { type: 'object', description: 'Scalar query parameters. Secret-shaped keys are ignored server-side.' },
+        maxBytes: { type: 'number', description: 'Maximum response preview bytes, capped server-side.' },
+        taskContext: { type: 'string', description: 'Short reason for audit context.' },
+      },
+    },
+  },
+  {
+    name: 'custom_api.request',
+    label: 'Request Custom API Action',
+    surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+    description:
+      'Run an approved write-like request against a connected Custom API. Use only after integrations.list/custom_api.read prove the target. Requires OpenSwan approval and server-side approval verification before POST/PUT/PATCH/DELETE executes. The proxy enforces the saved baseUrl/defaultEndpoint/allowedMethods, blocks private hosts, injects stored auth server-side, and returns a capped response preview with no secret values.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        integrationId: { type: 'string', description: 'Exact custom_api integration id when known.' },
+        apiName: { type: 'string', description: 'Configured API name when the id is not known.' },
+        toolNamespace: { type: 'string', description: 'Configured Custom API tool namespace when known.' },
+        method: { type: 'string', enum: ['POST', 'PUT', 'PATCH', 'DELETE'], description: 'Write-like method allowed by the Custom API metadata.' },
+        path: { type: 'string', description: 'Relative API path under the configured baseUrl/defaultEndpoint.' },
+        query: { type: 'object', description: 'Scalar query parameters. Secret-shaped keys are ignored server-side.' },
+        body: { description: 'JSON-serializable request body or plain text.' },
+        maxBytes: { type: 'number', description: 'Maximum response preview bytes, capped server-side.' },
+        taskContext: { type: 'string', description: 'Short reason for approval/audit context.' },
+      },
+      required: ['method'],
+    },
+  },
+  {
     name: 'office.list_agents',
     label: 'List Office Agents',
     surfaces: ['main_chat', 'room_chat', 'office'],
@@ -1596,6 +1717,10 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
       required: ['task'],
     },
   },
+  // ── Phase-3 mass-agent deploy — DEFAULT-OFF (see DEPLOY_AGENTS_TOOL_ENABLED).
+  //    Included here ONLY when the flag is on, so when off it is never
+  //    advertised to the model on any surface and never loop-eligible. ──
+  ...(DEPLOY_AGENTS_TOOL_ENABLED ? [TEAM_DEPLOY_AGENTS_TOOL_DEFINITION] : []),
   // ── Circle / Agent / Office editing tools ────────────────────────
   {
     name: 'circle.update_settings',
@@ -3085,6 +3210,27 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     };
   }
 
+  if (tool === 'custom_api.read') {
+    return {
+      family: 'knowledge',
+      approvalMode: 'auto',
+      mutatesState: false,
+      externalSideEffect: true,
+      summary: 'Reads from a connected Custom API through the guarded server-side proxy.',
+    };
+  }
+
+  if (tool === 'custom_api.request') {
+    return {
+      family: 'coordination',
+      approvalMode: 'ask',
+      mutatesState: true,
+      externalSideEffect: true,
+      approvalKind: 'privileged_action',
+      summary: 'Sends a write-like request to a connected Custom API through the guarded server-side proxy.',
+    };
+  }
+
   if (tool === 'agent.codex_acquire_asset') {
     return {
       family: 'agent',
@@ -3115,6 +3261,21 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
       externalSideEffect: false,
       approvalKind: 'privileged_action',
       summary: 'Delegates missing unfamiliar-app capability buildout to a connected Codex agent.',
+    };
+  }
+
+  if (tool === 'team.deploy_agents') {
+    // ALWAYS 'ask' — a mass deploy spends money and spawns agents, so it must
+    // never auto-approve regardless of size. The handler additionally enforces
+    // shouldRequireApproval for the cost/count gate; this policy guarantees a
+    // human approval step even for small deploys.
+    return {
+      family: 'agent',
+      approvalMode: 'ask',
+      mutatesState: true,
+      externalSideEffect: true,
+      approvalKind: 'privileged_action',
+      summary: 'Deploys a swarm of transient agents to work a task in parallel (spends budget; capped at 50 agents / ~$10 per deploy).',
     };
   }
 
@@ -3488,6 +3649,10 @@ const TOOL_DEPENDENCY_DOMAINS: Partial<Record<OpenSwanRuntimeToolName, { writes?
   'wp.update_post': { writes: ['wordpress'] },
   'wp.trash_post': { writes: ['wordpress'] },
   'wp.upload_media': { writes: ['wordpress'] },
+  // External Custom API connectors. Read calls still touch an external
+  // service; write calls are ask-gated and verified again inside the proxy.
+  'custom_api.read': { reads: ['external_api'] },
+  'custom_api.request': { writes: ['external_api'] },
 };
 
 /**
@@ -3541,6 +3706,9 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'agent.codex_acquire_asset': ['execute', 'build'],
   'agent.recover_failed_task': ['execute', 'support', 'build'],
   'agent.build_app_capability': ['execute', 'build', 'support'],
+  // Mass deploy is action-only — never available in read-only modes (review,
+  // research, talk) or in support; spending budget is an explicit action.
+  'team.deploy_agents': ['execute', 'build'],
   // Circle-wide settings — only when user explicitly wants to change them.
   'circle.update_settings':     ['execute', 'build'],
   'circle.update_budget_caps':  ['execute'],
@@ -3662,6 +3830,8 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'wp.update_post': ['execute', 'build', 'design'],
   'wp.trash_post': ['execute', 'build', 'design'],
   'wp.upload_media': ['execute', 'build', 'design'],
+  'custom_api.read': ['execute', 'build', 'support'],
+  'custom_api.request': ['execute', 'build'],
 };
 
 /** Returns the mode list for a tool (inline def wins over the central map). */
@@ -3755,6 +3925,8 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'rooms.list_files',
   'rooms.read_file',
   'integrations.list',
+  'custom_api.read',
+  'custom_api.request',
   'office.list_agents',
   'agent.codex_acquire_asset',
   'agent.recover_failed_task',
@@ -3863,6 +4035,13 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'context.search',
 ]);
 
+// Phase-3 mass deploy is loop-eligible ONLY when its DEFAULT-OFF flag is on, so
+// the one flag governs both advertising (TOOL_DEFINITIONS) and loop reachability.
+// When off it is absent from both sets and can never be selected mid-loop.
+if (DEPLOY_AGENTS_TOOL_ENABLED) {
+  TOOL_LOOP_SAFE_NAMES.add('team.deploy_agents');
+}
+
 export function listOpenSwanToolsForSurface(surface: OpenSwanToolSurface): OpenSwanToolDefinition[] {
   return TOOL_DEFINITIONS.filter((tool) => tool.surfaces.includes(surface));
 }
@@ -3935,6 +4114,7 @@ const TOOL_DISCLOSURE_FAMILY_DEFAULTS: Record<string, OpenSwanToolDisclosure> = 
   check_ins: 'deferred',
   credentials: 'deferred',
   integrations: 'deferred',
+  custom_api: 'deferred',
   office: 'deferred',
 };
 
@@ -4122,6 +4302,45 @@ export function buildOpenSwanToolBrief(
   return `Recommended tools for this turn:\n${lines.join('\n')}`;
 }
 
+/**
+ * The capability-manifest brief for a surface — the model-facing *menu* of
+ * capability families (browser, desktop, WordPress, Adobe design, vault,
+ * agent deploy …) plus the instruction to call `tools.search` to load the
+ * concrete deferred tool on demand. This is the discovery counterpart to the
+ * per-turn `buildOpenSwanToolBrief` (which lists the few tools recommended for
+ * THIS turn): the manifest makes the model aware of the whole long tail that
+ * is otherwise deferred out of the prompt, so frontier models + BlackSwan /
+ * OpenSwan all route from the same surface.
+ *
+ * Additive + flag-neutral: this only produces prose. It does NOT advertise or
+ * unlock any tool, and it does not depend on `DEPLOY_AGENTS_TOOL_ENABLED`
+ * (the deploy family is listed as a discoverable capability, but the actual
+ * `team.deploy_agents` tool stays gated by that flag in `TOOL_DEFINITIONS`).
+ * Hosts wire this into the system prompt alongside the tool list; nothing in
+ * the default tool-advertisement path calls it.
+ *
+ * `message` is optional: when present, the families that message is likely to
+ * need are surfaced first so the model reaches for the right family quickly.
+ */
+export function buildOpenSwanCapabilityManifestBrief(opts?: {
+  surface?: OpenSwanToolSurface;
+  message?: string;
+  enabledFamilies?: string[];
+}): string {
+  const manifest = buildCapabilityManifestPrompt({
+    surface: opts?.surface,
+    enabledFamilies: opts?.enabledFamilies,
+  });
+
+  const likely = opts?.message ? suggestCapabilitiesForMessage(opts.message) : [];
+  if (likely.length === 0) return manifest;
+
+  // Prepend a short, quiet hint so the model knows which families this turn
+  // probably needs — it still decides, and `tools.search` still enforces the
+  // real load. Kept to one line per CLAUDE.md's quiet-in-chat rule.
+  return `${manifest}\nLikely relevant for this request (still your call): ${likely.join(', ')} — tools.search to load.`;
+}
+
 // Surface actionable hints for desktop-bridge failure modes so the agent
 // doesn't just report "permission denied" and give up. Matches the
 // errorCode set in `src/lib/desktopBridgeProtocol.ts`.
@@ -4170,8 +4389,11 @@ export function fenceUntrustedObservationText(text: string): string {
 
 function stringifyMemoryResults(results: Awaited<ReturnType<typeof semanticSearchMemories>>): string {
   if (results.length === 0) return 'No matching memories found.';
+  // Memory title + content are member/agent-authored and therefore untrusted —
+  // fence them so retrieved memory cannot smuggle in instructions. Structural
+  // fields (index, kind, similarity) stay outside the fence. See untrustedContent.ts.
   return results.map((r, i) =>
-    `${i + 1}. [${r.memory_kind}] ${r.title}: ${r.content} (similarity: ${r.similarity.toFixed(2)})`
+    `${i + 1}. [${r.memory_kind}] (similarity: ${r.similarity.toFixed(2)}):\n${fenceUntrustedObservationText(`${r.title}: ${r.content}`)}`
   ).join('\n');
 }
 
@@ -4326,10 +4548,13 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'rooms.list_files':
     case 'rooms.read_file':
     case 'integrations.list':
+    case 'custom_api.read':
+    case 'custom_api.request':
     case 'office.list_agents':
     case 'agent.codex_acquire_asset':
     case 'agent.recover_failed_task':
     case 'agent.build_app_capability':
+    case 'team.deploy_agents':
     case 'circle.update_settings':
     case 'circle.update_budget_caps':
     case 'circle.update_office_theme':
@@ -4447,7 +4672,9 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
       if (!fetchResult.ok) {
         return fetchResult.error || 'Fetch failed.';
       }
-      return fetchResult.content;
+      // Fetched page text is arbitrary external web content — the highest-risk
+      // untrusted source in the catalog. Fence it so it cannot act as instructions.
+      return fenceUntrustedObservationText(fetchResult.content);
     }
     case 'list_circle_members':
       return (result as OpenSwanToolExecutionResultMap['list_circle_members']).resultsText;
@@ -4509,7 +4736,11 @@ export async function executeOpenSwanTool<T extends OpenSwanToolName>(
     case 'verification.tests':
     case 'verification.lint': {
       const verificationTool = tool as 'verification.typecheck' | 'verification.tests' | 'verification.lint';
-      const command = (args as VerificationCommandArgs).command || DEFAULT_VERIFICATION_COMMANDS[verificationTool];
+      // SECURITY: verification.* are fixed-purpose tools that run via the local
+      // bridge /exec under an auto-approve policy. Do NOT honor a model-supplied
+      // `command` — an out-of-schema `command` key would be auto-approved
+      // arbitrary shell execution on the user's machine. Pin to the known command.
+      const command = DEFAULT_VERIFICATION_COMMANDS[verificationTool];
       const bridgeOk = await detectClaudeCodeBridge();
       if (!bridgeOk) {
         return {
@@ -4588,6 +4819,37 @@ function maybeInvalidateContextSnapshotAfterTool(
       .then((m) => m.invalidateCircleContextSnapshot(circleId))
       .catch(() => {});
   } catch { /* never throw from cache hygiene */ }
+}
+
+function formatCustomApiProxyResult(
+  tool: 'custom_api.read' | 'custom_api.request',
+  data: Record<string, any>,
+): string {
+  const integration = data.integration && typeof data.integration === 'object' ? data.integration : {};
+  const status = data.status ? `HTTP ${data.status}` : 'HTTP status unknown';
+  const method = data.method ? String(data.method).toUpperCase() : (tool === 'custom_api.read' ? 'GET' : 'REQUEST');
+  const url = data.url ? String(data.url) : 'configured Custom API endpoint';
+  const lines = [
+    `${method} ${url} -> ${status}`,
+    `Integration: ${String(integration.label || 'Custom API')}${integration.toolNamespace ? ` (${integration.toolNamespace})` : ''}`,
+    `Content-Type: ${String(data.contentType || 'unknown')}`,
+    `Bytes read: ${Number(data.bytesRead || 0)}${data.truncated ? ' (truncated)' : ''}`,
+  ];
+  if (tool === 'custom_api.request') {
+    lines.push(data.approvalVerified ? 'Approval: verified before request' : 'Approval: not verified');
+  }
+  if (data.authUsed && data.authUsed !== 'none') {
+    lines.push(`Auth: ${String(data.authUsed)} (secret not returned)`);
+  }
+
+  const preview = typeof data.bodyPreview === 'string' ? data.bodyPreview : '';
+  if (preview) {
+    lines.push('Response preview:');
+    lines.push(fenceUntrustedObservationText(truncateText(preview, 8_000)));
+  } else {
+    lines.push('Response preview: (empty)');
+  }
+  return lines.join('\n');
 }
 
 /** Inner dispatcher — the pre-existing big tool switch, unchanged. */
@@ -5300,7 +5562,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const excerptCap = resolveResponseFormat(a.response_format) === 'detailed' ? 1200 : 400;
         const lines = (data as any[]).map((row, index) =>
           `${index + 1}. [${row.created_at}]${row.is_bot ? ' (bot)' : ''} thread ${String(row.thread_id || '').slice(0, 8)}: ` +
-          `<untrusted_quoted>${String(row.content || '').slice(0, excerptCap)}</untrusted_quoted>`);
+          fenceUntrustedObservationText(String(row.content || '').slice(0, excerptCap)));
         return { ok: true, resultsText: `${data.length} transcript match(es) for "${query}":\n${lines.join('\n')}` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
@@ -5314,19 +5576,45 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
       }
       const matches = searchOpenSwanToolCatalog(query, { surface: context.surface, family, limit: 10 });
       if (matches.length === 0) {
+        // Manifest-derived family hint: surface the families this query is
+        // most likely about (from the capability menu) instead of a static
+        // list, so a "no match" still points the model at the right family to
+        // browse. Falls back to a representative family menu when nothing
+        // matches. Additive — `matches` stays empty either way.
+        const suggested = suggestCapabilitiesForMessage(query || family || '');
+        const familyHint = (suggested.length > 0
+          ? suggested
+          : ['research', 'browser', 'desktop', 'wp', 'desktop:design', 'vault', 'github', 'rooms', 'agent', 'team.deploy_agents']
+        ).join("', '");
         return {
           ok: true,
-          resultsText: `No catalog tools matched "${query || family}". Try broader keywords or a family filter ('desktop', 'vault', 'github', 'rooms', 'wp', 'browser').`,
+          resultsText:
+            `No catalog tools matched "${query || family}". ` +
+            `Try broader keywords or a family filter — capability families: '${familyHint}'. ` +
+            'Each family is browsable: pass it as `family` (with any query) to list its tools.',
           matches: [],
         } as any;
       }
       const lines = matches.map((m, i) =>
         `${i + 1}. ${m.name} [${m.family}] [${m.approvalMode.toUpperCase()}] — ${m.label}: ${m.summary}`);
+      // Beyond the direct hits, tell the model which OTHER capability families
+      // this request likely touches so it can widen discovery on its next step
+      // (e.g. a "photoshop" search also nudges the design + desktop families).
+      // De-duplicate against families already represented in the matches so the
+      // hint only points at not-yet-surfaced powers. Purely additive to the
+      // resultsText — the `matches` array and the "now available" contract
+      // string (asserted by progressive-tool-disclosure-smoketest) are intact.
+      const matchedFamilies = new Set(matches.map((m) => m.family.split(/[.:]/)[0]));
+      const alsoConsider = suggestCapabilitiesForMessage(query || family || '')
+        .filter((fam) => !matchedFamilies.has(fam.split(/[.:]/)[0]));
+      const alsoLine = alsoConsider.length > 0
+        ? `\nAlso consider these capability families (tools.search to load): ${alsoConsider.join(', ')}.`
+        : '';
       return {
         ok: true,
         resultsText:
           `${matches.length} catalog tool(s) matched "${query || family}". ` +
-          `These tools are now available for direct calling on your next step:\n${lines.join('\n')}`,
+          `These tools are now available for direct calling on your next step:\n${lines.join('\n')}${alsoLine}`,
         matches,
       } as any;
     }
@@ -5588,7 +5876,8 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         if (error) return { ok: false, resultsText: error.message } as any;
         if (!data || data.length === 0) return { ok: true, resultsText: 'No recent check-ins found.' } as any;
         const lines = (data as any[]).map((row, index) => `${index + 1}. ${(row.user?.display_name || row.user?.username || 'Unknown')}: ${String(row.content || '').replace(/\s+/g, ' ').slice(0, 200)}`);
-        return { ok: true, resultsText: lines.join('\n') } as any;
+        // Check-in names + text are member-authored — fence before returning to the model.
+        return { ok: true, resultsText: fenceUntrustedObservationText(lines.join('\n')) } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     // ── Research ───────────────────────────────────────────────────────
@@ -5600,7 +5889,8 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           circleId: context.circleId,
           limit: Math.min(Number((args as any).limit) || 5, 10),
         });
-        return { ok: true, resultsText: text } as any;
+        // Research excerpts are model/member-authored saved content — fence them.
+        return { ok: true, resultsText: fenceUntrustedObservationText(text) } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'research.save': {
@@ -5730,9 +6020,113 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const { listCircleIntegrations } = await import('./circleIntegrations');
         const integrations = await listCircleIntegrations(context.circleId);
         if (integrations.length === 0) return { ok: true, resultsText: 'No integrations connected.' } as any;
-        const lines = integrations.map((integration) => `- ${integration.label} [${integration.provider}] ${integration.status}${integration.capability_flags?.length ? ` — ${integration.capability_flags.join(', ')}` : ''}`);
+        const secretishKeyRe = /(secret|token|password|private|credential|api[_-]?key|access[_-]?key|refresh|client[_-]?secret)/i;
+        const safeMetadataKeys = new Set([
+          'workspaceName',
+          'defaultModel',
+          'defaultModelProvider',
+          'defaultOrg',
+          'defaultRegion',
+          'defaultBrowser',
+          'defaultProfile',
+          'defaultDatabase',
+          'defaultDatasetName',
+          'defaultActorId',
+          'defaultProjectKey',
+          'apiName',
+          'baseUrl',
+          'apiDocsUrl',
+          'defaultEndpoint',
+          'defaultMethod',
+          'allowedMethods',
+          'defaultAction',
+          'toolNamespace',
+          'dataBoundary',
+          'rateLimitPolicy',
+          'teamKey',
+          'projectRef',
+          'clusterName',
+          'workspace',
+          'siteUrl',
+        ]);
+        const customApiOrder = ['apiName', 'baseUrl', 'apiDocsUrl', 'defaultEndpoint', 'defaultMethod', 'allowedMethods', 'authScheme', 'apiKeyHeaderName', 'toolNamespace', 'defaultAction', 'dataBoundary', 'rateLimitPolicy'];
+        const clip = (value: unknown, max = 90): string | null => {
+          if (value === null || value === undefined) return null;
+          if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') return null;
+          const text = String(value)
+            .replace(/<\s*\/?\s*untrusted_quoted\s*>/gi, '[untrusted_quoted-tag-removed]')
+            .replace(/[\r\n\t]+/g, ' ')
+            .replace(/\s{2,}/g, ' ')
+            .trim();
+          if (!text) return null;
+          return text.length > max ? `${text.slice(0, max - 1)}...` : text;
+        };
+        const formatMetadata = (provider: string, metadata: Record<string, unknown> | undefined): string => {
+          const safe: Record<string, string> = {};
+          for (const [key, value] of Object.entries(metadata || {})) {
+            if (secretishKeyRe.test(key) || !safeMetadataKeys.has(key)) continue;
+            const text = clip(value);
+            if (text) safe[key] = text;
+          }
+          const entries = provider === 'custom_api'
+            ? customApiOrder.filter(key => safe[key]).map(key => `${key}=${safe[key]}`)
+            : Object.entries(safe).slice(0, 4).map(([key, value]) => `${key}=${value}`);
+          return entries.slice(0, provider === 'custom_api' ? 7 : 4).join(', ');
+        };
+        const lines = integrations.map((integration) => {
+          const metadata = formatMetadata(integration.provider, integration.metadata);
+          return `- ${integration.label} [${integration.provider}] ${integration.status}${integration.capability_flags?.length ? ` — ${integration.capability_flags.join(', ')}` : ''}${metadata ? ` — metadata: ${metadata}` : ''}`;
+        });
         return { ok: true, resultsText: lines.join('\n') } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'custom_api.read':
+    case 'custom_api.request': {
+      try {
+        const toolName = tool as 'custom_api.read' | 'custom_api.request';
+        const a = (args || {}) as CustomApiReadArgs | CustomApiRequestArgs;
+        const method = toolName === 'custom_api.read'
+          ? String((a as CustomApiReadArgs).method || 'GET').toUpperCase()
+          : String((a as CustomApiRequestArgs).method || '').toUpperCase();
+        const { data, error } = await supabase.functions.invoke('custom-api-proxy', {
+          body: {
+            circleId: context.circleId,
+            runId: context.runId || null,
+            toolName,
+            toolArgs: a as Record<string, unknown>,
+            integrationId: a.integrationId,
+            apiName: a.apiName,
+            toolNamespace: a.toolNamespace,
+            method,
+            path: a.path,
+            query: a.query,
+            body: toolName === 'custom_api.request' ? (a as CustomApiRequestArgs).body : undefined,
+            maxBytes: a.maxBytes,
+          },
+        });
+        if (error) {
+          return { ok: false, resultsText: `Custom API proxy failed: ${error.message}` } as any;
+        }
+        const response = data && typeof data === 'object' ? data as Record<string, any> : {};
+        if (response.ok !== true) {
+          const message = String(response.message || response.error || response.statusText || 'Custom API request failed.');
+          const statusText = response.status ? `HTTP ${response.status}` : 'blocked';
+          return {
+            ok: false,
+            status: typeof response.status === 'number' ? response.status : undefined,
+            approvalVerified: response.approvalVerified === true,
+            resultsText: `Custom API ${statusText}: ${message}`,
+          } as any;
+        }
+        return {
+          ok: true,
+          status: typeof response.status === 'number' ? response.status : undefined,
+          approvalVerified: response.approvalVerified === true,
+          resultsText: formatCustomApiProxyResult(toolName, response),
+        } as any;
+      } catch (e: any) {
+        return { ok: false, resultsText: `Custom API request failed: ${e.message || String(e)}` } as any;
+      }
     }
     case 'office.list_agents': {
       try {
@@ -5914,6 +6308,121 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         } as any;
       } catch (e: any) {
         return { ok: false, provider: 'codex', resultsText: e.message || 'App capability buildout handoff failed.' } as any;
+      }
+    }
+    case 'team.deploy_agents': {
+      // SAFETY GATE 1 — DEFAULT-OFF flag. The tool is not advertised when the
+      // flag is off (omitted from TOOL_DEFINITIONS), but if it is somehow
+      // invoked anyway (stale schema, replayed call) fail closed with a clear
+      // disabled result rather than spending budget / spawning agents.
+      if (!DEPLOY_AGENTS_TOOL_ENABLED) {
+        return {
+          ok: false,
+          resultsText:
+            'team.deploy_agents is disabled. Mass agent deploy is gated behind a default-off feature flag until the deploy path is runtime-proven.',
+        } as any;
+      }
+      try {
+        const a = args as OpenSwanToolExecutionArgs['team.deploy_agents'];
+        const task = String(a.task || '').trim();
+        if (!task) return { ok: false, resultsText: 'task is required.' } as any;
+
+        // Lazy-import the Phase-3 deploy stack (mirrors how the other agent.*
+        // handlers dynamically import their delegation modules).
+        const [{ buildAgentDeployPlan }, deployPolicy, { resolveDeployModel }, { deployAgents }] =
+          await Promise.all([
+            import('./agentDeployPlan'),
+            import('./agentDeployPolicy'),
+            import('./agentDeployModelPolicy'),
+            import('./agentDeployOrchestrator'),
+          ]);
+        const { capDeployCount, estimateDeployCostUsd, shouldRequireApproval, MAX_AGENTS_PER_DEPLOY } =
+          deployPolicy;
+
+        // Connected providers bias 'auto' model resolution toward the team's
+        // BYOK keys. Resolve from the live circle integrations (the
+        // authoritative source) rather than trusting a caller-supplied list.
+        let connectedProviders: string[] = [];
+        try {
+          const { getInstalledIntegrationProviders } = await import('./circleIntegrations');
+          connectedProviders = (await getInstalledIntegrationProviders(context.circleId)) as string[];
+        } catch {
+          connectedProviders = [];
+        }
+
+        // Clamp first so a "give me 1000 agents" request maps to the ceiling and
+        // we pick the right plan mode. 'max' is the explicit whole-ceiling mode
+        // for at/over-ceiling requests; ordinary counts use 'uniform'.
+        const requestedCount = Number.isFinite(Number(a.count)) ? Math.floor(Number(a.count)) : 1;
+        const { count: cappedCount, truncated } = capDeployCount(requestedCount);
+        const mode = requestedCount >= MAX_AGENTS_PER_DEPLOY ? 'max' : 'uniform';
+
+        const plan = buildAgentDeployPlan({
+          mode,
+          count: cappedCount,
+          model: a.model,
+          prompt: task,
+        });
+
+        // Resolve each agent's concrete model and FAIL CLOSED if any model is
+        // not honorable on the web channel — never silently swap a model.
+        for (const spec of plan.specs) {
+          const resolved = resolveDeployModel(spec.model, { connectedProviders, channel: 'web' });
+          if (!resolved.ok) {
+            return {
+              ok: false,
+              truncated,
+              resultsText: `Deploy aborted before launch: ${resolved.reason || `model "${spec.model}" could not be resolved.`}`,
+            } as any;
+          }
+          spec.model = resolved.model;
+        }
+
+        // SAFETY GATE 2 — cost/count approval. Even though policy already forces
+        // an approval prompt (approvalMode:'ask'), enforce the dollar/count cap
+        // here so an over-cap deploy reports WHY and stops instead of running.
+        const estimateUsd = estimateDeployCostUsd(plan.specs.map((s) => s.model));
+        const approval = shouldRequireApproval({ count: plan.cappedCount, estimateUsd });
+        if (approval.required) {
+          return {
+            ok: false,
+            approvalRequired: true,
+            truncated,
+            estimateUsd,
+            resultsText: `Deploy needs explicit approval and was not run: ${approval.reason} Re-issue with approval to launch ${plan.cappedCount} agent${plan.cappedCount === 1 ? '' : 's'}.`,
+          } as any;
+        }
+
+        // Launch. deployAgents() is the only impure layer; transient agents
+        // only (it asserts the transient contract and never persists office rows).
+        const result = await deployAgents({
+          circleId: context.circleId,
+          userId: context.userId,
+          plan,
+          connectedProviders,
+        });
+
+        const truncNote = truncated ? ` Requested count was capped to the ${MAX_AGENTS_PER_DEPLOY}-agent ceiling.` : '';
+        const headline = `Deployed ${result.deployed}/${plan.cappedCount} agent${plan.cappedCount === 1 ? '' : 's'} on "${task}" via ${result.channel} channel (failed ${result.failed}, ~$${estimateUsd.toFixed(2)} est).${truncNote}`;
+        // Per-agent error detail is downstream/untrusted text — fence it so it
+        // cannot act as instructions if surfaced back into the model loop.
+        const failures = result.items.filter((i) => !i.ok && i.error);
+        const detail = failures.length
+          ? `\n${fenceUntrustedObservationText(failures.map((i) => `agent ${i.index + 1}: ${i.error}`).join('\n'))}`
+          : '';
+
+        return {
+          ok: result.deployed > 0,
+          deployed: result.deployed,
+          failed: result.failed,
+          channel: result.channel,
+          truncated,
+          approvalRequired: false,
+          estimateUsd,
+          resultsText: `${headline}${detail}`,
+        } as any;
+      } catch (e: any) {
+        return { ok: false, resultsText: e.message || 'Agent deploy failed.' } as any;
       }
     }
     // ── Circle / Agent / Office editing — chat-driven UI mutations ──
