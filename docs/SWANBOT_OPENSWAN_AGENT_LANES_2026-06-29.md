@@ -39,9 +39,9 @@ agents can finish one lane at a time without trampling the rest.
 | Lane | Scope | Default Daily Check |
 |---|---|---|
 | Lane 0 - Traffic Control | AGENTS, roadmap, stack reference, standards registry, package scripts, worktree/lane tooling | `npm run smoke:openswan-lane-report` |
-| Lane 1 - SwanBot v2 Readiness | SwanBot client, v2 edge loop, continuation, dedupe, readiness, retry, approvals | `npm run check:swanbot-v2:daily` |
+| Lane 1 - SwanBot v2 Readiness | SwanBot client, v1 baseline telemetry, v2 edge loop, continuation, dedupe, readiness, retry, approvals, `agent_runs` telemetry reader | `npm run check:swanbot-v2:daily` |
 | Lane 2 - Chat Dispatcher | chat planner, transport handlers, command routing, recovery cards, transcript metadata | `npm run smoke:chat-planner` |
-| Lane 3 - OpenSwan Typed Core | agent execution core, OpenSwan session runtime, task planner, delegation, skills, circle context | `npm run smoke:openswan-task-planner` |
+| Lane 3 - OpenSwan Typed Core | agent execution core, OpenSwan session runtime, task planner, delegation, skills, circle context, trace/eval exports | `npm run smoke:openswan-task-planner` + `npm run smoke:export-traces` |
 | Lane 4 - Tool Catalog Contracts | OpenSwan tool runtime, approval policy, secret args, redaction, MCP and result formatting | `npm run smoke:agent-tool-contract-standards` |
 | Lane 5 - Computer/App Evidence | desktop, browser, local-file, app adapters, evidence contract, recovery, generic app navigation | `npm run smoke:chat-computer-request-router` |
 | Lane 6 - WordPress Managed Sites | WordPress REST, wp-admin source intelligence, Dealer Inspire, vault policy, command risk | `npm run smoke:wordpress-admin-source-intelligence` |
@@ -83,6 +83,29 @@ Lane 1 runtime changes:
 ```bash
 npm run check:swanbot-v2:release
 ```
+
+After that local gate passes, use the live production report for M4/default-flip
+evidence. It is intentionally manual because it needs Supabase service-role
+credentials and fresh `agent_runs` rows:
+
+```bash
+npm run report:swanbot-openswan-readiness -- --smokes-passed --since <iso>
+```
+
+Use the hard production gate only when a customer/default-flip handoff should
+fail unless the live report says `can_flip_default`:
+
+```bash
+npm run check:swanbot-openswan-readiness:production -- --smokes-passed --since <iso>
+```
+
+Lane 1 readiness now includes source and fixture guards for the v1
+`agent_runs` baseline and the real `agent_runs` telemetry reader. A default
+flip still requires fresh production evidence: both `metadata.version =
+"swanbot-ai"` and `metadata.version = "swanbot-v2-ai"` cohorts must have the
+minimum `surface = "main_chat"` samples, normalized `final_stop_reason`
+values, populated run-summary/token columns, and v2's `end_turn` rate must meet
+or beat v1.
 
 Use the release check before bundling a larger SwanBot/OpenSwan/Chat delivery:
 

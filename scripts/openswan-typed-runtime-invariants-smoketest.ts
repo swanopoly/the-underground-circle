@@ -11,6 +11,7 @@
  *   OST-G3 — agentExecutionCore.runAgent advertises an additive-only tool set:
  *            without resolveAdditionalTools the set is identical turn-over-turn;
  *            with one it only GROWS (never shrinks).
+ *   OST-G4 — typed run-ledger paths preserve input/output/cache token rollups.
  *
  * Run: npm run smoke:openswan-typed-runtime-invariants
  */
@@ -92,6 +93,8 @@ assert(
 
 // ── OST-G2: T2/T8 seams stay dark in the session runtime ───────────────────
 const sessionSrc = readFileSync(join(repoRoot, 'src/lib/openswanSessionRuntime.ts'), 'utf8');
+const persistenceSrc = readFileSync(join(repoRoot, 'src/lib/agentRunPersistence.ts'), 'utf8');
+const subagentSrc = readFileSync(join(repoRoot, 'src/lib/subagentRegistry.ts'), 'utf8');
 assert(/parallelToolConcurrency:\s*1\b/.test(sessionSrc), 'session runtime pins parallelToolConcurrency: 1');
 
 function allMentionsAreComments(src: string, token: string): boolean {
@@ -102,6 +105,40 @@ function allMentionsAreComments(src: string, token: string): boolean {
 assert(allMentionsAreComments(sessionSrc, 'resolveAdditionalTools'), 'resolveAdditionalTools is comment-only in session runtime (dark)');
 assert(allMentionsAreComments(sessionSrc, 'toolParallelPolicyProvider'), 'toolParallelPolicyProvider is comment-only in session runtime (dark)');
 assert(allMentionsAreComments(sessionSrc, 'getProgressiveOpenSwanTools'), 'getProgressiveOpenSwanTools is comment-only in session runtime (dark)');
+
+// ── OST-G4: typed run-ledger token rollups stay complete ───────────────────
+assert(
+  persistenceSrc.includes('tokenTotals.input +=') && persistenceSrc.includes('tokenTotals.output +='),
+  'agentRunPersistence accumulates input/output usage from typed turn_end events',
+);
+assert(
+  persistenceSrc.includes('cache_read_input_tokens') && persistenceSrc.includes('cache_creation_input_tokens'),
+  'agentRunPersistence accumulates provider cache usage from typed turn_end events',
+);
+assert(
+  persistenceSrc.includes('input_tokens: tokenTotals.input')
+    && persistenceSrc.includes('output_tokens: tokenTotals.output')
+    && persistenceSrc.includes('cached_tokens: tokenTotals.cached'),
+  'agentRunPersistence finalizes agent_runs token columns',
+);
+assert(
+  subagentSrc.includes('cached_tokens: typeof toolLoopResult.usage.total_tokens ==='),
+  'subagent typed-core child runs persist cached_tokens from total token usage',
+);
+assert(
+  sessionSrc.includes('const delegatedUsageTotals = emptyOpenSwanTokenTotals()')
+    && sessionSrc.includes('addOpenSwanUsageTotals(delegatedUsageTotals, result.usage)'),
+  'session runtime accumulates delegated subagent usage totals',
+);
+assert(
+  sessionSrc.includes('usage: result.usage || null'),
+  'session runtime preserves delegated usage in run metadata',
+);
+assert(
+  sessionSrc.includes('finalUsageTotals.input += delegatedUsageTotals.input')
+    && sessionSrc.includes('cached_tokens: finalUsageTotals.cached'),
+  'session runtime finalizes parent runs with parent plus delegated token totals',
+);
 
 // ── OST-G3: additive-only advertised tool set (behavioral) ─────────────────
 function makeTool(name: string): AgentToolDefinition {

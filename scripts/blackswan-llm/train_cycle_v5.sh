@@ -17,6 +17,7 @@
 #   ./train_cycle_v5.sh --skip-train      # data prep + skip training
 #   ./train_cycle_v5.sh --skip-push       # don't upload to HF
 #   ./train_cycle_v5.sh --iters=2500      # override training iters
+#   ./train_cycle_v5.sh --base-model=mlx-community/Qwen3.5-9B-4bit
 #   ./train_cycle_v5.sh --deploy-ollama   # also deploy locally to Ollama
 #
 # Environment:
@@ -37,6 +38,9 @@ SKIP_PUSH=false
 DEPLOY_OLLAMA=false
 ITERS=1500
 SYNTHETIC_COUNT=0   # set >0 to call the synthetic generator
+BASE_MODEL="mlx-community/Qwen3.5-4B-4bit"
+DEFAULT_UPLOAD_BASE_MODEL="mlx-community/Qwen3.5-4B-4bit"
+MLX_CONFIG="mlx_lora_v5_config.yaml"
 LOG_DIR="${HOME}/.blackswan-train/log"
 LOG_FILE="${LOG_DIR}/cycle-$(date +%Y%m%d-%H%M%S).log"
 
@@ -48,6 +52,7 @@ for arg in "$@"; do
     --deploy-ollama)      DEPLOY_OLLAMA=true ;;
     --iters=*)            ITERS="${arg#*=}" ;;
     --synthetic=*)        SYNTHETIC_COUNT="${arg#*=}" ;;
+    --base-model=*)       BASE_MODEL="${arg#*=}" ;;
   esac
 done
 
@@ -67,7 +72,14 @@ echo "  skip-push:      ${SKIP_PUSH}"
 echo "  deploy-ollama:  ${DEPLOY_OLLAMA}"
 echo "  iters:          ${ITERS}"
 echo "  synthetic:      ${SYNTHETIC_COUNT}"
+echo "  base-model:     ${BASE_MODEL}"
 echo
+
+if [ "${BASE_MODEL}" != "${DEFAULT_UPLOAD_BASE_MODEL}" ] && [ "${SKIP_PUSH}" = false ]; then
+    echo "ERROR: Push/upload conversion currently supports ${DEFAULT_UPLOAD_BASE_MODEL} only."
+    echo "  Re-run with --skip-push for ${BASE_MODEL}, then update fuse_and_upload_v5.py before publishing."
+    exit 1
+fi
 
 # ─── Python env ────────────────────────────────────────────────────────
 if [ ! -d "${SCRIPT_DIR}/.venv" ]; then
@@ -123,42 +135,26 @@ echo "═══ Step 4: Prepare merged training dataset ════════
 "${PYTHON}" prepare_dataset_v4.py
 echo
 
-# ─── Step 5: Convert to MLX format ─────────────────────────────────────
-# The latest lora_v2 trained from training_data/mlx_format/ — we need
-# to keep that directory in sync with whatever prepare_dataset_v4
-# emitted into train_v4.jsonl / eval_v4.jsonl.
-echo "═══ Step 5: Build MLX training shards ═══════════════════════"
-mkdir -p training_data/mlx_format
-# mlx-lm.lora expects {prompt, completion} or chat-format JSONL.
-# prepare_dataset_v4.py writes chat format already, so we just symlink
-# (or copy if symlinks don't survive train run).
-cp -f training_data/train_v4.jsonl training_data/mlx_format/train.jsonl
-cp -f training_data/eval_v4.jsonl  training_data/mlx_format/valid.jsonl
-echo "  train: $(wc -l < training_data/mlx_format/train.jsonl) lines"
-echo "  valid: $(wc -l < training_data/mlx_format/valid.jsonl) lines"
+# ─── Step 5: Convert to current MLX message format ─────────────────────
+# Current mlx-lm expects OpenAI-style {"messages": [...]} records, not
+# ShareGPT {"conversations": [...]} turns.
+echo "═══ Step 5: Build MLX message training shards ═══════════════"
+"${PYTHON}" convert_mlx_messages.py
+echo "  train: $(wc -l < training_data/mlx_messages/train.jsonl) lines"
+echo "  valid: $(wc -l < training_data/mlx_messages/valid.jsonl) lines"
 echo
 
 # ─── Step 6: Train the LoRA ────────────────────────────────────────────
 if [ "${SKIP_TRAIN}" = false ]; then
-    echo "═══ Step 6: Train LoRA on Qwen3.5-4B-4bit ═══════════════════"
-    BASE_MODEL="mlx-community/Qwen3.5-4B-4bit"
+    echo "═══ Step 6: Train LoRA on ${BASE_MODEL} ═══════════════════"
     ADAPTER_OUT="models/v5/lora_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "${ADAPTER_OUT}"
 
     "${PYTHON}" -m mlx_lm lora \
+        -c "${MLX_CONFIG}" \
         --model "${BASE_MODEL}" \
-        --train \
-        --data training_data/mlx_format \
-        --fine-tune-type lora \
-        --num-layers 16 \
-        --batch-size 1 \
+        --data training_data/mlx_messages \
         --iters "${ITERS}" \
-        --learning-rate 1e-4 \
-        --max-seq-length 512 \
-        --steps-per-report 25 \
-        --steps-per-eval 100 \
-        --grad-checkpoint \
-        --lora-parameters '{"rank": 16, "scale": 1.0, "dropout": 0.0}' \
         --adapter-path "${ADAPTER_OUT}"
     echo "  Adapter saved to ${ADAPTER_OUT}"
 
@@ -176,10 +172,10 @@ fi
 if [ "${SKIP_TRAIN}" = false ] || [ "${SKIP_PUSH}" = false ]; then
     echo "═══ Step 7: Fuse adapter → fused HF model ═══════════════════"
     "${PYTHON}" -m mlx_lm fuse \
-        --model "mlx-community/Qwen3.5-4B-4bit" \
+        --model "${BASE_MODEL}" \
         --adapter-path models/v5/lora_v2 \
         --save-path models/v5/fused \
-        --hf-path models/v5/fused_hf
+        --dequantize
     echo
 fi
 

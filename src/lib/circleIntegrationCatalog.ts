@@ -26,6 +26,7 @@ export type CircleIntegrationPlatformKey =
   | 'airtop'
   | 'skyvern'
   | 'browser_use'
+  | 'custom_api'
   | 'braintrust'
   | 'vercel'
   | 'netlify'
@@ -204,6 +205,21 @@ export const CIRCLE_INTEGRATION_CATALOG: CircleIntegrationCatalogItem[] = [
     capabilityLabel: 'Native coding-agent runtime',
     scopeLabel: 'Built into the app',
     availability: 'available',
+  },
+  {
+    id: 'custom-api',
+    label: 'Custom API',
+    icon: 'API',
+    color: '#38bdf8',
+    group: 'workflow_automation',
+    description: 'Connect any REST or HTTP API as an agent-ready marketplace tool with scoped metadata, hidden secrets, and approval before side effects.',
+    relationships: ['Chat', 'OpenSwan', 'Automations'],
+    capabilityLabel: 'Universal API connector',
+    scopeLabel: 'Circle-wide',
+    availability: 'available',
+    platformKey: 'custom_api',
+    recentlyAdded: true,
+    popularityRank: 3,
   },
   {
     id: 'browserbase',

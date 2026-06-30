@@ -106,6 +106,35 @@ assert(!directConversionCompactFailure.compactUserMessage?.includes('Save for We
 assert(directConversionCompactFailure.blockerList.some((blocker) => /folder access/i.test(blocker)), 'direct image conversion reconnect stores customer blocker');
 assert(directConversionCompactFailure.nextSteps.some((step) => /Reconnect the desktop bridge/i.test(step)), 'direct image conversion reconnect stores direct next step');
 
+const directConversionNotFoundFailure = buildChatComputerOutcomePresentation({
+  task: 'open Gemini_Generated_Image_lppqo8lppqo8lppq.png from the desktop and make it a jpg',
+  outcomeStatus: 'failed',
+  outcomeMessage: 'I could not find that image. Check the filename or send the exact file path, then try again.',
+  rawWarnings: [
+    'desktop.convert_image preflight failed (file_not_found): No matching source image named Gemini_Generated_Image_lppqo8lppqo8lppq.png was found in the allowed folders.',
+    'desktop.file_search:~/Desktop:ok',
+    'desktop.file_stat:source_not_verified',
+  ],
+  visibleWarnings: [
+    'desktop.convert_image preflight failed (file_not_found): No matching source image named Gemini_Generated_Image_lppqo8lppqo8lppq.png was found in the allowed folders.',
+  ],
+  preflightBlockers: [],
+  preflightWarnings: [],
+  groundingBlockers: [],
+});
+
+assert.equal(directConversionNotFoundFailure.statePhase, 'blocked', 'direct image conversion missing source stays blocked');
+assert.equal(directConversionNotFoundFailure.shouldRecoverOutcome, false, 'direct image conversion missing source suppresses generic recovery cards');
+assert(directConversionNotFoundFailure.compactUserMessage?.includes('could not find the image'), 'direct image conversion missing source keeps not-found copy');
+assert(!directConversionNotFoundFailure.compactUserMessage?.includes('desktop bridge is not ready'), 'direct image conversion missing source does not show reconnect copy');
+assert(directConversionNotFoundFailure.blockerList.some((blocker) => /Source image could not be found/i.test(blocker)), 'direct image conversion missing source stores not-found blocker');
+assert.deepEqual(directConversionNotFoundFailure.nextSteps, ['Send the exact image path or refresh the file search, then retry the conversion once.'], 'direct image conversion missing source stores exact-path retry step');
+assertNoTechnicalLeak(
+  directConversionNotFoundFailure,
+  /desktop\.convert_image|desktop\.file_search|desktop\.file_stat|file_not_found|allowed folders/i,
+  'direct image conversion missing source compact copy hides tool and path-resolution internals',
+);
+
 const successfulFallback = buildChatComputerOutcomePresentation({
   task: screenshotSaveForWebTask,
   outcomeStatus: 'completed',
@@ -322,10 +351,52 @@ const failedLocalFileAutomation = buildChatComputerOutcomePresentation({
 
 assert.equal(failedLocalFileAutomation.hideRecoveryDetails, true, 'local file failure hides recovery details from customer view');
 assert(failedLocalFileAutomation.compactUserMessage?.includes('requested local file'), 'local file failure gets compact customer copy');
+assert(failedLocalFileAutomation.compactUserMessage?.includes('could not find'), 'missing local file gets not-found copy');
+assert.deepEqual(failedLocalFileAutomation.nextSteps, ['Send the exact file path or refresh the file search, then retry once.'], 'missing local file gets a simple retry step');
 assertNoTechnicalLeak(
   failedLocalFileAutomation,
   /EACCES|EPERM|ENOENT|\/Users\/|desktop\.open_path|desktop\.file_stat|X-UC-File-Session-Token/i,
   'local file visible copy hides permission, path, and token internals',
+);
+
+const failedLocalFilePermission = buildChatComputerOutcomePresentation({
+  task: 'Rename report.pdf on my Desktop to final-report.pdf',
+  outcomeStatus: 'failed',
+  outcomeMessage: 'desktop.file_rename failed: EPERM operation not permitted /Users/cswanson/Desktop/report.pdf',
+  rawWarnings: ['X-UC-File-Session-Token missing for desktop.file_rename'],
+  visibleWarnings: ['X-UC-File-Session-Token missing for desktop.file_rename'],
+  preflightBlockers: [],
+  preflightWarnings: [],
+  groundingBlockers: [],
+});
+
+assert.equal(failedLocalFilePermission.hideRecoveryDetails, true, 'local file permission failure hides recovery details from customer view');
+assert(failedLocalFilePermission.compactUserMessage?.includes('folder access'), 'permission local file failure gets folder-access copy');
+assert.deepEqual(failedLocalFilePermission.nextSteps, ['Approve the requested folder access, then retry once.'], 'permission local file failure gets a grant-focused retry step');
+assertNoTechnicalLeak(
+  failedLocalFilePermission,
+  /EPERM|operation not permitted|\/Users\/|desktop\.file_rename|X-UC-File-Session-Token/i,
+  'local file permission copy hides bridge and token internals',
+);
+
+const failedLocalFileAmbiguous = buildChatComputerOutcomePresentation({
+  task: 'Open report.pdf from Downloads',
+  outcomeStatus: 'failed',
+  outcomeMessage: 'Desktop bridge open path needs an exact file match before launch: multiple matches found for report.pdf; choose the exact file before opening. desktop.file_search',
+  rawWarnings: ['desktop.file_search found multiple matching paths'],
+  visibleWarnings: ['desktop.file_search found multiple matching paths'],
+  preflightBlockers: [],
+  preflightWarnings: [],
+  groundingBlockers: [],
+});
+
+assert.equal(failedLocalFileAmbiguous.hideRecoveryDetails, true, 'ambiguous local file failure hides recovery details from customer view');
+assert(failedLocalFileAmbiguous.compactUserMessage?.includes('more than one matching local file'), 'ambiguous local file failure gets exact-path copy');
+assert.deepEqual(failedLocalFileAmbiguous.nextSteps, ['Send the exact file path for the one you want, then retry once.'], 'ambiguous local file failure gets exact-path retry step');
+assertNoTechnicalLeak(
+  failedLocalFileAmbiguous,
+  /desktop\.file_search|multiple matching paths/i,
+  'ambiguous local file copy hides file-search internals',
 );
 
 const failedGenericBrowserAutomation = buildChatComputerOutcomePresentation({

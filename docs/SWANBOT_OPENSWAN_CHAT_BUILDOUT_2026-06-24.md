@@ -47,10 +47,13 @@ recipes for dashboard-only plugin/theme/settings/user/Dealer Inspire workflows.
   `final_stop_reason: "error"` (field-only, no loop/contract change).
 - The shared normalization vocabulary is pinned by the new
   `src/lib/swanbotV2StopReason.ts` `classifyV2StopReason` (`end_turn |
-  max_tokens | client_pending | error`) + smoke. v1 never writes `agent_runs`
-  at all (it persists tasks/agent_activity/claude_api_usage/blackswan_knowledge
-  only) — see roadmap `G3`. The telemetry READER that would populate the
-  readiness snapshot from real `agent_runs` rows is roadmap `G4`.
+  max_tokens | client_pending | error`) + smoke. Normal-path v1
+  `swanbot-ai` turns now write baseline `agent_runs` rows with
+  `metadata.version='swanbot-ai'`, token fields, `tool_calls`,
+  `iteration_count`, and normalized `final_stop_reason`; relay-mode v1 remains
+  excluded. The readiness reader now loads real v1/v2 `main_chat` cohorts from
+  `agent_runs`; M4 still requires deployed columns and fresh production
+  evidence.
 
 ### OpenSwan typed core
 - `agentExecutionCore.runAgent` is the typed loop; the advertised tool set is
@@ -118,9 +121,9 @@ are met.
 ### SwanBot
 | ID | Title | Value | Effort | Risk | Note |
 |---|---|---|---|---|---|
-| G3-v1-agent-runs | v1 `swanbot-ai` writes an `agent_runs` row with `final_stop_reason` for a real M4 baseline | high | L | medium | v1 computes `stopReason` (`index.ts:2486-2496`) but never persists `agent_runs`; the readiness v1-vs-v2 comparison has no real v1 feed. Editing the 4187-line v1 fn is structural; gate on telemetry + readiness. |
-| G4-telemetry-reader | `agent_runs` `final_stop_reason` telemetry reader to populate the readiness snapshot | high | M | medium | `buildSwanBotOpenSwanReadinessSnapshot` is fed only synthetic numbers by its smoke. Needs a surface querying `agent_runs` grouped by version + `final_stop_reason`. Depends on AR4 (done) + G3 for complete data. |
-| G6-m4-flip | M4 default flip: `isSwanbotV2Enabled` default true + kill switch | high | M | high | `swanbotRouting.ts:21-28` hardcodes false. Gated on real telemetry (G3, G4) + `canFlipDefault`. Needs AR3 (done) + complete stop-reason telemetry green first. Out of scope per wave constraints. |
+| G3-v1-agent-runs | v1 `swanbot-ai` writes an `agent_runs` row with `final_stop_reason` for a real M4 baseline | high | L | medium | Source-shipped. Normal-path v1 rows now include `metadata.version='swanbot-ai'`, token fields, `tool_calls`, `iteration_count`, and normalized `final_stop_reason`; relay-mode remains excluded. Keep release gated on deployed columns + live telemetry. |
+| G4-telemetry-reader | `agent_runs` `final_stop_reason` telemetry reader to populate the readiness snapshot | high | M | medium | Source-shipped. `loadSwanBotOpenSwanAgentRunTelemetry` queries real v1/v2 `main_chat` cohorts, summarizes stop reasons and telemetry completeness, and ignores active `client_pending` rows as non-terminal evidence. |
+| G6-m4-flip | M4 default flip: `isSwanbotV2Enabled` default true + kill switch | high | M | high | `swanbotRouting.ts:21-28` hardcodes false. Gated on `check:swanbot-v2:release` plus the live readiness report showing enough v1/v2 production rows, complete telemetry columns, and `can_flip_default: yes`. Out of scope per wave constraints. |
 | G5-failed-feed-stopreason | Carry `stopReason` in the v2 failed-path feed + usage logging | low | S | low | The terminal run logs `metadata.stopReason` (`index.ts:2461`); the catch-block `logFeedActivity` logs `task_failed` with no `stopReason`. AR4 already covers the `agent_runs` side. |
 
 ### OpenSwan
@@ -160,7 +163,9 @@ are met.
   `smoke:wordpress-rest-error`, `smoke:swanbot-v2-wp`,
   `smoke:swanbot-openswan-readiness`, `smoke:progressive-tool-disclosure`,
   `smoke:tool-batch-parallelism`, `smoke:agent-core`.
-- AR4's edge edits are Deno-only (cannot be tsx-smoked); verify by deploying and
-  exercising a `/v2` run that pauses on a client tool (`client_pending`) and one
-  that throws (`error`), then reading `agent_runs.final_stop_reason`.
+- AR4/G3/G4 edge and reader edits are source-guarded by smokes, but M4 still
+  requires production evidence: after the local release gate, run the live
+  readiness report with service-role credentials. It verifies schema columns,
+  v1/v2 cohort telemetry, stop-reason completeness, token-field completeness,
+  and `can_flip_default`.
 EOF

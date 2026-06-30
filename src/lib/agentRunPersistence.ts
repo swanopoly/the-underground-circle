@@ -77,6 +77,12 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
   }> = [];
   let lastStopReason: string | undefined;
   let finalIteration = 0;
+  let sawUsage = false;
+  const tokenTotals = {
+    input: 0,
+    output: 0,
+    cached: 0,
+  };
 
   const writeEvent = async (kind: string, payload: Record<string, unknown>) => {
     if (!streamEvents) return;
@@ -104,6 +110,14 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
       case 'turn_end':
         finalIteration = event.iteration;
         lastStopReason = event.stop_reason;
+        if (event.usage) {
+          sawUsage = true;
+          tokenTotals.input += Math.max(0, Math.floor(event.usage.input_tokens || 0));
+          tokenTotals.output += Math.max(0, Math.floor(event.usage.output_tokens || 0));
+          tokenTotals.cached += Math.max(0, Math.floor(
+            (event.usage.cache_read_input_tokens || 0) + (event.usage.cache_creation_input_tokens || 0),
+          ));
+        }
         void writeEvent('turn_end', {
           iteration: event.iteration,
           stop_reason: event.stop_reason,
@@ -187,6 +201,11 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
           tool_calls: toolCalls,
           iteration_count: result.iterations || finalIteration,
           final_stop_reason: result.stopReason || lastStopReason || null,
+          ...(sawUsage ? {
+            input_tokens: tokenTotals.input,
+            output_tokens: tokenTotals.output,
+            cached_tokens: tokenTotals.cached,
+          } : {}),
         })
         .eq('id', run.id);
     } catch (e) {

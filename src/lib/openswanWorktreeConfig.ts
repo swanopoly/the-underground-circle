@@ -123,6 +123,7 @@ export const OPENSWAN_WORKTREE_REQUIRED_PACKAGE_SCRIPTS: Record<string, string> 
   'typecheck:functions': 'typecheck-functions',
   'smoke:agent-standards-wiki': 'agent-standards-wiki-smoketest',
   'smoke:swanbot-openswan-readiness': 'swanbot-openswan-readiness-smoketest',
+  'smoke:export-traces': 'export-traces-smoketest',
   'smoke:openswan-task-planner': 'openswan-task-planner-smoketest',
   'smoke:openswan-worktree-config': 'openswan-worktree-config-smoketest',
   'check:openswan-worktree-config': 'openswan-worktree-config-report',

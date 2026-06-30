@@ -94,6 +94,14 @@ assertEqual(
   'policy: action-looking chat skips no-tool streaming',
 );
 
+const customApiActionMessage = 'Create a custom API action that calls POST /orders';
+assert(looksLikeTerminalActionRequest(customApiActionMessage), 'detector: custom API action needs tools');
+assertEqual(
+  decide({ executionKind: 'run_plain_chat', chatMode: 'none', looksLikeActionRequest: looksLikeTerminalActionRequest(customApiActionMessage) }),
+  { path: 'batch_openswan', reason: 'tool_catalog_required', canStream: false },
+  'policy: custom API action skips no-tool streaming',
+);
+
 const localAppMessage = 'open Notes and create a note called QA';
 assert(looksLikeTerminalActionRequest(localAppMessage), 'detector: local app task needs tools');
 
@@ -101,6 +109,60 @@ assertEqual(
   decide({ executionKind: 'run_plain_chat', chatMode: 'none', canStreamAnthropic: false }),
   { path: 'batch_openswan', reason: 'stream_unavailable', canStream: false },
   'policy: non-streamable models fall back to batch OpenSwan',
+);
+
+// ─── Phase 2 seam: stream-by-default → escalate-on-tool-use (DEFAULT OFF) ────
+// The flag must be safe-dormant: with it OFF (explicit false) the simple
+// streamable turn is byte-for-byte the legacy plain stream. `decide()` does NOT
+// pass the override, so this also exercises the default (live flag → OFF in the
+// smoke env, which has no localStorage opt-in).
+assertEqual(
+  decide({ executionKind: plainPlan.execution.kind, chatMode: 'none', streamEscalateOnToolUse: false }),
+  { path: 'stream_plain_chat', reason: 'simple_streamable_plain_chat', canStream: true },
+  'policy(flag OFF): simple chat is byte-for-byte the legacy plain stream',
+);
+assertEqual(
+  decide({ executionKind: talkPlan.execution.kind, chatMode: 'talk', streamEscalateOnToolUse: false }),
+  { path: 'stream_plain_chat', reason: 'simple_streamable_plain_chat', canStream: true },
+  'policy(flag OFF): talk mode is byte-for-byte the legacy plain stream',
+);
+
+// With the flag ON the SAME simple streamable turn becomes escalation-capable:
+// it still streams, but carries the pinned core + tools.search so a tool_use
+// signal can upgrade it into the batch OpenSwan loop.
+assertEqual(
+  decide({ executionKind: plainPlan.execution.kind, chatMode: 'none', streamEscalateOnToolUse: true }),
+  { path: 'stream_then_escalate', reason: 'stream_escalate_on_tool_use', canStream: true },
+  'policy(flag ON): simple chat streams AND can escalate on tool_use',
+);
+assertEqual(
+  decide({ executionKind: talkPlan.execution.kind, chatMode: 'talk', streamEscalateOnToolUse: true }),
+  { path: 'stream_then_escalate', reason: 'stream_escalate_on_tool_use', canStream: true },
+  'policy(flag ON): talk mode streams AND can escalate on tool_use',
+);
+
+// The flag ONLY affects the simple-streamable terminal branch — every earlier
+// guard (selected mode, planner-forced, delegation, recovery, figma, coding,
+// action-intent, stream-unavailable) is unchanged whether the flag is on or off.
+assertEqual(
+  decide({ executionKind: 'run_openswan', chatMode: 'none', streamEscalateOnToolUse: true }),
+  { path: 'batch_openswan', reason: 'planner_forced_openswan', canStream: false },
+  'policy(flag ON): planner-forced OpenSwan is unaffected by the seam flag',
+);
+assertEqual(
+  decide({
+    executionKind: 'run_plain_chat',
+    chatMode: 'none',
+    looksLikeActionRequest: looksLikeTerminalActionRequest('create a room called QA'),
+    streamEscalateOnToolUse: true,
+  }),
+  { path: 'batch_openswan', reason: 'tool_catalog_required', canStream: false },
+  'policy(flag ON): explicit action-intent still uses batch OpenSwan, not the stream seam',
+);
+assertEqual(
+  decide({ executionKind: 'run_plain_chat', chatMode: 'none', canStreamAnthropic: false, streamEscalateOnToolUse: true }),
+  { path: 'batch_openswan', reason: 'stream_unavailable', canStream: false },
+  'policy(flag ON): non-streamable models still fall back to batch OpenSwan',
 );
 
 if (failures > 0) {

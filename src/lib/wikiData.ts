@@ -1408,6 +1408,7 @@ function parseAutomationRequest(input: unknown): AutomationRequest | null {
           'Run check:openswan-worktree-config before risky connected-agent handoffs when checkout state matters',
           'Run check:openswan-lanes when SwanBot/OpenSwan/Chat work becomes broad so changes are grouped by delivery lane before review',
           'Run check:swanbot-chat:daily for normal SwanBot/OpenSwan/Chat development and check:swanbot-chat:release before a larger delivery',
+          'Run report:swanbot-openswan-readiness with --smokes-passed after the local SwanBot v2 release gate when default-flip or customer handoff needs live production telemetry evidence',
           'Run smoke:openswan-lane-report after changing the lane model or its package scripts',
           'Run smoke:openswan-worktree-config when the worktree config helper, report script, package scripts, .gitignore runtime artifacts, or OpenSwan worktree notes change',
           'Prefer extending mapped owners such as genericAppNavigator, appAutomationControlSurfaces, chat planning/metadata, chat computer runtime, OpenSwan runtime, product UI, second brain/research, standards/wiki, package scripts, or agent-runtime SQL before creating another file',

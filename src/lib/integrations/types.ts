@@ -20,6 +20,7 @@
 export type IntegrationCategory =
   | 'communication'   // Slack, Teams, Discord, Telegram, Email, Twilio
   | 'code_dev'        // GitHub, GitLab, Bitbucket, Linear, Jira, Sentry
+  | 'workflow_automation' // Custom APIs, webhooks, agent actions
   | 'ai_llm'          // OpenAI, Anthropic, Google AI, Replicate, etc.
   | 'cloud_infra'     // AWS, GCP, Azure, Cloudflare, Vercel, Netlify
   | 'productivity'    // Notion, Asana, Trello, Airtable, Figma

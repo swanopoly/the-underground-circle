@@ -77,6 +77,34 @@ assert(
   'edge terminal update persists normalized final_stop_reason',
 );
 assert(
+  edgeSource.includes('function agentRunTokenUsageFields'),
+  'edge maps usage totals into agent_runs token fields',
+);
+assert(
+  edgeSource.includes('input_tokens: Math.max(0, Math.floor(usage.uncachedIn || 0))'),
+  'edge persists uncached input tokens to agent_runs.input_tokens',
+);
+assert(
+  edgeSource.includes('output_tokens: Math.max(0, Math.floor(usage.output || 0))'),
+  'edge persists output tokens to agent_runs.output_tokens',
+);
+assert(
+  edgeSource.includes('cached_tokens: Math.max(0, Math.floor((usage.cacheCreate || 0) + (usage.cacheRead || 0)))'),
+  'edge persists cache create/read totals to agent_runs.cached_tokens',
+);
+assert(
+  (edgeSource.match(/\.\.\.agentRunTokenUsageFields\(result\.usage\)/g) || []).length >= 2,
+  'edge writes token fields on pending and terminal run updates',
+);
+assert(
+  edgeSource.includes('input_tokens: 0') && edgeSource.includes('output_tokens: 0') && edgeSource.includes('cached_tokens: 0'),
+  'edge writes zero token fields on failed run updates',
+);
+assert(
+  edgeSource.includes('tool_calls: []') && edgeSource.includes('iteration_count: 1'),
+  'edge writes complete run-summary fields on failed run updates',
+);
+assert(
   !edgeSource.includes('final_stop_reason: result.stopReason'),
   'edge terminal update does not persist raw model stopReason',
 );

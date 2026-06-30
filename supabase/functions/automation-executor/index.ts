@@ -41,7 +41,10 @@ const CLAUDE_MODEL_MAP: Record<string, string> = {
   "claude-haiku-4-5": "claude-haiku-4-5",
   "claude-sonnet":  "claude-sonnet-4-6",
   "claude-sonnet-4-6": "claude-sonnet-4-6",
-  "claude-opus":    "claude-opus-4-7",
+  "claude-fable":   "claude-fable-5",
+  "claude-fable-5": "claude-fable-5",
+  "claude-opus":    "claude-opus-4-8",
+  "claude-opus-4-8": "claude-opus-4-8",
   "claude-opus-4-7": "claude-opus-4-7",
   "claude-opus-4-6": "claude-opus-4-6",
 };
@@ -55,7 +58,7 @@ const DEFAULT_MODEL_ID = CLAUDE_MODEL_MAP[DEFAULT_MODEL_KEY];
 // Premium models require an explicit opt-in flag on the automation row. If
 // a caller tries to use one without the flag, we silently downgrade to
 // Haiku so a typo in the automation config can't nuke the spend budget.
-const PREMIUM_MODEL_IDS = new Set(["claude-sonnet-4-6", "claude-opus-4-6", "claude-opus-4-7"]);
+const PREMIUM_MODEL_IDS = new Set(["claude-sonnet-4-6", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-fable-5"]);
 
 interface AIResult {
   text: string;

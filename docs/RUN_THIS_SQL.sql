@@ -281,7 +281,10 @@ BEGIN
     ALTER TABLE agent_runs
       ADD COLUMN IF NOT EXISTS tool_calls        jsonb  DEFAULT '[]'::jsonb,
       ADD COLUMN IF NOT EXISTS iteration_count   int    DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS final_stop_reason text;
+      ADD COLUMN IF NOT EXISTS final_stop_reason text,
+      ADD COLUMN IF NOT EXISTS input_tokens      bigint DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS output_tokens     bigint DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS cached_tokens     bigint DEFAULT 0;
   END IF;
 END $$;
 
@@ -560,7 +563,8 @@ NOTIFY pgrst, 'reload schema';
 --   SELECT column_name FROM information_schema.columns
 --    WHERE table_name = 'profiles' AND column_name IN ('agent_appearance', 'office_layout');
 --   SELECT column_name FROM information_schema.columns
---    WHERE table_name = 'agent_runs' AND column_name IN ('tool_calls', 'iteration_count', 'final_stop_reason');
+--    WHERE table_name = 'agent_runs'
+--      AND column_name IN ('tool_calls', 'iteration_count', 'final_stop_reason', 'input_tokens', 'output_tokens', 'cached_tokens');
 -- ═════════════════════════════════════════════════════════════════════════════
 
 -- ═════════════════════════════════════════════════════════════════════════════

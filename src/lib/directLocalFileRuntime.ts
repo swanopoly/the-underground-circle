@@ -17,6 +17,15 @@ export interface DirectLocalFileAdapterResult {
   data?: Record<string, unknown>;
 }
 
+export type DirectLocalFileFailureKind =
+  | 'ambiguous'
+  | 'bridge_unavailable'
+  | 'conflict'
+  | 'missing_proof'
+  | 'not_found'
+  | 'permission'
+  | 'unknown';
+
 const DIRECT_LOCAL_FILE_MODES = new Set<string>([
   'rename',
   'copy',
@@ -49,6 +58,8 @@ export interface DirectLocalFileRuntimeOutcome {
     plan: DirectLocalFilePlan;
     result?: Record<string, unknown>;
     proofSignals?: string[];
+    failureKind?: DirectLocalFileFailureKind;
+    recoveryHint?: string;
   };
 }
 
@@ -170,6 +181,35 @@ function simpleOpenPathAmbiguousMessage(): string {
 
 function simpleOpenPathLaunchMessage(): string {
   return 'I could not open that file or folder. Check the path and try again.';
+}
+
+function classifyDirectLocalFileFailure(rawMessage: string): DirectLocalFileFailureKind {
+  const text = String(rawMessage || '');
+  if (/ambiguous|multiple|more than one/i.test(text)) return 'ambiguous';
+  if (/already exists|exist(s|ed)|conflict|EEXIST/i.test(text)) return 'conflict';
+  if (/not found|does not exist|ENOENT|missing|no file named/i.test(text)) return 'not_found';
+  if (/permission|access|EACCES|EPERM|grant/i.test(text)) return 'permission';
+  if (/not_paired|bridge|ECONN|fetch failed|timeout/i.test(text)) return 'bridge_unavailable';
+  return 'unknown';
+}
+
+function directLocalFileRecoveryHint(kind: DirectLocalFileFailureKind): string {
+  switch (kind) {
+    case 'ambiguous':
+      return 'Send the exact file path for the one you want, then retry once.';
+    case 'bridge_unavailable':
+      return 'Reconnect the desktop bridge, approve the requested folder if prompted, then retry once.';
+    case 'conflict':
+      return 'Choose a different destination name or confirm what should be replaced, then retry once.';
+    case 'missing_proof':
+      return 'Retry once and verify the file result before marking the task done.';
+    case 'not_found':
+      return 'Send the exact file path or refresh the file search, then retry once.';
+    case 'permission':
+      return 'Approve the requested folder access, then retry once.';
+    default:
+      return 'Check the file path and folder access, then retry once.';
+  }
 }
 
 function directLocalFileSafeFailureMessage(plan: DirectLocalFilePlan, rawMessage: string): string {
@@ -399,22 +439,30 @@ export async function executeDirectLocalFileRequest(
       status: 'failed',
       message: 'I need the desktop bridge connected and folder access approved before I can work with that file. Reconnect it, grant the folder, then try again.',
       warnings: [`${tool} blocked because the desktop bridge is unavailable`],
-      data: { plan },
+      data: {
+        plan,
+        failureKind: 'bridge_unavailable',
+        recoveryHint: directLocalFileRecoveryHint('bridge_unavailable'),
+      },
     };
   }
 
   if (!result.ok) {
+    const failureText = [
+      result.message,
+      ...(Array.isArray(result.warnings) ? result.warnings : []),
+    ].join('\n');
+    const failureKind = classifyDirectLocalFileFailure(failureText);
     return {
       handled: true,
       status: 'failed',
-      message: directLocalFileSafeFailureMessage(plan, [
-        result.message,
-        ...(Array.isArray(result.warnings) ? result.warnings : []),
-      ].join('\n')),
+      message: directLocalFileSafeFailureMessage(plan, failureText),
       warnings: result.warnings,
       data: {
         plan,
         result: result.data,
+        failureKind,
+        recoveryHint: directLocalFileRecoveryHint(failureKind),
       },
     };
   }
@@ -425,7 +473,11 @@ export async function executeDirectLocalFileRequest(
       status: 'failed',
       message: 'The file action ran without proof, so I stopped instead of saying it was done.',
       warnings: [`${tool} missing result proof`],
-      data: { plan },
+      data: {
+        plan,
+        failureKind: 'missing_proof',
+        recoveryHint: directLocalFileRecoveryHint('missing_proof'),
+      },
     };
   }
 

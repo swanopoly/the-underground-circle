@@ -45,6 +45,67 @@ async function main() {
   assert.equal(desktopPronounJpg.status, 'completed', 'desktop filename pronoun conversion completes');
   assert.match(desktopPronounJpg.message, /Gemini_Generated_Image_lppqo8lppqo8lppq\.jpg/, 'desktop filename pronoun conversion reports JPG output');
 
+  const resolvedByPreflight = await executeDirectImageConversionRequest(
+    'open logo.png from the desktop and make it a jpg',
+    {
+      async statFile(path) {
+        if (path === 'logo.png') {
+          return { ok: false, error: 'path must be scoped', errorCode: 'invalid_input' };
+        }
+        assert.equal(path, '/Users/cswanson/Desktop/logo.png', 'preflight stats the matched file before conversion');
+        return {
+          ok: true,
+          data: {
+            path: '/Users/cswanson/Desktop/logo.png',
+            exists: true,
+            kind: 'file',
+            size: 111,
+            modifiedAt: '2026-06-30T12:00:00.000Z',
+            createdAt: '2026-06-30T11:00:00.000Z',
+          },
+        };
+      },
+      async searchFiles(rootPath, query, options) {
+        assert.equal(rootPath, '~/Desktop', 'desktop task searches Desktop first');
+        assert.equal(query, 'logo.png', 'preflight searches by basename');
+        assert.deepEqual(options?.extensions, ['png'], 'preflight scopes search by extension');
+        return {
+          ok: true,
+          data: {
+            rootPath,
+            query,
+            visited: 12,
+            truncated: false,
+            matches: [{
+              path: '/Users/cswanson/Desktop/logo.png',
+              name: 'logo.png',
+              reason: 'name',
+              size: 111,
+              modifiedAt: '2026-06-30T12:00:00.000Z',
+            }],
+          },
+        };
+      },
+      async convertImage(request) {
+        assert.equal(request.source, '/Users/cswanson/Desktop/logo.png', 'conversion receives the verified source path');
+        assert.equal(request.format, 'jpg');
+        return {
+          ok: true,
+          data: {
+            sourcePath: '/Users/cswanson/Desktop/logo.png',
+            outputPath: '/Users/cswanson/Desktop/logo.jpg',
+            format: 'jpg',
+            bytes: 34567,
+          },
+        };
+      },
+    },
+  );
+
+  assert.equal(resolvedByPreflight.status, 'completed', 'preflight-resolved conversion completes');
+  assert(resolvedByPreflight.data?.preflightSignals?.includes('desktop.file_stat:matched_source_exists'), 'preflight signals include matched file stat proof');
+  assert(resolvedByPreflight.data?.proofSignals?.includes('desktop.file_search:~/Desktop:ok'), 'proof signals include the bounded file search');
+
   const quotedJpeg = await executeDirectImageConversionRequest(
     'convert "~/Desktop/logo mark.png" to jpeg',
     async (request) => {
@@ -107,6 +168,63 @@ async function main() {
   assert.match(notFound.message, /could not find that image/i, 'not-found message tells the user the simple blocker');
   assert.doesNotMatch(notFound.message, /desktop\.convert_image|File or folder does not exist/i, 'not-found message hides bridge internals');
   assert(notFound.warnings.some((warning) => /desktop\.convert_image failed \(file_not_found\)/i.test(warning)), 'not-found warning keeps technical support detail');
+
+  const preflightNoMatches = await executeDirectImageConversionRequest(
+    'open missing-logo.png from the desktop and make it a jpg',
+    {
+      async statFile() {
+        return { ok: false, error: 'path must be scoped', errorCode: 'invalid_input' };
+      },
+      async searchFiles(rootPath, query) {
+        assert.equal(rootPath, '~/Desktop');
+        assert.equal(query, 'missing-logo.png');
+        return {
+          ok: true,
+          data: { rootPath, query, visited: 4, truncated: false, matches: [] },
+        };
+      },
+      async convertImage() {
+        throw new Error('conversion should not run without a source match');
+      },
+    },
+  );
+
+  assert.equal(preflightNoMatches.status, 'failed', 'preflight no-match fails closed');
+  assert.match(preflightNoMatches.message, /could not find that image/i, 'preflight no-match gets not-found copy');
+  assert.doesNotMatch(preflightNoMatches.message, /desktop\.file_search|desktop\.convert_image|No matching source/i, 'preflight no-match hides tool details');
+  assert(preflightNoMatches.warnings.some((warning) => /preflight failed \(file_not_found\)/i.test(warning)), 'preflight no-match keeps diagnostic warning');
+
+  const preflightAmbiguous = await executeDirectImageConversionRequest(
+    'open logo.png from the desktop and make it a jpg',
+    {
+      async statFile() {
+        return { ok: false, error: 'path must be scoped', errorCode: 'invalid_input' };
+      },
+      async searchFiles(rootPath, query) {
+        return {
+          ok: true,
+          data: {
+            rootPath,
+            query,
+            visited: 4,
+            truncated: false,
+            matches: [
+              { path: '/Users/cswanson/Desktop/logo.png', name: 'logo.png', reason: 'name', size: 1, modifiedAt: '2026-06-30T12:00:00.000Z' },
+              { path: '/Users/cswanson/Desktop/archive/logo.png', name: 'logo.png', reason: 'name', size: 2, modifiedAt: '2026-06-30T12:00:00.000Z' },
+            ],
+          },
+        };
+      },
+      async convertImage() {
+        throw new Error('conversion should not run for ambiguous source matches');
+      },
+    },
+  );
+
+  assert.equal(preflightAmbiguous.status, 'failed', 'preflight ambiguous match fails closed');
+  assert.match(preflightAmbiguous.message, /more than one matching image|exact file path/i, 'preflight ambiguous match gets exact-path copy');
+  assert.doesNotMatch(preflightAmbiguous.message, /desktop\.file_search|ambiguous_file_match/i, 'preflight ambiguous message hides tool details');
+  assert(preflightAmbiguous.warnings.some((warning) => /preflight failed \(ambiguous_file_match\)/i.test(warning)), 'preflight ambiguous keeps diagnostic warning');
 
   for (const failureCase of [
     {

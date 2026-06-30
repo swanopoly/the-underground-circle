@@ -101,6 +101,8 @@ export type OpenSwanToolName =
   | 'rooms.list_files'
   | 'rooms.read_file'
   | 'integrations.list'
+  | 'custom_api.read'
+  | 'custom_api.request'
   | 'office.list_agents'
   | 'agent.codex_acquire_asset'
   | 'agent.recover_failed_task'
@@ -227,7 +229,8 @@ const CHECKINS_RE = /\b(check-?in|check in|daily update|standup|streak)\b/i;
 const RESEARCH_DOC_RE = /\b(research doc|research docs|research corpus|digest|findings|paper|report)\b/i;
 const ROOMS_RE = /\b(room|rooms|workspace|project files|room files)\b/i;
 const GITHUB_RE = /\b(github|repo|repository|branch|pull request|pr|read file)\b/i;
-const INTEGRATIONS_RE = /\b(integration|integrations|connector|browserbase|figma|slack|teams|github app|provider)\b/i;
+const INTEGRATIONS_RE = /\b(integration|integrations|connector|custom api|api connector|rest api|http api|external api|third[- ]party api|webhook|endpoint|browserbase|figma|slack|teams|github app|provider)\b/i;
+const CUSTOM_API_RE = /\b(custom api|api connector|rest api|http api|external api|third[- ]party api|webhook|endpoint|api integration|api action|call (?:an? )?api|post to (?:an? )?api|send to (?:an? )?api)\b/i;
 const OFFICE_RE = /\b(office agent|office agents|published agents|who is active|active agents|circle office)\b/i;
 const APPROVAL_RE = /\b(approval|approvals|approve|approved|reject|rejected|needs approval|pending approval)\b/i;
 const BROWSER_FILE_TRANSFER_RE = /\b(upload|attach|choose file|select file|import|download|export|save (?:this )?(?:page|webpage|site|report|csv|pdf)|save as pdf|print to pdf)\b/i;
@@ -260,7 +263,7 @@ const PIPELINE_OPEN_SWAN_TOOLS: Partial<Record<UserTaskPipelineId, OpenSwanToolN
   adobe_creative_cloud: ['desktop.file_search', 'desktop.file_stat', 'desktop.open_path', 'desktop.launch_app', 'desktop.focus_app', 'desktop.window_state', 'desktop.read_a11y_tree', 'desktop.screenshot', 'desktop.menu_click', 'desktop.press_keys', 'office.list_agents', 'research.search', 'agent.build_app_capability', 'approvals.request'],
   tasks_missions: ['tasks.list', 'tasks.create', 'tasks.assign', 'missions.list', 'check_ins.list'],
   office_agents: ['office.list_agents', 'search_memories', 'messages.create'],
-  integrations_models: ['integrations.list', 'code.inspect', 'verification.tests'],
+  integrations_models: ['integrations.list', 'custom_api.read', 'custom_api.request', 'code.inspect', 'verification.tests'],
   schedule_automation: ['schedule_action', 'approvals.request', 'office.list_agents'],
   governance_approvals: ['approvals.list', 'approvals.request', 'approvals.resolve'],
   human_verification: ['browser.verification_state', 'approvals.request'],
@@ -1029,6 +1032,12 @@ function buildRecommendedTools(kind: OpenSwanTaskKind, message: string, entities
   }
   if (INTEGRATIONS_RE.test(message)) {
     tools.push({ tool: 'integrations.list', reason: 'Check connected providers and capabilities before claiming the app can act on external systems.', priority: 'medium' });
+  }
+  if (CUSTOM_API_RE.test(message)) {
+    tools.push(
+      { tool: 'custom_api.read', reason: 'Read from a connected Custom API through the server-side proxy after integrations.list confirms the configured API.', priority: 'medium' },
+      { tool: 'custom_api.request', reason: 'Use only for approved write-like Custom API calls constrained by the connected API metadata.', priority: 'low' },
+    );
   }
   if (OFFICE_RE.test(message)) {
     tools.push({ tool: 'office.list_agents', reason: 'Load the live office roster when the request is about active agents or publishing state.', priority: 'medium' });

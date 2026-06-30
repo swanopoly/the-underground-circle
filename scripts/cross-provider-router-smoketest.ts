@@ -27,10 +27,14 @@ function set<T extends string>(...items: T[]): Set<T> {
 
 function main() {
   // ── findAliasKey: friendly id resolution ─────────────────────────
-  assert(findAliasKey('claude-opus-4-6') === 'claude-opus-4-6', 'findAliasKey: claude-opus-4-6 → exact key');
+  assert(findAliasKey('claude-opus-4-8') === 'claude-opus-4-8', 'findAliasKey: claude-opus-4-8 -> exact key');
+  assert(findAliasKey('claude-opus-4-6') === 'claude-opus-4-6', 'findAliasKey: claude-opus-4-6 -> exact key');
+  assert(findAliasKey('gpt-5.5') === 'gpt-5.5', 'findAliasKey: gpt-5.5 -> exact key');
   assert(findAliasKey('claude-haiku-4-5-20251001') === 'claude-haiku-4-5', 'findAliasKey: dated haiku → claude-haiku-4-5');
   assert(findAliasKey('llama-3.3-70b-versatile') === 'llama-3.3-70b', 'findAliasKey: groq llama → llama-3.3-70b');
   assert(findAliasKey('gemini-flash') === 'gemini-2.5-flash', 'findAliasKey: gemini-flash → gemini-2.5-flash');
+  assert(findAliasKey('gemini-3.5-flash') === 'gemini-3.5-flash', 'findAliasKey: gemini-3.5-flash -> gemini-3.5-flash');
+  assert(findAliasKey('gemini-3.1-flash-lite') === 'gemini-3.1-flash-lite', 'findAliasKey: gemini-3.1-flash-lite -> gemini-3.1-flash-lite');
   // SwanBot Tier 3 (S3) routes the legacy Gemini fallback via findAliasKey →
   // google_ai model. Lock the pro path it depends on.
   assert(findAliasKey('gemini-2.5-pro') === 'gemini-2.5-pro', 'findAliasKey: gemini-2.5-pro → gemini-2.5-pro');
@@ -39,6 +43,32 @@ function main() {
   assert(findAliasKey('made-up-model-id') === null, 'findAliasKey: unknown id → null');
 
   // ── resolveProviderRoutes: ordering with all providers ──────────
+  {
+    const routes = resolveProviderRoutes('gpt-5.5', {
+      available: set('openai', 'openrouter'),
+    });
+    assert(routes.length === 2, 'gpt-5.5: 2 routes (openrouter + openai)', `got ${routes.length}`);
+    assert(routes[0].provider === 'openrouter', 'gpt-5.5: openrouter first by default');
+    assert(routes[1].provider === 'openai', 'gpt-5.5: openai direct fallback');
+  }
+
+  {
+    const routes = resolveProviderRoutes('claude-opus-4-8', {
+      available: set('anthropic', 'openrouter'),
+    });
+    assert(routes.length === 2, 'opus 4.8: 2 routes (openrouter + anthropic)', `got ${routes.length}`);
+    assert(routes[0].modelId === 'anthropic/claude-opus-4-8', 'opus 4.8: OR alias uses current Opus');
+    assert(routes[1].modelId === 'claude-opus-4-8', 'opus 4.8: direct alias uses current Opus');
+  }
+
+  {
+    const routes = resolveProviderRoutes('sonar-deep-research', {
+      available: set('perplexity', 'openrouter'),
+    });
+    assert(routes.some((r) => r.provider === 'perplexity' && r.modelId === 'sonar-deep-research'), 'sonar-deep-research: direct perplexity route present');
+    assert(routes.some((r) => r.provider === 'openrouter' && r.modelId === 'perplexity/sonar-deep-research'), 'sonar-deep-research: OR route present');
+  }
+
   {
     const routes = resolveProviderRoutes('claude-sonnet-4-6', {
       available: set('anthropic', 'openrouter'),
@@ -147,7 +177,7 @@ function main() {
   assert(!isTransientProviderError({ message: 'invalid model id' }), 'invalid model msg → structural');
 
   // ── MODEL_ALIASES catalog sanity ─────────────────────────────────
-  const requiredAliases = ['claude-sonnet-4-6', 'claude-opus-4-6', 'gpt-4o', 'llama-3.3-70b', 'mistral-large'];
+  const requiredAliases = ['claude-sonnet-4-6', 'claude-opus-4-8', 'claude-opus-4-6', 'gpt-5.5', 'gpt-4o', 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'sonar-deep-research', 'llama-3.3-70b', 'mistral-large'];
   for (const k of requiredAliases) {
     assert(MODEL_ALIASES[k] != null, `MODEL_ALIASES contains ${k}`);
   }

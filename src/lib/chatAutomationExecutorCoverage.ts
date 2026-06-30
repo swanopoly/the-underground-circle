@@ -119,6 +119,22 @@ export const CHAT_AUTOMATION_EXECUTOR_COVERAGE_CASES: ChatAutomationExecutorCove
     migrationOwner: 'single_executor',
   },
   {
+    id: 'custom_api_action_request',
+    title: 'Custom API action request',
+    priority: 'p0',
+    input: { message: 'Create a custom API action that calls POST /orders from the marketplace connector' },
+    expected: {
+      source: 'plain_chat',
+      executionKind: 'run_openswan',
+      routeId: null,
+      risk: 'review',
+      approvalRequired: false,
+      minConfidence: 0.8,
+    },
+    userExperienceGoal: 'Use OpenSwan tools for API action setup/execution instead of no-tool plain chat.',
+    migrationOwner: 'single_executor',
+  },
+  {
     id: 'control_panel_repeat_automation_seed',
     title: 'Control Panel repeat automation seed',
     priority: 'p0',

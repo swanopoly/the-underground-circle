@@ -1056,6 +1056,9 @@ export async function delegateToSubagent(opts: {
               ? {
                   input_tokens: toolLoopResult.usage.input_tokens,
                   output_tokens: toolLoopResult.usage.output_tokens,
+                  cached_tokens: typeof toolLoopResult.usage.total_tokens === 'number'
+                    ? Math.max(0, toolLoopResult.usage.total_tokens - ((toolLoopResult.usage.input_tokens || 0) + (toolLoopResult.usage.output_tokens || 0)))
+                    : 0,
                 }
               : {}),
           });

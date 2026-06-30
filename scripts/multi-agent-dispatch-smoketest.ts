@@ -161,10 +161,100 @@ expectPlan('/roundtable decide the implementation order', 'dispatch', ['default:
 expectPlan('/sequence all implement the bridge handoff', 'dispatch', ['default::blackswan', 'codex-1', 'codex-2', 'claude-1'], '/sequence all creates a chain plan');
 expectPlan('/multi debate provider codex review the bridge handoff', 'dispatch', ['codex-1', 'codex-2'], '/multi debate provider codex creates debate plan');
 expectPlan('ask all codex agents to audit the bridge plan', 'dispatch', ['codex-1', 'codex-2'], 'natural language provider fan-out works');
+expectPlan('use as many agents as possible to audit the bridge plan', 'dispatch', ['default::blackswan', 'codex-1', 'codex-2', 'claude-1'], 'natural language max fan-out leading phrase works');
+expectPlan('keep building the WordPress automation and have as many agents work on it as possible', 'dispatch', ['default::blackswan', 'codex-1', 'codex-2', 'claude-1'], 'natural language max fan-out trailing phrase works');
 expectPlan('run a sequential workflow for implement the bridge handoff', 'dispatch', ['default::blackswan', 'codex-1', 'codex-2', 'claude-1'], 'natural language sequential workflow works');
 expectPlan('run a debate about the bridge handoff design', 'dispatch', ['default::blackswan', 'codex-1', 'codex-2', 'claude-1'], 'natural language debate works');
 expectPlan('/multi help', 'help', [], '/multi help returns help plan');
 expectPlan('/multi all', 'help', [], '/multi all without a task returns help plan');
+
+console.log('\nparseMultiAgentOrchestrationRequest — bounded deployment intent');
+
+const manyAgents = Array.from({ length: 15 }, (_, index) => ({
+  id: `agent-${index + 1}`,
+  name: `Agent ${index + 1}`,
+  provider: index % 2 === 0 ? 'codex' : 'openswan',
+  status: 'idle',
+}));
+
+function expectDeploymentIntent(
+  input: string,
+  agents: typeof liveAgents,
+  expected: {
+    strategy: 'parallel' | 'roundtable' | 'sequential' | 'debate';
+    maxTargets: number;
+    targetCount: number;
+    truncatedCount: number;
+    requestedScope?: string;
+  },
+  msg: string,
+) {
+  const plan = parseMultiAgentOrchestrationRequest(input, agents);
+  if (!plan || plan.kind !== 'dispatch') {
+    fail(msg + ' (did not produce dispatch plan)', plan);
+    return;
+  }
+  const intent = plan.deploymentIntent;
+  if (!intent) {
+    fail(msg + ' (missing deploymentIntent)', plan);
+    return;
+  }
+  if (
+    intent.bounded === true
+    && intent.strategy === expected.strategy
+    && intent.maxTargets === expected.maxTargets
+    && intent.targetIds.length === expected.targetCount
+    && intent.truncatedCount === expected.truncatedCount
+    && intent.modelPolicy === 'agent_select_from_connected_providers'
+    && (!expected.requestedScope || intent.requestedScope === expected.requestedScope)
+  ) {
+    ok(msg);
+  } else {
+    fail(msg + ' — deployment intent mismatch', { intent, expected });
+  }
+}
+
+expectDeploymentIntent(
+  'use as many agents as possible to audit this repo',
+  manyAgents,
+  { strategy: 'parallel', maxTargets: 12, targetCount: 12, truncatedCount: 3, requestedScope: 'as many active agents as possible' },
+  'max fan-out is bounded to 12 and reports truncation',
+);
+
+expectDeploymentIntent(
+  '/roundtable all: decide the rollout',
+  manyAgents,
+  { strategy: 'roundtable', maxTargets: 5, targetCount: 5, truncatedCount: 10, requestedScope: 'all agents' },
+  '/roundtable all is bounded to 5',
+);
+
+expectDeploymentIntent(
+  '/sequence all: implement the rollout',
+  manyAgents,
+  { strategy: 'sequential', maxTargets: 8, targetCount: 8, truncatedCount: 7, requestedScope: 'all agents' },
+  '/sequence all is bounded to 8',
+);
+
+expectDeploymentIntent(
+  '/debate all: review the rollout',
+  manyAgents,
+  { strategy: 'debate', maxTargets: 6, targetCount: 6, truncatedCount: 9, requestedScope: 'all agents' },
+  '/debate all is bounded to 6',
+);
+
+expectDeploymentIntent(
+  '/multi provider codex: audit provider routing',
+  manyAgents,
+  { strategy: 'parallel', maxTargets: 12, targetCount: 8, truncatedCount: 0, requestedScope: 'codex agents' },
+  'provider-scoped fan-out preserves requested scope',
+);
+
+expectDeploymentIntent(
+  '@openswan @codex1 audit the bridge plan',
+  liveAgents,
+  { strategy: 'parallel', maxTargets: 12, targetCount: 2, truncatedCount: 0, requestedScope: '@OpenSwan @Codex #1' },
+  'explicit mentions produce bounded deployment intent',
+);
 
 // ─── O3: typed-core subagent fan-out ─────────────────────────────────────
 //

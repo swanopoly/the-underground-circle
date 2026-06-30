@@ -286,6 +286,11 @@ function classifyFailureArea(text: string, contract: ComputerTaskEvidenceContrac
   ])) {
     return 'user_unblock';
   }
+  if (contract.kind === 'local_file' && matches(text, [
+    /\b(file_not_found|path_not_found|ENOENT|file or folder does not exist|path does not exist|does not exist|no matching source image|no file named|not found|missing path|missing source)\b/i,
+  ])) {
+    return 'fresh_evidence';
+  }
   if (matches(text, [
     /\b(selector|locator|element|target|control|button|field|text frame)\b[\s\S]{0,120}\b(timeout|ambiguous|not found|not visible|obscured|detached|disabled|not editable|actionability|receives events|stable)\b/i,
     /\b(selector|locator|element|target|control|button|field|text frame)\b[\s\S]{0,120}\b(timed out|failed actionability|actionability checks?)\b/i,

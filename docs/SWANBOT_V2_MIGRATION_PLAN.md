@@ -109,7 +109,7 @@ main loop.
 
 ### Timeout + cancel
 
-- If the client never sends a continuation and the user's chat session ends, the row sits with `status: 'running'` indefinitely. A cron sweeper (`sweep_stale_agent_runs`) every 5 min marks any run with `status='running'` + last event > 10 min as `final_stop_reason: 'client_timeout'`.
+- If the client never sends a continuation and the user's chat session ends, the row can sit with `status: 'running'` indefinitely. Any stale-run sweeper must keep the normalized readiness vocabulary: mark stale pending rows `status='failed'` with `final_stop_reason='error'`, and put the exact timeout label such as `client_timeout` in metadata for diagnostics.
 - Client-side: `callSwanBotV2` caps at 6 continuation round-trips. Seventh → abort, post error to chat.
 - Edge-side: continuation resumes older than 10 minutes or runs no longer
   marked `client_pending` fail closed with a compact `continuation_stale` or
@@ -153,16 +153,19 @@ M3 is complete. The v2 edge catalog is source-derived from `supabase/functions/s
 Pre-M4 readiness:
 1. Deploy/re-verify `swanbot-v2-ai` against the source-derived 73-tool snapshot.
 2. For focused Lane 1 work, run `npm run check:swanbot-v2:daily`; before default flips or customer release handoff, run `npm run check:swanbot-v2:release`. Cross-lane chat/computer releases still use `npm run check:swanbot-chat:release`.
-3. Verify `agent_runs.final_stop_reason` telemetry is normalized to `end_turn`, `max_tokens`, `client_pending`, and `error` before default flip decisions. The v2 edge preserves the raw Anthropic stop reason only in metadata as `rawStopReason`.
+3. After the local release gate passes, run the live production report with service-role Supabase credentials: `npm run report:swanbot-openswan-readiness -- --smokes-passed --since <iso>`. Use `npm run check:swanbot-openswan-readiness:production -- --smokes-passed --since <iso>` when the command should fail the handoff unless `can_flip_default` is yes. Do not add this live report to daily checks; it depends on production credentials and fresh telemetry.
+4. Verify real `agent_runs` telemetry, not synthetic readiness input: v1 `swanbot-ai` rows must write `metadata.version='swanbot-ai'`, v2 rows must write `metadata.version='swanbot-v2-ai'`, and `src/lib/swanbotOpenSwanReadiness.ts` must load both cohorts by `metadata->>version` and `surface='main_chat'`.
+4. Verify `agent_runs.final_stop_reason` telemetry is normalized to `end_turn`, `max_tokens`, `client_pending`, and `error` before default flip decisions. The v2 edge preserves the raw Anthropic stop reason only in metadata as `rawStopReason`; the v1 baseline normalizes terminal legacy turns to `end_turn`, `max_tokens`, or `error`.
 
 ---
 
 ## M4 — Flip the default
 
 - After M3e, watch a week of mixed v1/v2 telemetry from the opt-in cohort.
-- Build the decision from `src/lib/swanbotOpenSwanReadiness.ts`, not a manual checklist. It derives the current v2 catalog from `supabase/functions/swanbot-v2-ai/index.ts` and currently requires 73 tools total, 48 client-delegated tools, the SwanBot v2 routing/delegation/continuation/writer/workspace/approval/WordPress/dispatcher-parity smokes, WordPress admin source-intelligence smoke, OpenSwan approval/planner smokes, failure-recovery smoke, and enough `agent_runs.final_stop_reason` telemetry.
+- Build the decision from `src/lib/swanbotOpenSwanReadiness.ts`, not a manual checklist. It derives the current v2 catalog from `supabase/functions/swanbot-v2-ai/index.ts` and currently requires 73 tools total, 48 client-delegated tools, the SwanBot v2 routing/delegation/continuation/writer/workspace/approval/WordPress/dispatcher-parity smokes, WordPress admin source-intelligence smoke, OpenSwan approval/planner smokes, failure-recovery smoke, and enough real `agent_runs.final_stop_reason` telemetry from both the v1 baseline and v2 candidate cohorts. `scripts/swanbot-openswan-readiness-report.ts` is the operator-facing production report for that same logic; it first probes `agent_runs` for the late telemetry columns (`tool_calls`, `iteration_count`, `final_stop_reason`, `input_tokens`, `output_tokens`, `cached_tokens`) and reports cohort completeness before printing the readiness snapshot.
 - When v2's `final_stop_reason === 'end_turn'` rate is ≥ v1's and the readiness snapshot returns `canFlipDefault: true`, flip the default in `isSwanbotV2Enabled()` from `false` to `true` with `!== 'false'` semantics. v1 becomes opt-out.
-- As of 2026-06-29, terminal v2 rows also use the normalized stop-reason vocabulary before writing `agent_runs.final_stop_reason`: `stop_sequence` is counted as `end_turn`, iteration cap is `max_tokens`, paused client tools are `client_pending`, and unexpected terminal reasons are `error`. Only `end_turn` writes `status='completed'`; `max_tokens` and `error` write `status='failed'` so readiness does not count cut-off model responses as clean completions.
+- As of 2026-06-29, terminal v2 rows also use the normalized stop-reason vocabulary before writing `agent_runs.final_stop_reason`: `stop_sequence` is counted as `end_turn`, iteration cap is `max_tokens`, paused client tools are `client_pending`, and unexpected terminal reasons are `error`. Only `end_turn` writes `status='completed'`; `max_tokens` and `error` write `status='failed'` so readiness does not count cut-off model responses as clean completions. Pending and terminal v2 updates now also write `agent_runs.input_tokens`, `agent_runs.output_tokens`, and `agent_runs.cached_tokens` from the accumulated Anthropic usage totals so the live readiness report can flag real telemetry gaps instead of source-code gaps.
+- As of 2026-06-29, normal-path v1 `swanbot-ai` turns also create and close `agent_runs` rows with `metadata.version='swanbot-ai'`, token fields, tool summaries, iteration count, and normalized final stop reasons. Relay-mode v1 turns are deliberately excluded because they are client-controlled tool continuations, not terminal baseline samples.
 - Announce in chat + post to `agent_activity` on every circle.
 
 ---

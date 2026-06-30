@@ -9,6 +9,8 @@ Output: training_data/app_data.jsonl
 """
 
 import json
+import os
+import sys
 from pathlib import Path
 
 RAW_DIR = Path(__file__).parent / "raw_data"
@@ -484,6 +486,12 @@ def main():
     all_examples.extend(auto_examples)
 
     print(f"\nTotal app training examples: {len(all_examples)}")
+    if not all_examples and os.environ.get("ALLOW_EMPTY_APP_DATA") != "1":
+        print(
+            "ERROR: No app training examples were generated. "
+            "Fix the Supabase export or set ALLOW_EMPTY_APP_DATA=1 for a public-only run."
+        )
+        sys.exit(1)
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT, "w") as f:

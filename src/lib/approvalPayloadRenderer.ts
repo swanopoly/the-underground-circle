@@ -36,6 +36,10 @@ export interface ApprovalPayload {
   x?: number;
   y?: number;
   path?: string;
+  method?: string;
+  endpoint?: string;
+  apiName?: string;
+  toolNamespace?: string;
   [key: string]: unknown;
 }
 
@@ -75,6 +79,7 @@ function toolAction(tool: string): { verb: string; target: 'app' | 'browser' | '
     case 'browser.click_role': return { verb: 'Click', target: 'browser' };
     case 'browser.fill_field': return { verb: 'Fill', target: 'browser' };
     case 'browser.press_key':  return { verb: 'Press', target: 'browser' };
+    case 'custom_api.request': return { verb: 'Call', target: 'generic' };
     default: return { verb: tool.replace(/[_.]/g, ' '), target: 'generic' };
   }
 }
@@ -87,6 +92,19 @@ export function renderApprovalAction(
   if (!p || typeof p !== 'object' || !p.tool) {
     // No structured payload — banner will keep showing the raw title.
     return { headline: fallbackTitle };
+  }
+
+  const args = p.args && typeof p.args === 'object' ? p.args as Record<string, unknown> : {};
+  if (p.tool === 'custom_api.request') {
+    const method = String(p.method || args.method || 'REQUEST').toUpperCase();
+    const endpoint = String(p.endpoint || args.path || '').trim();
+    const apiName = String(p.apiName || args.apiName || args.toolNamespace || p.toolNamespace || 'Custom API').trim();
+    const headline = endpoint
+      ? `Call **${method} ${truncate(endpoint, 72)}**`
+      : `Call **${method} Custom API**`;
+    const details = [`using ${truncate(apiName, 60)}`];
+    if (args.body !== undefined) details.push('with request body');
+    return { headline, detail: details.join(' · ') };
   }
 
   const { verb, target } = toolAction(p.tool);

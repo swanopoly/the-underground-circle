@@ -46,6 +46,7 @@ const passingScripts = {
   'typecheck:functions': 'node scripts/typecheck-functions.mjs',
   'smoke:agent-standards-wiki': 'npx tsx scripts/agent-standards-wiki-smoketest.ts',
   'smoke:swanbot-openswan-readiness': 'npx tsx scripts/swanbot-openswan-readiness-smoketest.ts',
+  'smoke:export-traces': 'npx tsx scripts/export-traces-smoketest.ts',
   'smoke:openswan-task-planner': 'npx tsx scripts/openswan-task-planner-smoketest.ts',
   'smoke:openswan-worktree-config': 'npx tsx scripts/openswan-worktree-config-smoketest.ts',
   'check:openswan-worktree-config': 'npx tsx scripts/openswan-worktree-config-report.ts --fail-on-blocked',
@@ -119,6 +120,7 @@ assert(liveSnapshot.status !== 'blocked', `live worktree config should not be bl
 assert(liveSnapshot.items.some((item) => item.id === 'script:smoke:openswan-worktree-config' && item.status === 'pass'), 'live config sees OpenSwan worktree smoke script');
 assert(liveSnapshot.items.some((item) => item.id === 'script:check:openswan-worktree-config' && item.status === 'pass'), 'live config sees OpenSwan worktree check script');
 assert(liveSnapshot.items.some((item) => item.id === 'script:smoke:office-roster-grouping' && item.status === 'pass'), 'live config sees roster smoke script');
+assert(liveSnapshot.items.some((item) => item.id === 'script:smoke:export-traces' && item.status === 'pass'), 'live config sees export traces smoke script');
 assert(liveSnapshot.items.some((item) => item.id === 'ignore:.remember/logs/' && item.status === 'pass'), 'live config sees .remember/logs ignore');
 assert(liveSnapshot.items.some((item) => item.id === 'ignore:.remember/tmp/' && item.status === 'pass'), 'live config sees .remember/tmp ignore');
 

@@ -71,6 +71,23 @@ const staleBrowserEvidence = evaluateComputerTaskEvidenceRecoveryReadiness({
 });
 assert.equal(staleBrowserEvidence?.status, 'stale', 'browser recovery readiness detects stale evidence');
 
+const localImageRoute = buildChatComputerRequestRoute('Open Gemini_Generated_Image_lppqo8lppqo8lppq.png from the Desktop and make it a jpg');
+assert(localImageRoute?.evidenceContract, 'local image conversion route carries evidence contract');
+const localImageMissingRecovery = diagnoseComputerTaskEvidenceFailure({
+  contract: localImageRoute.evidenceContract,
+  task: 'Convert a Desktop image to JPG',
+  failureMessage: 'desktop.convert_image preflight failed (file_not_found): No matching source image named Gemini_Generated_Image_lppqo8lppqo8lppq.png was found in the allowed folders.',
+  outcomeStatus: 'failed',
+  source: 'desktop.convert_image',
+});
+assert.equal(localImageMissingRecovery?.failureArea, 'fresh_evidence', 'missing local image maps to fresh file evidence');
+assert.equal(localImageMissingRecovery?.retryAllowed, true, 'missing local image can retry after fresh file evidence');
+assert.equal(localImageMissingRecovery?.userActionRequired, false, 'missing local image does not require bridge restart by default');
+assert.equal(localImageMissingRecovery?.recommendedOptionId, 'retry_with_fresh_evidence', 'missing local image recommends fresh-evidence retry');
+assert(localImageMissingRecovery?.requiredEvidence.some((item) => item.tool === 'desktop.file_search'), 'missing local image requires file search evidence');
+assert(localImageMissingRecovery?.requiredEvidence.some((item) => item.tool === 'desktop.file_stat'), 'missing local image requires file stat evidence');
+assert(localImageMissingRecovery?.resumeInstruction.includes('retry only the failed step once'), 'missing local image gets one-shot retry instruction');
+
 const userBlockedRecovery = diagnoseComputerTaskEvidenceFailure({
   contract: browserRoute.evidenceContract,
   task: 'Log into Shopify',

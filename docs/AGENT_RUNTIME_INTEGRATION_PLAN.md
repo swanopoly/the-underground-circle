@@ -22,13 +22,13 @@ That last point is load-bearing: **adopting SKILL.md means UC circles can import
 
 | Chris's goal | Hermes primitive | Our current state |
 |---|---|---|
-| "Improves over time" | Skills + trajectory log + offline DSPy/GEPA | No skill library, no trajectory persistence |
+| "Improves over time" | Skills + trajectory log + offline DSPy/GEPA | Run persistence exists through `agent_runs`, `agent_run_events`, `agentRunPersistence`, and SwanBot v1/v2 telemetry; remaining gap is production cohort evidence plus broader skill-loop rollout |
 | "Can help with any task" | Registry of ~50 tools + MCP loader + `delegate_task` | `openswanToolRuntime.ts` exists but orphaned — runtime passes text `toolBrief` instead of calling it |
 | "Remembers what it learned" | MEMORY.md + USER.md + session FTS search | `circle_memory` table (closer than Hermes' solo-user model), but no per-user `USER.md` equivalent |
 | "Knows when to stop and ask" | `clarify` tool + `hitlService` equivalent | We have `hitlService.ts` already — ahead here |
 | "Can split work across specialists" | `delegate_task` isolates child context | Specialists exist but share no typed session contract (see OpenSwan audit §2) |
 
-We are ahead of Hermes on: verification pipeline, HITL approvals, multi-user circle-scoped memory, streaming chat UX. We are behind on: the core typed loop, skill layer, trajectory persistence.
+We are ahead of Hermes on: verification pipeline, HITL approvals, multi-user circle-scoped memory, streaming chat UX, and baseline run persistence. Remaining gaps are production cohort evidence, broader skill-loop adoption, and finishing the typed-loop migration across all callers.
 
 ---
 
@@ -106,7 +106,7 @@ Each phase ships independently. Each is typecheck-clean and has a user-visible i
    - `nudgeMember({ circleId, userId, reason })`
    Each returns `{ ok: true, data }` or `{ ok: false, error }` — never throws. Zod validates input schema at dispatch time.
 3. **`supabase/functions/swanbot-ai/index.ts`** — rewrite as a thin wrapper around `AgentExecutionCore`. System prompt split into frozen (with `cache_control`) + volatile blocks per the prompt-caching memory. Stream tool-call announcements into the room ("🔧 Using searchCircleMemory…") so users see progress.
-4. **Schema extension** — add to `agent_runs`: `tool_calls jsonb`, `iteration_count int`, `final_stop_reason text`. Add `agent_run_events` if not present (id, run_id, kind, payload, at). Migration goes into `docs/RUN_THIS_SQL.sql` §9 for the user to run.
+4. **Schema extension** — use `docs/RUN_THIS_SQL.sql` §9 as canonical. `agent_runs` telemetry requires `tool_calls jsonb`, `iteration_count int`, `final_stop_reason text`, `input_tokens int`, `output_tokens int`, and `cached_tokens int`. Add `agent_run_events` if not present (id, run_id, kind, payload, at).
 5. **Verification** — typecheck, targeted test of the loop with a mock provider (Phase 1 exit criterion: one test in `src/lib/__tests__/agentExecutionCore.test.ts`).
 
 **Concrete outcome:** user says `@blackswan what shipped this week?`, BlackSwan calls `getGithubActivity`, sees the real events, calls `searchCircleMemory` if context is missing, and posts a structured summary.
@@ -223,7 +223,10 @@ These gates are the difference between a helpful agent and a slowly-self-poisoni
 ALTER TABLE agent_runs
   ADD COLUMN IF NOT EXISTS tool_calls        jsonb  DEFAULT '[]',
   ADD COLUMN IF NOT EXISTS iteration_count   int    DEFAULT 0,
-  ADD COLUMN IF NOT EXISTS final_stop_reason text;
+  ADD COLUMN IF NOT EXISTS final_stop_reason text,
+  ADD COLUMN IF NOT EXISTS input_tokens      int    DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS output_tokens     int    DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS cached_tokens     int    DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS agent_run_events (
   id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),

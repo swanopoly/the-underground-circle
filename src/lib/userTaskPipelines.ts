@@ -1381,13 +1381,13 @@ export const USER_TASK_PIPELINES: UserTaskPipelineDefinition[] = [
     id: 'integrations_models',
     title: 'Integrations, Models, And API Keys',
     category: 'business',
-    description: 'Connect marketplace providers, save API keys securely, route models, and choose the best model for a task.',
-    matchers: [/\b(integration|marketplace|api key|provider|model picker|openrouter|hugging ?face|anthropic|openai|google ai|gemini|brave search|browserbase|auto picker|smart route)\b/i],
+    description: 'Connect marketplace providers, Custom API actions, save API keys securely, route models, and choose the best model for a task.',
+    matchers: [/\b(integration|marketplace|api key|provider|model picker|openrouter|hugging ?face|anthropic|openai|google ai|gemini|brave search|browserbase|auto picker|smart route|custom api|api action|rest api|http api|api connector|endpoint|webhook)\b/i],
     routeId: null,
     executionKind: 'run_openswan',
     risk: 'review',
     preferredSurfaces: ['marketplace', 'model_registry', 'llm_proxy'],
-    recommendedTools: ['integrations.list', 'code.inspect', 'verification.tests'],
+    recommendedTools: ['integrations.list', 'custom_api.read', 'custom_api.request', 'code.inspect', 'verification.tests'],
     solutionSteps: [
       'Identify provider, key scope, user/circle ownership, and target surfaces.',
       'Use user-provided keys for non-owner users; never fall back to platform keys unless allowed.',
@@ -1397,7 +1397,7 @@ export const USER_TASK_PIPELINES: UserTaskPipelineDefinition[] = [
     completionCriteria: ['Integration/model state is saved securely and reflected in chat routing.'],
     approvalTriggers: ['Saving/rotating keys, changing provider routing, or using paid APIs.'],
     persistenceTargets: ['circle_integrations', 'user_api_keys', 'model_routing'],
-    exampleQuestions: ['Make Hugging Face work in chat.', 'Add Brave Search.', 'Why am I charged for Anthropic?'],
+    exampleQuestions: ['Make Hugging Face work in chat.', 'Add a Custom API action for POST /orders.', 'Why am I charged for Anthropic?'],
   },
   {
     id: 'schedule_automation',
@@ -1565,6 +1565,13 @@ function scorePipeline(message: string, pipeline: UserTaskPipelineDefinition): U
   if (pipeline.id === 'website_platform_admin' && /\b(wordpress|wp admin)\b/i.test(text)) score -= 5;
   if (pipeline.id === 'browser_form_submission' && /\b(shopify|webflow|wix|squarespace|woocommerce|bigcommerce|framer|godaddy|site builder|website builder|store admin)\b/i.test(text)) score -= 1;
   if (pipeline.id === 'content_generation' && /\bwordpress|wp admin|publish|schedule\b/i.test(text)) score -= 4;
+  if (
+    pipeline.id === 'integrations_models' &&
+    /\b(custom api|api action|rest api|http api|api connector|webhook|endpoint|apis?)\b/i.test(text) &&
+    /\b(create|add|make|connect|call|invoke|post|put|patch|delete|send|run|automate|use)\b/i.test(text)
+  ) score += 5;
+  if (pipeline.id === 'integrations_models' && /\b(custom api|api connector|api action)\b/i.test(text)) score += 2;
+  if (pipeline.id === 'content_generation' && /\b(custom api|api action|rest api|http api|api connector|webhook|endpoint)\b/i.test(text)) score -= 4;
   if (pipeline.id === 'security_privacy' && /\b(api keys?|secure|not shared|privacy|rls|secrets?)\b/i.test(text)) score += 3;
   if (pipeline.id === 'coding_build' && /\b(security|secure|api keys?|charges?|cost|cron)\b/i.test(text)) score -= 2;
   if (pipeline.id === 'coding_build' && /\b(build|implementation plan|implement)\b/i.test(text)) score += 2;

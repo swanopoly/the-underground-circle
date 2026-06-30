@@ -105,18 +105,19 @@ async function main(): Promise<void> {
   let offset = 0;
   const runs: Record<string, unknown>[] = [];
   while (true) {
-    const q = supabase
+    let q = supabase
       .from('agent_runs')
-      .select('id, circle_id, user_id, surface, title, mode, model, provider, status, iteration_count, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, final_stop_reason, started_at, completed_at, tool_calls, metadata')
+      .select('id, circle_id, user_id, surface, title, mode, model, provider, status, iteration_count, input_tokens, output_tokens, cached_tokens, final_stop_reason, started_at, completed_at, tool_calls, metadata')
       .gte('started_at', sinceIso)
-      .lte('started_at', untilIso)
+      .lte('started_at', untilIso);
+    if (args.source) q = q.eq('metadata->>version', args.source);
+    q = q
       .order('started_at', { ascending: true })
       .range(offset, offset + pageSize - 1);
     const { data, error } = await q;
     if (error) { console.error('[export-traces] agent_runs query failed:', error.message); process.exit(1); }
     const rows = data || [];
     for (const row of rows) {
-      if (args.source && (row as any)?.metadata?.version !== args.source) continue;
       runs.push(row as Record<string, unknown>);
     }
     if (rows.length < pageSize) break;

@@ -13,9 +13,10 @@
  *   - popular: surface on the "Popular" filter (top of marketplace)
  *
  * Categories (in display order):
- *   communication, code_dev, ai_llm, cloud_infra, productivity, crm_sales,
- *   marketing, analytics, ads, commerce, cms_site, storage, auth, finance,
- *   support, observability, search_db, crypto_web3, social
+ *   communication, code_dev, workflow_automation, ai_llm, cloud_infra,
+ *   productivity, crm_sales, marketing, analytics, ads, commerce, cms_site,
+ *   storage, auth, finance, support, observability, search_db, crypto_web3,
+ *   social
  */
 
 import type { ProviderDefinition, IntegrationCategory } from './types';
@@ -197,6 +198,17 @@ export const INTEGRATIONS: ProviderDefinition[] = [
     status: 'coming_soon',
     homepage: 'https://launchdarkly.com',
     tags: ['feature-flags'],
+  },
+
+  // ── Workflow Automation ──────────────────────────────────────────────────
+  {
+    id: 'custom_api', label: 'Custom API', category: 'workflow_automation',
+    description: 'Connect any REST or HTTP API as an agent-ready tool with scoped metadata, hidden secrets, and approval before side effects.',
+    color: '#38bdf8', icon: 'API',
+    authModel: 'api_key',
+    capabilities: ['read_data', 'write_data', 'automation_action', 'agent_tool', 'receive_webhook'],
+    status: 'beta', popular: true,
+    tags: ['api', 'rest', 'webhook', 'automation', 'agent-tool'],
   },
 
   // ── AI / LLM ──────────────────────────────────────────────────────────────
@@ -1175,15 +1187,16 @@ export function getPopularIntegrations(): ProviderDefinition[] {
  * All distinct categories present in the registry, in display order.
  */
 export const CATEGORIES_IN_ORDER: IntegrationCategory[] = [
-  'communication', 'code_dev', 'ai_llm', 'cloud_infra', 'productivity',
-  'crm_sales', 'marketing', 'analytics', 'ads', 'commerce', 'cms_site',
-  'storage', 'auth', 'finance', 'support', 'observability', 'search_db',
-  'crypto_web3', 'social',
+  'communication', 'code_dev', 'workflow_automation', 'ai_llm', 'cloud_infra',
+  'productivity', 'crm_sales', 'marketing', 'analytics', 'ads', 'commerce',
+  'cms_site', 'storage', 'auth', 'finance', 'support', 'observability',
+  'search_db', 'crypto_web3', 'social',
 ];
 
 export const CATEGORY_LABELS: Record<IntegrationCategory, string> = {
   communication: 'Communication',
   code_dev: 'Code & Dev',
+  workflow_automation: 'Workflow Automation',
   ai_llm: 'AI & LLM',
   cloud_infra: 'Cloud Infra',
   productivity: 'Productivity',

@@ -65,6 +65,12 @@ const CONNECTOR_TO_CATALOG_ID: Record<string, string> = {
   'google-analytics': 'google-analytics',
   search_console: 'search-console',
   'google-search-console': 'search-console',
+  api: 'custom-api',
+  custom_api: 'custom-api',
+  'custom-api': 'custom-api',
+  rest_api: 'custom-api',
+  'rest-api': 'custom-api',
+  webhook: 'custom-api',
 };
 
 const CONNECTOR_TO_PLATFORM_KEY: Partial<Record<string, CircleIntegrationPlatformKey>> = {
@@ -94,6 +100,12 @@ const CONNECTOR_TO_PLATFORM_KEY: Partial<Record<string, CircleIntegrationPlatfor
   browser_use: 'browser_use',
   'browser-use': 'browser_use',
   browseruse: 'browser_use',
+  api: 'custom_api',
+  custom_api: 'custom_api',
+  'custom-api': 'custom_api',
+  rest_api: 'custom_api',
+  'rest-api': 'custom_api',
+  webhook: 'custom_api',
 };
 
 function getCatalogItem(id: string): CircleIntegrationCatalogItem | undefined {

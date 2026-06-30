@@ -11,12 +11,14 @@ Usage:
 import os
 import json
 import sys
+import shutil
 import requests
 from pathlib import Path
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 OUTPUT_DIR = Path(__file__).parent / "raw_data"
+STAGING_DIR = Path(__file__).parent / f".raw_data_export_tmp_{os.getpid()}"
 
 HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -24,6 +26,10 @@ HEADERS = {
     "Content-Type": "application/json",
     "Prefer": "count=exact",
 }
+
+
+class ExportError(RuntimeError):
+    pass
 
 
 def fetch_table(table_name, select="*", order=None, limit=50000):
@@ -38,10 +44,12 @@ def fetch_table(table_name, select="*", order=None, limit=50000):
         if order:
             params["order"] = order
 
-        resp = requests.get(url, headers=HEADERS, params=params)
+        try:
+            resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
+        except requests.RequestException as exc:
+            raise ExportError(f"{table_name} request failed: {exc}") from exc
         if resp.status_code != 200:
-            print(f"  WARNING: {table_name} returned {resp.status_code}: {resp.text[:200]}")
-            break
+            raise ExportError(f"{table_name} returned {resp.status_code}: {resp.text[:300]}")
 
         rows = resp.json()
         if not rows:
@@ -170,7 +178,9 @@ def main():
         print("ERROR: Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables.")
         sys.exit(1)
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    if STAGING_DIR.exists():
+        shutil.rmtree(STAGING_DIR)
+    STAGING_DIR.mkdir(parents=True, exist_ok=True)
     total_rows = 0
 
     # Use training-safe views when available (respects user opt-out)
@@ -193,16 +203,28 @@ def main():
     print(f"Output: {OUTPUT_DIR}")
     print(f"Using privacy-safe views where available\n")
 
-    for table_name, config in TABLES.items():
-        # Use training-safe view if available (filters opted-out users)
-        source = TRAINING_SAFE_VIEWS.get(table_name, table_name)
-        print(f"  {table_name} (via {source})...", end=" ", flush=True)
-        rows = fetch_table(source, **config)
-        output_path = OUTPUT_DIR / f"{table_name}.json"
-        with open(output_path, "w") as f:
-            json.dump(rows, f, indent=2, default=str)
-        print(f"{len(rows)} rows")
-        total_rows += len(rows)
+    try:
+        for table_name, config in TABLES.items():
+            # Use training-safe view if available (filters opted-out users)
+            source = TRAINING_SAFE_VIEWS.get(table_name, table_name)
+            print(f"  {table_name} (via {source})...", end=" ", flush=True)
+            rows = fetch_table(source, **config)
+            output_path = STAGING_DIR / f"{table_name}.json"
+            with open(output_path, "w") as f:
+                json.dump(rows, f, indent=2, default=str)
+            print(f"{len(rows)} rows")
+            total_rows += len(rows)
+    except Exception:
+        shutil.rmtree(STAGING_DIR, ignore_errors=True)
+        raise
+
+    if total_rows <= 0:
+        shutil.rmtree(STAGING_DIR, ignore_errors=True)
+        raise ExportError("Export returned zero total rows; refusing to replace raw_data.")
+
+    if OUTPUT_DIR.exists():
+        shutil.rmtree(OUTPUT_DIR)
+    STAGING_DIR.rename(OUTPUT_DIR)
 
     print(f"\nDone! {total_rows} total rows across {len(TABLES)} tables.")
 

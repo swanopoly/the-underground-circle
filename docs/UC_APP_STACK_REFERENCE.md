@@ -47,7 +47,7 @@ ownership. This file maps the app.
 
 | Concern | File(s) |
 |---|---|
-| Agent standards, lanes, and worktree quality | `src/lib/agentDevelopmentStandards.ts`, `src/lib/openswanWorktreeConfig.ts`, `scripts/openswan-lane-report.ts`, `docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md`, `docs/SWANBOT_OPENSWAN_AGENT_LANES_2026-06-29.md` |
+| Agent standards and worktree quality | `src/lib/agentDevelopmentStandards.ts`, `src/lib/openswanWorktreeConfig.ts`, `scripts/openswan-lane-report.ts`, `docs/AGENT_DEVELOPMENT_STANDARDS_INDEX.md`, `docs/SWANBOT_OPENSWAN_AGENT_LANES_2026-06-29.md` |
 | Chat classification | `src/lib/chatAutomationPlanner.ts` |
 | Chat computer request route | `src/lib/chatComputerRequestRouter.ts` |
 | Chat computer request UX | `src/lib/chatComputerRequestUx.ts` |
@@ -56,7 +56,7 @@ ownership. This file maps the app.
 | SwanBot client path | `src/lib/swanbot.ts`, `src/lib/swanbotClientToolDispatcher.ts` |
 | SwanBot edge path | `supabase/functions/swanbot-ai/index.ts` |
 | SwanBot v2 typed loop | `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/functions/_shared/swanbot-continuation.ts` |
-| SwanBot/OpenSwan default readiness | `src/lib/swanbotOpenSwanReadiness.ts` |
+| SwanBot/OpenSwan default readiness | `src/lib/swanbotOpenSwanReadiness.ts`, `scripts/swanbot-openswan-readiness-report.ts` |
 | Typed agent loop | `src/lib/agentExecutionCore.ts` |
 | OpenSwan session runtime | `src/lib/openswanSessionRuntime.ts` |
 | Tool catalog | `src/lib/openswanToolRuntime.ts` |
@@ -66,6 +66,7 @@ ownership. This file maps the app.
 | BlackSwan routing | `src/lib/blackswanRouting.ts` |
 | Computer task runtime | `src/lib/computerTaskRuntime.ts` |
 | Browser computer use | `src/lib/computerUse.ts`, `supabase/functions/computer-use-agent/index.ts` |
+| Agent Monitor | `src/lib/agentMonitorState.ts`, `src/components/agent-monitor/AgentMonitorHost.tsx`, `src/components/ComputerUseLiveCard.tsx` |
 | Computer capability expansion | `src/lib/computerCapabilityRegistry.ts`, `src/lib/computerCapabilityExpansion.ts` |
 | Local desktop awareness | `src/lib/localComputerAwarenessIntent.ts` |
 | WordPress/Dealer Inspire admin automation | `src/lib/wpAdmin.ts`, `src/lib/computerAppTaskStrategy.ts`, `src/lib/chatComputerRequestRouter.ts`, `src/lib/userTaskPipelines.ts`, `src/lib/wordpressAdminSourceIntelligence.ts` |
@@ -155,6 +156,9 @@ docs/
 - `src/lib/llmProviders.ts` defines provider types, default model lists, key
   CRUD, and `invokeLLMProxy`.
 - `src/lib/circleIntegrations.ts` owns circle-level integrations.
+- `supabase/functions/custom-api-proxy/index.ts` is the guarded server-side
+  execution path for Custom API marketplace connectors; OpenSwan tools call it
+  instead of exposing saved API secrets to the model/client.
 - `supabase/functions/llm-proxy/index.ts` calls OpenAI-compatible providers and
   Anthropic branches with user-stored keys.
 - `supabase/functions/swanbot-ai/index.ts` can relay marketplace-prefixed
@@ -162,8 +166,8 @@ docs/
 - `src/lib/billingPriority.ts` controls provider preference modes:
   `prefer_direct`, `prefer_openrouter`, and `cheapest`.
 
-Keep provider enums, model prefixes, UI cards, edge support, and DB provider
-constraints aligned.
+Keep provider enums, model prefixes, UI cards, edge support, and the open-ended
+integration provider registry aligned.
 
 ## Computer Use Flow
 
@@ -354,7 +358,7 @@ constraints aligned.
 | `circle_office_agents` | No `model` column. Owner FK is `owner_id`. |
 | `user_xp` | Primary key is `user_id`. |
 | `room_messages.message_type` | Must match the DB check constraint. |
-| `circle_integrations.provider` | CHECK constraint must include any new provider. |
+| `circle_integrations.provider` | Provider values are open-ended; validate known providers in app registries and keep lookup indexes/migrations current instead of re-adding a rigid CHECK. |
 | `circle_members` RLS | Avoid recursive policy reads; use security-definer helpers where available. |
 
 ## SQL
@@ -369,11 +373,15 @@ constraints aligned.
 ```bash
 npm run check:openswan-lanes
 npm run check:swanbot-chat:daily
+npm run smoke:export-traces
 npm run typecheck
 npm run build
 ```
 
 Use focused smoke scripts from `package.json` for runtime changes. Use
 `npm run check:swanbot-chat:release` before bundling a larger
-SwanBot/OpenSwan/Chat delivery. `smoke:all` is the integration sweep, not the
-daily default.
+SwanBot/OpenSwan/Chat delivery. Use the SwanBot/OpenSwan readiness report only
+for production/default-flip evidence because it requires Supabase service-role
+credentials and real `agent_runs` rows:
+`npm run report:swanbot-openswan-readiness -- --smokes-passed --since <iso>`.
+`smoke:all` is the integration sweep, not the daily default.

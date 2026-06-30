@@ -79,6 +79,7 @@ const GENERIC_MARKETPLACE_PROVIDERS: GenericMarketplaceProvider[] = [
   'airtop',
   'skyvern',
   'browser_use',
+  'custom_api',
   'braintrust',
   'vercel',
   'netlify',

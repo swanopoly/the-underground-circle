@@ -1,5 +1,7 @@
 export type SwanBotOpenSwanReadinessStatus = 'ready' | 'watch' | 'blocked';
 export type SwanBotOpenSwanSmokeStatus = 'pass' | 'fail' | 'missing' | 'unknown';
+export type SwanBotOpenSwanAgentRunVersion = 'swanbot-ai' | 'swanbot-v2-ai';
+export type SwanBotOpenSwanTelemetrySide = 'v1' | 'v2';
 
 export interface SwanBotOpenSwanSmokeCheck {
   id: string;
@@ -16,6 +18,50 @@ export interface SwanBotOpenSwanTelemetryInput {
   minRuns?: number;
   v1StopReasons?: SwanBotOpenSwanStopReasonCounts;
   v2StopReasons?: SwanBotOpenSwanStopReasonCounts;
+  missingFinalStopReason?: Partial<Record<SwanBotOpenSwanTelemetrySide, number>>;
+}
+
+export interface SwanBotOpenSwanAgentRunTelemetryRow {
+  id?: string;
+  circle_id?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  status?: string | null;
+  surface?: string | null;
+  final_stop_reason?: string | null;
+  tool_calls?: unknown;
+  iteration_count?: number | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cached_tokens?: number | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+export interface SwanBotOpenSwanTelemetryReadOptions {
+  circleId?: string;
+  since?: string;
+  until?: string;
+  minRuns?: number;
+  pageSize?: number;
+}
+
+export interface SwanBotOpenSwanProductionTelemetry {
+  telemetry: SwanBotOpenSwanTelemetryInput;
+  rowsScanned: number;
+  missingFinalStopReason: Record<SwanBotOpenSwanTelemetrySide, number>;
+  completeness: Record<SwanBotOpenSwanTelemetrySide, SwanBotOpenSwanTelemetryCompleteness>;
+  ignoredRows: number;
+  window: { since: string | null; until: string | null };
+  warnings: string[];
+}
+
+export interface SwanBotOpenSwanTelemetryCompleteness {
+  rows: number;
+  missingFinalStopReason: number;
+  missingToolCalls: number;
+  badIterationCount: number;
+  missingTokenFields: number;
+  zeroTokenRows: number;
 }
 
 export interface SwanBotOpenSwanReadinessInput {
@@ -25,6 +71,7 @@ export interface SwanBotOpenSwanReadinessInput {
   clientDelegatedToolCount?: number;
   requiredSmokes?: SwanBotOpenSwanSmokeCheck[];
   telemetry?: SwanBotOpenSwanTelemetryInput;
+  telemetryCompleteness?: Partial<Record<SwanBotOpenSwanTelemetrySide, Partial<SwanBotOpenSwanTelemetryCompleteness>>>;
   blockers?: string[];
 }
 
@@ -63,10 +110,13 @@ export interface SwanBotOpenSwanTelemetrySnapshot {
   minRuns: number;
   v1RunCount: number;
   v2RunCount: number;
+  v1EnoughSamples: boolean;
+  v2EnoughSamples: boolean;
   v1EndTurnRate: number | null;
   v2EndTurnRate: number | null;
   v1StopReasons: SwanBotOpenSwanStopReasonSummary;
   v2StopReasons: SwanBotOpenSwanStopReasonSummary;
+  missingFinalStopReason: Record<SwanBotOpenSwanTelemetrySide, number>;
   enoughSamples: boolean;
   rateComparable: boolean;
   ok: boolean;
@@ -105,6 +155,7 @@ export const SWANBOT_OPENSWAN_REQUIRED_SMOKES: SwanBotOpenSwanSmokeCheck[] = [
   { id: 'swanbot-v2-approvals', command: 'npm run smoke:swanbot-v2-approvals', status: 'unknown' },
   { id: 'swanbot-v2-wp', command: 'npm run smoke:swanbot-v2-wp', status: 'unknown' },
   { id: 'swanbot-v2-dispatcher-parity', command: 'npm run smoke:swanbot-v2-dispatcher-parity', status: 'unknown' },
+  { id: 'swanbot-v2-stop-reason', command: 'npm run smoke:swanbot-v2-stop-reason', status: 'unknown' },
   { id: 'wordpress-admin-source-intelligence', command: 'npm run smoke:wordpress-admin-source-intelligence', status: 'unknown' },
   { id: 'openswan-runtime-approval', command: 'npm run smoke:openswan-runtime-approval', status: 'unknown' },
   { id: 'openswan-task-planner', command: 'npm run smoke:openswan-task-planner', status: 'unknown' },
@@ -116,6 +167,19 @@ export interface SwanbotV2DerivedToolParity {
   server: number;
   clientDelegated: number;
 }
+
+type SupabaseQueryLike = {
+  select: (columns: string) => SupabaseQueryLike;
+  eq: (column: string, value: unknown) => SupabaseQueryLike;
+  gte: (column: string, value: unknown) => SupabaseQueryLike;
+  lt: (column: string, value: unknown) => SupabaseQueryLike;
+  order: (column: string, options?: Record<string, unknown>) => SupabaseQueryLike;
+  range: (from: number, to: number) => Promise<{ data?: SwanBotOpenSwanAgentRunTelemetryRow[] | null; error?: { message?: string } | null }>;
+};
+
+type SupabaseClientLike = {
+  from: (table: string) => SupabaseQueryLike;
+};
 
 /**
  * Derives the REAL tool counts from the `swanbot-v2-ai` edge-function source.
@@ -197,6 +261,134 @@ export function deriveSwanbotV2ToolParityFromSource(source: string): SwanbotV2De
   return { total, server: total - clientDelegated, clientDelegated };
 }
 
+export function buildSwanBotOpenSwanTelemetryInputFromAgentRunRows(
+  rows: SwanBotOpenSwanAgentRunTelemetryRow[],
+  opts: { minRuns?: number } = {},
+): SwanBotOpenSwanProductionTelemetry {
+  const v1StopReasons: Record<string, number> = {};
+  const v2StopReasons: Record<string, number> = {};
+  const missingFinalStopReason: Record<SwanBotOpenSwanTelemetrySide, number> = { v1: 0, v2: 0 };
+  const completeness: Record<SwanBotOpenSwanTelemetrySide, SwanBotOpenSwanTelemetryCompleteness> = {
+    v1: emptyTelemetryCompleteness(),
+    v2: emptyTelemetryCompleteness(),
+  };
+  const warnings: string[] = [];
+  let ignoredRows = 0;
+  let activePendingRows = 0;
+
+  for (const row of rows || []) {
+    if (row.surface && row.surface !== 'main_chat') {
+      ignoredRows += 1;
+      continue;
+    }
+    const version = getAgentRunVersion(row);
+    const side = version === 'swanbot-ai'
+      ? 'v1'
+      : version === 'swanbot-v2-ai'
+        ? 'v2'
+        : null;
+    if (!side) {
+      ignoredRows += 1;
+      continue;
+    }
+
+    const rawReason = row.final_stop_reason;
+    const reason = normalizeStopReason(rawReason);
+    if (row.status === 'running' && reason === 'client_pending') {
+      ignoredRows += 1;
+      activePendingRows += 1;
+      continue;
+    }
+    const sideCompleteness = completeness[side];
+    sideCompleteness.rows += 1;
+    if (typeof rawReason !== 'string' || rawReason.trim().length === 0) {
+      missingFinalStopReason[side] += 1;
+      sideCompleteness.missingFinalStopReason += 1;
+    }
+    if (row.tool_calls == null) {
+      sideCompleteness.missingToolCalls += 1;
+    }
+    if (!isPositiveIntegerLike(row.iteration_count)) {
+      sideCompleteness.badIterationCount += 1;
+    }
+    if (row.input_tokens == null || row.output_tokens == null || row.cached_tokens == null) {
+      sideCompleteness.missingTokenFields += 1;
+    } else if (Number(row.input_tokens) === 0 && Number(row.output_tokens) === 0 && Number(row.cached_tokens) === 0) {
+      sideCompleteness.zeroTokenRows += 1;
+    }
+
+    const target = side === 'v1' ? v1StopReasons : v2StopReasons;
+    target[reason] = (target[reason] || 0) + 1;
+  }
+
+  if (activePendingRows > 0) {
+    warnings.push(`Ignored ${activePendingRows} active client_pending SwanBot run${activePendingRows === 1 ? '' : 's'}; readiness counts terminal rows only.`);
+  }
+  const ignoredNonPendingRows = ignoredRows - activePendingRows;
+  if (ignoredNonPendingRows > 0) {
+    warnings.push(`Ignored ${ignoredNonPendingRows} non-SwanBot agent_run row${ignoredNonPendingRows === 1 ? '' : 's'}.`);
+  }
+
+  return {
+    telemetry: {
+      minRuns: opts.minRuns,
+      v1StopReasons,
+      v2StopReasons,
+      missingFinalStopReason,
+    },
+    rowsScanned: rows.length,
+    missingFinalStopReason,
+    completeness,
+    ignoredRows,
+    window: { since: null, until: null },
+    warnings,
+  };
+}
+
+export async function loadSwanBotOpenSwanAgentRunTelemetry(
+  opts: SwanBotOpenSwanTelemetryReadOptions = {},
+  client?: SupabaseClientLike,
+): Promise<SwanBotOpenSwanProductionTelemetry> {
+  const supabaseClient = client || await loadDefaultSupabaseClient();
+  const pageSize = clamp(Math.floor(opts.pageSize || 500), 1, 1000);
+  const rows: SwanBotOpenSwanAgentRunTelemetryRow[] = [];
+
+  for (const version of ['swanbot-ai', 'swanbot-v2-ai'] as const) {
+    let offset = 0;
+    while (true) {
+      let query = supabaseClient
+        .from('agent_runs')
+        .select('id, circle_id, started_at, completed_at, status, surface, final_stop_reason, tool_calls, iteration_count, input_tokens, output_tokens, cached_tokens, metadata')
+        .eq('metadata->>version', version)
+        .eq('surface', 'main_chat');
+      if (opts.circleId) query = query.eq('circle_id', opts.circleId);
+      if (opts.since) query = query.gte('started_at', opts.since);
+      if (opts.until) query = query.lt('started_at', opts.until);
+
+      const { data, error } = await query
+        .order('started_at', { ascending: false })
+        .range(offset, offset + pageSize - 1);
+      if (error) {
+        throw new Error(error.message || `Failed to load SwanBot ${version} telemetry`);
+      }
+
+      const page = data || [];
+      rows.push(...page);
+      if (page.length < pageSize) break;
+      offset += pageSize;
+    }
+  }
+
+  const result = buildSwanBotOpenSwanTelemetryInputFromAgentRunRows(rows, { minRuns: opts.minRuns });
+  return {
+    ...result,
+    window: {
+      since: opts.since || null,
+      until: opts.until || null,
+    },
+  };
+}
+
 export function buildSwanBotOpenSwanReadinessSnapshot(
   input: SwanBotOpenSwanReadinessInput = {},
 ): SwanBotOpenSwanReadinessSnapshot {
@@ -220,6 +412,10 @@ export function buildSwanBotOpenSwanReadinessSnapshot(
   if (!toolParity.ok) {
     blockers.push(toolParity.summary);
   }
+
+  const completeness = buildTelemetryCompletenessAssessment(input.telemetryCompleteness);
+  blockers.push(...completeness.blockers);
+  warnings.push(...completeness.warnings);
 
   if (!telemetry.enoughSamples) {
     warnings.push(telemetry.summary);
@@ -252,7 +448,7 @@ export function buildSwanBotOpenSwanReadinessSnapshot(
   if (telemetry.enoughSamples && !telemetry.rateComparable) {
     nextActions.push(buildTelemetryRepairAction(telemetry));
   } else if (!telemetry.enoughSamples) {
-    nextActions.push(`Collect at least ${telemetry.minRuns} v2 runs with final_stop_reason telemetry before M4.`);
+    nextActions.push(`Collect at least ${telemetry.minRuns} v1 and v2 runs with final_stop_reason telemetry before M4.`);
   }
 
   const allSmokesPass = requiredSmokes.every(smoke => smoke.status === 'pass');
@@ -364,27 +560,36 @@ function buildTelemetrySnapshot(input: SwanBotOpenSwanTelemetryInput | undefined
   const v2StopReasons = summarizeStopReasons(input?.v2StopReasons);
   const v1RunCount = Math.max(0, input?.v1RunCount ?? v1StopReasons.total);
   const v2RunCount = Math.max(0, input?.v2RunCount ?? v2StopReasons.total);
+  const v1EnoughSamples = v1RunCount >= minRuns;
+  const v2EnoughSamples = v2RunCount >= minRuns;
   const v1EndTurnRate = normalizeRate(input?.v1EndTurnRate) ?? deriveEndTurnRate(v1StopReasons);
   const v2EndTurnRate = normalizeRate(input?.v2EndTurnRate) ?? deriveEndTurnRate(v2StopReasons);
-  const enoughSamples = v2RunCount >= minRuns;
+  const missingFinalStopReason = {
+    v1: Math.max(0, input?.missingFinalStopReason?.v1 ?? 0),
+    v2: Math.max(0, input?.missingFinalStopReason?.v2 ?? 0),
+  };
+  const enoughSamples = v1EnoughSamples && v2EnoughSamples;
   const rateComparable = v1EndTurnRate === null || v2EndTurnRate === null
     ? false
     : v2EndTurnRate >= v1EndTurnRate;
   const ok = enoughSamples && rateComparable;
   const summary = !enoughSamples
-    ? `Telemetry needs ${minRuns} v2 runs before default flip; currently ${v2RunCount}.`
+    ? `Telemetry needs ${minRuns} v1 and v2 runs before default flip; currently v1=${v1RunCount}, v2=${v2RunCount}.`
     : rateComparable
-      ? `v2 end-turn rate ${(v2EndTurnRate ?? 0).toFixed(3)} is >= v1 ${(v1EndTurnRate ?? 0).toFixed(3)} across ${v2RunCount} v2 runs.`
+      ? `v2 end-turn rate ${(v2EndTurnRate ?? 0).toFixed(3)} is >= v1 ${(v1EndTurnRate ?? 0).toFixed(3)} across ${v1RunCount} v1 / ${v2RunCount} v2 runs.`
       : `v2 end-turn rate ${(v2EndTurnRate ?? 0).toFixed(3)} is below v1 ${(v1EndTurnRate ?? 0).toFixed(3)}.`;
 
   return {
     minRuns,
     v1RunCount,
     v2RunCount,
+    v1EnoughSamples,
+    v2EnoughSamples,
     v1EndTurnRate,
     v2EndTurnRate,
     v1StopReasons,
     v2StopReasons,
+    missingFinalStopReason,
     enoughSamples,
     rateComparable,
     ok,
@@ -447,6 +652,59 @@ function normalizeStopReasonCounts(input: SwanBotOpenSwanStopReasonCounts | unde
   return Array.from(merged.entries()).map(([reason, count]) => ({ reason, count }));
 }
 
+function emptyTelemetryCompleteness(): SwanBotOpenSwanTelemetryCompleteness {
+  return {
+    rows: 0,
+    missingFinalStopReason: 0,
+    missingToolCalls: 0,
+    badIterationCount: 0,
+    missingTokenFields: 0,
+    zeroTokenRows: 0,
+  };
+}
+
+function buildTelemetryCompletenessAssessment(
+  input: SwanBotOpenSwanReadinessInput['telemetryCompleteness'],
+): { blockers: string[]; warnings: string[] } {
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+  if (!input) return { blockers, warnings };
+
+  for (const side of ['v1', 'v2'] as const) {
+    const summary = input[side];
+    const rows = Math.max(0, Math.floor(Number(summary?.rows || 0)));
+    if (rows <= 0) continue;
+    const missingFinalStopReason = Math.max(0, Math.floor(Number(summary?.missingFinalStopReason || 0)));
+    const missingToolCalls = Math.max(0, Math.floor(Number(summary?.missingToolCalls || 0)));
+    const badIterationCount = Math.max(0, Math.floor(Number(summary?.badIterationCount || 0)));
+    const missingTokenFields = Math.max(0, Math.floor(Number(summary?.missingTokenFields || 0)));
+    const zeroTokenRows = Math.max(0, Math.floor(Number(summary?.zeroTokenRows || 0)));
+
+    if (missingFinalStopReason > 0) {
+      blockers.push(`${side} agent_runs telemetry is missing final_stop_reason on ${missingFinalStopReason}/${rows} row(s).`);
+    }
+    if (missingToolCalls > 0) {
+      blockers.push(`${side} agent_runs telemetry is missing tool_calls on ${missingToolCalls}/${rows} row(s).`);
+    }
+    if (badIterationCount > 0) {
+      blockers.push(`${side} agent_runs telemetry is missing valid iteration_count on ${badIterationCount}/${rows} row(s).`);
+    }
+    if (missingTokenFields > 0) {
+      blockers.push(`${side} agent_runs telemetry is missing token fields on ${missingTokenFields}/${rows} row(s).`);
+    }
+    if (zeroTokenRows > 0) {
+      warnings.push(`${side} agent_runs telemetry has ${zeroTokenRows}/${rows} zero-token row(s); review errors or pre-model failures before using spend parity.`);
+    }
+  }
+
+  return { blockers, warnings };
+}
+
+function isPositiveIntegerLike(value: unknown): boolean {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return false;
+  return Math.floor(value) === value && value >= 1;
+}
+
 function normalizeStopReason(reason: unknown): string {
   const text = typeof reason === 'string' ? reason.trim().toLowerCase() : '';
   return text || 'unknown';
@@ -491,7 +749,10 @@ function scoreReadiness(args: {
     ? 25
     : args.telemetry.enoughSamples
       ? 12
-      : Math.min(10, (args.telemetry.v2RunCount / args.telemetry.minRuns) * 10);
+      : Math.min(
+        10,
+        (Math.min(args.telemetry.v1RunCount, args.telemetry.v2RunCount) / args.telemetry.minRuns) * 10,
+      );
   const penalty = args.blockers.length * 6 + args.warnings.length * 2;
   const raw = smokeScore + parityScore + telemetryScore - penalty;
 
@@ -538,4 +799,15 @@ function uniqueMessages(messages: string[]): string[] {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function getAgentRunVersion(row: SwanBotOpenSwanAgentRunTelemetryRow): SwanBotOpenSwanAgentRunVersion | null {
+  const metadata = row.metadata || {};
+  const version = metadata.version;
+  return version === 'swanbot-ai' || version === 'swanbot-v2-ai' ? version : null;
+}
+
+async function loadDefaultSupabaseClient(): Promise<SupabaseClientLike> {
+  const mod = await import('./supabase');
+  return mod.supabase as unknown as SupabaseClientLike;
 }

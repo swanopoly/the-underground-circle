@@ -74,6 +74,33 @@ assert(narrowReport.activeLaneCount === 1, 'single-lane report has one active la
 assert(narrowReport.buckets[0]?.lane.id === 'lane2_chat_dispatcher', 'chat files map to chat dispatcher lane');
 assert(!narrowReport.verificationCommands.includes('npm run check:openswan-lanes'), 'narrow report does not self-loop lane check');
 
+const traceReport = buildOpenSwanLaneReport({
+  maxActiveLanes: 2,
+  maxChangedPaths: 10,
+  statusLines: [
+    ' M scripts/export-traces.ts',
+    '?? scripts/export-traces-smoketest.ts',
+  ],
+});
+
+assert(traceReport.status === 'narrow', 'trace exporter report is narrow');
+assert(traceReport.activeLaneCount === 1, 'trace exporter maps to one lane');
+assert(traceReport.buckets[0]?.lane.id === 'lane3_openswan_typed_core', 'trace exporter maps to OpenSwan typed core lane');
+assert(traceReport.unmappedPaths.length === 0, 'trace exporter paths are not unmapped');
+assert(traceReport.verificationCommands.includes('npm run smoke:export-traces'), 'trace exporter report recommends export smoke');
+
+const runtimePlanReport = buildOpenSwanLaneReport({
+  maxActiveLanes: 2,
+  maxChangedPaths: 10,
+  statusLines: [
+    ' M docs/AGENT_RUNTIME_INTEGRATION_PLAN.md',
+  ],
+});
+
+assert(runtimePlanReport.status === 'narrow', 'runtime integration plan report is narrow');
+assert(runtimePlanReport.buckets[0]?.lane.id === 'lane3_openswan_typed_core', 'runtime integration plan maps to OpenSwan typed core lane');
+assert(runtimePlanReport.unmappedPaths.length === 0, 'runtime integration plan is not unmapped');
+
 const cleanReport = buildOpenSwanLaneReport({
   statusLines: [],
 });

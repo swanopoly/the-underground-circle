@@ -161,6 +161,11 @@ should fail if it spans too many lanes.
 
 Use `npm run check:swanbot-chat:daily` for normal SwanBot/OpenSwan/Chat
 development and `npm run check:swanbot-chat:release` for a larger delivery.
+For a SwanBot v2 default flip or customer handoff, run the live production
+report after the local release gate:
+`npm run report:swanbot-openswan-readiness -- --smokes-passed --since <iso>`.
+Use `npm run check:swanbot-openswan-readiness:production -- --smokes-passed --since <iso>`
+only when the handoff should fail unless the live report says `can_flip_default`.
 `smoke:all` remains an integration sweep, not the daily default.
 
 Managed Claude Code, Codex, Cursor Composer, and Gemini CLI launches call

@@ -147,6 +147,23 @@ function main() {
     assert(r.detail?.includes('on github.com'), 'click_role: host in detail');
   }
 
+  // ─── Custom API write approval — method/path and connector shown ───
+  {
+    const r = renderApprovalAction({
+      tool: 'custom_api.request',
+      args: {
+        method: 'POST',
+        path: '/orders',
+        apiName: 'Dealer CRM',
+        body: { status: 'ready' },
+      },
+    }, 'x');
+    assert(r.headline.includes('Call'), 'custom_api.request: Call verb');
+    assert(r.headline.includes('**POST /orders**'), 'custom_api.request: method/path shown');
+    assert(r.detail?.includes('Dealer CRM'), 'custom_api.request: connector shown');
+    assert(r.detail?.includes('request body'), 'custom_api.request: request body flagged');
+  }
+
   // ─── browser.fill_field — text clipped ──────────────────────────
   {
     const r = renderApprovalAction({

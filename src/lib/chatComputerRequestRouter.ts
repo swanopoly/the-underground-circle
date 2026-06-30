@@ -340,6 +340,12 @@ export interface ChatComputerRequestRoute {
   completionProof: string[];
   aiNeed?: DesktopTaskAiNeedClassification;
   /**
+   * How the selected chat model should coordinate with SwanBot/OpenSwan,
+   * desktop/browser tools, and optional multi-agent fan-out. This prevents
+   * "selected model" from becoming a raw-chat bypass around the runtime.
+   */
+  modelOrchestration?: ChatComputerModelOrchestration;
+  /**
    * Ordered, executable checklist derived from the selected desktop/browser
    * tools. This is what the model should DO, not a broad phased plan. Optional
    * so routes persisted before this field keep parsing.
@@ -369,6 +375,58 @@ export interface ChatComputerRequestRoute {
    */
   appResolution?: ChatComputerAppResolution | null;
   notes: string[];
+}
+
+export interface ChatComputerModelOrchestration {
+  mode: 'model_guided_tools' | 'multi_agent_model_guided_tools';
+  coordinator: 'selected_chat_model_then_openswan';
+  selectedModelRole: string;
+  activationPath: string[];
+  modelSelectionHint: string;
+  multiAgentHint?: string;
+}
+
+function wantsMaximumAgentFanout(message: string): boolean {
+  const text = String(message || '').toLowerCase();
+  return /\b(?:use|deploy|spawn|run|assign|have|put)\s+(?:as\s+many|all|multiple|parallel)\s+agents?\b/.test(text)
+    || /\bas\s+many\s+agents?\s+(?:as\s+possible|work\s+on\s+it)\b/.test(text)
+    || /\bagents?\s+work\s+on\s+it\s+as\s+possible\b/.test(text)
+    || /\bwith\s+as\s+many\s+agents?\s+as\s+possible\b/.test(text);
+}
+
+function buildChatComputerModelOrchestration(input: {
+  message: string;
+  kind: ChatComputerRequestRouteKind;
+  recommendedTools: string[];
+  aiNeed: DesktopTaskAiNeedClassification;
+}): ChatComputerModelOrchestration {
+  const multiAgent = wantsMaximumAgentFanout(input.message);
+  const toolSurface = input.kind === 'browser'
+    ? 'browser tools'
+    : input.kind === 'local_file'
+      ? 'local file tools'
+      : input.kind === 'desktop_app'
+        ? 'desktop/app bridge tools'
+        : 'hybrid browser/desktop tools';
+  return {
+    mode: multiAgent ? 'multi_agent_model_guided_tools' : 'model_guided_tools',
+    coordinator: 'selected_chat_model_then_openswan',
+    selectedModelRole: `Use the selected chat model to understand the request, pick the right app/tool path, and decide when AI reasoning is needed; do not use raw chat as the final executor when ${toolSurface} are available.`,
+    activationPath: [
+      'resolve selected model or Auto profile',
+      'run SwanBot/OpenSwan planner with the route metadata',
+      `execute through ${toolSurface}`,
+      'collect proof or a bounded blocker',
+    ],
+    modelSelectionHint: input.aiNeed.level === 'none'
+      ? 'Prefer deterministic tools and use the model only to summarize proof or blockers.'
+      : input.aiNeed.level === 'assistive'
+        ? 'Use the model to choose controls, interpret screenshots, and keep execution bounded by evidence.'
+        : 'Use a strong connected reasoning/coding model, then hand execution to SwanBot/OpenSwan tools instead of answering only in prose.',
+    multiAgentHint: multiAgent
+      ? 'If multiple agents are available, create a multi-agent plan first and keep each agent on a bounded role; approvals/evidence still gate tool execution.'
+      : undefined,
+  };
 }
 
 const BROWSER_STRATEGIES = new Set<ComputerAppStrategyId>([
@@ -1490,10 +1548,17 @@ export function buildChatComputerRequestRoute(
     hasDesignPipeline: Boolean(designPipeline),
     recommendedTools,
   });
+  const modelOrchestration = buildChatComputerModelOrchestration({
+    message: normalized,
+    kind,
+    recommendedTools,
+    aiNeed,
+  });
   const notes = uniqueStrings([
     `Computer request route: ${bestPath}.`,
     `Preview kind: ${preview.kind}.`,
     `AI need: ${aiNeed.label} — ${aiNeed.reason}`,
+    `Model orchestration: ${modelOrchestration.mode}; ${modelOrchestration.modelSelectionHint}`,
     appResolution
       ? `App choice: ${appResolution.best.displayName} (${shortAppReason(appResolution.best.reason)}); alternatives: ${appResolution.alternativesSummary.map((alt) => alt.split(' — ')[0]).join(', ') || 'none'}.`
       : null,
@@ -1537,6 +1602,7 @@ export function buildChatComputerRequestRoute(
     recommendedTools,
     completionProof,
     aiNeed,
+    modelOrchestration,
     actionItems: [],
     evidenceContract: null,
     userConstraints,
@@ -1583,6 +1649,9 @@ export function buildChatComputerRequestRoutePromptBlock(message: string): strin
       : null,
     route.aiNeed
       ? `AI need: ${route.aiNeed.label} — ${route.aiNeed.reason}${route.aiNeed.deterministicTools.length ? ` Deterministic tools: ${route.aiNeed.deterministicTools.join(' | ')}.` : ''}${route.aiNeed.aiSurfaces.length ? ` AI surfaces: ${route.aiNeed.aiSurfaces.join(' | ')}.` : ''}`
+      : null,
+    route.modelOrchestration
+      ? `Model/app orchestration: ${route.modelOrchestration.selectedModelRole} Activation path: ${route.modelOrchestration.activationPath.join(' -> ')}. ${route.modelOrchestration.modelSelectionHint}${route.modelOrchestration.multiAgentHint ? ` ${route.modelOrchestration.multiAgentHint}` : ''}`
       : null,
     route.appResolution
       ? `App choice: ${route.appResolution.best.displayName} — ${route.appResolution.best.reason}. Open it first before the task (${route.appResolution.openStepLines[0] || route.appResolution.best.openVia}). If the user objects, switch to: ${route.appResolution.alternativesSummary.join('; ') || 'no ranked alternative — ask the user'}.`

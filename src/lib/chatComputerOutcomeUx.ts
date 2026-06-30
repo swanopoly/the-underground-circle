@@ -39,6 +39,24 @@ const DIRECT_IMAGE_CONVERSION_RECONNECT_MESSAGE = [
   'I could not finish the image conversion because the desktop bridge is not ready.',
   'Reconnect the bridge, approve the requested folder if prompted, then retry. I will only mark it done after the saved image is verified.',
 ].join('\n\n');
+const DIRECT_IMAGE_CONVERSION_NOT_FOUND_STEP = 'Send the exact image path or refresh the file search, then retry the conversion once.';
+const DIRECT_IMAGE_CONVERSION_NOT_FOUND_BLOCKER = 'Source image could not be found before conversion.';
+const DIRECT_IMAGE_CONVERSION_NOT_FOUND_MESSAGE = [
+  'I could not find the image to convert.',
+  DIRECT_IMAGE_CONVERSION_NOT_FOUND_STEP,
+].join('\n\n');
+const DIRECT_IMAGE_CONVERSION_AMBIGUOUS_STEP = 'Send the exact image path for the one you want converted, then retry once.';
+const DIRECT_IMAGE_CONVERSION_AMBIGUOUS_BLOCKER = 'More than one matching source image was found before conversion.';
+const DIRECT_IMAGE_CONVERSION_AMBIGUOUS_MESSAGE = [
+  'I found more than one matching image to convert.',
+  DIRECT_IMAGE_CONVERSION_AMBIGUOUS_STEP,
+].join('\n\n');
+const DIRECT_IMAGE_CONVERSION_CONFLICT_STEP = 'Choose a different output name or move the existing converted image, then retry once.';
+const DIRECT_IMAGE_CONVERSION_CONFLICT_BLOCKER = 'Converted image output already exists.';
+const DIRECT_IMAGE_CONVERSION_CONFLICT_MESSAGE = [
+  'A converted image with that name already exists.',
+  DIRECT_IMAGE_CONVERSION_CONFLICT_STEP,
+].join('\n\n');
 const LOCAL_IMAGE_EXPORT_MISSING_PROOF_BLOCKER = 'Saved-image proof was not captured, so the task cannot be marked done yet.';
 const LOCAL_IMAGE_EXPORT_MISSING_PROOF_STEP = 'Retry once after reconnecting the desktop bridge, then verify the saved image before reporting completion.';
 const LOCAL_IMAGE_EXPORT_MISSING_PROOF_MESSAGE = [
@@ -68,6 +86,21 @@ const LOCAL_FILE_AUTOMATION_RECOVERY_STEP = 'Refresh the file search/stat eviden
 const LOCAL_FILE_AUTOMATION_FAILURE_MESSAGE = [
   'I could not access the requested local file yet.',
   LOCAL_FILE_AUTOMATION_RECOVERY_STEP,
+].join('\n\n');
+const LOCAL_FILE_NOT_FOUND_RECOVERY_STEP = 'Send the exact file path or refresh the file search, then retry once.';
+const LOCAL_FILE_NOT_FOUND_FAILURE_MESSAGE = [
+  'I could not find the requested local file.',
+  LOCAL_FILE_NOT_FOUND_RECOVERY_STEP,
+].join('\n\n');
+const LOCAL_FILE_PERMISSION_RECOVERY_STEP = 'Approve the requested folder access, then retry once.';
+const LOCAL_FILE_PERMISSION_FAILURE_MESSAGE = [
+  'I need folder access before I can work with that local file.',
+  LOCAL_FILE_PERMISSION_RECOVERY_STEP,
+].join('\n\n');
+const LOCAL_FILE_AMBIGUOUS_RECOVERY_STEP = 'Send the exact file path for the one you want, then retry once.';
+const LOCAL_FILE_AMBIGUOUS_FAILURE_MESSAGE = [
+  'I found more than one matching local file.',
+  LOCAL_FILE_AMBIGUOUS_RECOVERY_STEP,
 ].join('\n\n');
 const BROWSER_AUTOMATION_BLOCKER = 'Browser automation needs a fresh browser connection or page observation before it can continue.';
 const BROWSER_AUTOMATION_RECOVERY_STEP = 'Refresh the browser page observation, reconnect the browser bridge if prompted, then retry once.';
@@ -137,6 +170,39 @@ export function isCompactDirectImageConversionBridgeFailure(
     && /\b(?:png|jpe?g|image|convert|conversion|export|save)\b/i.test(text);
 }
 
+function directImageConversionFailureCopy(
+  outcomeMessage: string,
+  warnings: string[],
+): { message: string; blocker: string; recoveryStep: string } {
+  const text = [outcomeMessage, ...warnings].join('\n');
+  if (/\b(?:ambiguous_file_match|ambiguous|more than one|multiple matching|multiple matches?)\b/i.test(text)) {
+    return {
+      message: DIRECT_IMAGE_CONVERSION_AMBIGUOUS_MESSAGE,
+      blocker: DIRECT_IMAGE_CONVERSION_AMBIGUOUS_BLOCKER,
+      recoveryStep: DIRECT_IMAGE_CONVERSION_AMBIGUOUS_STEP,
+    };
+  }
+  if (/\b(?:output_conflict|already exists|overwrit(?:e|ing)|conflict)\b/i.test(text)) {
+    return {
+      message: DIRECT_IMAGE_CONVERSION_CONFLICT_MESSAGE,
+      blocker: DIRECT_IMAGE_CONVERSION_CONFLICT_BLOCKER,
+      recoveryStep: DIRECT_IMAGE_CONVERSION_CONFLICT_STEP,
+    };
+  }
+  if (/\b(?:file_not_found|path_not_found|ENOENT|not found|does not exist|missing source|could not find|no matching source image)\b/i.test(text)) {
+    return {
+      message: DIRECT_IMAGE_CONVERSION_NOT_FOUND_MESSAGE,
+      blocker: DIRECT_IMAGE_CONVERSION_NOT_FOUND_BLOCKER,
+      recoveryStep: DIRECT_IMAGE_CONVERSION_NOT_FOUND_STEP,
+    };
+  }
+  return {
+    message: DIRECT_IMAGE_CONVERSION_RECONNECT_MESSAGE,
+    blocker: DIRECT_IMAGE_CONVERSION_BLOCKER,
+    recoveryStep: DIRECT_IMAGE_CONVERSION_RECONNECT_STEP,
+  };
+}
+
 export function buildCompactPhotoshopSaveForWebBridgeFailureMessage(): string {
   return [
     'I could not finish the Photoshop PNG export because the desktop bridge needs to reconnect before Photoshop actions can continue.',
@@ -192,6 +258,36 @@ export function isCompactLocalFileAutomationFailure(
     && /\b(?:file|folder|path|desktop|downloads?|documents?|image|pdf|csv|permission|access|missing|not found|failed|blocked|error)\b/i.test(text);
 }
 
+function localFileAutomationFailureCopy(
+  task: string,
+  outcomeMessage: string,
+  warnings: string[],
+): { message: string; recoveryStep: string } {
+  const text = [task, outcomeMessage, ...warnings].join('\n');
+  if (/\b(?:ambiguous|more than one|multiple matches?|multiple matching)\b/i.test(text)) {
+    return {
+      message: LOCAL_FILE_AMBIGUOUS_FAILURE_MESSAGE,
+      recoveryStep: LOCAL_FILE_AMBIGUOUS_RECOVERY_STEP,
+    };
+  }
+  if (/\b(?:ENOENT|not found|does not exist|no file named|missing\s+(?:file|folder|path|source)|file\s+missing|folder\s+missing|path\s+missing)\b/i.test(text)) {
+    return {
+      message: LOCAL_FILE_NOT_FOUND_FAILURE_MESSAGE,
+      recoveryStep: LOCAL_FILE_NOT_FOUND_RECOVERY_STEP,
+    };
+  }
+  if (/\b(?:X-UC-File-Session-Token|EACCES|EPERM|operation not permitted|permission|folder access|grant|approve)\b/i.test(text)) {
+    return {
+      message: LOCAL_FILE_PERMISSION_FAILURE_MESSAGE,
+      recoveryStep: LOCAL_FILE_PERMISSION_RECOVERY_STEP,
+    };
+  }
+  return {
+    message: LOCAL_FILE_AUTOMATION_FAILURE_MESSAGE,
+    recoveryStep: LOCAL_FILE_AUTOMATION_RECOVERY_STEP,
+  };
+}
+
 export function isCompactGenericBrowserAutomationFailure(
   task: string,
   outcomeStatus: string,
@@ -221,6 +317,9 @@ export function buildChatComputerOutcomePresentation(
     input.outcomeMessage,
     input.rawWarnings,
   );
+  const directImageConversionFailureCopyValue = compactDirectImageConversionBridgeFailure
+    ? directImageConversionFailureCopy(input.outcomeMessage, input.rawWarnings)
+    : null;
   const compactImageExportSuccess = buildCompactLocalImageExportSuccessMessage(
     input.task,
     input.outcomeStatus,
@@ -256,6 +355,9 @@ export function buildChatComputerOutcomePresentation(
     input.outcomeMessage,
     input.rawWarnings,
   );
+  const localFileFailureCopy = compactLocalFileAutomationFailure
+    ? localFileAutomationFailureCopy(input.task, input.outcomeMessage, input.rawWarnings)
+    : null;
   const compactTechnicalFailure = compactDirectImageConversionBridgeFailure
     || compactBridgeFailure
     || compactWordPressAutomationFailure
@@ -278,7 +380,7 @@ export function buildChatComputerOutcomePresentation(
     && !hasCapabilityAction
     && !missingLocalImageExportProof;
   const blockerList = uniqueCompact([
-    compactDirectImageConversionBridgeFailure ? DIRECT_IMAGE_CONVERSION_BLOCKER : null,
+    compactDirectImageConversionBridgeFailure ? directImageConversionFailureCopyValue?.blocker || DIRECT_IMAGE_CONVERSION_BLOCKER : null,
     compactBridgeFailure ? PHOTOSHOP_SAVE_FOR_WEB_BLOCKER : null,
     missingLocalImageExportProof ? LOCAL_IMAGE_EXPORT_MISSING_PROOF_BLOCKER : null,
     compactCredentialAutomationFailure ? CREDENTIAL_AUTOMATION_BLOCKER : null,
@@ -310,7 +412,7 @@ export function buildChatComputerOutcomePresentation(
     shouldRecoverOutcome,
     statePhase,
     compactUserMessage: compactDirectImageConversionBridgeFailure
-      ? DIRECT_IMAGE_CONVERSION_RECONNECT_MESSAGE
+      ? directImageConversionFailureCopyValue?.message || DIRECT_IMAGE_CONVERSION_RECONNECT_MESSAGE
       : compactBridgeFailure
         ? buildCompactPhotoshopSaveForWebBridgeFailureMessage()
         : missingLocalImageExportProof
@@ -322,7 +424,7 @@ export function buildChatComputerOutcomePresentation(
         : compactAppAutomationFailure
         ? APP_AUTOMATION_FAILURE_MESSAGE
         : compactLocalFileAutomationFailure
-        ? LOCAL_FILE_AUTOMATION_FAILURE_MESSAGE
+        ? localFileFailureCopy?.message || LOCAL_FILE_AUTOMATION_FAILURE_MESSAGE
         : compactGenericBrowserAutomationFailure
         ? BROWSER_AUTOMATION_FAILURE_MESSAGE
         : compactImageExportSuccess,
@@ -330,7 +432,7 @@ export function buildChatComputerOutcomePresentation(
     hideComputerHandoff: compactTechnicalFailure || Boolean(compactImageExportSuccess) || completedWithoutActionableIssues,
     hideComputerTaskStatus: compactTechnicalFailure || Boolean(compactImageExportSuccess) || completedWithoutActionableIssues,
     nextSteps: compactDirectImageConversionBridgeFailure
-      ? [DIRECT_IMAGE_CONVERSION_RECONNECT_STEP]
+      ? [directImageConversionFailureCopyValue?.recoveryStep || DIRECT_IMAGE_CONVERSION_RECONNECT_STEP]
       : compactBridgeFailure
         ? [PHOTOSHOP_SAVE_FOR_WEB_RECONNECT_STEP]
         : missingLocalImageExportProof
@@ -342,7 +444,7 @@ export function buildChatComputerOutcomePresentation(
         : compactAppAutomationFailure
         ? [APP_AUTOMATION_RECOVERY_STEP]
         : compactLocalFileAutomationFailure
-        ? [LOCAL_FILE_AUTOMATION_RECOVERY_STEP]
+        ? [localFileFailureCopy?.recoveryStep || LOCAL_FILE_AUTOMATION_RECOVERY_STEP]
         : compactGenericBrowserAutomationFailure
         ? [BROWSER_AUTOMATION_RECOVERY_STEP]
         : [],
