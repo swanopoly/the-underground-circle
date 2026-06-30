@@ -145,9 +145,9 @@ export function resolveModelForSoul(
 
   const directNano = firstConnected(connectedProviders, [
     ['ollama', 'ollama/llama3.2'],
-    ['openai', 'openai/gpt-4.1-nano'],
+    ['openai', 'openai/gpt-5.4-nano'],
     ['groq', 'groq/llama-3.3-70b-versatile'],
-    ['google_ai', 'google_ai/gemini-2.5-flash'],
+    ['google_ai', 'google_ai/gemini-3.1-flash-lite'],
     ['deepseek', 'deepseek/deepseek-chat'],
     ['mistral_ai', 'mistral_ai/mistral-small-latest'],
     ['zai', 'zai/glm-4-flash'],
@@ -155,8 +155,8 @@ export function resolveModelForSoul(
   ]);
   const directFast = firstConnected(connectedProviders, [
     ['groq', 'groq/llama-3.3-70b-versatile'],
-    ['google_ai', 'google_ai/gemini-2.5-flash'],
-    ['openai', 'openai/gpt-4.1'],           // full GPT-4.1 — mini is too weak for auto routing
+    ['google_ai', 'google_ai/gemini-3.5-flash'],
+    ['openai', 'openai/gpt-5.4-mini'],
     ['deepseek', 'deepseek/deepseek-chat'],
     ['mistral_ai', 'mistral_ai/mistral-large-latest'],
     ['together_ai', 'together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo'],
@@ -166,7 +166,8 @@ export function resolveModelForSoul(
     ['minimax', 'minimax/MiniMax-Text-01'],
   ]);
   const directStrong = firstConnected(connectedProviders, [
-    ['openai', 'openai/gpt-5.4'],
+    ['openai', 'openai/gpt-5.5'],
+    ['google_ai', 'google_ai/gemini-3.5-flash'],
     ['google_ai', 'google_ai/gemini-2.5-pro'],
     ['deepseek', 'deepseek/deepseek-reasoner'],
     ['mistral_ai', 'mistral_ai/mistral-large-latest'],
@@ -178,7 +179,7 @@ export function resolveModelForSoul(
     ['huggingface', 'huggingface/Qwen/Qwen3-235B-A22B'],
   ]);
   const directCode = firstConnected(connectedProviders, [
-    ['openai', 'openai/gpt-5.4'],
+    ['openai', 'openai/gpt-5.5'],
     ['mistral_ai', 'mistral_ai/codestral-latest'],
     ['deepseek', 'deepseek/deepseek-chat'],
     ['together_ai', 'together_ai/Qwen/Qwen3-235B-A22B-fp8-tput'],
@@ -187,38 +188,41 @@ export function resolveModelForSoul(
     ['huggingface', 'huggingface/Qwen/Qwen3-235B-A22B'],
   ]) || directStrong;
   const directReasoner = firstConnected(connectedProviders, [
-    ['openai', 'openai/o3'],
+    ['openai', 'openai/gpt-5.5'],
     ['deepseek', 'deepseek/deepseek-reasoner'],
     ['google_ai', 'google_ai/gemini-2.5-pro'],
     ['fireworks_ai', 'fireworks_ai/accounts/fireworks/models/deepseek-r1'],
     ['together_ai', 'together_ai/Qwen/Qwen3-235B-A22B-fp8-tput'],
   ]) || directStrong;
   const directResearch = firstConnected(connectedProviders, [
+    ['perplexity', 'perplexity/sonar-deep-research'],
+    ['perplexity', 'perplexity/sonar-reasoning-pro'],
     ['perplexity', 'perplexity/sonar-pro'],
     ['google_ai', 'google_ai/gemini-2.5-pro'],
-    ['openai', 'openai/gpt-5.4'],
+    ['openai', 'openai/gpt-5.5'],
     ['cohere', 'cohere/command-r-plus'],
     ['deepseek', 'deepseek/deepseek-reasoner'],
   ]) || directReasoner || directStrong;
   const directBrowser = firstConnected(connectedProviders, [
-    ['google_ai', 'google_ai/gemini-2.5-flash'],
-    ['openai', 'openai/gpt-4.1'],
+    ['google_ai', 'google_ai/gemini-3.5-flash'],
+    ['openai', 'openai/gpt-5.4-mini'],
     ['anthropic', SONNET],
     ['mistral_ai', 'mistral_ai/mistral-large-latest'],
     ['deepseek', 'deepseek/deepseek-chat'],
   ]) || directFast || directStrong;
   const directLong = firstConnected(connectedProviders, [
+    ['google_ai', 'google_ai/gemini-3.5-flash'],
     ['google_ai', 'google_ai/gemini-2.5-pro'],
     ['minimax', 'minimax/MiniMax-M1'],
     ['cohere', 'cohere/command-r-plus'],
-    ['openai', 'openai/gpt-5.4'],
+    ['openai', 'openai/gpt-5.5'],
   ]) || directStrong;
 
-  const OR_SONNET = 'openrouter/anthropic/claude-sonnet-4';
-  const OR_REASONER = 'openrouter/deepseek/deepseek-r1';
-  const OR_FAST = 'openrouter/openai/gpt-5-mini';
-  const OR_LONG = 'openrouter/google/gemini-2.5-pro';
-  const OR_BROWSER = 'openrouter/google/gemini-2.5-flash';
+  const OR_SONNET = 'openrouter/anthropic/claude-sonnet-4-6';
+  const OR_REASONER = 'openrouter/openai/gpt-5.5';
+  const OR_FAST = 'openrouter/openai/gpt-5.4-mini';
+  const OR_LONG = 'openrouter/google/gemini-3.5-flash';
+  const OR_BROWSER = 'openrouter/google/gemini-3.5-flash';
 
   // Exploring phase: ask one focused question — Haiku is plenty, ~2-3x
   // faster than Sonnet. User-visible latency drops hard here because
@@ -307,10 +311,22 @@ export function resolveModelForSoul(
 const MODEL_FAILOVER: Record<string, string[]> = {
   [BLACKSWAN_ENDPOINT_MODEL_ID]:     ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6'],
   'claude-sonnet-4-6':          ['claude-haiku-4-5-20251001', 'gemini-2.5-flash'],
+  'claude-fable-5':             ['claude-opus-4-8', 'claude-sonnet-4-6'],
+  'claude-opus-4-8':            ['claude-opus-4-7', 'claude-sonnet-4-6'],
+  'claude-opus-4-7':            ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
   'claude-opus-4-6':            ['claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
+  'gpt-5.5-pro':                ['gpt-5.5', 'gpt-5.4', 'claude-sonnet-4-6'],
+  'gpt-5.5':                    ['gpt-5.4', 'gpt-5.4-mini', 'claude-sonnet-4-6'],
+  'gpt-5.4':                    ['gpt-5.4-mini', 'gpt-4.1', 'claude-sonnet-4-6'],
+  'gpt-5.4-mini':               ['gpt-4.1', 'gemini-3.1-flash-lite'],
   'claude-haiku-4-5-20251001':  ['gemini-2.5-flash'],
+  'gemini-3.5-flash':           ['gemini-2.5-pro', 'gemini-2.5-flash'],
+  'gemini-3.1-pro-preview':     ['gemini-2.5-pro', 'claude-sonnet-4-6'],
+  'gemini-3.1-flash-lite':      ['gemini-2.5-flash-lite', 'gemini-2.5-flash'],
   'gemini-2.5-pro':             ['claude-haiku-4-5-20251001'],
   'gemini-2.5-flash':           ['claude-haiku-4-5-20251001'],
+  'sonar-deep-research':        ['sonar-reasoning-pro', 'sonar-pro'],
+  'sonar-reasoning-pro':        ['sonar-pro', 'sonar'],
 };
 
 export function getModelFailoverChain(model: string): string[] {

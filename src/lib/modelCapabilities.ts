@@ -25,24 +25,35 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   // Multimodal (text + image understanding + generation)
   'gpt-4o':                     ['text', 'code', 'image_understand', 'image_gen', 'webpage_gen'],
   'gemini-2.5-flash-preview':   ['text', 'code', 'image_understand', 'image_gen', 'webpage_gen'],
-  'gemini-3.1-pro':             ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'gemini-3.5-flash':           ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'gemini-3.1-pro-preview':     ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
+  'gemini-3.1-flash-lite':      ['text', 'code', 'image_understand', 'webpage_gen'],
   'gemini-2.5-pro':             ['text', 'code', 'image_understand', 'reasoning', 'webpage_gen'],
   'gemini-2.5-flash':           ['text', 'code', 'image_understand', 'webpage_gen'],
+  'gemini-2.5-flash-lite':      ['text', 'code', 'image_understand', 'webpage_gen'],
 
   // Coding models
+  'claude-fable-5':      ['text', 'code', 'reasoning', 'webpage_gen'],
+  'claude-opus-4-8':     ['text', 'code', 'reasoning', 'webpage_gen'],
+  'claude-opus-4-7':     ['text', 'code', 'reasoning', 'webpage_gen'],
   'claude-opus-4-6':     ['text', 'code', 'reasoning', 'webpage_gen'],
   'claude-sonnet-4-6':   ['text', 'code', 'webpage_gen'],
+  'claude-haiku-4-5':          ['text', 'code', 'webpage_gen'],
   'claude-haiku-4-5-20251001': ['text', 'code', 'webpage_gen'],
+  'gpt-5.5-pro':         ['text', 'code', 'reasoning', 'webpage_gen'],
+  'gpt-5.5':             ['text', 'code', 'reasoning', 'webpage_gen'],
   'gpt-5.4':             ['text', 'code', 'reasoning', 'webpage_gen'],
-  'gpt-5.2':             ['text', 'code', 'webpage_gen'],
+  'gpt-5.4-mini':        ['text', 'code', 'reasoning', 'webpage_gen'],
+  'gpt-5.4-nano':        ['text', 'code'],
   'codex-mini':          ['text', 'code'],
   'deepseek-v3.2':       ['text', 'code'],
   'qwen-3.5-coder':      ['text', 'code'],
 
   // Reasoning
-  'o3':          ['text', 'reasoning', 'code'],
-  'o4-mini':     ['text', 'reasoning', 'code'],
   'deepseek-r1': ['text', 'reasoning', 'code'],
+  'sonar-deep-research': ['text', 'reasoning'],
+  'sonar-reasoning-pro': ['text', 'reasoning'],
+  'sonar-pro': ['text', 'reasoning'],
 
   // Speed
   'gpt-4.1-nano':   ['text', 'code'],

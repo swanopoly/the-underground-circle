@@ -167,6 +167,11 @@ function normalizeProviderModel(provider: Provider, model: string): string {
 
 const MODEL_COSTS: Record<string, [number, number]> = {
   // OpenAI
+  "gpt-5.5-pro": [30.00, 180.00],
+  "gpt-5.5": [5.00, 30.00],
+  "gpt-5.4": [2.50, 15.00],
+  "gpt-5.4-mini": [0.75, 4.50],
+  "gpt-5.4-nano": [0.20, 1.20],
   "gpt-4.1": [2.00, 8.00],
   "gpt-4.1-mini": [0.40, 1.60],
   "gpt-4.1-nano": [0.10, 0.40],
@@ -177,9 +182,15 @@ const MODEL_COSTS: Record<string, [number, number]> = {
   "o1": [15.00, 60.00],
   "o3-mini": [1.10, 4.40],
   // Google
+  "gemini-3.5-flash": [1.50, 9.00],
+  "gemini-3.1-pro-preview": [2.00, 12.00],
+  "gemini-3.1-flash-lite": [0.04, 0.15],
   "gemini-2.5-pro": [1.25, 10.00],
   "gemini-2.5-flash": [0.15, 0.60],
+  "gemini-2.5-flash-lite": [0.04, 0.15],
   // Anthropic
+  "claude-fable-5": [10.00, 50.00],
+  "claude-opus-4-8": [5.00, 25.00],
   "claude-opus-4-7": [5.00, 25.00],
   "claude-opus-4-6": [5.00, 25.00],
   "claude-sonnet-4-6": [3.00, 15.00],
@@ -380,13 +391,16 @@ async function callAnthropic(
   // Map model shortcuts to full IDs. Canonical short form (no date suffixes)
   // per Anthropic. `claude-opus` follows the latest opus — currently 4.7.
   const MODEL_MAP: Record<string, string> = {
+    "claude-fable": "claude-fable-5",
+    "claude-fable-5": "claude-fable-5",
+    "claude-opus-4-8": "claude-opus-4-8",
     "claude-opus-4-7": "claude-opus-4-7",
     "claude-opus-4-6": "claude-opus-4-6",
     "claude-sonnet-4-6": "claude-sonnet-4-6",
     "claude-haiku-4-5": "claude-haiku-4-5",
     "claude-haiku": "claude-haiku-4-5",
     "claude-sonnet": "claude-sonnet-4-6",
-    "claude-opus": "claude-opus-4-7",
+    "claude-opus": "claude-opus-4-8",
   };
   const resolvedModel = MODEL_MAP[model] || model;
 

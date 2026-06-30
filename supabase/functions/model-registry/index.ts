@@ -36,7 +36,7 @@ async function fetchOpenAIModels(apiKey: string): Promise<ModelEntry[]> {
     const data = await res.json();
 
     // Filter to chat-relevant models only
-    const CHAT_PREFIXES = ['gpt-4', 'gpt-5', 'o1', 'o3', 'o4', 'chatgpt'];
+    const CHAT_PREFIXES = ['gpt-4', 'gpt-5', 'chatgpt'];
     const SKIP_PATTERNS = ['realtime', 'audio', 'tts', 'whisper', 'dall-e', 'davinci', 'babbage', 'embedding', 'moderation', 'search', 'instruct-preview'];
 
     const now = new Date().toISOString();

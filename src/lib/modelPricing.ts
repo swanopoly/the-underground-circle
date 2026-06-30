@@ -8,7 +8,8 @@
  * Cached input tokens are billed at 10% of full input rate.
  *
  * Published Anthropic rates (as of 2026-04):
- *   Opus 4.7 / 4.6: $5 / $25
+ *   Fable 5:        $10 / $50
+ *   Opus 4.8-4.6:   $5 / $25
  *   Sonnet 4.6:     $3 / $15
  *   Haiku 4.5:      $1 / $5
  *
@@ -27,6 +28,8 @@ export const MODEL_PRICING: Record<string, ModelRate> = {
   // ── Claude Opus ───────────────────────────────────────────────────────────
   // Published: $5 / $25 for 4.6+; older Opus generations were pricier.
   // Values below = published + 25% buffer.
+  'claude-fable-5':   { inPer1M: 12.50, outPer1M: 62.50, cachedInPer1M: 1.250, label: 'Claude Fable 5'  },
+  'claude-opus-4-8':  { inPer1M: 6.25,  outPer1M: 31.25, cachedInPer1M: 0.625, label: 'Claude Opus 4.8'  },
   'claude-opus-4-7':  { inPer1M: 6.25,  outPer1M: 31.25, cachedInPer1M: 0.625, label: 'Claude Opus 4.7'  },
   'claude-opus-4-6':  { inPer1M: 6.25,  outPer1M: 31.25, cachedInPer1M: 0.625, label: 'Claude Opus 4.6'  },
   'claude-opus-4-5':  { inPer1M: 18.75, outPer1M: 93.75, cachedInPer1M: 1.875, label: 'Claude Opus 4.5'  },
@@ -50,12 +53,20 @@ export const MODEL_PRICING: Record<string, ModelRate> = {
   'gemini-2-5-pro':   { inPer1M: 1.25,  outPer1M: 10.0,  cachedInPer1M: 0.31,  label: 'Gemini 2.5 Pro'   },
   'gemini-2-5-flash': { inPer1M: 0.15,  outPer1M: 0.60,  cachedInPer1M: 0.02,  label: 'Gemini 2.5 Flash' },
   'gemini-2-5-flash-lite': { inPer1M: 0.04, outPer1M: 0.15, cachedInPer1M: 0.01, label: 'Gemini 2.5 Flash Lite' },
+  'gemini-3-5-flash': { inPer1M: 1.50,  outPer1M: 9.00,  cachedInPer1M: 0.15,  label: 'Gemini 3.5 Flash' },
+  'gemini-3-1-pro-preview': { inPer1M: 2.00, outPer1M: 12.0, cachedInPer1M: 0.50, label: 'Gemini 3.1 Pro' },
+  'gemini-3-1-flash-lite': { inPer1M: 0.04, outPer1M: 0.15, cachedInPer1M: 0.01, label: 'Gemini 3.1 Flash Lite' },
   'gemini-2-flash':   { inPer1M: 0.10,  outPer1M: 0.40,  cachedInPer1M: 0.01,  label: 'Gemini 2 Flash'   },
   'gemini-flash':     { inPer1M: 0.10,  outPer1M: 0.40,  cachedInPer1M: 0.01,  label: 'Gemini Flash'     },
   'gemini-pro':       { inPer1M: 1.25,  outPer1M: 10.0,  cachedInPer1M: 0.31,  label: 'Gemini Pro'       },
   'gemini':           { inPer1M: 1.25,  outPer1M: 10.0,  cachedInPer1M: 0.31,  label: 'Gemini'           },
   // ── OpenAI ────────────────────────────────────────────────────────────────
   'gpt-4-1':          { inPer1M: 2.00,  outPer1M: 8.00,  cachedInPer1M: 0.50,  label: 'GPT-4.1'          },
+  'gpt-5-5-pro':      { inPer1M: 37.50, outPer1M: 225.0, cachedInPer1M: 3.75,  label: 'GPT-5.5 Pro'      },
+  'gpt-5-5':          { inPer1M: 6.25,  outPer1M: 37.50, cachedInPer1M: 0.625, label: 'GPT-5.5'          },
+  'gpt-5-4':          { inPer1M: 3.125, outPer1M: 18.75, cachedInPer1M: 0.3125,label: 'GPT-5.4'          },
+  'gpt-5-4-mini':     { inPer1M: 0.9375,outPer1M: 5.625, cachedInPer1M: 0.09375,label: 'GPT-5.4 Mini'     },
+  'gpt-5-4-nano':     { inPer1M: 0.25,  outPer1M: 1.50,  cachedInPer1M: 0.025, label: 'GPT-5.4 Nano'     },
   'gpt-4-1-mini':     { inPer1M: 0.40,  outPer1M: 1.60,  cachedInPer1M: 0.10,  label: 'GPT-4.1 Mini'     },
   'gpt-4-1-nano':     { inPer1M: 0.10,  outPer1M: 0.40,  cachedInPer1M: 0.025, label: 'GPT-4.1 Nano'     },
   'gpt-4o-mini':      { inPer1M: 0.15,  outPer1M: 0.60,  cachedInPer1M: 0.075, label: 'GPT-4o Mini'      },
@@ -79,6 +90,11 @@ export const MODEL_PRICING: Record<string, ModelRate> = {
   'blackswan-7b':     { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'BlackSwan 7B'     },
   'blackswan-4b':     { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'BlackSwan 4B'     },
   'blackswan':        { inPer1M: 0,     outPer1M: 0,     cachedInPer1M: 0,     label: 'BlackSwan'        },
+  // ── Perplexity (Sonar) ────────────────────────────────────────────────────
+  'sonar':               { inPer1M: 1,   outPer1M: 1,    cachedInPer1M: 0.1,  label: 'Sonar'               },
+  'sonar-pro':           { inPer1M: 3,   outPer1M: 15,   cachedInPer1M: 0.3,  label: 'Sonar Pro'           },
+  'sonar-reasoning-pro': { inPer1M: 2,   outPer1M: 8,    cachedInPer1M: 0.2,  label: 'Sonar Reasoning Pro' },
+  'sonar-deep-research': { inPer1M: 2,   outPer1M: 8,    cachedInPer1M: 0.2,  label: 'Sonar Deep Research' },
   // ── Default fallback ──────────────────────────────────────────────────────
   'default':          { inPer1M: 4,     outPer1M: 20,    cachedInPer1M: 0.4,   label: 'Unknown Model'    },
 };

@@ -69,12 +69,16 @@ export type ThinkingLevel = 'fast' | 'balanced' | 'deep';
 
 export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
   openai: [
+    { id: 'gpt-5.5',      label: 'GPT-5.5',      provider: 'openai', contextWindow: 1050000, costTier: 'expensive' },
+    { id: 'gpt-5.5-pro',  label: 'GPT-5.5 Pro',  provider: 'openai', contextWindow: 1050000, costTier: 'expensive' },
+    { id: 'gpt-5.4',      label: 'GPT-5.4',      provider: 'openai', contextWindow: 1050000, costTier: 'mid' },
+    { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', provider: 'openai', contextWindow: 1050000, costTier: 'cheap' },
+    { id: 'gpt-5.4-nano', label: 'GPT-5.4 Nano', provider: 'openai', contextWindow: 1050000, costTier: 'cheap' },
     { id: 'gpt-4.1',      label: 'GPT-4.1',      provider: 'openai', contextWindow: 1047576, costTier: 'mid' },
     { id: 'gpt-4.1-mini', label: 'GPT-4.1 Mini', provider: 'openai', contextWindow: 1047576, costTier: 'cheap' },
+    { id: 'gpt-4.1-nano', label: 'GPT-4.1 Nano', provider: 'openai', contextWindow: 1047576, costTier: 'cheap' },
     { id: 'gpt-4o',       label: 'GPT-4o',        provider: 'openai', contextWindow: 128000,  costTier: 'mid' },
     { id: 'gpt-4o-mini',  label: 'GPT-4o Mini',   provider: 'openai', contextWindow: 128000,  costTier: 'cheap' },
-    { id: 'o4-mini',      label: 'O4 Mini',       provider: 'openai', contextWindow: 200000,  costTier: 'mid' },
-    { id: 'o3-mini',      label: 'O3 Mini',       provider: 'openai', contextWindow: 200000,  costTier: 'mid' },
   ],
   openai_compatible: [
     { id: 'business-default', label: 'Business Default', provider: 'openai_compatible', contextWindow: 128000, costTier: 'mid' },
@@ -83,9 +87,12 @@ export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
     { id: 'company-code', label: 'Company Code', provider: 'openai_compatible', contextWindow: 128000, costTier: 'mid' },
   ],
   anthropic: [
+    { id: 'claude-fable-5',    label: 'Claude Fable 5',    provider: 'anthropic', contextWindow: 1000000, costTier: 'expensive' },
+    { id: 'claude-opus-4-8',   label: 'Claude Opus 4.8',   provider: 'anthropic', contextWindow: 1000000, costTier: 'expensive' },
+    { id: 'claude-opus-4-7',   label: 'Claude Opus 4.7',   provider: 'anthropic', contextWindow: 1000000, costTier: 'expensive' },
     { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'anthropic', contextWindow: 200000, costTier: 'mid' },
     { id: 'claude-haiku-4-5',  label: 'Claude Haiku 4.5',  provider: 'anthropic', contextWindow: 200000, costTier: 'cheap' },
-    { id: 'claude-opus-4-6',   label: 'Claude Opus 4.6',   provider: 'anthropic', contextWindow: 200000, costTier: 'expensive' },
+    { id: 'claude-opus-4-6',   label: 'Claude Opus 4.6',   provider: 'anthropic', contextWindow: 1000000, costTier: 'expensive' },
   ],
   openrouter: [
     // Phase 0 quick wins: surface OpenRouter's unique routing variants
@@ -96,20 +103,29 @@ export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
     // respectively. `:free` variants are zero-cost (rate-limited)
     // models — perfect for users who haven't connected paid keys yet.
     { id: 'openrouter/auto',                              label: 'Smart (Auto-route)',  provider: 'openrouter', contextWindow: 128000,  costTier: 'mid' },
+    { id: 'openai/gpt-5.5',                               label: 'GPT-5.5',             provider: 'openrouter', contextWindow: 1050000, costTier: 'expensive' },
+    { id: 'openai/gpt-5.4-mini',                          label: 'GPT-5.4 Mini',        provider: 'openrouter', contextWindow: 1050000, costTier: 'cheap' },
+    { id: 'anthropic/claude-fable-5',                     label: 'Claude Fable 5',      provider: 'openrouter', contextWindow: 1000000, costTier: 'expensive' },
+    { id: 'anthropic/claude-opus-4-8',                    label: 'Claude Opus 4.8',     provider: 'openrouter', contextWindow: 1000000, costTier: 'expensive' },
+    { id: 'google/gemini-3.5-flash',                      label: 'Gemini 3.5 Flash',    provider: 'openrouter', contextWindow: 1000000, costTier: 'mid' },
+    { id: 'google/gemini-3.1-flash-lite',                 label: 'Gemini 3.1 Flash-Lite', provider: 'openrouter', contextWindow: 1000000, costTier: 'cheap' },
     { id: 'meta-llama/llama-3.3-70b-instruct:nitro',     label: 'Llama 3.3 70B (Fast)', provider: 'openrouter', contextWindow: 131072,  costTier: 'cheap' },
     { id: 'meta-llama/llama-3.3-70b-instruct:floor',     label: 'Llama 3.3 70B (Cheap)',provider: 'openrouter', contextWindow: 131072,  costTier: 'cheap' },
     { id: 'meta-llama/llama-3.3-70b-instruct:free',      label: 'Llama 3.3 70B (Free)', provider: 'openrouter', contextWindow: 131072,  costTier: 'free'  },
     { id: 'mistralai/mistral-small-3.1-24b-instruct:free', label: 'Mistral Small (Free)', provider: 'openrouter', contextWindow: 131072,  costTier: 'free'  },
     { id: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', provider: 'openrouter', contextWindow: 200000,  costTier: 'mid' },
     { id: 'openai/gpt-4o',              label: 'GPT-4o',             provider: 'openrouter', contextWindow: 128000,  costTier: 'mid' },
+    { id: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro',  provider: 'openrouter', contextWindow: 1000000, costTier: 'mid' },
     { id: 'google/gemini-2.5-pro',      label: 'Gemini 2.5 Pro',     provider: 'openrouter', contextWindow: 1048576, costTier: 'mid' },
     { id: 'google/gemini-2.5-flash',    label: 'Gemini 2.5 Flash',   provider: 'openrouter', contextWindow: 1048576, costTier: 'cheap' },
+    { id: 'google/gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite', provider: 'openrouter', contextWindow: 1048576, costTier: 'cheap' },
+    { id: 'perplexity/sonar-deep-research', label: 'Sonar Deep Research', provider: 'openrouter', contextWindow: 200000, costTier: 'mid' },
     { id: 'meta-llama/llama-3.3-70b',   label: 'Llama 3.3 70B',      provider: 'openrouter', contextWindow: 131072, costTier: 'cheap' },
     { id: 'Qwen/Qwen3-235B-A22B',      label: 'Qwen 3 235B MoE',    provider: 'openrouter', contextWindow: 131072, costTier: 'mid' },
   ],
   groq: [
     { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B',  provider: 'groq', contextWindow: 128000, costTier: 'cheap' },
-    { id: 'mixtral-8x7b-32768',      label: 'Mixtral 8x7B',   provider: 'groq', contextWindow: 32768,  costTier: 'cheap' },
+    { id: 'llama-3.1-8b-instant',    label: 'Llama 3.1 8B Instant', provider: 'groq', contextWindow: 131072, costTier: 'cheap' },
   ],
   ollama: [
     { id: 'blackswan',   label: 'BlackSwan (Local)', provider: 'ollama', contextWindow: 4096,  costTier: 'free' },
@@ -156,11 +172,16 @@ export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
     { id: 'MiniMax-Text-01', label: 'MiniMax Text 01', provider: 'minimax', contextWindow: 1000000, costTier: 'cheap' },
   ],
   google_ai: [
+    { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', provider: 'google_ai', contextWindow: 1000000, costTier: 'mid' },
+    { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview', provider: 'google_ai', contextWindow: 1000000, costTier: 'mid' },
+    { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite', provider: 'google_ai', contextWindow: 1000000, costTier: 'cheap' },
     { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', provider: 'google_ai', contextWindow: 1000000, costTier: 'mid' },
     { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', provider: 'google_ai', contextWindow: 1000000, costTier: 'cheap' },
+    { id: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite', provider: 'google_ai', contextWindow: 1000000, costTier: 'cheap' },
   ],
   mistral_ai: [
     { id: 'mistral-large-latest', label: 'Mistral Large', provider: 'mistral_ai', contextWindow: 128000, costTier: 'mid' },
+    { id: 'mistral-small-latest', label: 'Mistral Small', provider: 'mistral_ai', contextWindow: 128000, costTier: 'cheap' },
     { id: 'codestral-latest', label: 'Codestral', provider: 'mistral_ai', contextWindow: 32000, costTier: 'mid' },
   ],
   cohere: [
@@ -168,6 +189,8 @@ export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
     { id: 'command-r', label: 'Command R', provider: 'cohere', contextWindow: 128000, costTier: 'cheap' },
   ],
   perplexity: [
+    { id: 'sonar-deep-research', label: 'Sonar Deep Research', provider: 'perplexity', contextWindow: 200000, costTier: 'mid' },
+    { id: 'sonar-reasoning-pro', label: 'Sonar Reasoning Pro', provider: 'perplexity', contextWindow: 200000, costTier: 'mid' },
     { id: 'sonar-pro', label: 'Sonar Pro', provider: 'perplexity', contextWindow: 200000, costTier: 'mid' },
     { id: 'sonar', label: 'Sonar', provider: 'perplexity', contextWindow: 128000, costTier: 'cheap' },
   ],
