@@ -8,7 +8,7 @@
  * Storage lives in two layers so users can opt-in per circle but also
  * blanket-opt-in globally (useful for solo users):
  *   - `circles.settings.autoApprove`  — circle-scoped, JSONB
- *   - per-user `user_memory.prefs.autoApprove` — global default
+ *   - `profiles.office_preferences.autoApprove` — per-user global default
  *
  * This file is the pure logic + read/write API. UI that flips the
  * settings lives next to `HitlApprovalBanner.tsx` (the "remember this"
@@ -159,19 +159,23 @@ export async function writeCircleAutoApprove(
 
 // ─── User-scoped read/write ────────────────────────────────────────────────
 //
-// Stored in `user_memory.prefs.autoApprove` (JSONB column on user_memory).
-// Falls back to null if the key isn't set — no separate prefs table to
-// migrate.
+// Stored in `profiles.office_preferences.autoApprove` (JSONB column on
+// profiles, keyed by `profiles.id` = user id). user_memory was the wrong home:
+// it has no `prefs` column and is UNIQUE(user_id, circle_id), so a user-keyed
+// `.maybeSingle()` / `onConflict: 'user_id'` upsert there errored for any user
+// active in a circle (and `content` is NOT NULL). We reuse the existing
+// office_preferences blob with the same read-merge-update pattern as
+// workspaceAdaptation / onboardingSteps, so no migration is needed.
 
 export async function readUserAutoApprove(userId: string): Promise<AutoApproveSettings | null> {
   if (!userId) return null;
   const { data, error } = await supabase
-    .from('user_memory')
-    .select('prefs')
-    .eq('user_id', userId)
+    .from('profiles')
+    .select('office_preferences')
+    .eq('id', userId)
     .maybeSingle();
   if (error || !data) return null;
-  const prefs = (data.prefs as any) || {};
+  const prefs = (data.office_preferences as any) || {};
   const block = prefs.autoApprove;
   return isValidSettings(block) ? block : null;
 }
@@ -182,19 +186,22 @@ export async function writeUserAutoApprove(
   decision: AutoApproveDecision,
 ): Promise<{ ok: boolean; error?: string }> {
   if (!userId) return { ok: false, error: 'missing userId' };
+  // Read-merge-update so we never clobber other office_preferences keys
+  // (adaptiveWorkspace, onboarding flags, budget/idle config, …).
   const { data: current, error: readErr } = await supabase
-    .from('user_memory')
-    .select('prefs')
-    .eq('user_id', userId)
+    .from('profiles')
+    .select('office_preferences')
+    .eq('id', userId)
     .maybeSingle();
   if (readErr) return { ok: false, error: readErr.message };
-  const prefs = (current?.prefs as any) || {};
+  const prefs = (current?.office_preferences as any) || {};
   const existing = (prefs.autoApprove as AutoApproveSettings | undefined) || {};
   const next = { ...existing, [category]: decision };
   const mergedPrefs = { ...prefs, autoApprove: next };
   const { error: updateErr } = await supabase
-    .from('user_memory')
-    .upsert({ user_id: userId, prefs: mergedPrefs }, { onConflict: 'user_id' });
+    .from('profiles')
+    .update({ office_preferences: mergedPrefs })
+    .eq('id', userId);
   if (updateErr) return { ok: false, error: updateErr.message };
   return { ok: true };
 }

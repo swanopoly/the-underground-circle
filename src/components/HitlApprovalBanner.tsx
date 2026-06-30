@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, Pressable, Animated, ScrollView, Platform } from 'react-native';
 import { AgentApproval, resolveApproval } from '../services/hitlService';
 import { supabase } from '../lib/supabase';
+import { applyApprovedAction } from '../lib/agentApprovalsWorker';
 import {
   AUTO_APPROVE_CATEGORY_LABELS,
   planCategory,
@@ -100,6 +101,20 @@ export default function HitlApprovalBanner({ approvals, circleId }: Props) {
       } = await supabase.auth.getUser();
       if (!user) return;
       await resolveApproval(approvalId, status, user.id);
+
+      // Close the HITL loop: resolveApproval only flips status to "approved";
+      // the proposed side-effect (skill/memory write) runs here via the worker.
+      // The worker is idempotent (it checks applied_at) and never throws across
+      // this boundary, so a failure is logged but does not break the UI.
+      if (status === 'approved') {
+        const applied = await applyApprovedAction(approvalId);
+        if (!applied.ok) {
+          console.error(
+            `approval ${approvalId} (${applied.actionType ?? 'unknown'}) failed to apply:`,
+            applied.error,
+          );
+        }
+      }
       // "Remember this" — if the user ticked the checkbox on the card,
       // and this was an approve, persist the category as auto-approved
       // for future plans. Reject + remember is not offered (Cline pattern:

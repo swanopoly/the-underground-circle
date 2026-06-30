@@ -288,7 +288,7 @@ export async function dispatchChatAutomationPlan(
     outcome = {
       executionKind: plan.execution.kind,
       status: 'failed',
-      message: 'That automation step hit an internal error. Technical details were saved for recovery.',
+      message: `That automation step hit an internal error: ${err instanceof Error ? err.message : String(err)}`,
       warnings: [`Transport threw: ${err instanceof Error ? err.message : String(err)}`],
       data: {
         rawError: err instanceof Error ? err.message : String(err),

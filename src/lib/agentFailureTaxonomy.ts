@@ -350,6 +350,59 @@ const RULES: FailureRule[] = [
     recommendedRecovery: 'Re-answer using The Underground Circle capability contract instead of upstream model identity.',
     patterns: [/\bi am (a )?(large language model|google|anthropic|openai)\b/i, /\btrained by google\b/i],
   },
+  // ── Safety-boundary classes ─────────────────────────────────────────────
+  // These were declared in AgentFailureClass but had NO detection rule, so
+  // real auth / approval / path / secret failures fell through to `unknown`
+  // (retryable + auto-fix) and the recovery layer would silently auto-retry a
+  // boundary it should STOP at. Each is non-retryable + userActionRequired so
+  // the run pauses and asks. Placed LAST so the more specific desktop/browser/
+  // provider rules above (token_rejected, browser_bridge_offline,
+  // provider_unavailable) still win first.
+  {
+    failureClass: 'auth_expired',
+    severity: 'warning',
+    surface: 'integration_api',
+    retryable: false,
+    userActionRequired: true,
+    recommendedRecovery: 'The session or token expired — ask the user to re-authenticate (sign in / reconnect the provider), then start a fresh run. Do not auto-retry.',
+    patterns: [/\bauth(?:entication)?\b[^.\n]*\bexpired\b/i, /\b(session|token|jwt|credentials?)\b[^.\n]*\bexpired\b/i, /\bexpired\b[^.\n]*\b(session|token|jwt|credential)\b/i],
+  },
+  {
+    failureClass: 'auth_required',
+    severity: 'warning',
+    surface: 'integration_api',
+    retryable: false,
+    userActionRequired: true,
+    recommendedRecovery: 'Authentication is required — ask the user to sign in / connect the account, then retry. Do not auto-retry blindly.',
+    patterns: [/\bauthentication required\b/i, /\b(not authenticated|unauthenticated)\b/i, /\bunauthorized\b/i, /\b401\b/, /\b(login|sign[- ]?in) required\b/i],
+  },
+  {
+    failureClass: 'publish_approval_required',
+    severity: 'warning',
+    surface: 'integration_api',
+    retryable: false,
+    userActionRequired: true,
+    recommendedRecovery: 'Publishing needs explicit approval — surface the diff and wait for the user to approve before publishing. Do not auto-publish on retry.',
+    patterns: [/\bpublish(?:ing)?\b[^.\n]*\bapproval\b/i, /\bapproval (?:is )?required\b[^.\n]*\bpublish/i, /\bpublish_approval_required\b/i],
+  },
+  {
+    failureClass: 'path_not_allowed',
+    severity: 'error',
+    surface: 'terminal_bridge',
+    retryable: false,
+    userActionRequired: true,
+    recommendedRecovery: 'The requested path is outside the granted roots — ask the user to grant that path or choose one inside the allowed roots. Do not retry with the same path.',
+    patterns: [/\bpath_not_allowed\b/i, /\bpath\b[^.\n]*\b(not allowed|not permitted)\b/i, /\boutside (?:the )?(?:granted|allowed|sandbox|workspace) (?:root|path|dir)/i],
+  },
+  {
+    failureClass: 'secret_redaction_required',
+    severity: 'critical',
+    surface: 'vault',
+    retryable: false,
+    userActionRequired: true,
+    recommendedRecovery: 'Output would expose a secret — stop, redact it, and never print or persist the raw value. Request a scoped vault grant instead.',
+    patterns: [/\bsecret_redaction_required\b/i, /\bsecret redaction\b/i, /\bwould (?:expose|leak|print)\b[^.\n]*\bsecret\b/i, /\bredact(?:ion)?\b[^.\n]*\bsecret\b/i],
+  },
 ];
 
 const DEFAULT_ASSESSMENT: AgentFailureAssessment = {

@@ -5,6 +5,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.95.3';
+import { getAuthenticatedUser } from '../_shared/edge.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -36,6 +37,33 @@ Deno.serve(async (req: Request) => {
 
     if (circleErr || !circle) {
       throw new Error('Invalid circle invite code');
+    }
+
+    // ── Authorization ──────────────────────────────────────────────────────
+    // The invite code only SELECTS the circle — it is a low-entropy, shareable
+    // join token, NOT a credential. Require a real authenticated user who is a
+    // member of this circle for every operation. (Previously the invite code
+    // alone granted full read of tasks + the last 50 chat messages plus an
+    // unauthenticated write that forged a task attributed to the circle creator.)
+    // MCP clients must send the user's Supabase access token in Authorization.
+    const authUser = await getAuthenticatedUser(req);
+    if (!authUser) {
+      return new Response(
+        JSON.stringify({ error: 'Authentication required: send the user access token in Authorization' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
+    }
+    const { data: membership } = await supabase
+      .from('circle_members')
+      .select('user_id')
+      .eq('circle_id', circle.id)
+      .eq('user_id', authUser.id)
+      .maybeSingle();
+    if (!membership) {
+      return new Response(
+        JSON.stringify({ error: 'Not authorized for this circle' }),
+        { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      );
     }
 
     const { method, params, id: jsonRpcId } = await req.json();
@@ -134,15 +162,14 @@ Deno.serve(async (req: Request) => {
       case 'tools/call':
         if (params.name === 'create_circle_task') {
           const { title, description } = params.arguments;
-          // Note: In a real scenario, we'd need a valid user_id. 
-          // For now, we'll assign it to the circle creator.
-          const { data: circleCreator } = await supabase.from('circles').select('created_by').eq('id', circle.id).single();
-          
+          // Attribute the task to the authenticated member (verified above), not
+          // the circle creator — the previous behavior forged tasks under the
+          // creator's identity for any caller holding an invite code.
           const { data: newTask, error: taskErr } = await supabase
             .from('tasks')
             .insert({
               circle_id: circle.id,
-              created_by: circleCreator?.created_by,
+              created_by: authUser.id,
               title,
               description,
               status: 'open'

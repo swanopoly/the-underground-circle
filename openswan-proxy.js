@@ -38,22 +38,69 @@ if (!GATEWAY_TOKEN) {
   console.warn('[proxy] No auth token found — checked:', CONFIG_PATHS.join(', '));
 }
 
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin':  '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-openswan-agent-id, x-openswan-session-key',
-  // Private Network Access — required for the live HTTPS site to talk
-  // to this localhost proxy without silent Chrome blocking.
-  'Access-Control-Allow-Private-Network': 'true',
-};
+// ─── Origin allowlist ───────────────────────────────────────────────────────
+// This proxy injects the real local gateway token on every forwarded request,
+// so it must not be reachable by arbitrary web pages. Wildcard CORS plus
+// Private Network Access previously let ANY site the user visited drive their
+// local OpenSwan gateway with full credentials (drive-by CSRF into the local
+// agent runtime). We now allow only the app's own origins; browser requests
+// from anywhere else are refused before the token is attached. Non-browser
+// callers (native app, curl) send no Origin header and are unaffected — a
+// malicious website's fetch always carries its Origin, so it cannot slip past.
+const ALLOWED_ORIGINS = new Set([
+  'http://localhost:8081',
+  'http://127.0.0.1:8081',
+  'https://app.chrisswanson.xyz',
+  ...(process.env.OPENSWAN_PROXY_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean),
+]);
+
+function isAllowedOrigin(origin) {
+  return !!origin && ALLOWED_ORIGINS.has(origin);
+}
+
+// Echo the specific allow-listed origin (never '*', which is unsafe alongside
+// credentials / Private Network Access). Returns {} for disallowed origins so
+// no CORS-allow headers are emitted.
+function corsHeadersFor(origin) {
+  if (!isAllowedOrigin(origin)) return {};
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Vary': 'Origin',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-openswan-agent-id, x-openswan-session-key',
+    // Private Network Access — required for the live HTTPS site to talk to this
+    // localhost proxy without silent Chrome blocking (allow-listed origins only).
+    'Access-Control-Allow-Private-Network': 'true',
+  };
+}
 
 // ─── HTTP server ───────────────────────────────────────────────────────────────
 
 const server = http.createServer((req, res) => {
+  const origin = req.headers.origin || '';
+  const cors = corsHeadersFor(origin);
+
   // Preflight
   if (req.method === 'OPTIONS') {
-    res.writeHead(200, CORS_HEADERS);
+    if (origin && !isAllowedOrigin(origin)) {
+      res.writeHead(403);
+      res.end();
+      return;
+    }
+    res.writeHead(204, cors);
     res.end();
+    return;
+  }
+
+  // Refuse cross-origin browser requests from non-allow-listed sites BEFORE
+  // the trusted gateway token is attached — this is the CSRF/SSRF gate.
+  if (origin && !isAllowedOrigin(origin)) {
+    console.warn(`[proxy] HTTP rejected disallowed origin: ${origin}`);
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'origin_not_allowed' }));
     return;
   }
 
@@ -77,7 +124,7 @@ const server = http.createServer((req, res) => {
   };
 
   const proxyReq = http.request(options, (proxyRes) => {
-    const headers = { ...proxyRes.headers, ...CORS_HEADERS };
+    const headers = { ...proxyRes.headers, ...cors };
     res.writeHead(proxyRes.statusCode || 200, headers);
     proxyRes.pipe(res, { end: true });
   });
@@ -85,7 +132,7 @@ const server = http.createServer((req, res) => {
   proxyReq.on('error', (err) => {
     console.error('[proxy] HTTP error:', err.message);
     if (!res.headersSent) {
-      res.writeHead(502, CORS_HEADERS);
+      res.writeHead(502, cors);
       res.end(JSON.stringify({ error: 'Gateway unreachable', detail: err.message }));
     }
   });
@@ -95,7 +142,19 @@ const server = http.createServer((req, res) => {
 
 // ─── WebSocket proxy ──────────────────────────────────────────────────────────
 
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({
+  server,
+  // Reject WS upgrades from non-allow-listed browser origins before the gateway
+  // token is injected. Native clients send no Origin and pass through.
+  verifyClient: (info, done) => {
+    const origin = info.req.headers.origin || '';
+    if (origin && !isAllowedOrigin(origin)) {
+      console.warn(`[proxy] WS rejected disallowed origin: ${origin}`);
+      return done(false, 403, 'origin_not_allowed');
+    }
+    return done(true);
+  },
+});
 
 wss.on('connection', (clientWs, req) => {
   const targetUrl = `ws://${GATEWAY_HOST}:${GATEWAY_PORT}${req.url}`;

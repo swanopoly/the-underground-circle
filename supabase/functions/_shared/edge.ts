@@ -176,3 +176,36 @@ export async function resolveUserModelApiKey(opts: {
 
   return null;
 }
+
+/**
+ * True if `userId` belongs to the org and/or circle that owns an integration
+ * connection. Used to authorize outbound actions (Slack/Teams) so a caller
+ * cannot drive a connection they don't belong to by guessing connectionId
+ * (IDOR → message spoofing into any connected workspace).
+ */
+export async function userOwnsConnection(
+  supabase: any,
+  userId: string,
+  orgId: string | null,
+  circleId: string | null,
+): Promise<boolean> {
+  if (circleId) {
+    const { data } = await supabase
+      .from("circle_members")
+      .select("user_id")
+      .eq("circle_id", circleId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (data) return true;
+  }
+  if (orgId) {
+    const { data } = await supabase
+      .from("org_members")
+      .select("user_id")
+      .eq("org_id", orgId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (data) return true;
+  }
+  return false;
+}
