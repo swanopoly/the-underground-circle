@@ -1,9 +1,25 @@
 /**
- * SpawnAgentsModal — 1-click multi-agent spawner.
+ * SpawnAgentsModal — 1-click multi-agent (mass) deployer.
  * Black & white aesthetic with pop + hover effects on all interactive elements.
+ *
+ * Phase-3 refresh:
+ *   - Models come from the live provider registry, not a stale alias list.
+ *     The always-selectable default set is the three current Claude tiers
+ *     (opus-4-8 / sonnet-4-6 / haiku-4-5) plus 'auto'; when a circle is in
+ *     scope, connected-provider ready models are merged in.
+ *   - The agent-count ceiling is the policy ceiling MAX_AGENTS_PER_DEPLOY (50),
+ *     clamped through capDeployCount.
+ *   - A live cost estimate (estimateDeployCostUsd) and a "requires approval"
+ *     badge (shouldRequireApproval) update as the user changes count/model.
+ *   - When a circle + user are in scope the deploy runs the WEB path
+ *     (buildAgentDeployPlan -> deployAgents) so it works on Netlify. Without
+ *     them it falls back to the local Claude Code bridge spawner. Either way
+ *     the model is resolved through resolveDeployModel first (alias-normalized,
+ *     catalog-validated, fail-closed for the bridge channel). Deployed agents
+ *     are TRANSIENT — no persistent office-agent rows are created.
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator, Modal, Platform, Pressable, ScrollView,
   StyleSheet, Text, TextInput, View,
@@ -13,6 +29,17 @@ import {
   isBridgeAvailable,
   spawnAgents,
 } from '../../../../lib/agentSpawner';
+import { PROVIDER_MODELS } from '../../../../lib/llmProviders';
+import { loadModelGroups } from '../../../../lib/integrations/modelProviderRegistry';
+import {
+  MAX_AGENTS_PER_DEPLOY,
+  capDeployCount,
+  estimateDeployCostUsd,
+  shouldRequireApproval,
+} from '../../../../lib/agentDeployPolicy';
+import { buildAgentDeployPlan } from '../../../../lib/agentDeployPlan';
+import { resolveDeployModel } from '../../../../lib/agentDeployModelPolicy';
+import { deployAgents } from '../../../../lib/agentDeployOrchestrator';
 
 interface Props {
   visible: boolean;
@@ -20,24 +47,52 @@ interface Props {
   onSpawned?: (result: SpawnResult) => void;
   defaultTask?: string;
   missionTasks?: Array<{ title: string; description?: string }>;
+  /** When both are present, the deploy runs the in-app WEB path (Netlify-safe)
+   *  instead of the local bridge. ChatTab already has `circleId` in scope, so
+   *  wiring these through enables web deploys for the chat surface. */
+  circleId?: string | null;
+  userId?: string | null;
 }
 
 type Mode = 'uniform' | 'individual';
 interface AgentSlot { id: number; task: string; model?: string }
 
-const MODEL_OPTIONS = [
-  { key: 'auto', label: 'AUTO' },
-  { key: 'claude-sonnet', label: 'SONNET' },
-  { key: 'claude-opus', label: 'OPUS' },
-  { key: 'gpt-4.1', label: 'GPT-4.1' },
-  { key: 'o4-mini', label: 'O4 MINI' },
-  { key: 'gemini-2.5-pro', label: 'GEMINI' },
-] as const;
+interface ModelChoice { key: string; label: string }
+
+// Always-available default set: the three current Claude tiers (sourced from
+// the provider catalog so the ids stay correct) plus 'auto'. Connected
+// providers extend this at runtime via loadModelGroups.
+const DEFAULT_MODEL_IDS = ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'] as const;
+
+const shortModelLabel = (id: string, fallback?: string): string => {
+  // Compact, uppercase chip labels in keeping with the existing aesthetic.
+  if (id === 'auto') return 'AUTO';
+  const bare = id.includes('/') ? id.slice(id.lastIndexOf('/') + 1) : id;
+  if (bare.startsWith('claude-opus')) return 'OPUS';
+  if (bare.startsWith('claude-sonnet')) return 'SONNET';
+  if (bare.startsWith('claude-haiku')) return 'HAIKU';
+  if (bare.startsWith('claude-fable')) return 'FABLE';
+  return (fallback || bare).toUpperCase();
+};
+
+const buildDefaultModelChoices = (): ModelChoice[] => {
+  const anthropic = PROVIDER_MODELS.anthropic || [];
+  const choices: ModelChoice[] = [{ key: 'auto', label: 'AUTO' }];
+  for (const id of DEFAULT_MODEL_IDS) {
+    const found = anthropic.find((m) => m.id === id);
+    // Fall back to the literal id if the catalog ever drops it — fail visible,
+    // never silently swap to a different model.
+    choices.push({ key: id, label: shortModelLabel(id, found?.label) });
+  }
+  return choices;
+};
 
 // Web-only transition for smooth hover/press animations
 const transition = Platform.OS === 'web' ? { transition: 'all 0.15s ease' } as any : {};
 
-export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultTask, missionTasks }: Props) {
+export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultTask, missionTasks, circleId, userId }: Props) {
+  const webChannel = !!(circleId && userId);
+
   const [bridgeOk, setBridgeOk] = useState<boolean | null>(null);
   const [mode, setMode] = useState<Mode>('uniform');
   const [uniformTask, setUniformTask] = useState(defaultTask || '');
@@ -48,12 +103,23 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
   const [useWorktree, setUseWorktree] = useState(true);
   const [spawning, setSpawning] = useState(false);
   const [result, setResult] = useState<SpawnResult | null>(null);
+  const [modelChoices, setModelChoices] = useState<ModelChoice[]>(buildDefaultModelChoices);
+  const [connectedProviders, setConnectedProviders] = useState<string[]>([]);
+  // Explicit human approval for over-cap / large fan-out deploys.
+  const [approved, setApproved] = useState(false);
 
   useEffect(() => {
     if (!visible) return;
     setResult(null);
-    setBridgeOk(null);
-    isBridgeAvailable().then(setBridgeOk);
+    setApproved(false);
+    // The web channel doesn't need the local bridge; treat it as "ready" so
+    // the form shows. The bridge channel still probes availability.
+    if (webChannel) {
+      setBridgeOk(true);
+    } else {
+      setBridgeOk(null);
+      isBridgeAvailable().then(setBridgeOk);
+    }
     if (missionTasks?.length) {
       setSlots(missionTasks.map((t, i) => ({
         id: i + 1,
@@ -62,10 +128,43 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
       })));
       setMode('individual');
     }
-  }, [visible, missionTasks]);
+  }, [visible, missionTasks, webChannel]);
+
+  // Merge connected-provider ready models into the selectable set. Default
+  // Claude tiers + 'auto' are always present; connected providers extend it.
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const groups = await loadModelGroups(circleId ?? null);
+        if (cancelled) return;
+        const providers = new Set<string>();
+        const extra: ModelChoice[] = [];
+        const seen = new Set<string>(['auto', ...DEFAULT_MODEL_IDS]);
+        for (const group of groups) {
+          if (group.connected) providers.add(group.provider);
+          for (const model of group.models) {
+            if (!model.ready || seen.has(model.id)) continue;
+            seen.add(model.id);
+            extra.push({ key: model.id, label: shortModelLabel(model.id, model.label) });
+          }
+        }
+        setConnectedProviders(Array.from(providers));
+        // Keep the default Claude tiers first, then any connected extras.
+        setModelChoices([...buildDefaultModelChoices(), ...extra]);
+      } catch {
+        if (!cancelled) {
+          setConnectedProviders([]);
+          setModelChoices(buildDefaultModelChoices());
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [visible, circleId]);
 
   const addSlot = () => {
-    if (slots.length >= 20) return;
+    if (slots.length >= MAX_AGENTS_PER_DEPLOY) return;
     setSlots(prev => [...prev, { id: Date.now(), task: '', model: uniformModel }]);
   };
   const removeSlot = (id: number) => {
@@ -76,27 +175,131 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
     setSlots(prev => prev.map(s => s.id === id ? { ...s, ...patch } : s));
   };
 
+  // Active count + the per-agent model list that drives the cost estimate.
+  const activeModels = useMemo<string[]>(() => {
+    if (mode === 'uniform') {
+      return Array.from({ length: slots.length }, () => uniformModel);
+    }
+    return slots.filter(s => s.task.trim()).map(s => s.model || 'auto');
+  }, [mode, slots, uniformModel]);
+
+  const activeCount = activeModels.length;
+
+  // Live cost estimate + approval gate. 'auto' is priced via the deploy
+  // default (sonnet) so the user sees a realistic figure before resolution.
+  const estimateUsd = useMemo(
+    () => estimateDeployCostUsd(activeModels.map(m => (m === 'auto' ? 'claude-sonnet-4-6' : m))),
+    [activeModels],
+  );
+  const approval = useMemo(
+    () => shouldRequireApproval({ count: activeCount, estimateUsd }),
+    [activeCount, estimateUsd],
+  );
+
+  // Re-clamp approval consent if the user drops back under the gate.
+  useEffect(() => {
+    if (!approval.required && approved) setApproved(false);
+  }, [approval.required, approved]);
+
+  const setAgentCount = (n: number) => {
+    const { count } = capDeployCount(n);
+    setSlots(Array.from({ length: count }, (_, i) => ({ id: i + 1, task: '', model: uniformModel })));
+  };
+
   const handleSpawn = async () => {
     setSpawning(true);
     setResult(null);
     try {
+      // Build the per-agent (task, model) list shared by both channels.
       const tasks = mode === 'uniform'
         ? Array.from({ length: slots.length }, (_, i) => ({
             task: slots.length > 1 ? `${uniformTask} (agent ${i + 1}/${slots.length})` : uniformTask,
-            model: uniformModel !== 'auto' ? uniformModel : undefined,
+            model: uniformModel,
           }))
         : slots.filter(s => s.task.trim()).map(s => ({
             task: s.task,
-            model: s.model && s.model !== 'auto' ? s.model : undefined,
+            model: s.model || 'auto',
           }));
       if (tasks.length === 0) {
         setResult({ ok: false, spawned: 0, total: 0, results: [], message: 'No tasks to spawn.' });
         setSpawning(false);
         return;
       }
-      const r = await spawnAgents({ tasks, useWorktree });
-      setResult(r);
-      onSpawned?.(r);
+
+      // Hard guard: anything past the gate must be explicitly approved.
+      if (approval.required && !approved) {
+        setResult({ ok: false, spawned: 0, total: tasks.length, results: [], message: `Approval required: ${approval.reason}` });
+        setSpawning(false);
+        return;
+      }
+
+      const channel: 'web' | 'bridge' = webChannel ? 'web' : 'bridge';
+
+      // Resolve every model through the deploy policy FIRST: normalizes
+      // aliases, validates against the catalog, and fails closed (e.g. a
+      // non-claude id over the bridge). Never silently swaps a model.
+      const resolved = tasks.map((t) => ({
+        task: t.task,
+        resolution: resolveDeployModel(t.model, { connectedProviders, channel }),
+      }));
+      const blocked = resolved.filter((r) => !r.resolution.ok);
+      if (blocked.length > 0) {
+        const first = blocked[0].resolution;
+        setResult({
+          ok: false,
+          spawned: 0,
+          total: tasks.length,
+          results: [],
+          message: `Cannot deploy: ${first.reason || `model "${first.model}" is not deployable on the ${channel} channel.`}`,
+        });
+        setSpawning(false);
+        return;
+      }
+
+      if (webChannel) {
+        // WEB path — Netlify-safe. Build a capped plan, then deploy. Deployed
+        // agents are transient (no office-agent rows persisted).
+        const plan = buildAgentDeployPlan({
+          mode: 'individual',
+          count: resolved.length,
+          perAgentModels: resolved.map((r) => r.resolution.model),
+          // Carry each agent's brief as its prompt so the delegated turn has
+          // the task. Roles default inside the orchestrator.
+          prompt: null,
+        });
+        // buildAgentDeployPlan keeps prompt uniform across specs, so attach the
+        // per-agent task brief onto the capped specs here.
+        const specs = plan.specs.map((spec, i) => ({ ...spec, prompt: resolved[i]?.task ?? spec.prompt }));
+        const r = await deployAgents({
+          circleId: circleId as string,
+          userId: userId as string,
+          plan: { ...plan, specs },
+          connectedProviders,
+        });
+        const mapped: SpawnResult = {
+          ok: r.deployed > 0,
+          spawned: r.deployed,
+          total: r.items.length,
+          results: r.items.map((item) => ({
+            ok: item.ok,
+            task: resolved[item.index]?.task || `Agent ${item.index + 1}`,
+            error: item.error,
+          })),
+          message: r.deployed > 0
+            ? `Deployed ${r.deployed}/${r.items.length} agent${r.deployed === 1 ? '' : 's'} (${r.channel}).`
+            : `Deployment failed${r.channel !== 'none' ? ` on the ${r.channel} channel` : ''}.`,
+        };
+        setResult(mapped);
+        onSpawned?.(mapped);
+      } else {
+        // BRIDGE path (legacy / local). Pass the resolved (claude-only) ids.
+        const r = await spawnAgents({
+          tasks: resolved.map((rr) => ({ task: rr.task, model: rr.resolution.model })),
+          useWorktree,
+        });
+        setResult(r);
+        onSpawned?.(r);
+      }
     } catch (err: any) {
       const failResult: SpawnResult = { ok: false, spawned: 0, total: 0, results: [], message: err?.message || 'Spawn failed' };
       setResult(failResult);
@@ -106,8 +309,14 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
     }
   };
 
-  const activeCount = mode === 'uniform' ? slots.length : slots.filter(s => s.task.trim()).length;
-  const canSpawn = !spawning && activeCount > 0 && (mode === 'individual' || uniformTask.trim());
+  const needsApproval = approval.required;
+  const canSpawn = !spawning
+    && activeCount > 0
+    && (mode === 'individual' || uniformTask.trim())
+    && (!needsApproval || approved);
+
+  // Count pill presets, clamped to the ceiling. Max is exposed explicitly.
+  const COUNT_PRESETS = [1, 3, 5, 10, 25, MAX_AGENTS_PER_DEPLOY];
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
@@ -120,7 +329,9 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
               <View style={st.headerIcon}><Text style={st.headerIconText}>//</Text></View>
               <View>
                 <Text style={st.title}>SPAWN AGENTS</Text>
-                <Text style={st.subtitle}>Launch parallel Claude Code sessions</Text>
+                <Text style={st.subtitle}>
+                  {webChannel ? 'Deploy transient agents (in-app)' : 'Launch parallel Claude Code sessions'}
+                </Text>
               </View>
             </View>
             <Pressable
@@ -137,15 +348,15 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
 
           <View style={st.divider} />
 
-          {/* Bridge check */}
-          {bridgeOk === false && (
+          {/* Bridge check (bridge channel only) */}
+          {!webChannel && bridgeOk === false && (
             <View style={st.errorBox}>
               <Text style={st.errorTitle}>BRIDGE OFFLINE</Text>
               <Text style={st.errorText}>Start the bridge first:</Text>
               <View style={st.codeBlock}><Text style={st.codeText}>node scripts/claude-bridge.js</Text></View>
             </View>
           )}
-          {bridgeOk === null && (
+          {!webChannel && bridgeOk === null && (
             <View style={st.loadingRow}>
               <ActivityIndicator color="#999" />
               <Text style={st.loadingText}>Detecting Claude Code Bridge...</Text>
@@ -193,10 +404,10 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
                   <View style={st.countRow}>
                     <Text style={st.countLabel}>AGENTS</Text>
                     <View style={st.countPills}>
-                      {[1, 2, 3, 5, 8, 10].map(n => (
+                      {COUNT_PRESETS.map(n => (
                         <Pressable
                           key={n}
-                          onPress={() => setSlots(Array.from({ length: n }, (_, i) => ({ id: i + 1, task: '', model: uniformModel })))}
+                          onPress={() => setAgentCount(n)}
                           style={({ hovered, pressed }: any) => [
                             st.countPill, transition,
                             slots.length === n && st.countPillActive,
@@ -204,15 +415,14 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
                             pressed && { transform: [{ scale: 0.92 }] },
                           ]}
                         >
-                          <Text style={[st.countPillText, slots.length === n && st.countPillTextActive]}>{n}</Text>
+                          <Text style={[st.countPillText, slots.length === n && st.countPillTextActive]}>
+                            {n === MAX_AGENTS_PER_DEPLOY ? 'MAX' : n}
+                          </Text>
                         </Pressable>
                       ))}
                       <TextInput
                         value={String(slots.length)}
-                        onChangeText={v => {
-                          const n = Math.min(Math.max(parseInt(v) || 1, 1), 20);
-                          setSlots(Array.from({ length: n }, (_, i) => ({ id: i + 1, task: '', model: uniformModel })));
-                        }}
+                        onChangeText={v => setAgentCount(parseInt(v, 10) || 1)}
                         style={st.countInput}
                         keyboardType="numeric"
                         maxLength={2}
@@ -223,7 +433,7 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
                   <View style={st.modelRow}>
                     <Text style={st.countLabel}>MODEL</Text>
                     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={st.modelChipRow}>
-                      {MODEL_OPTIONS.map(option => (
+                      {modelChoices.map(option => (
                         <Pressable
                           key={option.key}
                           onPress={() => {
@@ -274,7 +484,7 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
                           multiline
                         />
                         <View style={st.slotModels}>
-                          {MODEL_OPTIONS.map(option => {
+                          {modelChoices.map(option => {
                             const active = (slot.model || 'auto') === option.key;
                             return (
                               <Pressable
@@ -313,22 +523,56 @@ export default function SpawnAgentsModal({ visible, onClose, onSpawned, defaultT
 
               <View style={st.divider} />
 
-              {/* Options */}
-              <Pressable
-                onPress={() => setUseWorktree(v => !v)}
-                style={({ hovered }: any) => [
-                  st.optionRow, transition,
-                  hovered && { borderColor: '#555', backgroundColor: '#0a0a0a' },
-                ]}
-              >
-                <View style={[st.optionCheck, useWorktree && st.optionCheckActive]}>
-                  {useWorktree && <Text style={st.optionCheckMark}>//</Text>}
+              {/* Live cost estimate + approval badge */}
+              <View style={st.estimateRow}>
+                <View style={st.estimateLeft}>
+                  <Text style={st.estimateLabel}>EST. COST</Text>
+                  <Text style={st.estimateValue}>~${estimateUsd.toFixed(2)}</Text>
+                  <Text style={st.estimateSub}>{activeCount} agent{activeCount === 1 ? '' : 's'}</Text>
                 </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={st.optionLabel}>GIT WORKTREE ISOLATION</Text>
-                  <Text style={st.optionDesc}>Each agent gets its own branch. Recommended for code changes.</Text>
-                </View>
-              </Pressable>
+                {needsApproval && (
+                  <View style={st.approvalBadge}>
+                    <Text style={st.approvalBadgeText}>REQUIRES APPROVAL</Text>
+                  </View>
+                )}
+              </View>
+              {needsApproval && (
+                <Pressable
+                  onPress={() => setApproved(v => !v)}
+                  style={({ hovered }: any) => [
+                    st.approveRow, transition,
+                    approved && st.approveRowActive,
+                    hovered && !approved && { borderColor: '#f59e0b80', backgroundColor: '#f59e0b0a' },
+                  ]}
+                >
+                  <View style={[st.optionCheck, approved && st.approveCheckActive]}>
+                    {approved && <Text style={st.optionCheckMark}>//</Text>}
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={st.approveLabel}>APPROVE THIS DEPLOY</Text>
+                    <Text style={st.approveDesc}>{approval.reason}</Text>
+                  </View>
+                </Pressable>
+              )}
+
+              {/* Options — worktree isolation only applies to the bridge path */}
+              {!webChannel && (
+                <Pressable
+                  onPress={() => setUseWorktree(v => !v)}
+                  style={({ hovered }: any) => [
+                    st.optionRow, transition,
+                    hovered && { borderColor: '#555', backgroundColor: '#0a0a0a' },
+                  ]}
+                >
+                  <View style={[st.optionCheck, useWorktree && st.optionCheckActive]}>
+                    {useWorktree && <Text style={st.optionCheckMark}>//</Text>}
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={st.optionLabel}>GIT WORKTREE ISOLATION</Text>
+                    <Text style={st.optionDesc}>Each agent gets its own branch. Recommended for code changes.</Text>
+                  </View>
+                </Pressable>
+              )}
 
               {/* Footer */}
               <View style={st.footer}>
@@ -477,7 +721,7 @@ const st = StyleSheet.create({
     minHeight: 72, textAlignVertical: 'top',
     ...(Platform.OS === 'web' ? { outlineStyle: 'none' } as any : {}),
   },
-  countRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  countRow: { flexDirection: 'row', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
   modelRow: { gap: 8 },
   modelChipRow: { gap: 6, paddingRight: 8 },
   modelChip: {
@@ -491,8 +735,8 @@ const st = StyleSheet.create({
   modelChipText: { color: '#94a3b8', fontSize: 10, fontWeight: '900', letterSpacing: 0.8, fontFamily: 'monospace' },
   modelChipTextActive: { color: '#000' },
   countLabel: { color: '#94a3b8', fontSize: 10, fontWeight: '900', letterSpacing: 1.5, fontFamily: 'monospace' },
-  countPills: { flexDirection: 'row', gap: 5 },
-  countPill: { minWidth: 36, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: '#1e293b', backgroundColor: '#0f172a', alignItems: 'center' },
+  countPills: { flexDirection: 'row', gap: 5, flexWrap: 'wrap', flex: 1 },
+  countPill: { minWidth: 36, paddingHorizontal: 6, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: '#1e293b', backgroundColor: '#0f172a', alignItems: 'center' },
   countPillActive: {
     borderColor: '#22c55e', backgroundColor: '#22c55e',
     ...(Platform.OS === 'web' ? { boxShadow: '2px 2px 0px #22c55e25' } as any : {}),
@@ -535,6 +779,28 @@ const st = StyleSheet.create({
   slotModelChipTextActive: { color: '#000' },
   slotRemove: { width: 22, height: 22, borderRadius: 6, borderWidth: 1, borderColor: '#1e293b', alignItems: 'center', justifyContent: 'center', marginTop: 3 },
   slotRemoveText: { color: '#64748b', fontSize: 11, fontWeight: '900' },
+  estimateRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  estimateLeft: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
+  estimateLabel: { color: '#94a3b8', fontSize: 10, fontWeight: '900', letterSpacing: 1.5, fontFamily: 'monospace' },
+  estimateValue: { color: '#22c55e', fontSize: 16, fontWeight: '900', fontFamily: 'monospace' },
+  estimateSub: { color: '#64748b', fontSize: 10, fontFamily: 'monospace' },
+  approvalBadge: {
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, borderWidth: 1,
+    borderColor: '#f59e0b80', backgroundColor: '#f59e0b14',
+    ...(Platform.OS === 'web' ? { boxShadow: '2px 2px 0px #f59e0b20' } as any : {}),
+  },
+  approvalBadgeText: { color: '#f59e0b', fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: 'monospace' },
+  approveRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, padding: 12, borderRadius: R, borderWidth: 1, borderColor: '#f59e0b40', backgroundColor: '#f59e0b08' },
+  approveRowActive: {
+    borderColor: '#22c55e', backgroundColor: '#22c55e0a',
+    ...(Platform.OS === 'web' ? { boxShadow: '2px 2px 0px #22c55e20' } as any : {}),
+  },
+  approveCheckActive: {
+    borderColor: '#22c55e', backgroundColor: '#22c55e',
+    ...(Platform.OS === 'web' ? { boxShadow: '2px 2px 0px #22c55e30' } as any : {}),
+  },
+  approveLabel: { color: '#f59e0b', fontSize: 10, fontWeight: '900', letterSpacing: 1, fontFamily: 'monospace' },
+  approveDesc: { color: '#94a3b8', fontSize: 10, fontFamily: 'monospace', marginTop: 2 },
   optionRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, padding: 12, borderRadius: R, borderWidth: 1, borderColor: '#1e293b', backgroundColor: '#0f172a' },
   optionCheck: { width: 20, height: 20, borderRadius: 6, borderWidth: 1, borderColor: '#334155', backgroundColor: '#0f172a', alignItems: 'center', justifyContent: 'center' },
   optionCheckActive: {
