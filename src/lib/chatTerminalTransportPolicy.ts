@@ -83,12 +83,14 @@ export function looksLikeTerminalActionRequest(message: string): boolean {
 export const STREAM_ESCALATE_ON_TOOL_USE_FLAG = 'uc_stream_escalate_on_tool_use';
 
 export function isStreamEscalateOnToolUseEnabled(): boolean {
+  // Default-ON as of 2026-07-01 (user enabled). Explicit opt-out via the
+  // localStorage key set to '0'/'false'/'off'; anything else (incl. unset) is ON.
   try {
     const store = (globalThis as { localStorage?: { getItem?: (k: string) => string | null } }).localStorage;
     const value = store?.getItem?.(STREAM_ESCALATE_ON_TOOL_USE_FLAG);
-    if (value === '1' || value === 'true' || value === 'on') return true;
-  } catch { /* storage unavailable (native) → default OFF */ }
-  return false;
+    if (value === '0' || value === 'false' || value === 'off') return false;
+  } catch { /* storage unavailable (native) → default ON */ }
+  return true;
 }
 
 export function chooseChatTerminalTransport(

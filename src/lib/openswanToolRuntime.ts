@@ -808,7 +808,7 @@ const RESPONSE_FORMAT_PROPERTY = {
  * are proven; reverting is a one-line change. Even when enabled the tool is
  * always approval-gated (policy approvalMode:'ask') and honors the 50/$10 caps.
  */
-const DEPLOY_AGENTS_TOOL_ENABLED: boolean = false;
+const DEPLOY_AGENTS_TOOL_ENABLED: boolean = true; // enabled 2026-07-01 (user); mass deploy still gated by mandatory 'ask' approval + 50-agent/$10 caps
 
 /** Single definition for the gated deploy tool. Spread into TOOL_DEFINITIONS
  *  only when the flag is on, and into TOOL_LOOP_SAFE_NAMES the same way, so the

@@ -38,16 +38,16 @@ const plainPlan = buildChatAutomationPlan({ message: 'hello there' });
 assertEqual(plainPlan.execution.kind, 'run_plain_chat', 'planner: plain chat remains run_plain_chat');
 assertEqual(
   decide({ executionKind: plainPlan.execution.kind, chatMode: 'none' }),
-  { path: 'stream_plain_chat', reason: 'simple_streamable_plain_chat', canStream: true },
-  'policy: simple none-mode chat can stream',
+  { path: 'stream_then_escalate', reason: 'stream_escalate_on_tool_use', canStream: true },
+  'policy: simple none-mode chat streams (default escalate-on-tool-use, enabled 2026-07-01)',
 );
 
 const talkPlan = buildChatAutomationPlan({ message: 'hello there', selectedMode: 'talk' });
 assertEqual(talkPlan.execution.kind, 'run_openswan', 'planner: talk mode still classifies as run_openswan');
 assertEqual(
   decide({ executionKind: talkPlan.execution.kind, chatMode: 'talk' }),
-  { path: 'stream_plain_chat', reason: 'simple_streamable_plain_chat', canStream: true },
-  'policy: talk mode preserves the current streamable simple-chat behavior',
+  { path: 'stream_then_escalate', reason: 'stream_escalate_on_tool_use', canStream: true },
+  'policy: talk mode streams (default escalate-on-tool-use, enabled 2026-07-01)',
 );
 
 assertEqual(
@@ -111,11 +111,11 @@ assertEqual(
   'policy: non-streamable models fall back to batch OpenSwan',
 );
 
-// ─── Phase 2 seam: stream-by-default → escalate-on-tool-use (DEFAULT OFF) ────
-// The flag must be safe-dormant: with it OFF (explicit false) the simple
-// streamable turn is byte-for-byte the legacy plain stream. `decide()` does NOT
-// pass the override, so this also exercises the default (live flag → OFF in the
-// smoke env, which has no localStorage opt-in).
+// ─── Phase 2 seam: stream-by-default → escalate-on-tool-use (DEFAULT ON 2026-07-01) ────
+// Explicit opt-out still works: with the flag OFF (explicit false) the simple
+// streamable turn is byte-for-byte the legacy plain stream. The live default is
+// now ON (covered by the two top-of-file assertions); here we pin the explicit
+// OFF and ON paths deterministically.
 assertEqual(
   decide({ executionKind: plainPlan.execution.kind, chatMode: 'none', streamEscalateOnToolUse: false }),
   { path: 'stream_plain_chat', reason: 'simple_streamable_plain_chat', canStream: true },
