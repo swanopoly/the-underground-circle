@@ -25,6 +25,13 @@ import { ensureDesktopBridgePaired } from './desktopBridge';
 import { sanitizeUntrustedForModel } from './untrustedContent';
 import type { AutomationVerificationGate } from './desktopAutomationSafety';
 import {
+  normalizeTabList,
+  buildDownloadProof,
+  type BrowserTabInfo,
+  type NormalizedTabList,
+  type DownloadProof,
+} from './browserPrimitives';
+import {
   buildWordPressAdminSourceTaskHints,
   extractWordPressAdminSourceIntelligence,
   type WordPressAdminSourceIntelligence,
@@ -186,6 +193,33 @@ export interface BrowserVerificationState {
   selectorMatches: string[];
   matchedTerms: string[];
   pauseInstruction?: string;
+}
+
+/** Result of listTabs — the normalized, single-active tab list plus the
+ *  active index. Titles/urls are already sanitized for model display. */
+export interface BrowserTabListResult {
+  tabs: BrowserTabInfo[];
+  activeIndex: number;
+  count: number;
+}
+
+/** Result of a downloadFile call: the scoped save path, byte size, and the
+ *  compact evidence-contract proof (basename + human size + safe tail). */
+export interface BrowserDownloadResult {
+  path: string;
+  basename: string;
+  sizeBytes: number;
+  suggestedFilename?: string;
+  proof: DownloadProof;
+}
+
+/** Result of a waitFor call — echoes what was awaited. */
+export interface BrowserWaitForResult {
+  mode: 'selector' | 'state' | 'timeout';
+  selector?: string;
+  state?: string;
+  timeoutMs: number;
+  awaited: string;
 }
 
 // ─── Calls ──────────────────────────────────────────────────────────────
@@ -415,6 +449,12 @@ export async function clickRole(args: {
    *  routes to locator(), so passing a selector via either field
    *  works. Explicit `selector` is preferred. */
   selector?: string;
+  /** CSS selector for an iframe to scope this click INSIDE. When set,
+   *  the bridge resolves the target via page.frameLocator(frameSelector)
+   *  so role/name/selector are looked up within that frame — needed for
+   *  embedded editors, payment iframes, and cross-origin widgets whose
+   *  controls are invisible to a top-frame locator. */
+  frameSelector?: string;
   exact?: boolean;
   /** 0-based index to disambiguate when the locator matches
    *  multiple elements. Without it, multi-match returns
@@ -445,6 +485,10 @@ export async function fillField(args: {
   /** Explicit CSS selector — alternative to (role + name). See
    *  clickRole for the full story. */
   selector?: string;
+  /** CSS selector for an iframe to scope this fill INSIDE — see
+   *  clickRole. Needed for form fields inside embedded/cross-origin
+   *  frames. */
+  frameSelector?: string;
   text: string;
   submit?: boolean;
   exact?: boolean;
@@ -526,6 +570,131 @@ export async function pressKey(combo: string, opts?: { taskContext?: string }): 
 /** Full-page screenshot as base64 PNG. */
 export async function screenshot(opts?: { fullPage?: boolean }): Promise<DesktopResult<{ base64: string; mimeType: string; sizeBytes: number }>> {
   return callBrowser('POST', '/browser/screenshot', opts || {});
+}
+
+/**
+ * List every open tab in the persistent context with a stable 0-based
+ * index, marking the active one. Popups the site spawns (OAuth windows,
+ * `target=_blank` clicks, `window.open`) are tracked too. The raw bridge
+ * list is passed through `normalizeTabList` (bounds count, coerces types,
+ * guarantees exactly one active tab) and titles/urls are sanitized as
+ * untrusted page text before the model sees them.
+ */
+export async function listTabs(): Promise<DesktopResult<BrowserTabListResult>> {
+  const raw = await callBrowser<{ tabs?: unknown }>('GET', '/browser/tabs_list');
+  if (!raw.ok || !raw.data) return raw as DesktopResult<BrowserTabListResult>;
+  const normalized: NormalizedTabList = normalizeTabList(raw.data.tabs);
+  const tabs = normalized.tabs.map((tab) => ({
+    ...tab,
+    // Page-derived title/url is UNTRUSTED — sanitize the model-visible text.
+    url: sanitizeUntrustedForModel(tab.url),
+    title: sanitizeUntrustedForModel(tab.title),
+  }));
+  return { ok: true, data: { tabs, activeIndex: normalized.activeIndex, count: tabs.length } };
+}
+
+/**
+ * Bring a tab to the foreground by 0-based index and make it the active
+ * page for subsequent single-page actions (click/fill/screenshot). Use
+ * `listTabs` first to pick the index.
+ */
+export async function switchTab(index: number): Promise<DesktopResult<{ index: number; url: string; title: string; active: boolean }>> {
+  if (!Number.isInteger(index) || index < 0) {
+    return browserFailureResult(describeBrowserBridgeFailure('tab index must be a non-negative integer', 'invalid_input'));
+  }
+  const r = await callBrowser<{ index: number; url: string; title: string; active: boolean }>('POST', '/browser/tab_switch', { index });
+  if (r.ok && r.data) {
+    return { ok: true, data: { ...r.data, url: sanitizeUntrustedForModel(r.data.url), title: sanitizeUntrustedForModel(r.data.title) } };
+  }
+  return r;
+}
+
+/**
+ * Close a tab by 0-based index. The bridge refuses to close the last
+ * remaining tab (the context needs one live page). After closing, the
+ * active page falls back to the last remaining tab.
+ */
+export async function closeTab(index: number): Promise<DesktopResult<{ closed: number; remaining: number }>> {
+  if (!Number.isInteger(index) || index < 0) {
+    return browserFailureResult(describeBrowserBridgeFailure('tab index must be a non-negative integer', 'invalid_input'));
+  }
+  return callBrowser('POST', '/browser/tab_close', { index });
+}
+
+/**
+ * Explicit, bounded wait so the model can synchronize on dynamic content
+ * instead of polling screenshots. Exactly one intent is used, in order:
+ *   - `selector` → wait for that element (state defaults to 'visible');
+ *   - `state` ('load'|'domcontentloaded'|'networkidle') → wait for that
+ *     page lifecycle event;
+ *   - otherwise a plain bounded `timeoutMs` delay.
+ * Timeouts are clamped on the bridge (selector/state ≤60s, delay ≤30s).
+ */
+export async function waitFor(args: {
+  selector?: string;
+  state?: 'load' | 'domcontentloaded' | 'networkidle' | 'attached' | 'detached' | 'visible' | 'hidden';
+  timeoutMs?: number;
+}): Promise<DesktopResult<BrowserWaitForResult>> {
+  return callBrowser('POST', '/browser/wait_for', args || {});
+}
+
+/**
+ * Real mouse-wheel scroll (Playwright `mouse.wheel`) so infinite-scroll
+ * and lazy-loaded content actually advances — unlike scrollIntoView on a
+ * known element. Deltas are clamped to ±5000 px per gesture; a bare call
+ * nudges the page down ~600px. Positive `dy` scrolls down, negative up.
+ */
+export async function scrollWheel(args?: { dx?: number; dy?: number }): Promise<DesktopResult<{ dx: number; dy: number }>> {
+  return callBrowser('POST', '/browser/scroll', args || {});
+}
+
+/**
+ * Trigger a download and save it to a scoped downloads dir under the UC
+ * app-support area, returning a REAL on-disk file path + byte size. This
+ * is the backend-aware proof for "download the invoice/report" tasks — a
+ * verifiable file, not just a screenshot — and it feeds the evidence
+ * contract's file_stat proof-after requirement.
+ *
+ * Pass a click target (role/name/selector) to fire the download link; omit
+ * it when a prior `openUrl` to a direct file URL already started the
+ * download. The returned `proof.summary` never leaks the full home path.
+ */
+export async function downloadFile(args?: {
+  role?: string;
+  name?: string;
+  selector?: string;
+  exact?: boolean;
+  nth?: number;
+  timeoutMs?: number;
+  taskContext?: string;
+  /** Skip the pre-mutation verification-gate check. See clickRole. */
+  skipVerificationCheck?: boolean;
+}): Promise<BrowserActionResult<BrowserDownloadResult>> {
+  const gate = await preMutationVerificationGate<BrowserDownloadResult>(args?.skipVerificationCheck);
+  if (gate) return gate;
+  const { skipVerificationCheck: _skip, ...body } = args || {};
+  const r = await callBrowser<{ path?: string; basename?: string; sizeBytes?: number; suggestedFilename?: string }>('POST', '/browser/download', body);
+  if (!r.ok || !r.data) return r as BrowserActionResult<BrowserDownloadResult>;
+  // Rebuild the proof client-side through the shared pure helper so the
+  // home-path-safe tail + human size are consistent even against an older
+  // bridge; sanitize the model-visible basename (suggested filenames are
+  // page/site-controlled, hence untrusted).
+  const proof = buildDownloadProof({
+    path: r.data.path,
+    sizeBytes: r.data.sizeBytes,
+    basename: sanitizeUntrustedForModel(r.data.basename),
+    suggestedFilename: sanitizeUntrustedForModel(r.data.suggestedFilename),
+  });
+  return {
+    ok: true,
+    data: {
+      path: r.data.path || '',
+      basename: proof.basename,
+      sizeBytes: proof.sizeBytes,
+      suggestedFilename: proof.suggestedFilename,
+      proof,
+    },
+  };
 }
 
 /** Close the browser context (not usually needed — it persists across requests). */

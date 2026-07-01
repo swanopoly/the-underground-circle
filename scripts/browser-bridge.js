@@ -35,10 +35,52 @@ const PROFILE_DIR = path.join(
   'ChromeProfile',
 );
 
+// Scoped downloads land here — OUR area, not the user's real Downloads
+// folder — so download proof is a real on-disk file we control and can
+// stat, without touching the user's personal downloads.
+const DOWNLOADS_DIR = path.join(
+  os.homedir(),
+  'Library',
+  'Application Support',
+  'UC',
+  'downloads',
+);
+
 let context = null;   // BrowserContext
-let page = null;      // Page (re-used)
+let page = null;      // Page (the ACTIVE re-used page — existing commands
+                      // operate on this one)
 let launchError = null;
 let launchPromise = null;
+
+// Multi-tab: we track every page the context opens (including popups the
+// site spawns) so tabs_list / tab_switch / tab_close can address them by a
+// stable 0-based index. `page` always points at the ACTIVE tab so the
+// legacy single-page commands keep working unchanged.
+function trackContextPages(ctx) {
+  // New pages (target=_blank clicks, window.open, OAuth popups) become the
+  // active page — that mirrors what a human sees when a popup steals focus,
+  // and it's what the model most likely wants to act on next.
+  ctx.on('page', (newPage) => {
+    page = newPage;
+    // If the popup closes, fall back to the last remaining page so `page`
+    // never dangles on a closed target.
+    newPage.on('close', () => {
+      if (page === newPage) {
+        const remaining = ctx.pages();
+        page = remaining[remaining.length - 1] || null;
+      }
+    });
+  });
+}
+
+// Resolve the active page, healing a stale reference (closed/detached) by
+// falling back to the last live page in the context.
+function activePage(ctx) {
+  if (page && !page.isClosed()) return page;
+  const pages = ctx.pages();
+  page = pages[pages.length - 1] || null;
+  return page;
+}
 
 function classifyBrowserFailure(error, explicitCode) {
   const code = String(explicitCode || '').trim().toLowerCase();
@@ -184,6 +226,7 @@ async function ensureContext() {
         handleSIGTERM: false,
         handleSIGHUP: false,
       });
+      trackContextPages(ctx);
       const pg = ctx.pages()[0] || await ctx.newPage();
       context = ctx;
       page = pg;
@@ -201,6 +244,7 @@ async function ensureContext() {
             handleSIGTERM: false,
             handleSIGHUP: false,
           });
+          trackContextPages(ctx);
           const pg = ctx.pages()[0] || await ctx.newPage();
           context = ctx;
           page = pg;
@@ -1012,19 +1056,32 @@ function writeAmbiguousLocator(res, CORS, body, ambiguity) {
   }));
 }
 
+// Resolve the locator ROOT: normally the page, but when `frameSelector`
+// is present we scope every lookup inside that iframe via
+// page.frameLocator(). FrameLocator exposes the same getByRole/getByLabel/
+// getByPlaceholder/getByAltText/getByTitle/getByTestId/locator surface as
+// Page, so resolveLocator below works against either root unchanged.
+// Backward-compatible: no frameSelector → the page itself is the root.
+function locatorRoot(page, body) {
+  const frameSelector = body && typeof body.frameSelector === 'string' ? body.frameSelector.trim() : '';
+  return frameSelector ? page.frameLocator(frameSelector) : page;
+}
+
 // Build a Playwright Locator from any of the three input shapes.
 // Returns the locator without trying a fill/click yet — caller handles
 // the action so timeout/submit logic stays at the call site.
 function resolveLocator(page, role, body) {
   const isStr = (v) => typeof v === 'string' && v.trim().length > 0;
   const exact = body.exact === true;
+  // Scope into an iframe when frameSelector is set (else `root === page`).
+  const root = locatorRoot(page, body);
   // 1. Explicit selector — highest precedence.
   if (body.selector && typeof body.selector === 'string') {
-    return page.locator(body.selector);
+    return root.locator(body.selector);
   }
   // 2. `name` that's actually a CSS selector.
   if (body.name && looksLikeCssSelector(body.name)) {
-    return page.locator(body.name);
+    return root.locator(body.name);
   }
   // 3. Semantic-locator ladder (additive optional fields). Strict order, each
   //    only used when the field is a non-empty string. These are resilient to
@@ -1032,16 +1089,16 @@ function resolveLocator(page, role, body) {
   //    selector. `exact` is forwarded where the getBy* API supports it
   //    (getByTestId has no exact option). NOTE: there is intentionally no
   //    `text` rung — body.text is the fill VALUE, not a locator hint.
-  if (isStr(body.testId)) return page.getByTestId(String(body.testId).trim());
-  if (isStr(body.label)) return page.getByLabel(String(body.label), exact ? { exact: true } : undefined);
-  if (isStr(body.placeholder)) return page.getByPlaceholder(String(body.placeholder), exact ? { exact: true } : undefined);
-  if (isStr(body.altText)) return page.getByAltText(String(body.altText), exact ? { exact: true } : undefined);
-  if (isStr(body.title)) return page.getByTitle(String(body.title), exact ? { exact: true } : undefined);
+  if (isStr(body.testId)) return root.getByTestId(String(body.testId).trim());
+  if (isStr(body.label)) return root.getByLabel(String(body.label), exact ? { exact: true } : undefined);
+  if (isStr(body.placeholder)) return root.getByPlaceholder(String(body.placeholder), exact ? { exact: true } : undefined);
+  if (isStr(body.altText)) return root.getByAltText(String(body.altText), exact ? { exact: true } : undefined);
+  if (isStr(body.title)) return root.getByTitle(String(body.title), exact ? { exact: true } : undefined);
   // 4. Canonical role + accessible name (default).
   const opts = {};
   if (body.name) opts.name = String(body.name);
   if (exact) opts.exact = true;
-  return page.getByRole(role, opts);
+  return root.getByRole(role, opts);
 }
 
 async function handleClickRole(req, res, CORS) {
@@ -1076,7 +1133,7 @@ async function handleClickRole(req, res, CORS) {
       if (!semantic) throw firstErr;
       const opts = { name: semantic };
       if (body.exact === true) opts.exact = true;
-      const fallback = launched.page.getByRole(role, opts);
+      const fallback = locatorRoot(launched.page, body).getByRole(role, opts);
       const fb = typeof body.nth === 'number' ? fallback.nth(body.nth) : fallback;
       const dialogRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
         await fb.click({ timeout });
@@ -1085,7 +1142,7 @@ async function handleClickRole(req, res, CORS) {
       if (!dialogRun.ok) { writeBrowserDialogBlocked(res, CORS, dialogRun.blockedDecision); return; }
     }
     res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: true, role, name: body.name || null }));
+    res.end(JSON.stringify({ ok: true, role, name: body.name || null, frameSelector: body.frameSelector || null }));
   } catch (e) {
     writeBrowserFailure(res, CORS, e, 'click failed');
   }
@@ -1124,7 +1181,7 @@ async function handleFill(req, res, CORS) {
       if (!semantic) throw firstErr;
       const opts = { name: semantic };
       if (body.exact === true) opts.exact = true;
-      const fallback = launched.page.getByRole(role, opts);
+      const fallback = locatorRoot(launched.page, body).getByRole(role, opts);
       const fb = typeof body.nth === 'number' ? fallback.nth(body.nth) : fallback;
       const dialogRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
         await fb.fill(text, { timeout });
@@ -1140,7 +1197,7 @@ async function handleFill(req, res, CORS) {
       if (!submitRun.ok) { writeBrowserDialogBlocked(res, CORS, submitRun.blockedDecision); return; }
     }
     res.writeHead(200, CORS);
-    res.end(JSON.stringify({ ok: true, chars: text.length, submitted: !!body.submit }));
+    res.end(JSON.stringify({ ok: true, chars: text.length, submitted: !!body.submit, frameSelector: body.frameSelector || null }));
   } catch (e) {
     writeBrowserFailure(res, CORS, e, 'fill failed');
   }
@@ -1330,6 +1387,269 @@ async function handleScreenshot(req, res, CORS) {
   }
 }
 
+// ─── Lane-A primitives: multi-tab, downloads, waits, wheel scroll ─────────
+//
+// These mirror the pure shapes in src/lib/browserPrimitives.ts. That TS
+// module can't be `require`d from this plain-JS bridge, so the normalizers
+// are duplicated here — keep the two in sync (tab-list dedupe, download
+// proof, wait spec, scroll clamp).
+
+const MAX_TRACKED_TABS = 50;
+const SCROLL_DELTA_MAX = 5_000;
+
+// tabs_list — enumerate every tab in the persistent context with a stable
+// 0-based index, marking the active one. Titles/urls are page-derived
+// UNTRUSTED text; the client sanitizes before showing them to the model.
+async function handleTabsList(_req, res, CORS) {
+  const launched = await ensureContext();
+  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
+  try {
+    const active = activePage(launched.context);
+    const pages = launched.context.pages().slice(0, MAX_TRACKED_TABS);
+    const tabs = [];
+    for (let i = 0; i < pages.length; i += 1) {
+      const pg = pages[i];
+      let url = '';
+      let title = '';
+      try { url = pg.url(); } catch {}
+      try { title = await pg.title(); } catch {}
+      tabs.push({ index: i, url, title, active: pg === active });
+    }
+    // Fail-closed to exactly one active tab even if none matched (e.g. the
+    // active page was just closed): default the last one.
+    if (tabs.length > 0 && !tabs.some((t) => t.active)) tabs[tabs.length - 1].active = true;
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: true, tabs, count: tabs.length }));
+  } catch (e) {
+    writeBrowserFailure(res, CORS, e, 'tabs list failed');
+  }
+}
+
+// tab_switch — bring a tab to the foreground by index and make it the
+// active page for subsequent single-page commands.
+async function handleTabSwitch(req, res, CORS) {
+  const { body, err } = await readJsonBody(req);
+  if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
+  const launched = await ensureContext();
+  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
+  try {
+    const pages = launched.context.pages();
+    const idx = Number(body.index);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= pages.length) {
+      writeBrowserFailure(res, CORS, `tab index ${body.index} out of range (0..${Math.max(0, pages.length - 1)})`, undefined, 'invalid_input', 400);
+      return;
+    }
+    const target = pages[idx];
+    await target.bringToFront();
+    page = target;
+    let url = '';
+    let title = '';
+    try { url = target.url(); } catch {}
+    try { title = await target.title(); } catch {}
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: true, index: idx, url, title, active: true }));
+  } catch (e) {
+    writeBrowserFailure(res, CORS, e, 'tab switch failed');
+  }
+}
+
+// tab_close — close a tab by index. Refuses to close the last remaining
+// tab (the context needs at least one page to stay useful).
+async function handleTabClose(req, res, CORS) {
+  const { body, err } = await readJsonBody(req);
+  if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
+  const launched = await ensureContext();
+  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
+  try {
+    const pages = launched.context.pages();
+    const idx = Number(body.index);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= pages.length) {
+      writeBrowserFailure(res, CORS, `tab index ${body.index} out of range (0..${Math.max(0, pages.length - 1)})`, undefined, 'invalid_input', 400);
+      return;
+    }
+    if (pages.length <= 1) {
+      writeBrowserFailure(res, CORS, 'cannot close the last remaining tab', undefined, 'invalid_input', 400);
+      return;
+    }
+    const target = pages[idx];
+    await target.close();
+    // Point the active page at the last live tab so later commands work.
+    const remaining = launched.context.pages();
+    page = remaining[remaining.length - 1] || null;
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: true, closed: idx, remaining: remaining.length }));
+  } catch (e) {
+    writeBrowserFailure(res, CORS, e, 'tab close failed');
+  }
+}
+
+function ensureDownloadsDir() {
+  try { fs.mkdirSync(DOWNLOADS_DIR, { recursive: true }); } catch {}
+}
+
+// Build compact, home-path-safe download proof (mirror of
+// buildDownloadProof in browserPrimitives.ts). basename + human size +
+// a two-segment path tail — never the full home path.
+function buildBridgeDownloadProof({ filePath, sizeBytes, suggestedFilename }) {
+  const basename = filePath ? path.basename(filePath) : (suggestedFilename || 'download');
+  const size = Number.isFinite(Number(sizeBytes)) && Number(sizeBytes) > 0 ? Math.round(Number(sizeBytes)) : 0;
+  const humanSize = formatBridgeByteSize(size);
+  const parts = String(filePath || '').split(path.sep).filter(Boolean);
+  const pathTail = parts.length > 2 ? `.../${parts.slice(-2).join('/')}` : parts.join('/');
+  const proof = {
+    basename,
+    sizeBytes: size,
+    humanSize,
+    pathTail,
+    summary: `Downloaded "${basename}" (${humanSize})${pathTail ? ` → ${pathTail}` : ''}`,
+  };
+  if (suggestedFilename && suggestedFilename !== basename) proof.suggestedFilename = suggestedFilename;
+  return proof;
+}
+
+function formatBridgeByteSize(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n < 0) return '0 B';
+  if (n < 1024) return `${Math.round(n)} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = n / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  const rounded = value >= 10 ? Math.round(value) : Math.round(value * 10) / 10;
+  return `${rounded} ${units[unit]}`;
+}
+
+// download — arm a download listener, run the caller-provided trigger
+// (click by role/name/selector), then save the resulting download to our
+// scoped downloads dir. The proof is a REAL on-disk file + byte size — the
+// backend-aware evidence for "download the invoice" tasks, not a
+// screenshot. Mirrors the upload handler's filechooser structure.
+async function handleDownload(req, res, CORS) {
+  const { body, err } = await readJsonBody(req);
+  if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
+  const launched = await ensureContext();
+  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
+  try {
+    const gate = await guardHumanVerification(launched.page, [body.name, body.selector, body.role]);
+    if (gate) { writeHumanVerificationPause(res, CORS, gate); return; }
+    const timeout = Math.max(1000, Math.min(120000, Number(body.timeoutMs) || 30000));
+    ensureDownloadsDir();
+
+    // Arm the download listener BEFORE the trigger so we never miss a fast
+    // download (same ordering as the filechooser upload flow).
+    const downloadPromise = launched.page.waitForEvent('download', { timeout });
+
+    // The trigger is optional: some flows navigate directly to a file URL
+    // (which Chrome turns into a download) via a prior open_url. When a
+    // click target is given, use the same locator resolution as click_role.
+    if (body.selector || body.name || body.role) {
+      const role = String(body.role || 'link').trim() || 'link';
+      let locator = resolveLocator(launched.page, role, body);
+      if (typeof body.nth === 'number') locator = locator.nth(body.nth);
+      const clickRun = await runWithBrowserDialogHandling(launched.page, body, async () => {
+        await locator.click({ timeout });
+        return null;
+      });
+      if (!clickRun.ok) { writeBrowserDialogBlocked(res, CORS, clickRun.blockedDecision); return; }
+    }
+
+    const download = await downloadPromise;
+    const suggested = String(download.suggestedFilename() || 'download').replace(/[\\/]/g, '_').slice(0, 200) || 'download';
+    const savePath = path.join(DOWNLOADS_DIR, `${Date.now()}-${suggested}`);
+    await download.saveAs(savePath);
+
+    let sizeBytes = 0;
+    try { sizeBytes = fs.statSync(savePath).size; } catch {}
+
+    const proof = buildBridgeDownloadProof({ filePath: savePath, sizeBytes, suggestedFilename: suggested });
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({
+      ok: true,
+      path: savePath,
+      basename: proof.basename,
+      sizeBytes,
+      suggestedFilename: suggested,
+      proof,
+    }));
+  } catch (e) {
+    writeBrowserFailure(res, CORS, e, 'download failed');
+  }
+}
+
+// wait_for — explicit, bounded waits so the model can synchronize on
+// dynamic content instead of polling screenshots. Supports {selector}
+// (waitForSelector with state), {state} (waitForLoadState), or a plain
+// {timeoutMs} delay. Mirrors parseWaitForSpec in browserPrimitives.ts.
+async function handleWaitFor(req, res, CORS) {
+  const { body, err } = await readJsonBody(req);
+  if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
+  const launched = await ensureContext();
+  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
+  const clampTimeout = (value, fallback, max) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(0, Math.min(max, Math.round(n)));
+  };
+  const LOAD_STATES = ['load', 'domcontentloaded', 'networkidle'];
+  const SELECTOR_STATES = ['attached', 'detached', 'visible', 'hidden'];
+  try {
+    const selector = typeof body.selector === 'string' ? body.selector.trim() : '';
+    if (selector) {
+      const rawState = String(body.state || '').toLowerCase();
+      const state = SELECTOR_STATES.includes(rawState) ? rawState : 'visible';
+      const timeout = clampTimeout(body.timeoutMs, 15000, 60000);
+      await launched.page.waitForSelector(selector, { state, timeout });
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({ ok: true, mode: 'selector', selector, state, timeoutMs: timeout, awaited: `selector ${selector} (${state})` }));
+      return;
+    }
+    const rawState = String(body.state || '').toLowerCase();
+    if (LOAD_STATES.includes(rawState)) {
+      const timeout = clampTimeout(body.timeoutMs, 15000, 60000);
+      await launched.page.waitForLoadState(rawState, { timeout });
+      res.writeHead(200, CORS);
+      res.end(JSON.stringify({ ok: true, mode: 'state', state: rawState, timeoutMs: timeout, awaited: `page state ${rawState}` }));
+      return;
+    }
+    // Plain bounded delay (fail-closed default). Capped lower than the
+    // selector/state budget — a bare sleep should not hold for a minute.
+    const hasTimeout = body.timeoutMs != null && Number.isFinite(Number(body.timeoutMs));
+    const timeout = clampTimeout(hasTimeout ? body.timeoutMs : 1000, 1000, 30000);
+    await launched.page.waitForTimeout(timeout);
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: true, mode: 'timeout', timeoutMs: timeout, awaited: `${timeout}ms delay` }));
+  } catch (e) {
+    writeBrowserFailure(res, CORS, e, 'wait failed');
+  }
+}
+
+// scroll — real mouse-wheel scroll (page.mouse.wheel) so infinite-scroll
+// and lazy-loaded content actually advances. Deltas clamped to sane
+// bounds; a bare call nudges the page down. Mirrors normalizeScrollDelta.
+async function handleScroll(req, res, CORS) {
+  const { body, err } = await readJsonBody(req);
+  if (err) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: err })); return; }
+  const launched = await ensureContext();
+  if (!launched.ok) { writeBrowserFailure(res, CORS, launched.error, undefined, 'browser_bridge_offline', 503); return; }
+  try {
+    const clampAxis = (value) => {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return 0;
+      return Math.max(-SCROLL_DELTA_MAX, Math.min(SCROLL_DELTA_MAX, Math.round(n)));
+    };
+    const hasDx = body.dx != null && Number.isFinite(Number(body.dx));
+    const hasDy = body.dy != null && Number.isFinite(Number(body.dy));
+    const dx = hasDx ? clampAxis(body.dx) : 0;
+    let dy = hasDy ? clampAxis(body.dy) : 0;
+    if (!hasDx && !hasDy) dy = 600; // bare scroll → downward nudge
+    await launched.page.mouse.wheel(dx, dy);
+    res.writeHead(200, CORS);
+    res.end(JSON.stringify({ ok: true, dx, dy }));
+  } catch (e) {
+    writeBrowserFailure(res, CORS, e, 'scroll failed');
+  }
+}
+
 async function handleClose(_req, res, CORS) {
   if (context) {
     try { await context.close(); } catch {}
@@ -1362,8 +1682,17 @@ module.exports = {
   handleUploadFile,
   handlePress,
   handleScreenshot,
+  // Lane-A browser primitives (multi-tab / download / wait / wheel scroll).
+  handleTabsList,
+  handleTabSwitch,
+  handleTabClose,
+  handleDownload,
+  handleWaitFor,
+  handleScroll,
   handleClose,
   // Exposed for the smoke test.
   _prune: prune,
   _PROFILE_DIR: PROFILE_DIR,
+  _DOWNLOADS_DIR: DOWNLOADS_DIR,
+  _buildBridgeDownloadProof: buildBridgeDownloadProof,
 };
