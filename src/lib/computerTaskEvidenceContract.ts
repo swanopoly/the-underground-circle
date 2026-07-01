@@ -334,6 +334,82 @@ export function buildComputerTaskEvidenceContract(route: ChatComputerRequestRout
   return desktopContract(route);
 }
 
+/**
+ * Risk tiers for a single approval reason, matching the app-wide vocabulary
+ * (agentSpirits / capability riskTier). Consumed by the risk-tiering lane to
+ * decide how hard an approval gate should be for a given contract reason.
+ */
+export type ComputerTaskApprovalRisk = 'low' | 'medium' | 'high' | 'critical';
+
+/** A contract approval reason paired with the tier it should gate at. */
+export interface ComputerTaskApprovalGateReason {
+  reason: string;
+  risk: ComputerTaskApprovalRisk;
+}
+
+const APPROVAL_RISK_CRITICAL_RE = /\b(pay|payment|purchase|buy|checkout|send money|wire|transfer funds|delete|destroy|wipe|erase|publish|post publicly|send (?:email|message|invite|dm)|invite|external upload|upload to|share externally|overwrite|irreversible|deploy|go live)\b/i;
+const APPROVAL_RISK_HIGH_RE = /\b(submit|save|export|package|render|flatten|rasterize|relink|place (?:local )?asset|run(?:ning)? (?:new )?(?:scripts?|plugins?|actions?|macros?|add-?ins?)|connected-agent adapter code|patch|credential|sign ?in|log ?in|password|api key|token|move|copy|rename|archive|recursive scan|broad scan|batch|mass)\b/i;
+const APPROVAL_RISK_MEDIUM_RE = /\b(document mutation|mutat|edit|modify|change|update|create|insert|type|fill|cross-origin|navigat|new note|write)\b/i;
+
+/**
+ * Classify one approvalBefore reason string into a risk tier. Pure and
+ * conservative: unrecognized reasons fall to 'low' (an approval gate still
+ * applies at the contract level; this only tiers how severe THIS reason is).
+ * Severity is checked high→low so "delete/overwrite" wins over a generic
+ * "edit", and money/destructive/external actions land at 'critical'.
+ */
+export function classifyApprovalReasonRisk(reason: string | null | undefined): ComputerTaskApprovalRisk {
+  const text = String(reason || '').trim();
+  if (!text) return 'low';
+  if (APPROVAL_RISK_CRITICAL_RE.test(text)) return 'critical';
+  if (APPROVAL_RISK_HIGH_RE.test(text)) return 'high';
+  if (APPROVAL_RISK_MEDIUM_RE.test(text)) return 'medium';
+  return 'low';
+}
+
+const APPROVAL_RISK_ORDER: Record<ComputerTaskApprovalRisk, number> = {
+  critical: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+};
+
+/**
+ * Derive the contract's approval-gate reasons paired with their risk tier,
+ * deduped and ordered most-severe first. This is the structured
+ * "approvalBefore reasons" input the risk-tiering lane needs — it reads the
+ * canonical contract instead of re-parsing approval strings itself. Additive:
+ * no existing code path depends on it.
+ */
+export function deriveApprovalGateReasons(
+  contract: ComputerTaskEvidenceContract,
+): ComputerTaskApprovalGateReason[] {
+  const seen = new Set<string>();
+  const reasons: ComputerTaskApprovalGateReason[] = [];
+  for (const raw of contract.approvalBefore || []) {
+    const reason = String(raw || '').trim();
+    if (!reason) continue;
+    const key = reason.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    reasons.push({ reason, risk: classifyApprovalReasonRisk(reason) });
+  }
+  return reasons.sort((a, b) => APPROVAL_RISK_ORDER[a.risk] - APPROVAL_RISK_ORDER[b.risk]);
+}
+
+/**
+ * The highest approval-risk tier the contract gates at (its most severe
+ * approvalBefore reason), or null when the contract has no approval gate
+ * (e.g. a read-only route). Lets the risk-tiering lane pick a single tier for
+ * the whole contract cheaply.
+ */
+export function highestApprovalRisk(
+  contract: ComputerTaskEvidenceContract,
+): ComputerTaskApprovalRisk | null {
+  const reasons = deriveApprovalGateReasons(contract);
+  return reasons.length ? reasons[0].risk : null;
+}
+
 export function summarizeComputerTaskEvidenceContract(contract: ComputerTaskEvidenceContract): Record<string, unknown> {
   return {
     schemaVersion: contract.schemaVersion,

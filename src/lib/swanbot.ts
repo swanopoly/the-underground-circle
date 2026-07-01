@@ -16,6 +16,7 @@ import { buildSpiritWikiKnowledgeBundle, buildWikiKnowledgeBundle, buildWikiSear
 import { buildResearchKnowledgeBundle, buildResearchSearchResponse, buildSpiritResearchKnowledgeBundle } from './researchKnowledge';
 import { getAgentIdentityKey, loadAgentIdentities } from './agentIdentity';
 import type { OpenSwanExecutionStatus } from './openswanExecution';
+import type { ComputerTaskEvidenceRecoveryObservation } from './computerTaskEvidenceRecovery';
 import { getStrictLocalAiModeMessage, isStrictLocalAiModeEnabled, shouldBlockExternalAiProvider } from './privacyMode';
 import type { OpenSwanMemoryStores } from './openswanMemoryStores';
 import type { OpenSwanChatMode } from './openswanModePolicy';
@@ -24,7 +25,13 @@ import type { ConnectedProviderSet } from './serviceProfileSouls';
 import { detectAutomationVerificationGate } from './desktopAutomationSafety';
 import { buildUserTaskPipelinePromptBlock } from './userTaskPipelines';
 import { buildComputerAppTaskStrategyPromptBlock } from './computerAppTaskStrategy';
-import { buildChatComputerRequestRoutePromptBlock } from './chatComputerRequestRouter';
+import {
+  buildChatComputerRequestRoutePromptBlock,
+  constraintBlocksToolCall,
+  hasChatComputerConstraintInputs,
+  resolveChatComputerConstraintInputs,
+  type ChatComputerConstraintInputs,
+} from './chatComputerRequestRouter';
 import { buildComputerAppGroundingPromptBlock } from './computerAppGrounding';
 import { buildComputerAppExecutionReceiptPromptBlock } from './computerAppExecutionReceipts';
 import { buildDesignAppAutomationPromptBlock } from './designAppAutomation';
@@ -1270,6 +1277,109 @@ async function withSwanBotClientWordPressApproval(
       ...((result.data && typeof result.data === 'object') ? result.data as Record<string, unknown> : { result: result.data }),
       approvalId: approval.approvalId || undefined,
     },
+  };
+}
+
+// ─── QW1: always-confirm floor approval pause ────────────────────────────
+//
+// When the pre-dispatch constraint check reports `floorConfirmRequired` for a
+// pay/delete/login/grant tool call, the loop must PAUSE for explicit user
+// confirmation instead of dispatching — the floor is policy, not preference,
+// and is not disabled by autonomy mode, a sticky grant, or a user "don't ask
+// me". This mirrors the WordPress approval pattern above: resolve any existing
+// approval for this exact (tool,args), and if none exists yet, create a pending
+// one. The loop then feeds a "not performed, approval pending" tool_result and
+// skips dispatch, so a later round (after the user approves) can proceed. Keyed
+// on the same `agent_run_approvals` machinery so an approval granted once is
+// honored on the retry via `resolveOpenSwanRuntimeApprovalDecision`.
+
+type SwanBotFloorApprovalContext = {
+  circleId?: string;
+  userId?: string;
+  runId?: string;
+};
+
+async function resolveSwanBotFloorApproval(input: {
+  tool: string;
+  args: Record<string, unknown>;
+  category: string;
+  context: SwanBotFloorApprovalContext;
+}): Promise<{ passed: true } | { passed: false; message: string; approvalId?: string }> {
+  const { context } = input;
+  // Fail closed: without a run context we cannot record/track an approval, so
+  // the floored action must NOT run.
+  if (!context.circleId || !context.userId || !context.runId) {
+    return {
+      passed: false,
+      message: `Always-confirm floor: "${input.category}" actions require explicit user confirmation, but no approval context was available — the action was not performed. Ask the user to confirm before retrying.`,
+    };
+  }
+  const args = buildSwanBotClientToolApprovalArgs(input.args);
+  const title = `SwanBot approval required: ${input.tool}`;
+  const { data, error } = await supabase
+    .from('agent_run_approvals')
+    .select('id,status,payload')
+    .eq('run_id', context.runId)
+    .eq('circle_id', context.circleId)
+    .order('requested_at', { ascending: false })
+    .limit(20);
+  if (error) {
+    return {
+      passed: false,
+      message: `Always-confirm floor: approval lookup failed for "${input.tool}" — the ${input.category} action was not performed.`,
+    };
+  }
+  const decision = resolveOpenSwanRuntimeApprovalDecision({
+    tool: input.tool,
+    args,
+    rows: (data || []) as OpenSwanRuntimeApprovalRow[],
+  });
+  if (decision.kind === 'pass') return { passed: true };
+  if (decision.kind === 'defer') {
+    return {
+      passed: false,
+      message: `Always-confirm floor: approval is still pending for this ${input.category} action ("${input.tool}"). It was not performed. Wait for the user's decision.`,
+      approvalId: decision.approvalId,
+    };
+  }
+  if (decision.kind === 'block') {
+    return {
+      passed: false,
+      message: `The user rejected this ${input.category} action ("${input.tool}"). Do not retry it — choose a different approach or ask the user.`,
+      approvalId: decision.approvalId,
+    };
+  }
+  const toolApprovalKey = buildOpenSwanToolApprovalKey(input.tool, args);
+  const { requestRunApproval } = await import('./agentRunSystem');
+  const approval = await requestRunApproval({
+    runId: context.runId,
+    circleId: context.circleId,
+    approvalKind: input.category === 'pay' ? 'publish' : 'privileged_action',
+    title,
+    description: `Always-confirm floor (${input.category}): review and approve this exact action before SwanBot runs it. This confirmation is required in every autonomy mode.`,
+    requestedBy: context.userId,
+    payload: {
+      tool: input.tool,
+      args,
+      toolApprovalKey,
+      toolApprovalKeyVersion: 1,
+      policyFamily: 'always_confirm_floor',
+      floorCategory: input.category,
+      approvalMode: 'ask',
+      mutatesState: true,
+      externalSideEffect: true,
+    },
+  });
+  if (!approval) {
+    return {
+      passed: false,
+      message: `Always-confirm floor: "${input.category}" confirmation is required, but the approval request could not be created — the action was not performed.`,
+    };
+  }
+  return {
+    passed: false,
+    message: `Always-confirm floor: requested user confirmation for this ${input.category} action ("${input.tool}", id: ${approval.id.slice(0, 8)}). It was NOT performed yet — wait for the user's approval before continuing.`,
+    approvalId: approval.id,
   };
 }
 
@@ -3251,6 +3361,63 @@ async function getSwanBotStructuredResponseImpl(
   return { response };
 }
 
+type ToolLoopEvent = {
+  tool: string;
+  input: unknown;
+  result: string;
+  status: OpenSwanExecutionStatus;
+  metadata?: Record<string, unknown>;
+};
+
+/** A tool event is treated as an OBSERVATION for evidence-recovery purposes when
+ *  it re-grounded state without mutating anything: the loop's deterministic
+ *  auto_reobserve reads, plus any successful read/observe tool the model itself
+ *  ran. Failed reads and mutating actions are excluded — they don't establish
+ *  fresh ground truth. Pure; the read/observe classifier is injected so this
+ *  stays decoupled from the tool registry (and smoke-testable). */
+function isObservationToolEvent(
+  event: Pick<ToolLoopEvent, 'tool' | 'status' | 'metadata'>,
+  isReadTool?: (name: string) => boolean,
+): boolean {
+  if (event.metadata?.auto_reobserve === true) return true;
+  if (/\b(error|fail|failed|failure|blocked|denied|timeout)\b/i.test(String(event.status || ''))) return false;
+  if (!isReadTool) return false;
+  try { return isReadTool(event.tool) === true; } catch { return false; }
+}
+
+/**
+ * QW4 producer: harvest the fresh observations a failed turn captured, in the
+ * shape the evidence-recovery diagnosis consumes
+ * (`ComputerTaskEvidenceRecoveryObservation`). Includes the loop's deterministic
+ * `auto_reobserve` reads plus the model's own successful read/observe calls, in
+ * chronological order, each stamped with `capturedAt` so the recovery readiness
+ * check can enforce a per-requirement freshness window. Bounded to the most
+ * recent `max`. Pure over its inputs: pass `isReadTool` (mutatesState === false)
+ * to also count model-run reads; without it, only the flagged auto_reobserve
+ * events are harvested (a safe, conservative under-count). Passed into
+ * `diagnoseComputerTaskEvidenceFailure` via `chatFailureRecovery` so
+ * `evidenceReadiness.ready` reflects real ground truth.
+ */
+export function harvestToolLoopObservations(
+  toolEvents: ReadonlyArray<Pick<ToolLoopEvent, 'tool' | 'status' | 'metadata'>>,
+  opts: { isReadTool?: (name: string) => boolean; nowMs?: number; max?: number } = {},
+): ComputerTaskEvidenceRecoveryObservation[] {
+  const nowMs = Number.isFinite(opts.nowMs) ? Number(opts.nowMs) : Date.now();
+  const max = Math.max(1, opts.max ?? 24);
+  const out: ComputerTaskEvidenceRecoveryObservation[] = [];
+  for (const event of toolEvents || []) {
+    if (!event?.tool) continue;
+    if (!isObservationToolEvent(event, opts.isReadTool)) continue;
+    // Prefer the real capture time stamped when the observation ran so the
+    // recovery freshness window is meaningful; fall back to now only if a
+    // caller passed events without a stamp.
+    const stamped = event.metadata?.observed_at;
+    const capturedAt = typeof stamped === 'number' && Number.isFinite(stamped) ? stamped : nowMs;
+    out.push({ tool: event.tool, capturedAt });
+  }
+  return out.slice(-max);
+}
+
 /**
  * Execute one round of Anthropic tool-use within a chat turn. The model
  * may respond with `tool_use` content blocks; we dispatch each one via
@@ -3298,6 +3465,13 @@ export async function executeToolUseLoop(opts: {
   /** Machine-readable resume snapshot when `incomplete` — which steps ran, the
    *  last observation/failure, and a resume hint. Present only on cap exhaustion. */
   checkpoint?: ToolLoopCheckpoint;
+  /** QW4: fresh read/observe evidence this turn captured (incl. deterministic
+   *  auto_reobserve reads), in the shape the evidence-recovery diagnosis
+   *  consumes. Pass into `chatFailureRecovery`'s `observations` so
+   *  `evidenceReadiness.ready` gates a mutating retry on real ground truth.
+   *  Callers can also derive it from `toolEvents` via
+   *  `harvestToolLoopObservations`. */
+  observations?: ComputerTaskEvidenceRecoveryObservation[];
 }> {
   if (shouldBlockExternalAiProvider('anthropic')) {
     return { response: getStrictLocalAiModeMessage('anthropic'), toolEvents: [] };
@@ -3311,6 +3485,16 @@ export async function executeToolUseLoop(opts: {
   const { toolBudgetReminder } = await import('./toolLoopBudget');
   const { planDeterministicReobserve, summarizeObservationForRetry } = await import('./deterministicReobserve');
   const { assessProofCoverage, proofCoverageNudge } = await import('./proofCoverage');
+  // Mutation-policy classifiers used by the in-loop fresh-evidence retry gate
+  // and `harvestToolLoopObservations`. `mutatesState === false` ⇒ read/observe
+  // (an evidence source); `=== true` ⇒ mutates. Anything else is treated
+  // conservatively (not a read; not gated as a known mutation).
+  const isReadTool = (name: string): boolean => {
+    try { return getToolParallelPolicy(name, opts.activePluginIds).mutatesState === false; } catch { return false; }
+  };
+  const isMutatingTool = (name: string): boolean => {
+    try { return getToolParallelPolicy(name, opts.activePluginIds).mutatesState === true; } catch { return false; }
+  };
   const tools = getToolDefinitions(opts.allowedToolNames, opts.surface || 'main_chat', opts.mode);
   if (tools.length === 0) {
     return { response: '', toolEvents: [] };
@@ -3325,6 +3509,16 @@ export async function executeToolUseLoop(opts: {
     activePluginIds: opts.activePluginIds,
     surface: opts.surface || 'main_chat',
   };
+
+  // QW1: the always-confirm floor (pay/delete/login/grant) + parsed user
+  // "never do X" constraints as a HARD pre-dispatch check — not prompt-only.
+  // Derived once per turn from the user message (independent of the computer
+  // route's "is this a computer task" null-gating, so the floor still fires on
+  // a bare "delete everything" turn). When neither input is present this stays
+  // a no-op and the per-block enforcement below short-circuits — ordinary
+  // no-constraint turns are completely unaffected.
+  const constraintInputs: ChatComputerConstraintInputs = resolveChatComputerConstraintInputs(opts.userMessage);
+  const enforceConstraints = hasChatComputerConstraintInputs(constraintInputs);
 
   const anthropicTools = tools.map(t => ({
     name: t.name,
@@ -3420,6 +3614,7 @@ export async function executeToolUseLoop(opts: {
         response: extractAssistantText(content) || data.response || '',
         toolEvents,
         routing: routingInfo,
+        observations: harvestToolLoopObservations(toolEvents, { isReadTool }),
       };
     }
 
@@ -3429,18 +3624,31 @@ export async function executeToolUseLoop(opts: {
     // mutation or approval keeps the round sequential to preserve ordering.
     const toolResults: Array<{ type: string; tool_use_id: string; content: string }> = [];
     const batchPolicies = toolUseBlocks.map((b: any) => getToolParallelPolicy(b.name, opts.activePluginIds));
-    const preDispatched = canParallelizeToolBatch(batchPolicies, { hasApprovalGate: !!opts.toolApprovalGate })
+    // QW1: when this turn carries constraint/floor inputs, never pre-dispatch a
+    // parallel batch — every block must pass the sequential constraint check
+    // BEFORE it runs, so a verb-anchored match can't be executed ahead of the
+    // gate. `canParallelizeToolBatch` already bars mutating/side-effect tools;
+    // this closes the gap where a read-only tool name matches a floor verb.
+    const preDispatched = !enforceConstraints
+      && canParallelizeToolBatch(batchPolicies, { hasApprovalGate: !!opts.toolApprovalGate })
       ? await Promise.all(toolUseBlocks.map((b: any) => dispatchToolDetailed(b.name, b.input || {}, toolCtx)))
       : null;
+    // Layer-8 auto-grounding (deterministic re-observe) is suppressed only in
+    // per-STEP REVIEW mode, where the model can request the read as its next
+    // reviewed step. `opts.toolApprovalGate` is that per-step review gate — name
+    // the intent explicitly so the SEPARATE always-on constraint/floor gate
+    // added below does NOT silently kill auto-grounding on the riskiest turns.
+    const perStepReviewGateActive = !!opts.toolApprovalGate;
     for (let bi = 0; bi < toolUseBlocks.length; bi++) {
       const block = toolUseBlocks[bi];
       // Per-step review gate. The room chat's review mode renders an
       // approval prompt and resolves with the user's decision; YOLO/auto
       // mode just doesn't pass a gate so the loop runs as before.
-      if (opts.toolApprovalGate) {
+      if (perStepReviewGateActive) {
         let decision: 'approve' | 'reject';
         try {
-          decision = await opts.toolApprovalGate({ name: block.name, input: block.input });
+          // Guaranteed defined: `perStepReviewGateActive === !!opts.toolApprovalGate`.
+          decision = await opts.toolApprovalGate!({ name: block.name, input: block.input });
         } catch {
           decision = 'reject';
         }
@@ -3461,6 +3669,94 @@ export async function executeToolUseLoop(opts: {
           continue;
         }
       }
+      // QW1: always-on, deterministic pre-dispatch enforcement of the
+      // always-confirm floor + parsed user "never do X" constraints. This is
+      // SEPARATE from (and complements) the per-step review gate above and the
+      // runtime-layer `maybeRequestToolApproval` — a HARD backstop so a
+      // forbidden or floored action can never dispatch on the prompt's word
+      // alone. Only runs when this turn actually carries constraint inputs.
+      if (enforceConstraints) {
+        const verdict = constraintBlocksToolCall(constraintInputs.userConstraints, block.name, block.input || {});
+        if (verdict.blocked) {
+          // The user explicitly forbade this category — stop, don't retry.
+          const blockedText = verdict.reason
+            || `The user forbade "${verdict.category}" actions for this task. It was not performed. Stop and report instead.`;
+          toolEvents.push({
+            tool: block.name,
+            input: block.input,
+            result: blockedText,
+            status: 'blocked' as OpenSwanExecutionStatus,
+            metadata: { blocked_by_user_constraint: true, constraint_category: verdict.category },
+          });
+          toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: blockedText });
+          continue;
+        }
+        // Pay/delete/login/grant — convert to a real approval pause (reuse the
+        // approval machinery). On pass, fall through and dispatch; otherwise
+        // skip dispatch and feed the "not performed, approval pending" note.
+        // Skipped in per-step review mode: the user just gave an explicit
+        // fresh approval for THIS exact call above, which satisfies the floor's
+        // "confirm before each such action" intent (the forbidden HARD block
+        // still applies there — an explicit constraint overrides a stray tap).
+        if (verdict.floorConfirmRequired && !perStepReviewGateActive) {
+          const floor = await resolveSwanBotFloorApproval({
+            tool: block.name,
+            args: (block.input || {}) as Record<string, unknown>,
+            category: String(verdict.floorCategory || 'sensitive'),
+            context: { circleId: opts.circleId, userId: opts.userId, runId: opts.runId },
+          });
+          if (!floor.passed) {
+            toolEvents.push({
+              tool: block.name,
+              input: block.input,
+              result: floor.message,
+              status: 'blocked' as OpenSwanExecutionStatus,
+              metadata: {
+                always_confirm_floor: true,
+                floor_category: verdict.floorCategory,
+                ...(floor.approvalId ? { approval_id: floor.approvalId } : {}),
+              },
+            });
+            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: floor.message });
+            continue;
+          }
+        }
+      }
+      // QW4: fresh-evidence-before-retry, enforced deterministically. If this
+      // MUTATING tool already failed earlier this turn and NO observation has
+      // re-grounded state since that failure (neither a deterministic
+      // auto_reobserve nor a model-run read), block the redundant mutating
+      // retry and require fresh evidence first — the loop-level realization of
+      // "evidenceReadiness.ready before re-dispatching a mutating tool". Only a
+      // repeated FAILED mutation is gated (never a first attempt), and only when
+      // no fresh observation exists (`isPreDispatched` batches are read-only and
+      // never reach here), so ordinary act→verify→act flows are untouched.
+      if (!preDispatched && isMutatingTool(block.name)) {
+        let lastFailureIdx = -1;
+        for (let ei = toolEvents.length - 1; ei >= 0; ei--) {
+          const ev = toolEvents[ei];
+          if (ev.tool !== block.name) continue;
+          if (/\b(error|fail|failed|failure|blocked|denied|timeout)\b/i.test(String(ev.status || ''))) { lastFailureIdx = ei; }
+          break;
+        }
+        if (lastFailureIdx >= 0) {
+          const freshObservationSinceFailure = toolEvents
+            .slice(lastFailureIdx + 1)
+            .some((ev) => isObservationToolEvent(ev, isReadTool));
+          if (!freshObservationSinceFailure) {
+            const gateText = `Fresh-evidence gate: "${block.name}" already failed this turn and nothing has re-observed current state since. Capture fresh ground truth first (re-read the a11y tree / DOM, re-check the target), then retry the mutating action once. It was not performed.`;
+            toolEvents.push({
+              tool: block.name,
+              input: block.input,
+              result: gateText,
+              status: 'blocked' as OpenSwanExecutionStatus,
+              metadata: { fresh_evidence_gate: true },
+            });
+            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: gateText });
+            continue;
+          }
+        }
+      }
       const dispatched = preDispatched ? preDispatched[bi] : await dispatchToolDetailed(block.name, block.input || {}, toolCtx);
       // Enforce observe→act→VERIFY on multi-step app/desktop/browser tasks:
       // attach a re-observe/verify (or retry-ladder) reminder to mutating app
@@ -3472,15 +3768,19 @@ export async function executeToolUseLoop(opts: {
       // re-dispatching the identical doomed action until the step cap. Computed
       // against `toolEvents` BEFORE the current event is pushed (prior history).
       resultContent = appendStuckBreaker(resultContent, toolEvents, { tool: block.name, input: block.input, status: String(dispatched.status) });
-      toolEvents.push({ tool: block.name, input: block.input, result: dispatched.text, status: dispatched.status, metadata: dispatched.metadata });
+      // Stamp capture time (QW4) so a harvested read/observe carries a real
+      // freshness timestamp for the evidence-recovery readiness window.
+      toolEvents.push({ tool: block.name, input: block.input, result: dispatched.text, status: dispatched.status, metadata: { ...(dispatched.metadata || {}), observed_at: Date.now() } });
       // Deterministic re-observe: when a UI action fails (and we're not in
       // per-step review mode — there the model can just request the read as its
       // next reviewed step), auto-capture fresh ground truth and embed it in the
       // failed action's result so the model's retry is grounded in current state
       // without spending a round to ask for the observation. Read-only +
       // best-effort: any error or empty/failed read adds nothing and falls back
-      // to the stuck-breaker's "re-observe" nudge.
-      if (!opts.toolApprovalGate) {
+      // to the stuck-breaker's "re-observe" nudge. Keyed on the per-STEP review
+      // gate only (see `perStepReviewGateActive`) — the always-on constraint/
+      // floor gate must NOT disable auto-grounding.
+      if (!perStepReviewGateActive) {
         const reobserve = planDeterministicReobserve(block.name, String(dispatched.status));
         if (reobserve) {
           try {
@@ -3488,7 +3788,7 @@ export async function executeToolUseLoop(opts: {
             const note = summarizeObservationForRetry(obs?.text, String(obs?.status), { maxChars: 1400 });
             if (note) {
               resultContent = `${resultContent}${note}`;
-              toolEvents.push({ tool: reobserve.observationTool, input: {}, result: obs.text, status: obs.status, metadata: { auto_reobserve: true } });
+              toolEvents.push({ tool: reobserve.observationTool, input: {}, result: obs.text, status: obs.status, metadata: { auto_reobserve: true, observed_at: Date.now() } });
             }
           } catch { /* observation is best-effort; never break the loop */ }
         }
@@ -3556,6 +3856,7 @@ export async function executeToolUseLoop(opts: {
     routing: routingInfo,
     incomplete: true,
     checkpoint: buildToolLoopCheckpoint(toolEvents, { maxRounds }),
+    observations: harvestToolLoopObservations(toolEvents, { isReadTool }),
   };
 }
 

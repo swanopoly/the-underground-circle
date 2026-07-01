@@ -91,6 +91,40 @@ export type AgentToolApprovalGate = (req: {
 }) => AgentToolApprovalDecision | Promise<AgentToolApprovalDecision>;
 
 /**
+ * QW1 (mirror of `executeToolUseLoop`'s always-on constraint/floor check). A
+ * HARD pre-dispatch verdict computed BEFORE the approval gate — the loop-level
+ * enforcement of the user's "never do X" constraints and the always-confirm
+ * floor (pay/delete/login/grant), rather than trusting prompt rules alone.
+ *
+ * This core stays provider- and product-agnostic, so the actual verdict is
+ * injected: the chat/session adapter wires it to
+ * `chatComputerRequestRouter.constraintBlocksToolCall` (with the turn's
+ * `userConstraints` + `alwaysConfirmFloor`). Return:
+ *   - `{ block: true, reason }` → the tool is refused with a POLICY-BLOCK
+ *     tool_result (not a transient error) so the model does not retry it;
+ *   - `{ requireApproval: true, reason }` → the always-confirm floor tripped;
+ *     the tool is refused with a "confirmation required, not performed"
+ *     tool_result. (This core has no approval-pause primitive of its own — the
+ *     adapter that owns `agent_run_approvals` requests the actual approval; here
+ *     we fail closed so the floored action never runs unconfirmed.)
+ *   - `undefined` / `{ block: false }` → allow (then the approval gate runs).
+ * A guard that throws fails closed (blocks) — never a silent allow.
+ */
+export type AgentToolConstraintVerdict =
+  | { block?: false; requireApproval?: false }
+  | { block: true; reason?: string }
+  | { block?: false; requireApproval: true; reason?: string }
+  | void
+  | undefined;
+
+export type AgentToolConstraintGuard = (req: {
+  toolName: string;
+  toolUseId: string;
+  input: unknown;
+  iteration: number;
+}) => AgentToolConstraintVerdict | Promise<AgentToolConstraintVerdict>;
+
+/**
  * Round-boundary hook (O1 nudge parity). Fired after a tool round's results
  * are appended (and `iteration_complete` is emitted) but BEFORE the next
  * provider turn, so adapters can inject round-boundary guidance the way the
@@ -182,6 +216,15 @@ export type AgentRunOptions = {
    * keep existing behavior (all registered tools dispatch).
    */
   toolApprovalGate?: AgentToolApprovalGate;
+  /**
+   * Optional HARD pre-dispatch constraint/floor guard (QW1 — see
+   * `AgentToolConstraintGuard`). Runs BEFORE `toolApprovalGate`: a `block`
+   * verdict refuses the tool as a policy block; a `requireApproval` verdict
+   * refuses a floored (pay/delete/login/grant) action as "confirmation
+   * required, not performed" — both fail closed. Omit to keep existing
+   * behavior (no constraint enforcement in this core).
+   */
+  toolConstraintGuard?: AgentToolConstraintGuard;
   /**
    * Optional per-turn dynamic tool expansion (T2 progressive disclosure).
    * Re-evaluated at the start of every turn BEFORE the provider call; any
@@ -308,6 +351,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     signal,
     compaction,
     toolApprovalGate,
+    toolConstraintGuard,
     resolveAdditionalTools,
     toolParallelPolicyProvider,
     onRoundComplete,
@@ -413,11 +457,15 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
       if (!def) {
         result = { ok: false, error: `Tool "${use.name}" is not registered.` };
       } else {
-        // Pre-dispatch approval gate — fail closed: a gate error rejects.
-        let approval: AgentToolApprovalDecision = { decision: 'approve' };
-        if (toolApprovalGate) {
+        // QW1: HARD pre-dispatch constraint/floor guard — runs BEFORE the
+        // approval gate and the handler. Fail closed: a guard error blocks. A
+        // `block` verdict (user forbade the category) or a `requireApproval`
+        // verdict (always-confirm floor tripped) refuses the tool without
+        // running it, as a policy block the model must not blindly retry.
+        let constraintVerdict: AgentToolConstraintVerdict = undefined;
+        if (toolConstraintGuard) {
           try {
-            approval = await toolApprovalGate({
+            constraintVerdict = await toolConstraintGuard({
               toolName: use.name,
               toolUseId: use.id,
               input: use.input,
@@ -425,22 +473,52 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
             });
           } catch (e) {
             const message = e instanceof Error ? e.message : String(e);
-            approval = { decision: 'reject', reason: `approval gate failed (${message})` };
+            constraintVerdict = { block: true, reason: `constraint guard failed (${message})` };
           }
         }
-        if (approval.decision === 'reject') {
-          const reason = approval.reason ? ` Reason: ${approval.reason}` : '';
+        const blockedByConstraint = !!constraintVerdict
+          && (constraintVerdict.block === true || (constraintVerdict as { requireApproval?: boolean }).requireApproval === true);
+        // Pre-dispatch approval gate — fail closed: a gate error rejects.
+        let approval: AgentToolApprovalDecision = { decision: 'approve' };
+        if (blockedByConstraint) {
+          const reason = constraintVerdict && 'reason' in constraintVerdict && constraintVerdict.reason
+            ? ` Reason: ${constraintVerdict.reason}`
+            : '';
+          const kind = (constraintVerdict as { requireApproval?: boolean }).requireApproval === true
+            ? 'requires explicit user confirmation and was not performed'
+            : 'was blocked by a user constraint and did not run';
           result = {
             ok: false,
-            error: `Tool "${use.name}" was blocked by policy and did not run.${reason} Do not retry the same call — choose a different approach or ask the user.`,
+            error: `Tool "${use.name}" ${kind}.${reason} Do not retry the same call — stop and ask the user, or choose a different approach.`,
           };
         } else {
-          try {
-            result = await def.handler(use.input, ctx);
-          } catch (e) {
-            // Tools SHOULD NOT throw — we still catch to preserve the loop.
-            const message = e instanceof Error ? e.message : String(e);
-            result = { ok: false, error: `Handler threw: ${message}` };
+          if (toolApprovalGate) {
+            try {
+              approval = await toolApprovalGate({
+                toolName: use.name,
+                toolUseId: use.id,
+                input: use.input,
+                iteration,
+              });
+            } catch (e) {
+              const message = e instanceof Error ? e.message : String(e);
+              approval = { decision: 'reject', reason: `approval gate failed (${message})` };
+            }
+          }
+          if (approval.decision === 'reject') {
+            const reason = approval.reason ? ` Reason: ${approval.reason}` : '';
+            result = {
+              ok: false,
+              error: `Tool "${use.name}" was blocked by policy and did not run.${reason} Do not retry the same call — choose a different approach or ask the user.`,
+            };
+          } else {
+            try {
+              result = await def.handler(use.input, ctx);
+            } catch (e) {
+              // Tools SHOULD NOT throw — we still catch to preserve the loop.
+              const message = e instanceof Error ? e.message : String(e);
+              result = { ok: false, error: `Handler threw: ${message}` };
+            }
           }
         }
       }

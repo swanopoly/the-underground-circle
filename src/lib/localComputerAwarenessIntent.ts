@@ -4761,47 +4761,438 @@ export function renderLocalComputerAwarenessIntent(intent: LocalComputerAwarenes
   }
 }
 
-export function getLocalComputerAwarenessRisk(intent: LocalComputerAwarenessIntent): 'safe' | 'review' | 'external_side_effect' {
-  switch (intent.kind) {
+export type LocalComputerAwarenessRiskTier = 'safe' | 'review' | 'external_side_effect';
+
+/**
+ * Content-aware risk profile for a parsed local-computer intent (QW3).
+ *
+ * `tier` is the same coarse gate the rest of the app already consumes
+ * (`getLocalComputerAwarenessRisk` returns exactly this). The extra flags let
+ * downstream approval UI reason about *why* something is gated — an irreversible
+ * or egress/sensitive action can be surfaced with a stronger warning than a
+ * reversible window focus, and a retry path can require fresh evidence before
+ * anything that has an external side effect.
+ *
+ * IMPORTANT: this is a TIERING/advisory layer, not the enforcement boundary.
+ * The typed-runtime floor/constraint gate is the hard stop; this only escalates
+ * conservatively so the high-frequency input kinds (type/paste/set_field/keys/
+ * menu_click) stop being blanket-`review` when their actual content is
+ * destructive or exfiltrating.
+ */
+export interface LocalComputerAwarenessRiskProfile {
+  tier: LocalComputerAwarenessRiskTier;
+  /** Can the effect be undone easily (focus/move/scroll) vs not (delete/send)? */
+  reversible: boolean;
+  /** Does this move data OFF the machine (send/publish/upload/pay/exfil URL)? */
+  egress: boolean;
+  /** Does this touch secret/credential material (secret clipboard write, etc.)? */
+  sensitive: boolean;
+  /** Short machine-readable reasons for the tier (for logs / approval copy). */
+  signals: string[];
+}
+
+// Verb-anchored content patterns for QW3 escalation. Deliberately conservative:
+// these fire on the ACTUAL text/combo/menuPath/targetLabel being applied, not on
+// the app or kind alone, so a benign "type hello" stays 'review' while a typed
+// `rm -rf` or a menu click on Delete/Publish escalates.
+
+// Irreversible / destructive local effects: shell-level removal, disk wipes,
+// force-kill, format. Anchored so "remove background" (a Photoshop phrase) does
+// NOT match — we require a terminal/exec or explicit trash/delete-of-target verb.
+const RISK_DESTRUCTIVE_EXEC_RE =
+  /(^|[\s;&|`(])(?:sudo\s+|rm\s+-|rm\s+["'~/.]|rmdir\s|del\s+\/|erase\s+\/|format\s+[a-z]:|mkfs\b|dd\s+if=|shutdown\b|reboot\b|kill(?:all)?\s+-9|diskutil\s+(?:erase|reformat)|drop\s+(?:table|database)\b|truncate\s+table\b|git\s+(?:reset\s+--hard|clean\s+-[a-z]*f|push\s+.*--force))/i;
+// Destructive verbs aimed at a file/data target (delete/trash/wipe/purge/format).
+const RISK_DESTRUCTIVE_VERB_RE =
+  /\b(?:delete|trash|discard|wipe|purge|shred|destroy|permanently\s+(?:delete|remove)|empty\s+(?:the\s+)?trash|move\s+to\s+trash|factory\s+reset|uninstall)\b/i;
+// Egress / external side effect: pushing data or money off the box.
+const RISK_EGRESS_VERB_RE =
+  /\b(?:send|publish|post|submit|share|upload|transfer|export\s+to|email|e-?mail|dm|message|tweet|pay|checkout|purchase|buy|charge|wire|venmo|transfer\s+funds|deploy|release|go\s+live)\b/i;
+// A control that, when clicked/targeted, has an external side effect.
+const RISK_SEND_SUBMIT_CONTROL_RE =
+  /\b(?:send|submit|publish|post|pay|checkout|buy|purchase|place\s+order|confirm\s+(?:order|payment|purchase|send)|delete|remove|trash|deploy|go\s+live|share)\b/i;
+// Secret / credential material moving through clipboard/typing.
+const RISK_SENSITIVE_RE =
+  /\b(?:password|passcode|secret|api[\s_-]?key|access[\s_-]?token|bearer\s+[a-z0-9._-]{6,}|private\s+key|credential|otp|2fa\s+code|seed\s+phrase|recovery\s+phrase|ssn|social\s+security|credit\s+card|card\s+number|cvv|routing\s+number|account\s+number)\b/i;
+// The pre-existing verb-anchored reason/targetLabel escalation shared with
+// launch/focus/open, kept as a named pattern so both branches stay in sync.
+const RISK_REASON_SIDE_EFFECT_RE =
+  /\b(local-gmail-send|local-wordpress-(?:publish|update|schedule|delete|trash))\b/i;
+const RISK_TARGET_SIDE_EFFECT_RE =
+  /\b(send|publish|update|schedule|delete|trash|remove)\b/i;
+
+// Kinds that are intrinsically read-only / awareness reads.
+const RISK_SAFE_KINDS: ReadonlySet<LocalComputerAwarenessKind> = new Set<LocalComputerAwarenessKind>([
+  'browser_tabs',
+  'window_state',
+  'running_apps',
+  'clipboard',
+  'screen_state',
+  'file_list',
+  'file_read',
+  'file_search',
+  'file_stat',
+  'shortcuts_list',
+  'a11y_tree',
+  'wait_for_app',
+  'indesign_document_status',
+  'indesign_text_inventory',
+  'photoshop_document_status',
+  'photoshop_layer_inventory',
+]);
+
+// Kinds whose EFFECT is reversible-by-default (focus/move/scroll/wait/read-ish
+// window management). These never escalate on content and get the softer gate.
+const RISK_REVERSIBLE_KINDS: ReadonlySet<LocalComputerAwarenessKind> = new Set<LocalComputerAwarenessKind>([
+  'focus_app',
+  'window_manage',
+  'wait',
+  'mouse_move',
+  'mouse_scroll',
+]);
+
+/** Free-text payload of an intent that content-tiering should inspect. */
+function intentPayloadText(intent: LocalComputerAwarenessIntent): string {
+  const parts = [
+    intent.text,
+    intent.combo,
+    intent.targetLabel,
+    Array.isArray(intent.menuPath) ? intent.menuPath.join(' > ') : '',
+    intent.query,
+    intent.url,
+  ];
+  return parts.filter(Boolean).join('\n');
+}
+
+/**
+ * Full content-aware risk profile (QW3). Escalates the high-frequency input
+ * kinds to `external_side_effect` when their payload matches destructive/egress
+ * patterns, and annotates reversible / egress / sensitive so file_trash,
+ * clipboard-write-of-secret, and open_url-to-exfil get stronger gates than a
+ * reversible window focus. Conservative by design to avoid approval fatigue.
+ */
+export function getLocalComputerAwarenessRiskProfile(
+  intent: LocalComputerAwarenessIntent,
+): LocalComputerAwarenessRiskProfile {
+  const kind = intent.kind;
+  const reason = intent.reason || '';
+  const signals: string[] = [];
+
+  // Read-only awareness: always safe, always reversible.
+  if (!kind || RISK_SAFE_KINDS.has(kind)) {
+    return { tier: 'safe', reversible: true, egress: false, sensitive: false, signals: ['read_only'] };
+  }
+
+  // Signal sources, kept SEPARATE so a benign field *name* never triggers an
+  // egress/destructive escalation (e.g. "fill the email field with X" — "email"
+  // is the field label, not an egress action). Only content the user actually
+  // types/executes (`text`/`combo`) or a click *target* (`targetLabel`/menuPath)
+  // drives the tier; incidental nouns in field names do not.
+  const typedValue = [intent.text, intent.combo].filter(Boolean).join('\n');
+  const menuPathText = Array.isArray(intent.menuPath) ? intent.menuPath.join(' > ') : '';
+  const clickTarget = [intent.targetLabel, menuPathText].filter(Boolean).join('\n');
+  const allText = intentPayloadText(intent);
+
+  // Destructive/exec is only meaningful in what is TYPED or in a menu path
+  // (running a command, choosing Delete/Empty Trash) — never a field name.
+  const destructiveExec = RISK_DESTRUCTIVE_EXEC_RE.test(typedValue) || RISK_DESTRUCTIVE_EXEC_RE.test(menuPathText);
+  const destructiveVerb = RISK_DESTRUCTIVE_VERB_RE.test(typedValue) || RISK_DESTRUCTIVE_VERB_RE.test(menuPathText);
+  const destructive = destructiveExec || destructiveVerb;
+  // A send/submit control being CLICKED/targeted has an external side effect.
+  // Uses the control regex (no "email"/"message" nouns) so field names are safe.
+  const controlSideEffect = RISK_SEND_SUBMIT_CONTROL_RE.test(clickTarget);
+  // Secrets: sensitive if secret material is typed OR named as the field value.
+  const sensitive = RISK_SENSITIVE_RE.test(typedValue) || RISK_SENSITIVE_RE.test(allText);
+  // Pre-existing verb-anchored escalation for launch/focus/open, unchanged.
+  const reasonSideEffect = RISK_REASON_SIDE_EFFECT_RE.test(reason);
+  const targetSideEffect = RISK_TARGET_SIDE_EFFECT_RE.test(intent.targetLabel || '');
+  // Egress as an ADVISORY flag only (not tier-driving for input kinds): an
+  // egress action verb in typed content or a send/publish/schedule click target.
+  const egressText = RISK_EGRESS_VERB_RE.test(typedValue);
+
+  // Exfil URL: an open_url whose scheme/verb pushes data off-box (mailto:, share,
+  // upload, pay…). Tier-driving for open_url only.
+  const exfilUrl = kind === 'open_url' && /\b(?:mailto:|sms:|tel:|share|send|upload|post|submit|pay|checkout)\b/i.test(intent.url || '');
+
+  if (destructive) signals.push('destructive');
+  if (controlSideEffect) signals.push('send_submit_control');
+  if (sensitive) signals.push('sensitive');
+  if (egressText || exfilUrl) signals.push('egress');
+
+  const egress = egressText || exfilUrl || reasonSideEffect || controlSideEffect ||
+    /\b(send|publish|schedule)\b/i.test(intent.targetLabel || '');
+
+  // shortcut_run is opaque (an arbitrary Shortcuts workflow) — treat as an
+  // external side effect exactly as before, but annotate it as irreversible.
+  if (kind === 'shortcut_run') {
+    return {
+      tier: 'external_side_effect',
+      reversible: false,
+      egress,
+      sensitive,
+      signals: ['shortcut_opaque', ...signals],
+    };
+  }
+
+  // file_trash is a destructive file op by definition — irreversible-ish.
+  if (kind === 'file_trash') {
+    return {
+      tier: destructive || controlSideEffect ? 'external_side_effect' : 'review',
+      reversible: false,
+      egress,
+      sensitive,
+      signals: ['file_trash', ...signals],
+    };
+  }
+
+  // clipboard_write of secret material: sensitive + gated. (Reversible-ish but
+  // the sensitive flag drives the stronger downstream gate.)
+  if (kind === 'clipboard_write' && sensitive) {
+    return {
+      tier: 'external_side_effect',
+      reversible: true,
+      egress,
+      sensitive: true,
+      signals: ['clipboard_secret', ...signals],
+    };
+  }
+
+  // Launch/focus/open family: keep the pre-existing verb-anchored escalation
+  // (reason/targetLabel) AND add exfil-URL / destructive / send-control content.
+  if (
+    kind === 'launch_app' ||
+    kind === 'focus_app' ||
+    kind === 'open_url' ||
+    kind === 'open_path' ||
+    kind === 'open_file_search_match' ||
+    kind === 'clipboard_write' ||
+    kind === 'clipboard_clear' ||
+    kind === 'window_manage' ||
+    kind === 'semantic_click'
+  ) {
+    const escalate = reasonSideEffect || targetSideEffect || destructive || exfilUrl ||
+      (kind === 'semantic_click' && controlSideEffect);
+    const reversible = RISK_REVERSIBLE_KINDS.has(kind) && !escalate;
+    return {
+      tier: escalate ? 'external_side_effect' : 'review',
+      reversible,
+      egress,
+      sensitive,
+      signals: escalate ? ['verb_side_effect', ...signals] : ['gated_default', ...signals],
+    };
+  }
+
+  // High-frequency input kinds: previously ALWAYS 'review'. QW3 escalates them
+  // to 'external_side_effect' ONLY when the TYPED content is destructive (shell
+  // exec / delete / trash) or when the action targets a send/submit CONTROL
+  // (Send/Submit/Publish/Pay button, Delete menu item). An egress verb sitting
+  // in typed prose or an "email" field name does NOT escalate the tier — it is
+  // recorded as the advisory `egress` flag only, to avoid approval fatigue.
+  if (
+    kind === 'menu_click' ||
+    kind === 'type_text' ||
+    kind === 'paste_text' ||
+    kind === 'set_field_text' ||
+    kind === 'press_keys'
+  ) {
+    const escalate = destructive || controlSideEffect;
+    const reversible = !escalate && !destructive;
+    return {
+      tier: escalate ? 'external_side_effect' : 'review',
+      reversible,
+      egress,
+      sensitive,
+      signals: escalate ? ['content_side_effect', ...signals] : ['input_review', ...signals],
+    };
+  }
+
+  // Remaining gated kinds (design mutations, other file ops, mouse actions,
+  // notes_create, waits-with-effect): default 'review'. Annotate reversibility
+  // from the reversible-kind set and any destructive content signal, and let a
+  // destructive payload still escalate (defense in depth).
+  const escalate = destructive || controlSideEffect;
+  const reversible = RISK_REVERSIBLE_KINDS.has(kind) && !escalate;
+  return {
+    tier: escalate ? 'external_side_effect' : 'review',
+    reversible,
+    egress,
+    sensitive,
+    signals: escalate ? ['content_side_effect', ...signals] : ['gated_default', ...signals],
+  };
+}
+
+/**
+ * Coarse risk tier for a parsed local-computer intent. Backward-compatible
+ * wrapper over {@link getLocalComputerAwarenessRiskProfile} — existing callers
+ * (chatAutomationPlanner) keep the same `'safe' | 'review' | 'external_side_effect'`
+ * contract while automatically gaining the QW3 content-aware escalation.
+ */
+export function getLocalComputerAwarenessRisk(
+  intent: LocalComputerAwarenessIntent,
+): LocalComputerAwarenessRiskTier {
+  return getLocalComputerAwarenessRiskProfile(intent).tier;
+}
+
+export function requiresLocalComputerAwarenessApproval(intent: LocalComputerAwarenessIntent): boolean {
+  return getLocalComputerAwarenessRisk(intent) !== 'safe';
+}
+
+// ─── Machine-capability manifest (QW5) ───────────────────────────────────────
+//
+// A single, machine-readable catalog of every local-computer capability the
+// bridge exposes, DERIVED from the `LocalComputerAwarenessKind` union so it can
+// never silently drift from the kinds the parser can actually emit (the smoke
+// asserts every union member appears exactly once). It expands the coarse single
+// "desktop" capability family (as advertised in chatCapabilityManifest) into two
+// honest sub-families:
+//
+//   - observe  → read-like, low-risk awareness (tabs, window/screen state,
+//                clipboard-inspect, a11y tree, file read/search/stat, doc/layer
+//                inventory). Read-first: the model should reach for these before
+//                any gated action.
+//   - gated_act → anything that mutates local state or has an external side
+//                 effect (launch/focus/open, type/paste/keys, menu/semantic
+//                 click, clipboard write/clear, file write/rename/copy/trash/
+//                 mkdir, notes create, design mutations, coordinate mouse ops,
+//                 shortcut run).
+//
+// Every entry carries its default risk tier (from
+// getLocalComputerAwarenessRiskProfile with a content-free synthetic intent) and
+// an observe-before/freshness hint. Coordinate `mouse_*` kinds are tied to the
+// computerAppGrounding `desktop_canvas_vision` rule — "a fresh screenshot before
+// every blind coordinate click" — with the canvas 5s freshness window.
+//
+// Pure / type-only: no react-native, so it is tsx-smokeable, and both frontier
+// models and BlackSwan/OpenSwan read the same expanded desktop menu.
+
+export type LocalComputerCapabilityFamily = 'observe' | 'gated_act';
+
+export interface LocalComputerCapabilityEntry {
+  /** The parser kind this capability corresponds to (1:1 with the union). */
+  kind: LocalComputerAwarenessKind;
+  /** observe (read-first) vs gated_act (mutating / external side effect). */
+  family: LocalComputerCapabilityFamily;
+  /** Default content-free risk tier for this kind. */
+  risk: LocalComputerAwarenessRiskTier;
+  /**
+   * The observation the model should have BEFORE this action, or null for
+   * read-like observes that ARE the observation. Names a computerAppGrounding
+   * observation tool (e.g. desktop.window_state, desktop.screenshot).
+   */
+  observeBefore: string | null;
+  /** Max age of that observation, ms. null for reads with no freshness gate. */
+  freshnessMs: number | null;
+  /**
+   * True for coordinate-driven actions that require a fresh screenshot before a
+   * blind coordinate click/drag (the desktop_canvas_vision rule).
+   */
+  coordinate: boolean;
+}
+
+// Coordinate kinds: blind x/y actions that MUST cite a fresh screenshot.
+const COORDINATE_KINDS: ReadonlySet<LocalComputerAwarenessKind> = new Set<LocalComputerAwarenessKind>([
+  'mouse_move',
+  'mouse_click',
+  'mouse_down',
+  'mouse_up',
+  'mouse_drag',
+  'mouse_scroll',
+]);
+
+// Design-inspection observes (read-only doc/layer state).
+const DESIGN_INSPECT_KINDS: ReadonlySet<LocalComputerAwarenessKind> = new Set<LocalComputerAwarenessKind>([
+  'indesign_document_status',
+  'indesign_text_inventory',
+  'photoshop_document_status',
+  'photoshop_layer_inventory',
+]);
+
+// Every kind in the union, in declaration order — the single source the catalog
+// iterates so a new kind that is added to the union but forgotten here trips the
+// exhaustive-switch type check in `capabilityObserveHint` below.
+const ALL_LOCAL_COMPUTER_KINDS: readonly LocalComputerAwarenessKind[] = [
+  'browser_tabs', 'window_state', 'running_apps', 'clipboard', 'screen_state',
+  'launch_app', 'focus_app', 'open_url', 'open_path', 'open_file_search_match',
+  'clipboard_write', 'clipboard_clear', 'shortcuts_list', 'shortcut_run',
+  'file_list', 'file_read', 'file_search', 'file_stat', 'file_rename',
+  'file_copy', 'file_trash', 'file_mkdir', 'file_write_text', 'notes_create',
+  'a11y_tree', 'window_manage', 'semantic_click', 'menu_click', 'type_text',
+  'paste_text', 'set_field_text', 'indesign_find_change',
+  'indesign_batch_find_change', 'indesign_document_status',
+  'indesign_text_inventory', 'indesign_set_layer_state',
+  'indesign_batch_update_text_layers', 'indesign_update_text_layer',
+  'indesign_relink_asset', 'indesign_package_document', 'indesign_export_proof',
+  'photoshop_document_status', 'photoshop_layer_inventory',
+  'photoshop_set_layer_state', 'photoshop_update_text_layer',
+  'photoshop_place_asset', 'photoshop_export_proof', 'press_keys', 'wait',
+  'wait_for_app', 'mouse_move', 'mouse_click', 'mouse_down', 'mouse_up',
+  'mouse_drag', 'mouse_scroll',
+] as const;
+
+// Freshness windows mirror computerAppGrounding: canvas coordinate work is 5s;
+// frontmost app/window confirmation for input is short (10s); design doc/layer
+// state is a 5s layout window; file reads carry a generous 120s window.
+const CAPABILITY_CANVAS_FRESHNESS_MS = 5_000;
+const CAPABILITY_WINDOW_FRESHNESS_MS = 10_000;
+const CAPABILITY_LAYOUT_FRESHNESS_MS = 5_000;
+const CAPABILITY_FILE_FRESHNESS_MS = 120_000;
+
+function capabilityObserveHint(
+  kind: LocalComputerAwarenessKind,
+): { observeBefore: string | null; freshnessMs: number | null } {
+  // Coordinate mouse ops: fresh screenshot before blind coordinate click/drag.
+  if (COORDINATE_KINDS.has(kind)) {
+    return { observeBefore: 'desktop.screenshot', freshnessMs: CAPABILITY_CANVAS_FRESHNESS_MS };
+  }
+  switch (kind) {
+    // Pure reads: they ARE the observation, no prerequisite.
     case 'browser_tabs':
     case 'window_state':
     case 'running_apps':
     case 'clipboard':
     case 'screen_state':
+    case 'shortcuts_list':
+    case 'a11y_tree':
     case 'file_list':
     case 'file_read':
     case 'file_search':
     case 'file_stat':
-    case 'shortcuts_list':
-    case 'a11y_tree':
+    case 'wait':
     case 'wait_for_app':
+      return { observeBefore: null, freshnessMs: null };
+    // Design inspection reads.
     case 'indesign_document_status':
     case 'indesign_text_inventory':
     case 'photoshop_document_status':
     case 'photoshop_layer_inventory':
-      return 'safe';
-    case 'shortcut_run':
-      return 'external_side_effect';
-    case 'launch_app':
-    case 'focus_app':
-    case 'open_url':
-    case 'open_path':
-    case 'open_file_search_match':
-    case 'clipboard_write':
-    case 'clipboard_clear':
-    case 'window_manage':
-    case 'semantic_click':
-      if (
-        /\b(local-gmail-send|local-wordpress-(?:publish|update|schedule|delete|trash))\b/i.test(intent.reason || '') ||
-        /\b(send|publish|update|schedule|delete|trash|remove)\b/i.test(intent.targetLabel || '')
-      ) {
-        return 'external_side_effect';
-      }
-      return 'review';
-    case 'menu_click':
+      return { observeBefore: null, freshnessMs: null };
+    // Text/menu/semantic input: confirm frontmost app + accessible target first.
     case 'type_text':
     case 'paste_text':
     case 'set_field_text':
+    case 'menu_click':
+    case 'semantic_click':
+    case 'press_keys':
+      return { observeBefore: 'desktop.read_a11y_tree', freshnessMs: CAPABILITY_WINDOW_FRESHNESS_MS };
+    // App/window control: confirm current window state before mutating focus.
+    case 'launch_app':
+    case 'focus_app':
+    case 'window_manage':
+    case 'clipboard_write':
+    case 'clipboard_clear':
+    case 'shortcut_run':
+    case 'notes_create':
+      return { observeBefore: 'desktop.window_state', freshnessMs: CAPABILITY_WINDOW_FRESHNESS_MS };
+    // File mutations + open-by-path/search: verify the path exists first.
+    case 'open_path':
+    case 'open_url':
+    case 'open_file_search_match':
+    case 'file_rename':
+    case 'file_copy':
+    case 'file_trash':
+    case 'file_mkdir':
+    case 'file_write_text':
+      return { observeBefore: 'desktop.file_stat', freshnessMs: CAPABILITY_FILE_FRESHNESS_MS };
+    // Design mutations: refresh doc status / layer inventory before mutating.
     case 'indesign_find_change':
     case 'indesign_batch_find_change':
     case 'indesign_set_layer_state':
@@ -4810,30 +5201,91 @@ export function getLocalComputerAwarenessRisk(intent: LocalComputerAwarenessInte
     case 'indesign_relink_asset':
     case 'indesign_package_document':
     case 'indesign_export_proof':
-    case 'photoshop_update_text_layer':
     case 'photoshop_set_layer_state':
+    case 'photoshop_update_text_layer':
     case 'photoshop_place_asset':
     case 'photoshop_export_proof':
-    case 'press_keys':
-    case 'wait':
+      return { observeBefore: 'desktop.read_a11y_tree', freshnessMs: CAPABILITY_LAYOUT_FRESHNESS_MS };
+    // Coordinate kinds are handled above; this exhaustive fallthrough keeps the
+    // switch total so a new union member forces an update here.
     case 'mouse_move':
     case 'mouse_click':
     case 'mouse_down':
     case 'mouse_up':
     case 'mouse_drag':
     case 'mouse_scroll':
-    case 'file_rename':
-    case 'file_copy':
-    case 'file_trash':
-    case 'file_mkdir':
-    case 'file_write_text':
-    case 'notes_create':
-      return 'review';
-    default:
-      return 'safe';
+      return { observeBefore: 'desktop.screenshot', freshnessMs: CAPABILITY_CANVAS_FRESHNESS_MS };
+    default: {
+      // Exhaustiveness guard: if a kind is added to the union but not here, this
+      // line fails to type-check.
+      const _exhaustive: never = kind;
+      return _exhaustive;
+    }
   }
 }
 
-export function requiresLocalComputerAwarenessApproval(intent: LocalComputerAwarenessIntent): boolean {
-  return getLocalComputerAwarenessRisk(intent) !== 'safe';
+function capabilityFamilyForKind(kind: LocalComputerAwarenessKind): LocalComputerCapabilityFamily {
+  const risk = getLocalComputerAwarenessRiskProfile({ route: true, kind, reason: '' }).tier;
+  // 'wait' / 'wait_for_app' are inert timers; treat wait_for_app as observe (it
+  // is 'safe') and 'wait' (a 'review' pacing step inside a gated sequence) as an
+  // observe-family pacing primitive, not a mutation.
+  if (kind === 'wait') return 'observe';
+  if (risk === 'safe') return 'observe';
+  return 'gated_act';
+}
+
+/**
+ * The machine-capability catalog — one entry per LocalComputerAwarenessKind,
+ * each tagged with its observe/gated_act family, default risk tier, and an
+ * observe-before/freshness hint. Built once at module load.
+ */
+export const LOCAL_COMPUTER_CAPABILITY_CATALOG: readonly LocalComputerCapabilityEntry[] =
+  ALL_LOCAL_COMPUTER_KINDS.map((kind) => {
+    const risk = getLocalComputerAwarenessRiskProfile({ route: true, kind, reason: '' }).tier;
+    const { observeBefore, freshnessMs } = capabilityObserveHint(kind);
+    return {
+      kind,
+      family: capabilityFamilyForKind(kind),
+      risk,
+      observeBefore,
+      freshnessMs,
+      coordinate: COORDINATE_KINDS.has(kind),
+    };
+  });
+
+/** All observe-family (read-first) capabilities. */
+export function getLocalComputerObserveCapabilities(): LocalComputerCapabilityEntry[] {
+  return LOCAL_COMPUTER_CAPABILITY_CATALOG.filter((entry) => entry.family === 'observe');
+}
+
+/** All gated-act (mutating / external side effect) capabilities. */
+export function getLocalComputerGatedActCapabilities(): LocalComputerCapabilityEntry[] {
+  return LOCAL_COMPUTER_CAPABILITY_CATALOG.filter((entry) => entry.family === 'gated_act');
+}
+
+/** Distinct observe-tools the read-first menu recommends, in catalog order. */
+export function getLocalComputerObserveTools(): string[] {
+  const tools = new Set<string>();
+  // The observes that ARE reads (no observeBefore) map to their own bridge tool
+  // family; expose the canonical read tools plus every observeBefore prerequisite.
+  const readTools: Partial<Record<LocalComputerAwarenessKind, string>> = {
+    a11y_tree: 'desktop.read_a11y_tree',
+    window_state: 'desktop.window_state',
+    running_apps: 'desktop.list_running_apps',
+    browser_tabs: 'desktop.list_browser_tabs',
+    screen_state: 'desktop.screenshot',
+    clipboard: 'desktop.read_clipboard',
+    file_read: 'desktop.file_read',
+    file_search: 'desktop.file_search',
+    file_stat: 'desktop.file_stat',
+    file_list: 'desktop.file_list',
+  };
+  for (const entry of LOCAL_COMPUTER_CAPABILITY_CATALOG) {
+    if (entry.family === 'observe') {
+      const tool = readTools[entry.kind];
+      if (tool) tools.add(tool);
+    }
+    if (entry.observeBefore) tools.add(entry.observeBefore);
+  }
+  return Array.from(tools);
 }

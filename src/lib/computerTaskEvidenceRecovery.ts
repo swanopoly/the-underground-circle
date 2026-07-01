@@ -117,7 +117,21 @@ export interface ComputerTaskEvidenceRecoveryObservation {
   id?: string | null;
   ruleId?: string | null;
   tool: string;
-  capturedAt: string | number;
+  /**
+   * When the observation was captured. `capturedAt` is the canonical field;
+   * `at` is accepted as an alias so the loop-side producer (swanbot toolEvents,
+   * incl. auto_reobserve) can hand its lightweight
+   * `{ tool, at, ok, summary }` shape straight in without a reshape.
+   */
+  capturedAt?: string | number | null;
+  at?: string | number | null;
+  /**
+   * Whether the observation itself succeeded. A failed/errored observation is
+   * NOT valid fresh evidence (a screenshot that errored proves nothing), so
+   * `ok === false` never satisfies a required-evidence tool. Absent/undefined is
+   * treated as ok (back-compat: existing callers pass no status).
+   */
+  ok?: boolean | null;
   summary?: string | null;
 }
 
@@ -695,6 +709,9 @@ function observationTimeMs(value: string | number | null | undefined): number | 
 }
 
 function observationSatisfiesRequirement(observation: ComputerTaskEvidenceRecoveryObservation, requirement: ComputerTaskEvidenceRequirement): boolean {
+  // A failed/errored observation is not valid evidence — it can't satisfy a
+  // required-evidence tool no matter how fresh its timestamp is.
+  if (observation.ok === false) return false;
   return observation.tool === requirement.tool
     || observation.id === requirement.id
     || observation.ruleId === requirement.id;
@@ -733,7 +750,7 @@ export function evaluateComputerTaskEvidenceRecoveryReadiness(args: {
     const matching = observations
       .filter((observation) => observationSatisfiesRequirement(observation, item))
       .map((observation) => {
-        const capturedAt = observationTimeMs(observation.capturedAt);
+        const capturedAt = observationTimeMs(observation.capturedAt ?? observation.at);
         const ageMs = capturedAt === null ? Number.POSITIVE_INFINITY : Math.max(0, nowMs - capturedAt);
         return { observation, ageMs };
       })

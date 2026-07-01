@@ -36,10 +36,45 @@ export interface ProofCoverageEvent {
 // them — same reasoning as OBSERVATION_TOOL_RE.
 const EXPORT_PROOF_RE = /(export_proof|package_document)/i;
 
+// A DURABLE proof is one that leaves a checkable artifact on disk: an
+// export/package tool, or a file_stat of the written output. When the route
+// specifically promised a saved/exported file, only a durable proof settles it
+// (see targetsDurableArtifact) — a transient screenshot/read doesn't prove the
+// file was actually written. `_` is a word char so no \b anchors, matching the
+// prefixed tool names (desktop.file_stat, photoshop_export_proof).
+const DURABLE_PROOF_RE = /(export_proof|package_document|file_stat)/i;
+
 /** True for tools that constitute proof of a result: a ground-truth observation
  *  or a durable export/package artifact. */
 export function isProofTool(name: string | null | undefined): boolean {
   return isObservationTool(name) || EXPORT_PROOF_RE.test(String(name || ''));
+}
+
+/** True for tools that leave a checkable on-disk artifact (export/package or a
+ *  file_stat of the output). A strict subset of isProofTool. */
+export function isDurableProofTool(name: string | null | undefined): boolean {
+  return DURABLE_PROOF_RE.test(String(name || ''));
+}
+
+/**
+ * Whether the route's proof requirement (its completionProof / proofAfter
+ * strings) specifically promised a saved/exported FILE artifact — e.g. "output
+ * file_stat …", "exported proof artifact", "package summary". Only then do we
+ * raise the bar to a durable proof; a generic "refreshed state / confirmation"
+ * requirement stays satisfied by any proof (today's behavior — no over-block).
+ *
+ * Deliberately conservative: matches only unambiguous file/export/package
+ * language so a plain visual/read requirement is never mis-escalated.
+ */
+export function targetsDurableArtifact(
+  proofRequirements: Array<string | null | undefined> | null | undefined,
+): boolean {
+  if (!Array.isArray(proofRequirements) || proofRequirements.length === 0) return false;
+  const text = proofRequirements.map((item) => String(item || '')).join(' | ').toLowerCase();
+  if (!text) return false;
+  // Require an explicit file/export/package noun. "screenshot"/"confirmation"
+  // alone must NOT trigger this — they are transient proofs by design.
+  return /\b(file_stat|exported|export proof|export artifact|package (?:document|summary)|saved file|written file|output file|basename\/hash|file on disk)\b/i.test(text);
 }
 
 export interface ProofCoverageAssessment {
@@ -51,6 +86,25 @@ export interface ProofCoverageAssessment {
   missingProof: boolean;
   /** The last mutating tool, for the nudge wording. */
   lastMutationTool?: string;
+  /**
+   * Set when the route specifically promised a saved/exported file and the only
+   * proof captured was transient (a read/screenshot, not a durable export /
+   * package / file_stat). The turn "has proof" in the generic sense but not the
+   * artifact the route contracted for, so the nudge asks for the file proof.
+   * Never set when no proof-requirement context is supplied.
+   */
+  needsDurableProof?: boolean;
+}
+
+export interface ProofCoverageOptions {
+  /**
+   * The route's proof-after / completionProof requirement strings (from the
+   * evidence contract). When these promise a file/export artifact
+   * (targetsDurableArtifact), a transient read/screenshot no longer settles the
+   * turn — only a durable export/package/file_stat does. Omit for today's
+   * any-proof behavior (used by callers without route context).
+   */
+  proofRequirements?: Array<string | null | undefined> | null;
 }
 
 /**
@@ -61,6 +115,7 @@ export interface ProofCoverageAssessment {
  */
 export function assessProofCoverage(
   events: ProofCoverageEvent[] | null | undefined,
+  opts?: ProofCoverageOptions | null,
 ): ProofCoverageAssessment {
   const list = Array.isArray(events) ? events : [];
   let lastMutationIndex = -1;
@@ -75,18 +130,29 @@ export function assessProofCoverage(
   if (lastMutationIndex === -1) {
     return { mutated: false, proofAfterMutation: false, missingProof: false };
   }
+  // Only when the route explicitly promised a saved/exported file do we require
+  // a DURABLE proof; otherwise any proof settles the turn (today's behavior).
+  const requireDurable = targetsDurableArtifact(opts?.proofRequirements);
   let proofAfterMutation = false;
+  let durableProofAfterMutation = false;
   for (let i = lastMutationIndex + 1; i < list.length; i++) {
-    if (isProofTool(list[i]?.tool) && !isFailedStatus(list[i]?.status)) {
-      proofAfterMutation = true;
-      break;
-    }
+    const event = list[i];
+    if (isFailedStatus(event?.status)) continue;
+    if (isProofTool(event?.tool)) proofAfterMutation = true;
+    if (isDurableProofTool(event?.tool)) durableProofAfterMutation = true;
+    // Fast exit once we have everything the route needs.
+    if (proofAfterMutation && (!requireDurable || durableProofAfterMutation)) break;
   }
+  // Missing proof when there's no proof at all, OR the route contracted a file
+  // artifact but only a transient proof (read/screenshot) was captured.
+  const missingProof = !proofAfterMutation || (requireDurable && !durableProofAfterMutation);
+  const needsDurableProof = requireDurable && proofAfterMutation && !durableProofAfterMutation;
   return {
     mutated: true,
     proofAfterMutation,
-    missingProof: !proofAfterMutation,
+    missingProof,
     lastMutationTool,
+    needsDurableProof,
   };
 }
 
@@ -98,6 +164,18 @@ export function assessProofCoverage(
 export function proofCoverageNudge(assessment: ProofCoverageAssessment): string {
   const tool = assessment.lastMutationTool || '';
   const tail = tool ? ` (last change: \`${tool}\`)` : '';
+  // The route promised a saved/exported FILE but only a transient read/screenshot
+  // was captured — ask specifically for the durable artifact, not another read.
+  if (assessment.needsDurableProof) {
+    return [
+      '',
+      `⚠️ Before finishing: you changed app state${tail} and captured a read/screenshot, but this task promised a saved/exported file — that file proof is still missing.`,
+      'Capture the durable artifact now, then give your final answer:',
+      '- export/save the artifact and confirm the file exists (file_stat: basename, size/hash), or',
+      '- for a packaged output, produce the package and confirm its summary.',
+      'This is the last step — one durable proof action, then summarize what you did and the file proof of it.',
+    ].join('\n');
+  }
   // Surface-aware proof options: a browser mutation is proven by re-reading the
   // DOM / verification state / screenshot, not by desktop reads or design exports.
   const proofOptions = tool.startsWith('browser.')

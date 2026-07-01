@@ -5,6 +5,7 @@ import type { OpenSwanExecutionStatus } from './openswanExecution';
 import type { OpenSwanTaskPlan, OpenSwanToolName } from './openswanTaskPlanner';
 import type { SwanBotStructuredArtifact } from './swanbot';
 import type { ApprovalKind } from './agentRunSystem';
+import type { ChatComputerUserConstraints } from './chatComputerRequestRouter';
 import type { ToolParallelPolicy } from './toolBatchParallelism';
 import { createFilesInRoomFromArtifact, createWorkspaceFromArtifact, type RoomArtifactApplyResult, type WorkspaceCreationResult } from './chatWorkspace';
 import { focusRoomWorkspaceFile, primeRoomWorkspaceLaunch } from './roomWorkspaceLauncher';
@@ -18,6 +19,7 @@ import {
   buildOpenSwanToolApprovalKey,
   resolveOpenSwanRuntimeApprovalDecision,
   type OpenSwanRuntimeApprovalDecision,
+  type OpenSwanRuntimeApprovalRow,
 } from './openswanToolApprovals';
 import {
   normalizeWordPressTrashPostMutation,
@@ -278,6 +280,15 @@ export type OpenSwanRuntimeToolContext = {
   activeSoulKey?: string;
   runId?: string;
   activePluginIds?: string[];
+  /**
+   * QW1 (defense-in-depth): the turn's parsed user "never do X" constraints, so
+   * the runtime chokepoint can HARD-block a forbidden tool call even if a caller
+   * forgot to gate it upstream. Optional/additive — when absent, the chokepoint
+   * still enforces the always-confirm floor (pay/delete/login/grant), which is
+   * policy and message-independent. Callers that have the chat route should pass
+   * `route.userConstraints`.
+   */
+  userConstraints?: ChatComputerUserConstraints | null;
 };
 
 type CreateRoomWorkspaceArgs = {
@@ -4499,6 +4510,127 @@ async function maybeRequestToolApproval(
 }
 
 /**
+ * QW1 defense-in-depth: HARD constraint/floor enforcement at the runtime
+ * dispatch chokepoint, alongside `maybeRequestToolApproval`. This is the last
+ * backstop under swanbot.ts's loop gate and `agentExecutionCore`'s guard — if
+ * any caller forgets to gate, a forbidden or floored action still cannot run
+ * from here. Returns null to allow, or a `{ blocked | pending }` verdict.
+ *
+ * - A user-forbidden category → hard block (never dispatch, don't retry).
+ * - The always-confirm floor (pay/delete/login/grant) is policy and message-
+ *   independent, so it is enforced even when `context.userConstraints` is
+ *   absent: with a run context we request/track a pending floor approval
+ *   (honored on retry via `resolveOpenSwanRuntimeApprovalDecision`); without
+ *   one we fail closed. Approvals.* tools are exempt (they ARE the approval
+ *   mechanism). Fail-open ONLY on an unexpected internal error — the primary
+ *   gates upstream already made the safety decision.
+ */
+async function maybeBlockToolByConstraint(
+  tool: OpenSwanRuntimeToolName,
+  args: Record<string, unknown>,
+  context: OpenSwanRuntimeToolContext,
+): Promise<{ message: string; status: 'blocked' | 'pending'; approvalId?: string } | null> {
+  if (String(tool || '').startsWith('approvals.')) return null;
+  try {
+    const { constraintBlocksToolCall } = await import('./chatComputerRequestRouter');
+    // Strip approval-tracking keys from args before computing/matching the
+    // approval key, so this backstop's key equals the one the swanbot loop's
+    // floor helper stored for the same call (they otherwise differ if the model
+    // passed an approvalId in the input) — avoiding a second confirmation.
+    const keyArgs: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(args || {})) {
+      if (k === 'approvalId' || k === 'approval_id' || k === 'toolApprovalKey' || k === 'approvalKey') continue;
+      keyArgs[k] = v;
+    }
+    const verdict = constraintBlocksToolCall(context.userConstraints ?? null, tool, args);
+    if (verdict.blocked) {
+      return {
+        status: 'blocked',
+        message: verdict.reason
+          || `The user forbade "${verdict.category}" actions for this task. The tool was not run. Stop and report instead.`,
+      };
+    }
+    if (!verdict.floorConfirmRequired) return null;
+
+    // Always-confirm floor tripped. When the tool's OWN policy is already
+    // approval-gated ('ask'), let the existing `maybeRequestToolApproval` (which
+    // runs right after this) own the confirmation — creating a second approval
+    // here would double-prompt. This backstop's job is only to close the gap
+    // where a floored (pay/delete/login/grant) tool is auto-approved: then we
+    // request/track the floor confirmation ourselves.
+    if (getOpenSwanToolPolicy(tool, context.activePluginIds).approvalMode === 'ask') return null;
+
+    // Without a run context we cannot record a confirmation — fail closed.
+    const category = String(verdict.floorCategory || 'sensitive');
+    if (!context.runId || !context.circleId) {
+      return {
+        status: 'blocked',
+        message: `Always-confirm floor: "${category}" actions require explicit user confirmation, but no approval context was available — the tool was not run.`,
+      };
+    }
+    const title = `OpenSwan always-confirm floor: ${tool}`;
+    // Match by the stable (tool,args) approval key across ALL of this run's
+    // approvals — NOT by title — so a floor confirmation the swanbot loop (or
+    // any layer) already recorded for this exact call is honored here instead of
+    // asking the user a second time.
+    const { data: existing, error: existingError } = await supabase
+      .from('agent_run_approvals')
+      .select('id,status,payload')
+      .eq('run_id', context.runId)
+      .eq('circle_id', context.circleId)
+      .order('requested_at', { ascending: false })
+      .limit(20);
+    if (existingError) {
+      return {
+        status: 'blocked',
+        message: `Always-confirm floor: approval lookup failed for "${tool}" (${category}) — the tool was not run.`,
+      };
+    }
+    const decision = resolveOpenSwanRuntimeApprovalDecision({
+      tool,
+      args: keyArgs,
+      rows: (existing || []) as OpenSwanRuntimeApprovalRow[],
+    });
+    if (decision.kind === 'pass') return null; // user already confirmed this exact call
+    if (decision.kind === 'defer') {
+      return { status: 'pending', approvalId: decision.approvalId, message: `Always-confirm floor: confirmation still pending for this ${category} action ("${tool}"). It was not run.` };
+    }
+    if (decision.kind === 'block') {
+      return { status: 'blocked', approvalId: decision.approvalId, message: `The user rejected this ${category} action ("${tool}"). Do not retry it.` };
+    }
+    const toolApprovalKey = buildOpenSwanToolApprovalKey(tool, keyArgs);
+    const { requestRunApproval } = await import('./agentRunSystem');
+    const approval = await requestRunApproval({
+      runId: context.runId,
+      circleId: context.circleId,
+      approvalKind: category === 'pay' ? 'publish' : 'privileged_action',
+      title,
+      description: `Always-confirm floor (${category}): approve this exact action before it runs. Required in every autonomy mode.`,
+      requestedBy: context.userId,
+      payload: {
+        tool,
+        args: keyArgs,
+        toolApprovalKey,
+        toolApprovalKeyVersion: 1,
+        policyFamily: 'always_confirm_floor',
+        floorCategory: category,
+        approvalMode: 'ask',
+        mutatesState: true,
+        externalSideEffect: true,
+      },
+    });
+    if (!approval) {
+      return { status: 'blocked', message: `Always-confirm floor: "${category}" confirmation is required, but the approval request could not be created — the tool was not run.` };
+    }
+    return { status: 'pending', approvalId: approval.id, message: `Always-confirm floor: requested confirmation for this ${category} action ("${tool}", id: ${approval.id.slice(0, 8)}). It was NOT run yet.` };
+  } catch {
+    // Never let the backstop itself break dispatch — upstream gates already
+    // enforced the policy; this layer only adds redundancy.
+    return null;
+  }
+}
+
+/**
  * Tool results ARE the model's context — keep them high-signal and bounded.
  *
  * T10: new/updated result text should compose the pure helpers in
@@ -4770,6 +4902,29 @@ export async function executeOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolNa
   args: OpenSwanToolExecutionArgs[T],
   context: OpenSwanRuntimeToolContext,
 ): Promise<OpenSwanToolExecutionResultMap[T]> {
+  // QW1 defense-in-depth: HARD constraint/floor backstop runs FIRST, before the
+  // approval gate — a user-forbidden or unconfirmed floored (pay/delete/login/
+  // grant) action never dispatches from the runtime chokepoint even if an
+  // upstream gate was missed.
+  const constraintGate = await maybeBlockToolByConstraint(tool, (args || {}) as Record<string, unknown>, context);
+  if (constraintGate) {
+    const approvalRequest = constraintGate.status === 'pending'
+      ? { id: constraintGate.approvalId, required: true, status: constraintGate.status }
+      : undefined;
+    if (tool === 'schedule_action') {
+      return {
+        ok: false,
+        resultText: constraintGate.message,
+        error: constraintGate.message,
+        ...(approvalRequest ? { approvalRequest } : {}),
+      } as unknown as OpenSwanToolExecutionResultMap[T];
+    }
+    return {
+      ok: false,
+      resultsText: constraintGate.message,
+      ...(approvalRequest ? { approvalRequest } : {}),
+    } as unknown as OpenSwanToolExecutionResultMap[T];
+  }
   const approvalGate = await maybeRequestToolApproval(tool, (args || {}) as Record<string, unknown>, context);
   if (approvalGate) {
     const approvalRequest = approvalGate.status === 'pending'

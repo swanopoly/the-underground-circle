@@ -42,6 +42,17 @@
 // adds no react-native dependency, but anchors our `approval` field to the
 // source of truth so a future widening there shows up here as a type error.
 import type { OpenSwanToolApprovalMode } from './openswanToolRuntime';
+// Runtime imports — both modules are pure (no react-native), so they stay
+// tsx-loadable. The machine-capability catalog (QW5) expands the coarse
+// 'desktop' family into its real observe + gated-act menu; matchKnownApp lets
+// the advertisement stay honest about deep (Adobe/Finder) vs generic (Figma/
+// Blender) desktop support.
+import {
+  LOCAL_COMPUTER_CAPABILITY_CATALOG,
+  getLocalComputerObserveTools,
+  type LocalComputerCapabilityEntry,
+} from './localComputerAwarenessIntent';
+import { matchKnownApp } from './knownAppShortcuts';
 
 /**
  * One discoverable capability family the model can activate. Deliberately
@@ -234,6 +245,80 @@ export const APP_CAPABILITIES: readonly AppCapability[] = [
   },
 ] as const;
 
+// ─── Desktop family expansion (QW5) ─────────────────────────────────────────
+//
+// The single coarse 'desktop' AppCapability above is honest but shallow. When a
+// turn actually reaches for local desktop control, the model benefits from the
+// REAL read-first menu (a11y tree, window/screen state, clipboard-inspect, file
+// read/search/stat/list) plus the gated action set — all DERIVED from the
+// machine-capability catalog so this can never drift from the kinds the parser
+// can emit. This is read-only advertisement metadata; the actual per-action gate
+// is still enforced by getLocalComputerAwarenessRiskProfile + the typed-runtime
+// floor. Nothing here changes what is or is not gated.
+
+export interface DesktopCapabilityExpansion {
+  /** Read-first observe tools the model should reach for before any action. */
+  observeTools: string[];
+  /** Distinct gated-act intent kinds (mutating / external side effect). */
+  gatedActKinds: string[];
+  /** Coordinate action kinds that require a fresh screenshot first. */
+  coordinateKinds: string[];
+  /** Number of catalog entries at each risk tier, for an honest posture line. */
+  riskCounts: { safe: number; review: number; external_side_effect: number };
+}
+
+/** Build the expanded desktop menu from the machine-capability catalog. */
+export function buildDesktopCapabilityExpansion(): DesktopCapabilityExpansion {
+  const catalog: readonly LocalComputerCapabilityEntry[] = LOCAL_COMPUTER_CAPABILITY_CATALOG;
+  const riskCounts = { safe: 0, review: 0, external_side_effect: 0 };
+  const gatedActKinds: string[] = [];
+  const coordinateKinds: string[] = [];
+  for (const entry of catalog) {
+    riskCounts[entry.risk] += 1;
+    if (entry.family === 'gated_act') gatedActKinds.push(entry.kind);
+    if (entry.coordinate) coordinateKinds.push(entry.kind);
+  }
+  return {
+    observeTools: getLocalComputerObserveTools(),
+    gatedActKinds,
+    coordinateKinds,
+    riskCounts,
+  };
+}
+
+// Apps with DEEP, script-backed desktop support (dedicated bridge tools beyond
+// generic a11y/coordinate control): Adobe Photoshop/InDesign have script-backed
+// document/layer tools; Finder has scoped file read/search/stat/write/trash.
+// Everything else the bridge can drive falls back to GENERIC universal control.
+const DEEP_SUPPORT_APP_IDS: ReadonlySet<string> = new Set([
+  'adobe-photoshop',
+  'adobe-indesign',
+  'finder',
+]);
+
+export type AppDesktopSupportDepth = 'deep' | 'generic' | 'unknown';
+
+/**
+ * Honest depth of desktop support for an app the user named. 'deep' →
+ * Adobe Photoshop/InDesign or Finder (script-backed tools); 'generic' → any
+ * other known launchable app (universal a11y/coordinate control only);
+ * 'unknown' → no known-app match. Never over-promises deep automation for
+ * Figma/Blender/etc.
+ */
+export function describeAppDesktopSupport(appText: string): {
+  depth: AppDesktopSupportDepth;
+  appId: string | null;
+  displayName: string | null;
+} {
+  const app = matchKnownApp(String(appText || ''));
+  if (!app) return { depth: 'unknown', appId: null, displayName: null };
+  return {
+    depth: DEEP_SUPPORT_APP_IDS.has(app.id) ? 'deep' : 'generic',
+    appId: app.id,
+    displayName: app.displayName,
+  };
+}
+
 /** Families whose name prefix is a single literal token used by tools.search. */
 const KNOWN_FAMILY_TOKENS: ReadonlySet<string> = new Set(
   APP_CAPABILITIES.map((c) => c.family.split(/[.:]/)[0]).filter(Boolean),
@@ -415,6 +500,25 @@ export function buildCapabilityManifestPrompt(opts?: CapabilityManifestPromptOpt
     const examples = cap.exampleTools.slice(0, 3).join(', ');
     const gate = cap.approval === 'ask' ? 'approval' : 'auto';
     lines.push(`- ${cap.title} [${cap.family}] (${gate}) — ${cap.whenToUse} e.g. ${examples}.`);
+    // Expand the coarse 'desktop' family into its real read-first menu + gated
+    // actions so the model knows the local machine surface is much wider than a
+    // single line. Advertisement only — gates are unchanged.
+    if (cap.family === 'desktop') {
+      const expansion = buildDesktopCapabilityExpansion();
+      const observe = expansion.observeTools.slice(0, 8).join(', ');
+      lines.push(
+        `  · Read-first (auto/low-risk): ${observe}. Reach for these BEFORE any local action.`,
+      );
+      lines.push(
+        `  · Gated actions (approval / observe-before): ${expansion.gatedActKinds.length} kinds incl. launch/focus/open, type/paste/press_keys, menu/semantic click, clipboard write/clear, file rename/copy/trash/mkdir/write, notes create, shortcut run, and Adobe design mutations.`,
+      );
+      lines.push(
+        `  · Coordinate actions (${expansion.coordinateKinds.join(', ')}) need a FRESH screenshot before any blind coordinate click/drag.`,
+      );
+      lines.push(
+        '  · Deep, script-backed support: Adobe Photoshop/InDesign and Finder. Other apps (Figma, Blender, etc.) get generic accessibility/coordinate control only — do not promise deep automation you cannot verify.',
+      );
+    }
   }
 
   lines.push(

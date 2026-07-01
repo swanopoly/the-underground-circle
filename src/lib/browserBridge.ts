@@ -22,6 +22,7 @@ import type { DesktopResult } from './desktopBridgeProtocol';
 import { getBridgeUrl } from './bridgeEnvironment';
 import { describeBrowserBridgeFailure, type BrowserBridgeFailure } from './browserBridgeFailure';
 import { ensureDesktopBridgePaired } from './desktopBridge';
+import { sanitizeUntrustedForModel } from './untrustedContent';
 import type { AutomationVerificationGate } from './desktopAutomationSafety';
 import {
   buildWordPressAdminSourceTaskHints,
@@ -568,8 +569,12 @@ export function renderDomSnapshot(result: DomSnapshotResult): string {
 export function renderBrowserTree(node: BrowserA11yNode, depth = 0, out: string[] = []): string[] {
   const indent = '  '.repeat(depth);
   const parts = [`${indent}[${node.id}]`, node.role];
-  if (node.name) parts.push(`"${node.name.replace(/"/g, '\\"').slice(0, 120)}"`);
-  if (node.value && node.value !== node.name) parts.push(`= "${String(node.value).replace(/"/g, '\\"').slice(0, 80)}"`);
+  // QW2: `name`/`value` are page-derived UNTRUSTED text — sanitize the
+  // MODEL-VISIBLE render (strip invisible Tag-char smuggling, defang
+  // auto-loading markdown image/link syntax). The raw `node` is untouched;
+  // structural fields (id/role/flags) are ours, not page content.
+  if (node.name) parts.push(`"${sanitizeUntrustedForModel(node.name).replace(/"/g, '\\"').slice(0, 120)}"`);
+  if (node.value && node.value !== node.name) parts.push(`= "${sanitizeUntrustedForModel(String(node.value)).replace(/"/g, '\\"').slice(0, 80)}"`);
   const flags: string[] = [];
   if (node.checked === true) flags.push('checked');
   if (node.pressed === true) flags.push('pressed');

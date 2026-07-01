@@ -698,6 +698,49 @@ export function constraintBlocksToolCall(
   return { blocked: false };
 }
 
+/**
+ * The exact pair of pre-dispatch enforcement inputs a tool loop needs from a
+ * chat turn — `route.userConstraints` and `route.alwaysConfirmFloor` — resolved
+ * WITHOUT building the full (heavier) route and, crucially, WITHOUT the route's
+ * "is this a computer task" null-gating.
+ *
+ * QW1: the always-confirm floor is policy, not preference. It must fire on a
+ * bare "delete everything" turn that never matched a pipeline (where
+ * `buildChatComputerRequestRoute` returns null) exactly as it does on a full
+ * desktop/browser route. Parsed user "never do X" constraints are handled the
+ * same way. So the loop calls THIS to feed `constraintBlocksToolCall`, rather
+ * than reaching through a route object that may be null.
+ *
+ * Both fields degrade to their empty/absent form when the message carries no
+ * constraint phrasing and no floor verb — the caller's per-block check then
+ * short-circuits to a no-op (see `hasChatComputerConstraintInputs`).
+ */
+export interface ChatComputerConstraintInputs {
+  userConstraints: ChatComputerUserConstraints | null;
+  alwaysConfirmFloor: ChatComputerConstraintCategory[];
+}
+
+export function resolveChatComputerConstraintInputs(
+  message: string,
+): ChatComputerConstraintInputs {
+  return {
+    userConstraints: parseChatComputerUserConstraints(message),
+    alwaysConfirmFloor: detectAlwaysConfirmFloorCategories(message),
+  };
+}
+
+/**
+ * True when either enforcement input is present — lets the loop skip the
+ * per-block `constraintBlocksToolCall` entirely on ordinary no-constraint,
+ * no-floor turns (the common case), keeping the hot path allocation-free.
+ */
+export function hasChatComputerConstraintInputs(
+  inputs: ChatComputerConstraintInputs | null | undefined,
+): boolean {
+  if (!inputs) return false;
+  return Boolean(inputs.userConstraints?.forbidden.length) || inputs.alwaysConfirmFloor.length > 0;
+}
+
 /** Compact prompt lines for the constraints — injected as hard rules. */
 export function formatChatComputerUserConstraintsPromptLines(
   constraints: ChatComputerUserConstraints | null | undefined,

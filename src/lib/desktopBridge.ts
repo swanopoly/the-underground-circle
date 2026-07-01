@@ -27,6 +27,7 @@ import {
 } from './desktopBridgeProtocol';
 import { getBridgeUrl } from './bridgeEnvironment';
 import { normalizeDesktopFileSearchQuery } from './fileSearchQuery';
+import { sanitizeUntrustedForModel } from './untrustedContent';
 
 export type { DesktopBridgeError, DesktopResult, DesktopHealth } from './desktopBridgeProtocol';
 
@@ -401,6 +402,12 @@ export type DesktopBrowserTab = {
   browser: string;
   title: string;
   url: string;
+  // QW2: page-controlled tab title/URL are UNTRUSTED. Raw `title`/`url` stay
+  // verbatim (actionable — e.g. re-open the tab); `modelTitle`/`modelUrl` are
+  // the sanitized copies for the model-facing tab list (Tag-char smuggling
+  // stripped, auto-loading markdown link/image syntax defanged).
+  modelTitle: string;
+  modelUrl: string;
 };
 
 function normalizeBrowserFilter(value: string): string {
@@ -421,13 +428,22 @@ function filterBrowserTabs(
   return tabs.filter((tab) => wanted.has(normalizeBrowserFilter(tab.browser)));
 }
 
+function normalizeBrowserTab(raw: any): DesktopBrowserTab {
+  const browser = String(raw?.browser || '');
+  const title = String(raw?.title || '');
+  const url = String(raw?.url || '');
+  // QW2: attach the sanitized model-facing copies; raw title/url preserved.
+  return { browser, title, url, modelTitle: sanitizeUntrustedForModel(title), modelUrl: sanitizeUntrustedForModel(url) };
+}
+
 function parseBrowserTabsResult(r: DesktopResult, browsers?: string[]): DesktopResult<{ tabs: DesktopBrowserTab[]; errors: string[] }> {
   if (!r.ok) return r as DesktopResult<{ tabs: DesktopBrowserTab[]; errors: string[] }>;
   const d = r.data as any;
+  const tabs = (Array.isArray(d?.tabs) ? d.tabs : []).map(normalizeBrowserTab);
   return {
     ok: true,
     data: {
-      tabs: filterBrowserTabs(Array.isArray(d?.tabs) ? d.tabs : [], browsers),
+      tabs: filterBrowserTabs(tabs, browsers),
       errors: Array.isArray(d?.errors) ? d.errors : [],
     },
   };
@@ -468,11 +484,16 @@ export async function getWindowState(): Promise<DesktopResult<DesktopWindowState
   };
 }
 
-export async function readClipboard(): Promise<DesktopResult<{ text: string; chars: number; truncated: boolean }>> {
+export async function readClipboard(): Promise<DesktopResult<{ text: string; modelText: string; chars: number; truncated: boolean }>> {
   const r = await callBridge('GET', '/desktop/clipboard');
-  if (!r.ok) return r as DesktopResult<{ text: string; chars: number; truncated: boolean }>;
+  if (!r.ok) return r as DesktopResult<{ text: string; modelText: string; chars: number; truncated: boolean }>;
   const d = r.data as any;
-  return { ok: true, data: { text: String(d?.text || ''), chars: Number(d?.chars || 0), truncated: Boolean(d?.truncated) } };
+  const text = String(d?.text || '');
+  // QW2: clipboard text is UNTRUSTED (whatever the user/an app copied). Raw
+  // `text` is preserved verbatim for round-trip / user display / file ops;
+  // `modelText` is the sanitized copy the model path should fence + show
+  // (Tag-char smuggling stripped, auto-loading markdown links defanged).
+  return { ok: true, data: { text, modelText: sanitizeUntrustedForModel(text), chars: Number(d?.chars || 0), truncated: Boolean(d?.truncated) } };
 }
 
 export async function writeClipboard(text: string): Promise<DesktopResult<{ chars: number }>> {
@@ -792,19 +813,24 @@ export async function listFiles(rawPath: string): Promise<DesktopResult<{ path: 
   return { ok: true, data: { path: String(d?.path || v.path), entries: Array.isArray(d?.entries) ? d.entries : [], truncated: Boolean(d?.truncated) } };
 }
 
-export async function readFile(rawPath: string, maxBytes?: number): Promise<DesktopResult<{ path: string; content: string; size: number; truncated: boolean }>> {
+export async function readFile(rawPath: string, maxBytes?: number): Promise<DesktopResult<{ path: string; content: string; modelContent: string; size: number; truncated: boolean }>> {
   const v = validateDesktopPath(rawPath);
   if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
   const grantHeaders = await ensureLocalFileGrantHeaders([v.path], 'read', `Read local file ${v.path}`);
-  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ path: string; content: string; size: number; truncated: boolean }>(grantHeaders);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<{ path: string; content: string; modelContent: string; size: number; truncated: boolean }>(grantHeaders);
   const params = new URLSearchParams({ path: v.path });
   if (typeof maxBytes === 'number') params.set('maxBytes', String(maxBytes));
   const r = await callBridge('GET', `/desktop/file_read?${params.toString()}`, undefined, { headers: grantHeaders.data });
-  if (!r.ok) return r as DesktopResult<{ path: string; content: string; size: number; truncated: boolean }>;
+  if (!r.ok) return r as DesktopResult<{ path: string; content: string; modelContent: string; size: number; truncated: boolean }>;
   const d = r.data as any;
+  const content = String(d?.content || '');
+  // QW2: file contents are UNTRUSTED local data. Raw `content` is preserved
+  // verbatim for file ops / user display (e.g. computerFileAdapter's read
+  // result); `modelContent` is the sanitized copy for the model path
+  // (invisible Tag-char smuggling stripped, auto-loading markdown defanged).
   return {
     ok: true,
-    data: { path: String(d?.path || v.path), content: String(d?.content || ''), size: Number(d?.size || 0), truncated: Boolean(d?.truncated) },
+    data: { path: String(d?.path || v.path), content, modelContent: sanitizeUntrustedForModel(content), size: Number(d?.size || 0), truncated: Boolean(d?.truncated) },
   };
 }
 
@@ -1642,8 +1668,12 @@ export function renderA11yTree(node: A11yNode, depth = 0, out: string[] = []): s
   const parts = typeof node.index === 'number' && node.index > 0
     ? [`${indent}[#${node.index}]`, `[${node.id}]`, node.role]
     : [`${indent}[${node.id}]`, node.role];
-  if (node.label) parts.push(`"${node.label.replace(/"/g, '\\"').slice(0, 120)}"`);
-  if (node.value && node.value !== node.label) parts.push(`= "${node.value.replace(/"/g, '\\"').slice(0, 80)}"`);
+  // QW2: `label`/`value` are app-controlled UNTRUSTED text — sanitize the
+  // MODEL-VISIBLE render (strip invisible Tag-char smuggling, defang
+  // auto-loading markdown image/link syntax). The raw `node` is untouched;
+  // structural fields (id/role/index) are ours, not app content.
+  if (node.label) parts.push(`"${sanitizeUntrustedForModel(node.label).replace(/"/g, '\\"').slice(0, 120)}"`);
+  if (node.value && node.value !== node.label) parts.push(`= "${sanitizeUntrustedForModel(node.value).replace(/"/g, '\\"').slice(0, 80)}"`);
   out.push(parts.join(' '));
   for (const child of node.children || []) {
     renderA11yTree(child, depth + 1, out);

@@ -15,6 +15,7 @@ import {
   formatComputerTaskEvidenceRecoveryForPrompt,
   type ComputerTaskAppRouteDecisionInput,
   type ComputerTaskEvidenceRecoveryContext,
+  type ComputerTaskEvidenceRecoveryObservation,
   type ComputerTaskRecoveryAppFallback,
 } from './computerTaskEvidenceRecovery';
 import { buildAppAdapterGapPlan } from './appAdapterGapContract';
@@ -46,6 +47,14 @@ export interface ChatFailureRecoveryInput {
   checkpointRecovery?: ComputerTaskCheckpointRecoveryContext | null;
   evidenceContract?: ComputerTaskEvidenceContract | null;
   appRouteDecision?: ComputerTaskAppRouteDecisionInput | null;
+  /**
+   * QW4: fresh observations harvested from the failed run's tool loop (incl.
+   * auto_reobserve events), so recovery can decide whether a bounded retry is
+   * actually backed by fresh evidence instead of assuming it. When absent (a
+   * missed harvest, or a non-computer failure), readiness degrades to advisory —
+   * it never blocks a retry that would otherwise be allowed. Additive.
+   */
+  observations?: ComputerTaskEvidenceRecoveryObservation[] | null;
   /** AR: the app the user named, so unavailable-app recovery can cite intent. */
   namedAppIntent?: string | null;
   /** AR: the structured next-best launchable app to switch to on an unavailable-app failure. */
@@ -807,6 +816,9 @@ function resolveEvidenceRecovery(input: ChatFailureRecoveryInput): ComputerTaskE
     planSummary: input.planSummary,
     groundingSummary: input.groundingSummary,
     preflightSummary: input.preflightSummary,
+    // QW4: real fresh-evidence gating — the harvested loop observations decide
+    // evidenceReadiness.ready. Missing/absent → advisory (never blocks).
+    observations: Array.isArray(input.observations) ? input.observations : [],
   });
 }
 
