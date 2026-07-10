@@ -240,18 +240,39 @@ export function validateToolInputExample(
  * time; a non-conforming example is dropped (never sent — an invalid example
  * is an API 400 for the whole request). Non-mutating; tools without curated
  * examples pass through unchanged; example count capped per tool.
+ *
+ * P60 optimization: validation is memoized per schema OBJECT (the registry's
+ * schemas are static module constants, so identity is stable across calls;
+ * the catalog chokepoint runs this every turn). Name-guarded so a shared
+ * schema object between two tools can never leak the wrong examples; a
+ * fresh/different schema object (tests, dynamic tools) just re-validates.
  */
+const validatedExamplesMemo = new WeakMap<
+  object,
+  { name: string; examples: ReadonlyArray<Record<string, unknown>> | null }
+>();
+
 export function attachToolInputExamples<
   T extends { name: string; input_schema?: Record<string, unknown> },
 >(defs: ReadonlyArray<T>): Array<T & { input_examples?: Array<Record<string, unknown>> }> {
   return defs.map((def) => {
     const curated = getToolInputExamples(def.name);
     if (!curated) return { ...def };
-    const valid = curated
-      .filter((example) => validateToolInputExample(def.input_schema, example).length === 0)
-      .slice(0, MAX_INPUT_EXAMPLES_PER_TOOL)
-      .map((example) => ({ ...example }));
-    if (valid.length === 0) return { ...def };
-    return { ...def, input_examples: valid };
+
+    let valid: ReadonlyArray<Record<string, unknown>> | null = null;
+    const schemaKey = def.input_schema && typeof def.input_schema === 'object' ? def.input_schema : null;
+    const cached = schemaKey ? validatedExamplesMemo.get(schemaKey) : undefined;
+    if (cached && cached.name === def.name) {
+      valid = cached.examples;
+    } else {
+      const computed = curated
+        .filter((example) => validateToolInputExample(def.input_schema, example).length === 0)
+        .slice(0, MAX_INPUT_EXAMPLES_PER_TOOL);
+      valid = computed.length > 0 ? computed : null;
+      if (schemaKey) validatedExamplesMemo.set(schemaKey, { name: def.name, examples: valid });
+    }
+
+    if (!valid || valid.length === 0) return { ...def };
+    return { ...def, input_examples: valid.map((example) => ({ ...example })) };
   });
 }

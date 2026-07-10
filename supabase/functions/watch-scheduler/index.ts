@@ -288,7 +288,9 @@ function decodeSecret(value: string): string {
  * project_id / session_region.
  */
 async function resolveBrowserbaseCreds(
-  supabase: ReturnType<typeof createClient>,
+  // deno-typecheck: force the `any` schema so table rows are not inferred
+  // as `never` under supabase-js 2.95 strict generics (type-level only).
+  supabase: ReturnType<typeof createClient<any>>,
   circleId: string,
 ): Promise<
   | { ok: true; creds: { apiKey: string; projectId: string; region?: string } }
@@ -463,7 +465,9 @@ async function runAgentTask(input: {
  * so a failed insert can never leave the watch due/hot-looping.
  */
 async function postWatchMessage(
-  supabase: ReturnType<typeof createClient>,
+  // deno-typecheck: force the `any` schema so table rows are not inferred
+  // as `never` under supabase-js 2.95 strict generics (type-level only).
+  supabase: ReturnType<typeof createClient<any>>,
   schedule: ScheduleRow,
   content: string,
 ): Promise<void> {
@@ -483,7 +487,9 @@ async function postWatchMessage(
 // ── Per-schedule processing ─────────────────────────────────────────────────
 
 async function processSchedule(
-  supabase: ReturnType<typeof createClient>,
+  // deno-typecheck: force the `any` schema so table rows are not inferred
+  // as `never` under supabase-js 2.95 strict generics (type-level only).
+  supabase: ReturnType<typeof createClient<any>>,
   env: { supabaseUrl: string; serviceKey: string },
   schedule: ScheduleRow,
 ): Promise<{ scheduleId: string; status: string }> {
@@ -631,7 +637,7 @@ Deno.serve(async (req: Request) => {
   if (!supabaseUrl || !serviceKey) {
     return jsonResponse({ ok: false, error: "scheduler env not configured" }, 500);
   }
-  const supabase = createClient(supabaseUrl, serviceKey);
+  const supabase = createClient<any>(supabaseUrl, serviceKey);
 
   // 2. Due watches across ALL circles, soonest first, bounded per tick
   // (MAX_SCHEDULES_PER_TICK — cost control; see the constant's comment).

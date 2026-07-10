@@ -2272,32 +2272,33 @@ async function buildSystemPromptAsync(
   // W5 (P38): sections are keyed; ordering/budget/boundary are owned by the
   // pure chatPromptAssembly seam (smoke-pinned), not by push-call position.
   const sections: ChatPromptSectionInput[] = [];
-  const pipelineBlock = buildUserTaskPipelinePromptBlock(currentMessage || '', { limit: 2 });
-  if (pipelineBlock) sections.push({ key: 'task_pipeline', body: pipelineBlock });
-  const computerRequestRouteBlock = buildChatComputerRequestRoutePromptBlock(currentMessage || '');
-  if (computerRequestRouteBlock) sections.push({ key: 'computer_request_route', body: computerRequestRouteBlock });
-  const computerStrategyBlock = buildComputerAppTaskStrategyPromptBlock(currentMessage || '');
-  if (computerStrategyBlock) sections.push({ key: 'computer_strategy', body: computerStrategyBlock });
-  const computerGroundingBlock = buildComputerAppGroundingPromptBlock(currentMessage || '');
-  if (computerGroundingBlock) sections.push({ key: 'computer_grounding', body: computerGroundingBlock });
-  const designAppBlock = buildDesignAppAutomationPromptBlock(currentMessage || '');
-  if (designAppBlock) sections.push({ key: 'design_automation', body: designAppBlock });
-  const designExecutionPipelineBlock = buildDesignAppExecutionPipelinePromptBlock(currentMessage || '');
-  if (designExecutionPipelineBlock) sections.push({ key: 'design_execution_pipeline', body: designExecutionPipelineBlock });
-  const designCreativeAiBlock = buildDesignAppCreativeAiPromptBlock(currentMessage || '');
-  if (designCreativeAiBlock) sections.push({ key: 'design_creative_ai', body: designCreativeAiBlock });
-  const designCreativeAiRecipeBlock = buildDesignAppCreativeAiRecipePromptBlock(currentMessage || '');
-  if (designCreativeAiRecipeBlock) sections.push({ key: 'design_creative_ai_recipe', body: designCreativeAiRecipeBlock });
-  const designObjectManifestBlock = buildDesignAppObjectManifestPromptBlock(currentMessage || '');
-  if (designObjectManifestBlock) sections.push({ key: 'design_object_manifest', body: designObjectManifestBlock });
-  const designOperationRunbookBlock = buildDesignAppOperationRunbookPromptBlock(currentMessage || '');
-  if (designOperationRunbookBlock) sections.push({ key: 'design_operation_runbook', body: designOperationRunbookBlock });
-  const designProofReviewBlock = buildDesignAppProofReviewPromptBlock(currentMessage || '');
-  if (designProofReviewBlock) sections.push({ key: 'design_proof_review', body: designProofReviewBlock });
-  const engineeringCadOperationRunbookBlock = buildEngineeringCadOperationRunbookPromptBlock(currentMessage || '');
-  if (engineeringCadOperationRunbookBlock) sections.push({ key: 'cad_operation_runbook', body: engineeringCadOperationRunbookBlock });
-  const computerReceiptBlock = buildComputerAppExecutionReceiptPromptBlock(currentMessage || '');
-  if (computerReceiptBlock) sections.push({ key: 'computer_receipt', body: computerReceiptBlock });
+  // P60 optimization: a lane that omits sections (the v2 ladder-dedupe debt
+  // list) should not pay to BUILD them either — these 14 builders run regex
+  // route analysis over the whole message. Skipping construction here is
+  // behavior-identical: the final `omitChatPromptSections` pass (the safety
+  // net) already dropped exactly these keys before assembly.
+  const omittedSectionKeys = new Set(context.omitPromptSections ?? []);
+  const buildSectionUnlessOmitted = (
+    key: ChatPromptSectionKey,
+    build: () => string | null | undefined,
+  ): void => {
+    if (omittedSectionKeys.has(key)) return;
+    const body = build();
+    if (body) sections.push({ key, body });
+  };
+  buildSectionUnlessOmitted('task_pipeline', () => buildUserTaskPipelinePromptBlock(currentMessage || '', { limit: 2 }));
+  buildSectionUnlessOmitted('computer_request_route', () => buildChatComputerRequestRoutePromptBlock(currentMessage || ''));
+  buildSectionUnlessOmitted('computer_strategy', () => buildComputerAppTaskStrategyPromptBlock(currentMessage || ''));
+  buildSectionUnlessOmitted('computer_grounding', () => buildComputerAppGroundingPromptBlock(currentMessage || ''));
+  buildSectionUnlessOmitted('design_automation', () => buildDesignAppAutomationPromptBlock(currentMessage || ''));
+  buildSectionUnlessOmitted('design_execution_pipeline', () => buildDesignAppExecutionPipelinePromptBlock(currentMessage || ''));
+  buildSectionUnlessOmitted('design_creative_ai', () => buildDesignAppCreativeAiPromptBlock(currentMessage || ''));
+  buildSectionUnlessOmitted('design_creative_ai_recipe', () => buildDesignAppCreativeAiRecipePromptBlock(currentMessage || ''));
+  buildSectionUnlessOmitted('design_object_manifest', () => buildDesignAppObjectManifestPromptBlock(currentMessage || ''));
+  buildSectionUnlessOmitted('design_operation_runbook', () => buildDesignAppOperationRunbookPromptBlock(currentMessage || ''));
+  buildSectionUnlessOmitted('design_proof_review', () => buildDesignAppProofReviewPromptBlock(currentMessage || ''));
+  buildSectionUnlessOmitted('cad_operation_runbook', () => buildEngineeringCadOperationRunbookPromptBlock(currentMessage || ''));
+  buildSectionUnlessOmitted('computer_receipt', () => buildComputerAppExecutionReceiptPromptBlock(currentMessage || ''));
 
   // AI-models-first collaboration menu (DEFAULT ON since 2026-07-01). When the
   // uc_stream_escalate_on_tool_use seam is ON, inject the compact capability

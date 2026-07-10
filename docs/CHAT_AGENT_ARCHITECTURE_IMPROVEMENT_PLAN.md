@@ -663,6 +663,26 @@
   stuck-breaker); typecheck + swanbot-routing green. Every tool lane now
   has clarify → activate → execute → solve → recover.
 
+- **P60 — fix + optimize sweep** ✅ — (1) FUNCTIONS TYPECHECK GATE GREEN
+  (all 43 edge functions) for the first time in this arc: repaired the
+  pre-existing `computer-use-agent` errors (typed the steering request —
+  `steer?: {runId, note}` on AgentRequest — and widened the round's
+  toolResults union to admit the deliberate trailing steering TEXT blocks)
+  and `watch-scheduler`'s nine `never`-row errors (supabase-js 2.95 strict
+  generics: forced the `any` schema generic at the client construction +
+  both param annotations — type-level only, zero behavior change). (2) V2
+  turn cost: the assembler no longer BUILDS the 14 regex-heavy
+  computer/design blocks the v2 lane omits — `buildSectionUnlessOmitted`
+  skips construction for keys in `omitPromptSections`; behavior-identical
+  for every other lane (the registry-level omit stays as the safety net).
+  (3) Catalog chokepoint: `attachToolInputExamples` memoizes validated
+  examples per schema OBJECT (static module constants → stable identity),
+  name-guarded so shared objects can't leak wrong examples and drifted
+  schemas (different object) always re-validate — the drift-protection
+  smoke still passes unchanged. All touched-surface smokes green
+  (tool-input-examples, chat-prompt-assembly, typed-runtime-invariants,
+  progressive-tool-disclosure).
+
 ## What P21 already shipped from this plan
 
 - **Typed-loop vision + image economics** ✅ — the loop was worse than

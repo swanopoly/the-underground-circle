@@ -327,6 +327,10 @@ interface AgentRequest {
   task: string;
   circleId: string;
   userId?: string;
+  /** Mid-run steering (plan §4e): when present, the request is a steering
+   *  note for an in-flight run (handled by handleSteeringRequest), not a
+   *  new task. `runId` targets the run; `note` is the user's nudge. */
+  steer?: { runId?: string; note?: string };
   /** Optional: resume an existing Browserbase session. */
   sessionId?: string;
   /** Credentials for Browserbase. Caller pulls these from circle
@@ -923,7 +927,12 @@ Deno.serve(async (req: Request) => {
             break;
           }
 
-          const toolResults: Array<{ type: string; tool_use_id: string; content: any }> = [];
+          // Union: tool_result blocks plus the trailing steering TEXT blocks
+          // (text must FOLLOW tool_result blocks in the same user turn).
+          const toolResults: Array<
+            | { type: string; tool_use_id: string; content: any }
+            | { type: "text"; text: string }
+          > = [];
           for (const tu of toolUses) {
             emit("action", { tool: tu.name, input: tu.input });
             recordProgress(iter + 1, tu.name, tu.input);
