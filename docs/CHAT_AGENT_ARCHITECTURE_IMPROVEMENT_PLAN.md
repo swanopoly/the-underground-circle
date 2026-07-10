@@ -618,6 +618,33 @@
   (computer-task-clarifier); computer-task-runtime +
   chat-transport-handlers re-run green.
 
+- **P58 — consolidated activation sequence, LIVE (both lanes)** ✅ — the
+  "activate what it needs" third of the task-reliability directive, and the
+  last recorded follow-up. The prerequisites already existed but were
+  scattered (preflight WARNS, complexity plan HINTS at the app choice,
+  grants listed, reachability a tool away) — mid-loop failures were the
+  discovery mechanism. New pure `src/lib/computerTaskActivation.ts` derives
+  ONE ordered contract from the route facts — bridge → grants →
+  app/session → target → observe — as imperative steps for the agent's
+  EXISTING tools under the EXISTING gates (activation never bypasses
+  approvals; it front-loads checks so failure happens at step 1 with a
+  clear message, not round 7 with a confusing one). Per-kind shapes:
+  desktop kinds start at the bridge check (fail = stop + "start the local
+  bridge"); resolved apps get launch-or-focus + frontmost-verify (url-opened
+  apps via open_url; availability='maybe' carries the fail-fast fallback
+  line); file/hybrid verify the NAMED target is the active document (never
+  edit whatever is frontmost); browser gets target-navigation with vault
+  credentials + CAPTCHA/MFA stop; everything ends with observe-before-act.
+  WIRED at the envelope chokepoint (`prepareComputerTaskExecution`): the
+  formatted block is appended to `dispatchPrefix`, which BOTH lanes already
+  consume (agent prompt + the browser planner's planningContext) — one
+  change, both lanes; envelope exposes `activation` for cards/telemetry.
+  Smoke: computer-task-activation (~30 incl. envelope integration);
+  computer-pipeline-e2e (217) + computer-task-runtime re-run green. With
+  P54/P56/P57 this completes the directive: clarify (model-driven, one
+  shot) → activate (ordered, fail-fast) → execute → solve (fresh-eyes
+  consultation) → recover.
+
 ## What P21 already shipped from this plan
 
 - **Typed-loop vision + image economics** ✅ — the loop was worse than

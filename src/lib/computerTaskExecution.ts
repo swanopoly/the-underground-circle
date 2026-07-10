@@ -28,6 +28,11 @@ import {
   type ComputerTaskPlanPreview,
 } from './computerTaskPlanner';
 import type { BusinessModelTaskPlan } from './businessModelProfileCore';
+import {
+  buildComputerTaskActivationPlan,
+  formatComputerTaskActivationBlock,
+  type ComputerTaskActivationPlan,
+} from './computerTaskActivation';
 
 export interface ComputerTaskExecutionEnvelope {
   preview: ComputerTaskPlanPreview;
@@ -37,6 +42,10 @@ export interface ComputerTaskExecutionEnvelope {
     summary: string;
   };
   dispatchPrefix: string;
+  /** P58: the consolidated bridge→grants→app→target→observe sequence whose
+   *  formatted block is already appended to dispatchPrefix; exposed for
+   *  cards/telemetry. */
+  activation: ComputerTaskActivationPlan;
   recommendedMode: 'research' | 'execute' | 'plan';
   capabilityProfile: TaskCapabilityProfileKey;
   entrypoint: 'browser_runtime' | 'agent_runtime';
@@ -133,23 +142,46 @@ export function prepareComputerTaskExecution(args: {
     grantedIds: args.grantedIds,
   });
 
+  // P58: the consolidated activation sequence — bridge → grants → app/session
+  // → target → observe — derived from the route facts and injected at the
+  // head of the dispatch prefix, so BOTH lanes (agent prompt + browser
+  // planner context) front-load prerequisite checks instead of discovering
+  // them via mid-loop failures.
+  const activation = buildComputerTaskActivationPlan({
+    kind: preview.kind,
+    appResolution: args.appResolution?.best
+      ? {
+          displayName: args.appResolution.best.displayName,
+          openVia: args.appResolution.best.openVia,
+          openTarget: args.appResolution.best.openTarget,
+          availability: args.appResolution.best.availability,
+        }
+      : null,
+    outstandingGrantLabels: grants.outstanding.map((grant) => grant.label),
+    preflightBlockerLabels: preflight.blockers.map((item) => item.label),
+  });
+
   return {
     preview,
     readiness: stagedReadiness,
-    dispatchPrefix: buildComputerTaskDispatchPrefix({
-      task: args.task,
-      preview,
-      readiness: stagedReadiness,
-      audit: args.audit,
-      grants,
-      preflight,
-      computerAppGrounding,
-      computerAppGroundingRunbook,
-      computerAppGroundingNextStep,
-      computerAppGroundingTrace,
-      complexityPlan,
-      businessModelPlan: args.businessModelPlan,
-    }),
+    activation,
+    dispatchPrefix: [
+      buildComputerTaskDispatchPrefix({
+        task: args.task,
+        preview,
+        readiness: stagedReadiness,
+        audit: args.audit,
+        grants,
+        preflight,
+        computerAppGrounding,
+        computerAppGroundingRunbook,
+        computerAppGroundingNextStep,
+        computerAppGroundingTrace,
+        complexityPlan,
+        businessModelPlan: args.businessModelPlan,
+      }),
+      formatComputerTaskActivationBlock(activation),
+    ].filter(Boolean).join('\n\n'),
     recommendedMode: resolveMode(preview.kind),
     capabilityProfile: resolveCapabilityProfile(preview.kind),
     entrypoint: preview.kind === 'browser_task' ? 'browser_runtime' : 'agent_runtime',
