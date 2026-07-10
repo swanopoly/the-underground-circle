@@ -3704,7 +3704,8 @@ export async function executeToolUseLoop(opts: {
   const { summarizeToolLoopProgress, buildToolLoopCheckpoint, extractAssistantText } = await import('./toolLoopProgress');
   const { canParallelizeToolBatch } = await import('./toolBatchParallelism');
   const { isRetryableEdgeFailure, edgeRetryBackoffMs, EDGE_INVOKE_RETRIES } = await import('./edgeInvokeRetry');
-  const { appendStuckBreaker } = await import('./toolLoopStuckBreaker');
+  const { appendStuckBreaker, detectRepeatedToolFailure, hashToolInput } = await import('./toolLoopStuckBreaker');
+  const { buildSolverConsultationMessage, previewToolInput, shouldConsultSolver } = await import('./toolLoopSolver');
   const { toolBudgetReminder } = await import('./toolLoopBudget');
   const { planDeterministicReobserve, summarizeObservationForRetry } = await import('./deterministicReobserve');
   const { assessProofCoverage, proofCoverageNudge } = await import('./proofCoverage');
@@ -3817,6 +3818,15 @@ export async function executeToolUseLoop(opts: {
   const maxRounds = Math.max(1, Math.min(MAX_TOOL_ROUNDS, opts.maxToolRounds ?? MAX_TOOL_ROUNDS));
   // Completion proof-check fires at most once per turn (see the done-branch).
   let proofNudged = false;
+  // P59: legacy-loop parity with the typed core's P56 stuck-solver. A bounded
+  // ring of real dispatches (name + stable input hash + ok) feeds the same
+  // progress-based detector; on three identical failures the loop consults
+  // the solver ONCE (fresh-eyes re-plan) and, if still stuck, STOPS instead
+  // of burning rounds to the cap.
+  let solverConsulted = false;
+  let lastFailureTextForSolver: string | null = null;
+  let lastFailingCall: { tool: string; input: unknown } | null = null;
+  const stuckRing: Array<{ name: string; inputHash: string; ok: boolean }> = [];
 
   for (let round = 0; round < maxRounds; round++) {
     // Call the edge fn, retrying transient blips. Refresh the JWT per-round so
@@ -4048,6 +4058,17 @@ export async function executeToolUseLoop(opts: {
       // Stamp capture time (QW4) so a harvested read/observe carries a real
       // freshness timestamp for the evidence-recovery readiness window.
       toolEvents.push({ tool: block.name, input: block.input, result: dispatched.text, status: dispatched.status, metadata: { ...(dispatched.metadata || {}), observed_at: Date.now() } });
+      // P59: record into the progress-based stuck ring (real dispatches only —
+      // gate/floor-blocked calls stay out, keeping detection conservative).
+      {
+        const callFailed = /\b(error|fail|failed|failure|blocked|denied|timeout)\b/i.test(String(dispatched.status || ''));
+        stuckRing.push({ name: block.name, inputHash: hashToolInput(block.input), ok: !callFailed });
+        if (stuckRing.length > 24) stuckRing.splice(0, stuckRing.length - 24);
+        if (callFailed) {
+          lastFailureTextForSolver = String(dispatched.text || '').slice(0, 300);
+          lastFailingCall = { tool: block.name, input: block.input };
+        }
+      }
       // Deterministic re-observe: when a UI action fails (and we're not in
       // per-step review mode — there the model can just request the read as its
       // next reviewed step), auto-capture fresh ground truth and embed it in the
@@ -4091,6 +4112,36 @@ export async function executeToolUseLoop(opts: {
     // Feed results back for the next round
     messages.push({ role: 'assistant', content });
     messages.push({ role: 'user', content: toolResults });
+
+    // P59: progress-based stuck handling (typed-core P56 parity). Three
+    // identical failing dispatches → ONE fresh-eyes solver consultation
+    // (root cause + two different approaches, gates unchanged); still stuck
+    // after that → STOP with an incomplete blocker result instead of
+    // re-sampling the doomed call until the round cap.
+    const stuckVerdict = detectRepeatedToolFailure(stuckRing);
+    if (stuckVerdict.stuck) {
+      if (shouldConsultSolver({ stuck: true, alreadyConsulted: solverConsulted })) {
+        solverConsulted = true;
+        messages.push({
+          role: 'user',
+          content: buildSolverConsultationMessage({
+            tool: lastFailingCall?.tool || 'the failing tool',
+            inputPreview: lastFailingCall ? previewToolInput(lastFailingCall.input) : null,
+            stuckReason: stuckVerdict.reason,
+            lastError: lastFailureTextForSolver,
+            availableTools: tools.map((t: { name: string }) => t.name),
+          }),
+        });
+        continue;
+      }
+      const stopNote = `Stopped: ${stuckVerdict.reason} — still stuck after a solver consultation. Report the blocker: what was tried, the exact error, and what you need from the user.`;
+      return {
+        response: stopNote,
+        toolEvents,
+        routing: routingInfo,
+        incomplete: true,
+      };
+    }
   }
 
   // Exhausted tool rounds — return whatever text we accumulated, flagged

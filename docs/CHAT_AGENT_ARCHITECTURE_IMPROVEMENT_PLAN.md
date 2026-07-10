@@ -645,6 +645,24 @@
   shot) → activate (ordered, fail-fast) → execute → solve (fresh-eyes
   consultation) → recover.
 
+- **P59 — solver parity for the legacy relay loop, LIVE** ✅ — the typed
+  core got the P56 stuck-solver; the legacy `executeToolUseLoop` (which
+  serves the DEFAULT-ON stream-escalation lane) only had the per-result
+  reminder and burned rounds to the cap. Now: a bounded ring of real
+  dispatches (name + stable input hash + ok; gate/floor-blocked calls
+  excluded — conservative) feeds the same `detectRepeatedToolFailure`; on
+  three identical failures the loop injects ONE `[stuck-solver]`
+  consultation (same pure module — root cause quoting the captured failure
+  text, two different approaches from the advertised tools, gates
+  unchanged) and, if the verdict trips again after that, RETURNS an
+  incomplete blocker result instead of re-sampling to the round cap.
+  Semantics note vs the typed core: the legacy loop consults after the 3rd
+  failure has dispatched (it records post-dispatch), the typed core stops
+  before dispatching the 3rd — equivalent protection, one extra doomed call
+  on the legacy lane. Pure pieces already smoke-pinned (tool-loop-solver /
+  stuck-breaker); typecheck + swanbot-routing green. Every tool lane now
+  has clarify → activate → execute → solve → recover.
+
 ## What P21 already shipped from this plan
 
 - **Typed-loop vision + image economics** ✅ — the loop was worse than
