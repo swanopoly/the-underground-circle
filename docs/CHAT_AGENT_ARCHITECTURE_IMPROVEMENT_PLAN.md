@@ -683,6 +683,28 @@
   (tool-input-examples, chat-prompt-assembly, typed-runtime-invariants,
   progressive-tool-disclosure).
 
+- **P61 — stuck-solver for the native browser loop, LIVE + DEPLOYED** ✅ —
+  the third and last tool loop: `computer-use-agent` (the Browserbase
+  screenshot/action loop, the highest-failure surface) previously burned all
+  12 iterations re-trying an identical failing action. Now: a bounded ring
+  of real browser-action dispatches (conservative failure semantics — only
+  THROWN tool errors count; a visually-failed action with a clean screenshot
+  stays the model's job to judge from pixels) feeds the SAME
+  `detectRepeatedToolFailure`; three identical failures inject ONE
+  `[stuck-solver]` consultation riding the same user turn as the tool
+  results (text-after-tool_results, the steering precedent) with the current
+  page URL as the observation; still stuck after that → clean
+  `stuck_no_progress` partial_result stop (session preserved for takeover/
+  resume) instead of iteration burn. ask_user/pay-floor gates untouched.
+  Enabler: extracted the zero-import `toolLoopStuckCore.ts`
+  (hashToolInput/detectRepeatedToolFailure) because Deno's strict resolution
+  rejects the breaker module's extensionless appSurfaceLadder import —
+  `toolLoopStuckBreaker` re-exports it so every client import is unchanged
+  (stuck-breaker/solver/agent-core smokes green). All three loops (typed
+  core, legacy relay, native browser) now share one solver implementation.
+  typecheck:functions 43/43 green; deployed to rjkniqiqdtroeholxacg
+  2026-07-10.
+
 ## What P21 already shipped from this plan
 
 - **Typed-loop vision + image economics** ✅ — the loop was worse than

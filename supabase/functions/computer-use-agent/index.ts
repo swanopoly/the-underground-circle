@@ -36,6 +36,10 @@ import {
   type UsageBreakdown,
 } from "../_claude/anthropic.ts";
 import { byokMissingMessage, isServiceRoleRequest, resolveUserModelApiKey } from "../_shared/edge.ts";
+// P61: shared stuck-loop machinery (same pure modules as both client loops —
+// the zero-import core keeps Deno's strict resolution happy).
+import { detectRepeatedToolFailure, hashToolInput } from "../../../src/lib/toolLoopStuckCore.ts";
+import { buildSolverConsultationMessage, previewToolInput, shouldConsultSolver } from "../../../src/lib/toolLoopSolver.ts";
 import {
   BOOKING_SAFETY_BLOCK,
   BOOKING_FORM_SUBMISSION_PROFILE,
@@ -624,6 +628,16 @@ Deno.serve(async (req: Request) => {
       // deadline (D5) — a human fetching a 2FA code should not starve the
       // agent's 5-minute budget.
       let confirmationWaitMs = 0;
+      // P61: progress-based stuck handling for the native browser loop
+      // (parity with the client loops' P56/P59). A bounded ring of real
+      // browser-action dispatches feeds detectRepeatedToolFailure; three
+      // identical failing actions → ONE fresh-eyes solver consultation;
+      // still stuck after that → clean partial_result stop instead of
+      // burning the remaining iterations on a doomed action.
+      let solverConsulted = false;
+      let lastBrowserToolError: string | null = null;
+      let lastFailingBrowserCall: { tool: string; input: unknown } | null = null;
+      const browserActionRing: Array<{ name: string; inputHash: string; ok: boolean }> = [];
 
       // Conversation messages for the Claude loop. Prepend follow-up
       // context (from the most recent completed run in this circle) so
@@ -1063,6 +1077,12 @@ Deno.serve(async (req: Request) => {
                     ]
                   : [{ type: "text", text: out.text || "(no output)" }],
               });
+              // P61: record the successful dispatch (conservative failure
+              // semantics — only THROWN tool errors count as failures; a
+              // visually-failed action with a clean screenshot stays the
+              // model's job to judge from pixels).
+              browserActionRing.push({ name: tu.name, inputHash: hashToolInput(tu.input), ok: true });
+              if (browserActionRing.length > 24) browserActionRing.splice(0, browserActionRing.length - 24);
             } catch (err: any) {
               emit("error", { message: `Tool ${tu.name} failed: ${err?.message || err}` });
               toolResults.push({
@@ -1070,6 +1090,11 @@ Deno.serve(async (req: Request) => {
                 tool_use_id: tu.id,
                 content: [{ type: "text", text: `Tool error: ${err?.message || err}` }],
               });
+              // P61: record the failure for the progress-based detector.
+              browserActionRing.push({ name: tu.name, inputHash: hashToolInput(tu.input), ok: false });
+              if (browserActionRing.length > 24) browserActionRing.splice(0, browserActionRing.length - 24);
+              lastBrowserToolError = String(err?.message || err).slice(0, 300);
+              lastFailingBrowserCall = { tool: tu.name, input: tu.input };
             }
           }
           // Mid-run steering (plan §4e): unconsumed notes ride the same
@@ -1081,6 +1106,35 @@ Deno.serve(async (req: Request) => {
           for (const steering of steeringNotes) {
             toolResults.push({ type: "text", text: formatSteeringNoteForModel(steering.note) });
             emit("steering_applied", { note: steering.note.slice(0, 200) });
+          }
+
+          // P61: progress-based stuck handling. The consultation rides the
+          // same user turn as the tool results (text AFTER tool_result blocks
+          // — the steering precedent); gates (ask_user, pay floor) are
+          // untouched — it changes the plan, never permissions.
+          const stuckVerdict = detectRepeatedToolFailure(browserActionRing);
+          if (stuckVerdict.stuck) {
+            if (shouldConsultSolver({ stuck: true, alreadyConsulted: solverConsulted })) {
+              solverConsulted = true;
+              emit("solver_consultation", { reason: stuckVerdict.reason });
+              toolResults.push({
+                type: "text",
+                text: buildSolverConsultationMessage({
+                  tool: lastFailingBrowserCall?.tool || "the failing tool",
+                  inputPreview: lastFailingBrowserCall ? previewToolInput(lastFailingBrowserCall.input) : null,
+                  stuckReason: stuckVerdict.reason,
+                  lastError: lastBrowserToolError,
+                  availableTools: ["computer", "bash", "ask_user", "fill_saved_login"],
+                  lastObservation: lastKnownUrl ? `current page: ${lastKnownUrl}` : null,
+                }),
+              });
+            } else {
+              const stopMessage = `Stopped: ${stuckVerdict.reason} — still stuck after a solver consultation. The same browser action keeps erroring; the session is preserved so you can take over or retry with different instructions.`;
+              await emitPartialResult(iter + 1, "stuck_no_progress", stopMessage);
+              emit("error", { message: stopMessage });
+              messages.push({ role: "user", content: toolResults });
+              break agentLoop;
+            }
           }
           messages.push({ role: "user", content: toolResults });
 
