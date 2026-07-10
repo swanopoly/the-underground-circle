@@ -36,6 +36,7 @@ const files = {
   aiModalAdvisor: fs.readFileSync('src/lib/desktopAIModalAdvisor.ts', 'utf8'),
   browserAiModalAdvisor: fs.readFileSync('src/lib/browserAIModalAdvisor.ts', 'utf8'),
   chatTab: fs.readFileSync('src/screens/circles/tabs/ChatTab.tsx', 'utf8'),
+  chatUserFacingOutcomes: fs.readFileSync('src/lib/chatUserFacingOutcomes.ts', 'utf8'),
   bridge: fs.readFileSync('scripts/claude-bridge.js', 'utf8'),
   pkg: JSON.parse(fs.readFileSync('package.json', 'utf8')),
 };
@@ -264,7 +265,10 @@ assert(files.directImageConversionRuntime.includes('extractDirectLocalImageForma
 assert(files.directImageConversionRuntime.includes('output_conflict') && files.directImageConversionRuntime.includes('try {') && files.directImageConversionRuntime.includes('bridge_offline'), 'direct image conversion runtime normalizes bridge throws and output conflicts');
 assert(files.chatTransportHandlers.includes('That automation step hit an internal error. Technical details were saved for recovery.') && files.chatTransportHandlers.includes('rawError'), 'chat transport handlers hide thrown transport details from visible messages');
 assert(files.runChatAutomationPlan.includes('That automation step hit an internal error. Technical details were saved for recovery.') && files.runChatAutomationPlan.includes('rawError'), 'chat automation dispatcher hides thrown transport details from visible messages');
-assert(files.computerUseTask.includes('sanitizeComputerUseErrorMessage') && files.computerUseTask.includes('rawErrorMessage') && files.computerUseTask.includes('Computer Use could not finish. Technical details were saved for recovery.'), 'Computer Use live task state hides raw edge/fetch errors while retaining diagnostics');
+// P12: the display policy moved to the chatUserFacingOutcomes owner — the
+// hook delegates (sanitizeComputerUseErrorMessage = translateComputerUseErrorMessage)
+// and the generic fallback literal lives in the delegate module.
+assert(files.computerUseTask.includes('sanitizeComputerUseErrorMessage') && files.computerUseTask.includes('rawErrorMessage') && files.computerUseTask.includes('translateComputerUseErrorMessage') && files.chatUserFacingOutcomes.includes('Computer Use could not finish. Technical details were saved for recovery.'), 'Computer Use live task state hides raw edge/fetch errors while retaining diagnostics');
 assert(files.chatTab.includes('executeDirectImageConversionRequest') && files.chatTab.includes('directImageConversion'), 'ChatTab: direct image conversion runtime is wired');
 assert(files.chatTab.includes('routeHasDirectLocalFileActionItems') && files.chatTab.includes('executeDirectLocalFileRequest') && files.chatTab.includes('directLocalFileAction'), 'ChatTab: direct local file runtime is wired');
 assert(files.fileAdapter.includes('selectUnambiguousFileMatchForMutation') && files.fileAdapter.includes('Ambiguous local file mutation target'), 'file adapter: rename/copy/trash fail closed on ambiguous search matches');

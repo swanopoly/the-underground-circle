@@ -72,15 +72,23 @@ const WP_SCHEDULE_PATTERNS = [
   /\b(schedule|queue|plan)\b.*\b(post|article|blog)\b.*\b(for|on|next|this)\b/i,
 ];
 
+// LOCKSTEP with chatAutomationPlanner.ts detectPlannerConversationalIntent
+// create_task trigger (the "work item" noun must stay in both). The planner is
+// the classify-once source of truth; this legacy detector is only reached as a
+// guarded safety net, so their coverage must not drift.
 const TASK_CREATE_PATTERNS = [
   /\b(create|add|make|open)\b.*\b(a\s+)?(task|todo|ticket|issue|work item)\b/i,
 ];
 
+// LOCKSTEP with chatAutomationPlanner.ts OFFICE_AGENT_TASK_TRIGGERS — keep the
+// agent-reference patterns identical across both files.
 const OFFICE_AGENT_PATTERNS = [
   /\b(spin\s+me\s+up|spin\s+up|create|make)\b.*\b(agent|pixel agent)\b/i,
   /\b(agent|pixel agent)\b.*\b(called|named)\b/i,
 ];
 
+// LOCKSTEP with chatAutomationPlanner.ts OFFICE_TASK_ATTACH_TRIGGERS — keep the
+// task-attach patterns identical across both files.
 const TASK_ATTACH_PATTERNS = [
   /\b(add|assign|attach|put)\b.*\b(to|onto|on)\b.*\btask\b/i,
   /\btask\s+we\s+just\s+made\b/i,
@@ -105,24 +113,48 @@ function extractRequestedModel(message: string): string | undefined {
   return undefined;
 }
 
+// P24 (LOCKSTEP with detectPlannerConversationalIntent in
+// chatAutomationPlanner.ts): remember is a SAVE only when imperative —
+// start-anchored and not followed by an interrogative ("remember when we
+// went…?" is nostalgia, "what do you remember…" is recall). Recall questions
+// are handled by SHOW_MEMORY_PATTERNS, checked BEFORE remember.
 const REMEMBER_PATTERNS = [
   /\b(add|put)\b.*\b(to|in)\s+(?:your\s+)?memory\b/i,
-  /\b(remember|save|store|note|keep in mind)\b.*\b(that|this|:)\b/i,
-  /\bremember\b/i,
+  /^(?:please\s+)?(?:remember|save|store|note|keep in mind)\b.*\b(that|this|:)\b/i,
+  /^(?:please\s+)?remember\b(?!\s+(?:when|what|where|who|how|why)\b)/i,
 ];
 
+// P24: forget is a command only when start-anchored ("I forget what that
+// error was" is a statement, not a deletion request); objects widened so
+// "forget what I said about X" and "forget everything about X" match.
 const FORGET_PATTERNS = [
-  /\b(forget|remove|delete|clear)\b.*\b(memory|that|the fact|what you know about)\b/i,
+  /^(?:please\s+)?(?:forget|remove|delete|clear)\b[\s\S]*\b(?:memory|memories|that|this|everything|the fact|what (?:i|you|we) (?:said|know|knew|discussed)|about)\b/i,
 ];
+
+/**
+ * P24 credential guard: memory must NEVER store secrets. Matches a
+ * credential noun plus an assignment ("my wifi password is hunter2",
+ * "api key: sk-…"). Pure + exported for smokes; the remember executor
+ * refuses and points at the vault instead of persisting.
+ */
+export function looksLikeCredentialMemoryContent(content: string): boolean {
+  const text = String(content || '');
+  if (!/\b(?:password|passcode|passphrase|api[-\s]?key|access[-\s]?key|secret|token|private\s+key|seed\s+phrase|recovery\s+(?:code|phrase)|pin\s+(?:code|number)?)\b/i.test(text)) {
+    return false;
+  }
+  return /\b(?:is|was|=|:)\s*\S{4,}/i.test(text) || /\b(?:password|passcode|pin)\b\s+\S{4,}/i.test(text);
+}
 
 const SHOW_MEMORY_PATTERNS = [
   /\bwhat do you (remember|know)\b/i,
   /\b(show|list|see)\b.*\b(memories|memory|what you remember)\b/i,
 ];
 
+// Image generation requires an imperative generation verb. The old bare
+// /\b(image|picture|photo)\b.*\bof\b/ pattern hijacked casual mentions
+// ("a photo of my dog from yesterday") into the /imagine pipeline.
 const IMAGE_GEN_PATTERNS = [
-  /\b(generate|create|make|draw|design)\b.*\b(image|picture|photo|illustration|artwork|logo|banner|icon)\b/i,
-  /\b(image|picture|photo)\b.*\bof\b/i,
+  /\b(generate|create|make|draw|design|render|paint)\b.*\b(image|picture|photo|illustration|artwork|logo|banner|icon)\b/i,
 ];
 
 // WEBPAGE_PATTERNS used to auto-detect "build a page/site" and set the
@@ -207,6 +239,12 @@ export function detectConversationalIntent(
     return { type: 'create_task', title: titleMatch?.[1]?.trim() || message.slice(0, 80) };
   }
 
+  // Show memories — checked BEFORE remember so recall questions ("what do
+  // you remember about me?") never get SAVED as memories (P24).
+  if (SHOW_MEMORY_PATTERNS.some(p => p.test(message))) {
+    return { type: 'show_memories' };
+  }
+
   // Remember
   if (REMEMBER_PATTERNS.some(p => p.test(message))) {
     const content = message
@@ -220,14 +258,9 @@ export function detectConversationalIntent(
   // Forget
   if (FORGET_PATTERNS.some(p => p.test(message))) {
     const query = message
-      .replace(/^(please\s+)?(forget|remove|delete|clear)\s+(the\s+)?(memory|fact|that|what you know about)\s*/i, '')
+      .replace(/^(please\s+)?(forget|remove|delete|clear)\s+(?:the\s+)?(?:memory\s+(?:of|about)?|fact\s+(?:that)?|that|this|everything\s+(?:about)?|what\s+(?:i|you|we)\s+(?:said|know|knew|discussed)\s+(?:about)?|about)?\s*/i, '')
       .trim();
     if (query.length > 2) return { type: 'forget', query };
-  }
-
-  // Show memories
-  if (SHOW_MEMORY_PATTERNS.some(p => p.test(message))) {
-    return { type: 'show_memories' };
   }
 
   // Image generation
@@ -628,6 +661,14 @@ ${status === 'draft' ? `Say "publish it" or use \`/wp publish ${result.postId}\`
     }
 
     case 'remember': {
+      // P24: refuse credential-looking content BEFORE any persistence path —
+      // passwords/keys belong in 1Password/the vault, never in memory.
+      if (looksLikeCredentialMemoryContent(intent.content)) {
+        return {
+          handled: true,
+          message: "I don't store passwords, keys, or other secrets in memory — nothing was saved. Keep credentials in 1Password (or your vault) and I can reference them by name when needed.",
+        };
+      }
       try {
         if (context.executeRemember) {
           const result = await context.executeRemember({
@@ -701,17 +742,34 @@ ${status === 'draft' ? `Say "publish it" or use \`/wp publish ${result.postId}\`
 }
 
 /**
- * Legacy public API — preserved verbatim for the remaining legacy callers
- * (ChatTab's fallback block, which runs `detectConversationalIntent` itself
- * and passes the result here). It is now a thin delegate to
- * `executeDetectedConversationalIntent`; behavior is identical. New code on
- * the unified dispatcher path should call the detected-intent executor
- * directly with `plan.intent.intent` (see R8 in
+ * Intents that mutate an EXTERNAL surface (live WordPress publish/schedule)
+ * and therefore must never execute from the legacy detect-then-execute path,
+ * which has no approval gate in front of it. The unified dispatcher path is
+ * approval-gated by the planner (`buildApproval('wordpress', ...)` in
+ * chatAutomationPlanner.ts) before `executeDetectedConversationalIntent`
+ * runs, so these intents are only safe there.
+ */
+export function legacyPathRequiresApprovalGate(intent: ConversationalIntent): boolean {
+  return intent.type === 'wordpress_publish' || intent.type === 'wordpress_schedule';
+}
+
+/**
+ * Legacy public API — preserved for the remaining legacy callers (ChatTab's
+ * fallback block, which runs `detectConversationalIntent` itself and passes
+ * the result here). It delegates to `executeDetectedConversationalIntent`,
+ * EXCEPT for external-mutation intents (`legacyPathRequiresApprovalGate`):
+ * those return the `null` route-to-planner sentinel — the consumer treats an
+ * unhandled result as "fall through to the normal chat pipeline", where the
+ * planner's approval-gated dispatcher or the SwanBot tool loop owns the
+ * mutation. Nothing on this path may reach a live publish without approval.
+ * New code on the unified dispatcher path should call the detected-intent
+ * executor directly with `plan.intent.intent` (see R8 in
  * docs/SWANBOT_OPENSWAN_CHAT_NEXT_PLAN_2026-06-08.md).
  */
 export async function executeConversationalIntent(
   intent: ConversationalIntent,
   context: ConversationalIntentContext,
 ): Promise<ConversationalIntentResult> {
+  if (legacyPathRequiresApprovalGate(intent)) return null;
   return executeDetectedConversationalIntent(intent, context);
 }

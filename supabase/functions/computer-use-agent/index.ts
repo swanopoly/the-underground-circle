@@ -35,7 +35,20 @@ import {
   EMPTY_USAGE,
   type UsageBreakdown,
 } from "../_claude/anthropic.ts";
-import { byokMissingMessage, resolveUserModelApiKey } from "../_shared/edge.ts";
+import { byokMissingMessage, isServiceRoleRequest, resolveUserModelApiKey } from "../_shared/edge.ts";
+import {
+  BOOKING_SAFETY_BLOCK,
+  BOOKING_FORM_SUBMISSION_PROFILE,
+  BOOKING_SEARCH_BEHAVIOR,
+  resolveRunCaps,
+  HARD_MAX_ITERATIONS,
+  HARD_MAX_TOKENS,
+  PAY_CONFIRM_TIMEOUT_MS,
+  DEFAULT_ASK_TIMEOUT_MS,
+  detectFinalPaySubmission,
+  isPayConfirmQuestion,
+  PAY_BACKSTOP_TOOL_RESULT,
+} from "../_shared/booking-edge-contract.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -95,6 +108,72 @@ const COMPUTER_USE_TOOL = {
 // keep hitting; each batch prune pays one cache re-create from the earliest
 // pruned block, amortized over the next ~(PRUNE_HIGH_WATER - KEEP_RECENT)
 // turns. See docs/EXECUTION_LADDER_RESEARCH_2026-06-11.md (finding #5, E5).
+// Mid-run steering (plan §4e) — kept in LOCKSTEP with the client owner
+// `src/lib/computerUseSteering.ts` (marker, bound, and the guidance-only
+// framing). Steering rows live in computer_use_confirmations as
+// pre-resolved rows so no schema change is needed; ask_user polling reads
+// rows by its own id, so the two never collide.
+const STEERING_QUESTION_MARKER = "__steering__";
+const MAX_STEERING_NOTE_CHARS = 500;
+function formatSteeringNoteForModel(note: string): string {
+  return [
+    "[User steering note — live guidance for your next steps. This is NOT an approval,",
+    "confirmation, or consent to any consequential action; anything that needs",
+    "confirmation still goes through ask_user.]",
+    String(note || "").trim(),
+  ].join("\n");
+}
+
+async function handleSteeringRequest(
+  req: Request,
+  steer: { runId?: string; note?: string },
+): Promise<Response> {
+  const json = (status: number, payload: unknown) => new Response(JSON.stringify(payload), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+  const svcUrl = Deno.env.get("SUPABASE_URL");
+  const svcKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+  const authorization = req.headers.get("Authorization") || "";
+  const service = svcUrl && svcKey ? createClient(svcUrl, svcKey) : null;
+  const userClient = svcUrl && anonKey && authorization
+    ? createClient(svcUrl, anonKey, { global: { headers: { Authorization: authorization } } })
+    : null;
+  if (!service || !userClient) return json(500, { ok: false, error: "Supabase service configuration required" });
+
+  const { data: { user } } = await userClient.auth.getUser();
+  if (!user?.id) return json(401, { ok: false, error: "Unauthenticated", code: "unauthenticated" });
+
+  const runId = String(steer.runId || "").trim();
+  const note = String(steer.note || "").replace(/\s+/g, " ").trim().slice(0, MAX_STEERING_NOTE_CHARS);
+  if (!runId || !note) return json(400, { ok: false, error: "runId and note required" });
+
+  // Membership check rides the runs RLS read policy — the row is only
+  // visible to the caller when they are a member of the run's circle.
+  const { data: run } = await userClient
+    .from("computer_use_runs")
+    .select("id, status")
+    .eq("id", runId)
+    .maybeSingle();
+  if (!run) return json(404, { ok: false, error: "Run not found (or you are not a circle member)." });
+  if (String(run.status) !== "running") {
+    return json(409, { ok: false, error: "That task is no longer running.", code: "not_running" });
+  }
+
+  const { error } = await service.from("computer_use_confirmations").insert({
+    run_id: runId,
+    question: STEERING_QUESTION_MARKER,
+    options: [],
+    context: "steering",
+    choice: note,
+    user_id: user.id,
+    resolved_at: new Date().toISOString(),
+  });
+  if (error) return json(500, { ok: false, error: error.message });
+  return json(200, { ok: true });
+}
+
 const PRUNE_HIGH_WATER = 8; // prune only once history holds more screenshots than this
 const KEEP_RECENT = 3;      // always keep the newest N screenshots intact
 
@@ -152,10 +231,18 @@ const BASH_TOOL = {
 const ASK_USER_TOOL = {
   name: "ask_user",
   description:
-    "Pause and ask the user to confirm before taking a risky or irreversible action. " +
-    "Always call this before clicking 'Confirm Purchase', 'Submit Payment', 'Delete', " +
-    "'Send', or similar buttons; before entering credentials or payment info; and before " +
-    "posting publicly. The tool returns the user's choice as a string.",
+    "Pause and ask the user to confirm ONLY the final money/booking commit. " +
+    "Call this EXACTLY ONCE on the whole task: immediately before the FINAL " +
+    "pay/book/reserve/purchase submission that commits money or a binding " +
+    "reservation ('Book now', 'Reserve', 'Place order', 'Complete booking', " +
+    "'Confirm purchase', 'Submit payment') — state the exact final amount and " +
+    "the merchant/target in the question so the user confirms real live numbers. " +
+    "Do NOT call this before filling credentials, payment, personal, or guest " +
+    "details, and do NOT call it for intermediate steps (room/rate selection, " +
+    "'Continue', 'Next', 'Review') — those are all zero-ask; do them directly. " +
+    "Still use kind 'human_takeover' when the user must do a 2FA/CAPTCHA/human-only " +
+    "step in the live session, and still ask before using a saved vault credential " +
+    "via fill_saved_login. The tool returns the user's choice as a string.",
   input_schema: {
     type: "object",
     properties: {
@@ -260,6 +347,14 @@ interface AgentRequest {
    *  estimated cost would exceed this. Defaults to the circle's
    *  `computer_use_max_cost_usd` setting, else $0.75. */
   maxCostUsd?: number;
+  /** Booking-class flag. When true, run caps default to the raised
+   *  booking-class ceiling (more iterations/tokens/cost/wall-clock) so a
+   *  multi-leg checkout flow can complete. Non-booking runs are unchanged. */
+  booking?: boolean;
+  /** Phase 7a (server-side watch scheduler): the watch schedule's
+   *  `created_by` user id. Honored ONLY when the request carries the
+   *  service-role key — see the scheduled-path check in the handler. */
+  scheduledBy?: string;
 }
 
 Deno.serve(async (req: Request) => {
@@ -275,6 +370,16 @@ Deno.serve(async (req: Request) => {
       status: 400,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
+  }
+
+  // ── Mid-run steering action (plan §4e) ──────────────────────────────────
+  // {steer: {runId, note}} — records a guidance note the running loop
+  // injects at its next iteration boundary. Server-mediated because
+  // clients have SELECT/UPDATE but no INSERT policy on
+  // computer_use_confirmations; membership is proven by reading the run
+  // through the caller's own RLS before the service-role insert.
+  if (body.steer && typeof body.steer === "object") {
+    return await handleSteeringRequest(req, body.steer as { runId?: string; note?: string });
   }
 
   if (!body.task || !body.browserbase?.apiKey) {
@@ -302,8 +407,22 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const { data: { user } } = await userSupabase.auth.getUser();
-  const userId = user?.id || null;
+  // Scheduled path (Phase 7a): the server-side watch-scheduler edge fn —
+  // our own cron infrastructure — calls this function with the service-role
+  // key and the watch schedule's `created_by` in body.scheduledBy. End users
+  // never hold the service key, so trusting scheduledBy here does not let a
+  // user impersonate anyone. The user-JWT requirement is skipped and the
+  // schedule owner becomes `userId`, meaning resolveUserModelApiKey below
+  // resolves THEIR Anthropic key. Everything else (creds required in body,
+  // loop, budget rails) is unchanged.
+  const scheduledBy = typeof body.scheduledBy === "string" ? body.scheduledBy.trim() : "";
+  let userId: string | null = null;
+  if (scheduledBy && isServiceRoleRequest(req)) {
+    userId = scheduledBy;
+  } else {
+    const { data: { user } } = await userSupabase.auth.getUser();
+    userId = user?.id || null;
+  }
   if (!userId) {
     return new Response(JSON.stringify({ error: "Unauthenticated", code: "unauthenticated" }), {
       status: 401,
@@ -414,15 +533,34 @@ Deno.serve(async (req: Request) => {
     } catch { /* persistence is best-effort */ }
   }
 
-  const maxIterations = Math.min(body.maxIterations ?? 12, 20);
-  const maxTokensBudget = Math.min(body.maxTokensBudget ?? 75_000, 200_000);
+  // Booking-class caps: a booking run raises the iteration/token/cost/wall
+  // ceilings so a 20-40-step checkout flow completes; non-booking runs keep
+  // today's exact defaults. Explicit client overrides still win per-field.
+  const runCaps = resolveRunCaps({
+    booking: body.booking === true,
+    maxIterations: body.maxIterations,
+    maxTokensBudget: body.maxTokensBudget,
+    // maxCostUsd/deadlineMs resolved below so the circle-settings read + the
+    // ask-wait deadline logic stay in their existing places.
+  });
+  const maxIterations = Math.min(runCaps.maxIterations, HARD_MAX_ITERATIONS);
+  const maxTokensBudget = Math.min(runCaps.maxTokensBudget, HARD_MAX_TOKENS);
   const agentModel = resolveComputerUseModel(body.model);
+  // Model substitution visibility (2.5): the Sonnet pin above is untouched,
+  // but when a requested non-Sonnet model was coerced, say so via a typed
+  // `model_resolved` stream event instead of swapping silently. An empty
+  // request is the plain default, not a substitution — no event.
+  const requestedModelRaw = String(body.model || "").trim();
+  const requestedModelNormalized = requestedModelRaw.startsWith("anthropic/")
+    ? requestedModelRaw.slice("anthropic/".length)
+    : requestedModelRaw;
+  const modelWasSubstituted = Boolean(requestedModelRaw) && requestedModelNormalized !== agentModel;
 
   // Per-circle budget cap — read from `circles.settings.computer_use_max_cost_usd`
   // unless the caller passed an explicit override. Defaults to $0.75. Any
   // iteration that would push running cost above this aborts the run
   // gracefully with a summary of what was done so far.
-  let maxCostUsd = typeof body.maxCostUsd === "number" && body.maxCostUsd > 0 ? body.maxCostUsd : 0.75;
+  let maxCostUsd = typeof body.maxCostUsd === "number" && body.maxCostUsd > 0 ? body.maxCostUsd : runCaps.maxCostUsd;
   if (supabase && body.circleId && typeof body.maxCostUsd !== "number") {
     try {
       const { data } = await supabase
@@ -468,8 +606,16 @@ Deno.serve(async (req: Request) => {
       // Anthropic's billing structure (cache reads 10% of input, creates 1.25x).
       let usage: UsageBreakdown = { ...EMPTY_USAGE };
       const startTime = Date.now();
-      const DEADLINE_MS = 5 * 60 * 1000;
+      const DEADLINE_MS = runCaps.deadlineMs;
       let credentialFillApprovedUntil = 0;
+      // Server-side pay-floor backstop (WI-7). `payConfirmed` arms once the
+      // user affirmatively answers a pay/book-class ask_user this run; until
+      // then, a click that looks like the final pay/book submission is blocked
+      // with an injected tool_result forcing ask_user first. `lastKnownUrl`
+      // tracks the most recent observed page URL so the detector can see
+      // checkout/payment surfaces.
+      let payConfirmed = false;
+      let lastKnownUrl: string | null = null;
       // Time spent paused on ask_user does not count against the work
       // deadline (D5) — a human fetching a 2FA code should not starve the
       // agent's 5-minute budget.
@@ -487,6 +633,17 @@ Deno.serve(async (req: Request) => {
         { role: "user", content: userContent },
       ];
 
+      // Emitted first (before run_started) so clients can label the run's
+      // model before any other event arrives. Same shape as the client-side
+      // mirror in src/lib/chatComputerHandoffContext.ts.
+      if (modelWasSubstituted) {
+        emit("model_resolved", {
+          requestedModel: requestedModelRaw,
+          resolvedModel: agentModel,
+          reason: "computer_use_requires_sonnet",
+        });
+      }
+
       if (runId) emit("run_started", { runId });
 
       // Heartbeat every 10s so the client's stream reader has a reason to
@@ -500,9 +657,33 @@ Deno.serve(async (req: Request) => {
 
       try {
         // ── Open or reuse Browserbase session ─────────────────────────
-        const { sessionId, liveUrl } = body.sessionId
-          ? { sessionId: body.sessionId, liveUrl: `https://www.browserbase.com/sessions/${body.sessionId}` }
-          : await openBrowserbaseSession(body.browserbase);
+        // A passed-in sessionId (follow-up like "book option 2") may point at
+        // a session that has already died (idle timeout, keepAlive off on a
+        // free plan). Don't blindly trust it — probe with a lightweight
+        // screenshot, and on ANY failure fall back to a fresh session. The
+        // existing followUpContext / finding-URL re-navigation then drives
+        // re-entry (spec Case C), so a stale reuse degrades gracefully instead
+        // of failing the whole run against a dead session.
+        let sessionId: string;
+        let liveUrl: string;
+        if (body.sessionId) {
+          let reuseOk = false;
+          try {
+            await bbCommand(body.browserbase, body.sessionId, "screenshot", {});
+            reuseOk = true;
+          } catch {
+            reuseOk = false;
+          }
+          if (reuseOk) {
+            sessionId = body.sessionId;
+            liveUrl = `https://www.browserbase.com/sessions/${body.sessionId}`;
+          } else {
+            emit("reasoning", { text: "[session] Prior browser session was gone — opening a fresh one and re-navigating." });
+            ({ sessionId, liveUrl } = await openBrowserbaseSession(body.browserbase));
+          }
+        } else {
+          ({ sessionId, liveUrl } = await openBrowserbaseSession(body.browserbase));
+        }
         emit("session_started", { sessionId, liveUrl });
 
         // ── Partial-results support (D8) ──────────────────────────────
@@ -582,10 +763,35 @@ Deno.serve(async (req: Request) => {
           });
         };
 
+        // Mid-run steering (plan §4e): notes posted via the `steer` action
+        // while this run is live. Consumed ids are loop-local — one run,
+        // one loop — and each note is injected exactly once.
+        const consumedSteeringIds = new Set<string>();
+        const fetchUnconsumedSteeringNotes = async (): Promise<Array<{ id: string; note: string }>> => {
+          if (!supabase || !runId) return [];
+          try {
+            const { data } = await supabase
+              .from("computer_use_confirmations")
+              .select("id, choice")
+              .eq("run_id", runId)
+              .eq("question", STEERING_QUESTION_MARKER)
+              .not("resolved_at", "is", null)
+              .order("created_at", { ascending: true })
+              .limit(5);
+            const fresh = (data || []).filter((row: any) =>
+              row?.id && row?.choice && !consumedSteeringIds.has(String(row.id)));
+            for (const row of fresh) consumedSteeringIds.add(String((row as any).id));
+            return fresh.map((row: any) => ({ id: String(row.id), note: String(row.choice) }));
+          } catch {
+            return []; // steering is best-effort — never stall the loop
+          }
+        };
+
         // ── Agent loop ────────────────────────────────────────────────
+        agentLoop:
         for (let iter = 0; iter < maxIterations; iter++) {
           if (Date.now() - startTime - confirmationWaitMs > DEADLINE_MS) {
-            const message = `Timed out after ${iter} iteration${iter === 1 ? '' : 's'} (5-minute limit). The task is too long for one run — try splitting it, or narrow the scope (e.g. "just the top 3 results").`;
+            const message = `Timed out after ${iter} iteration${iter === 1 ? '' : 's'} (${Math.round(DEADLINE_MS / 60_000)}-minute limit). The task is too long for one run — try splitting it, or narrow the scope (e.g. "just the top 3 results").`;
             await emitPartialResult(iter, "timeout", message);
             emit("error", { message });
             break;
@@ -742,14 +948,46 @@ Deno.serve(async (req: Request) => {
                 const takeoverCtx = isTakeover
                   ? `${ctx ? `${ctx} — ` : ""}Open the live session view to complete this step yourself. Nothing you type there is captured while the agent waits.`
                   : ctx;
+                // Pay/book confirmations get the longer (>=300s) window so a
+                // human reviewing the final amount / fetching a card isn't
+                // auto-cancelled. Takeovers keep their existing 300s; ordinary
+                // asks keep 120s.
+                const isPayConfirm = isPayConfirmQuestion(question, ctx);
+                const askTimeoutMs = isTakeover || isPayConfirm
+                  ? PAY_CONFIRM_TIMEOUT_MS
+                  : DEFAULT_ASK_TIMEOUT_MS;
                 const waitStarted = Date.now();
                 const choice = await askUserAndWait(
                   supabase, runId, question, options, takeoverCtx, emit,
-                  isTakeover ? 300_000 : 120_000,
+                  askTimeoutMs,
                 );
                 confirmationWaitMs += Date.now() - waitStarted;
+                const timedOut = choice === "__timeout__" || /did not respond within/i.test(choice);
+                // Pay-confirm timeout: instead of feeding a "treat as No" back
+                // into the loop and terminating, hand the run back as a
+                // resumable partial_result carrying the sessionId so the user
+                // can confirm & resume the SAME session later.
+                if (isPayConfirm && timedOut) {
+                  await emitPartialResult(
+                    iter + 1,
+                    "awaiting_confirmation",
+                    "Awaiting booking confirmation — the final pay/book step is paused for your OK. Reply to confirm and I'll resume this session.",
+                  );
+                  emit("error", { message: "Paused awaiting your booking confirmation. Reply to resume." });
+                  // Break the OUTER agent loop (labeled) so usage logging +
+                  // stream cleanup in the enclosing finally still run. The
+                  // partial_result already carries the sessionId so the user
+                  // can confirm & resume the SAME session.
+                  break agentLoop;
+                }
                 if (isAffirmativeChoice(choice) && isCredentialApprovalQuestion(question, ctx)) {
                   credentialFillApprovedUntil = Date.now() + 2 * 60 * 1000;
+                }
+                // Arm the pay-floor backstop once the user affirmatively OKs a
+                // pay/book-class confirmation. From here the final submit click
+                // is allowed to proceed.
+                if (isAffirmativeChoice(choice) && isPayConfirm) {
+                  payConfirmed = true;
                 }
                 toolResults.push({
                   type: "tool_result",
@@ -776,7 +1014,33 @@ Deno.serve(async (req: Request) => {
                 continue;
               }
 
+              // Server-side pay-floor backstop (WI-7). Even with every client
+              // gate removed, the final pay/book submission must not fire
+              // without an affirmative confirmation this run. If this click
+              // looks like the final commit (checkout/payment URL + pay-verb
+              // reasoning, or explicit pay-action reasoning) and the user
+              // hasn't confirmed, inject a tool_result error forcing ask_user
+              // first — the real click never runs.
+              if (detectFinalPaySubmission({
+                toolName: tu.name,
+                action: (tu.input as any)?.action ?? null,
+                actionText: (tu.input as any)?.text ?? null,
+                lastReasoning,
+                lastUrl: lastKnownUrl,
+                payConfirmed,
+                booking: body.booking === true,
+              })) {
+                emit("reasoning", { text: "[pay floor] Blocked a final-submit click — need explicit confirmation first." });
+                toolResults.push({
+                  type: "tool_result",
+                  tool_use_id: tu.id,
+                  content: [{ type: "text", text: PAY_BACKSTOP_TOOL_RESULT }],
+                });
+                continue;
+              }
+
               const out = await runTool(body.browserbase, sessionId, tu.name, tu.input);
+              if (out.currentUrl) lastKnownUrl = out.currentUrl;
               if (out.screenshot) {
                 emit("screenshot", { b64: out.screenshot, url: out.currentUrl });
               }
@@ -798,6 +1062,16 @@ Deno.serve(async (req: Request) => {
                 content: [{ type: "text", text: `Tool error: ${err?.message || err}` }],
               });
             }
+          }
+          // Mid-run steering (plan §4e): unconsumed notes ride the same
+          // user turn as the tool results (text blocks must FOLLOW
+          // tool_result blocks). Guidance only — the framing tells the
+          // model a note is not consent; ask_user still gates
+          // consequential actions.
+          const steeringNotes = await fetchUnconsumedSteeringNotes();
+          for (const steering of steeringNotes) {
+            toolResults.push({ type: "text", text: formatSteeringNoteForModel(steering.note) });
+            emit("steering_applied", { note: steering.note.slice(0, 200) });
           }
           messages.push({ role: "user", content: toolResults });
 
@@ -883,22 +1157,18 @@ TASK COMPLETION
 BROWSERBASE WORKFLOW PROFILES
 - Web data retrieval: open the source page, wait for dynamic content to render, extract only the requested fields/records, include source URLs when visible, and stop promptly. For list-like results, use the <FINDINGS> block. For table/record/json style output, use <EXTRACTED_DATA> with valid JSON after the human summary.
 - Stagehand-style browser work: break ambiguous UI work into small semantic actions (act/extract-sized steps), then verify with screenshots or visible text before continuing. Use deterministic clicks/typing when the target is obvious; do not overuse AI actions when a simple browser action is safer.
-- Form submission: wait for fields to load, fill text inputs/selects/radios/checkboxes/uploads in sequence, handle dynamic sections after each selection, ask_user before credentials/personal info/payment/final submit, then verify success through visible confirmation text, URL change, or validation errors.
+${BOOKING_FORM_SUBMISSION_PROFILE}
 - Persistent login state: if the task needs an account, use vault-provided credentials through fill_saved_login only after approval and only on allowed origins. If the site needs 2FA, CAPTCHA, or a human-only checkpoint, hand over to the user with the human-takeover flow (below) and continue after they finish.
 - Deterministic-first: if the task already contains concrete browser steps (open URL, click named control, fill field, press key, extract visible data), execute that explicit sequence before inventing a new strategy. Use model judgment only for ambiguous targets, missing selectors, summarizing observed data, or recovery after repeated deterministic failure.
 - Creative handoff: if the browser task requires a generated image or visual concept, produce the precise prompt/spec needed for the image tool and return it as an artifact-ready result; do not answer with a generic "I cannot create images" refusal.
 
-SAFETY
-- ALWAYS call the \`ask_user\` tool BEFORE clicking any "Purchase", "Buy now", "Confirm", "Pay", "Submit", "Send", "Delete", "Publish", or similar button that commits a change. Include the specific amount and merchant/target in the question.
-- ALWAYS call \`ask_user\` before entering credentials, payment info, personal info, or posting publicly.
-- For saved vault credentials, navigate to the login page, focus the username/email field, call \`ask_user\` for permission to use the saved credential, then call \`fill_saved_login\` with the credential_id plus any grantee/grantee_type from the vault runbook. Never ask the user to paste a password or secret into chat.
-- If the user's task explicitly asked for that exact action ("buy X for $Y"), still call \`ask_user\` once at the commit step to confirm the final details.
-- Never guess credentials. If a site requires login you weren't given, call \`ask_user\` with the question "Log in as who?" and wait for direction.
-- HUMAN TAKEOVER: if a site shows 2FA, a CAPTCHA, or any human-only verification step, do NOT keep trying and do NOT give up. Call \`ask_user\` with kind "human_takeover", a question like "The site is asking for a 2FA code — complete it in the live session view, then choose Done", and wait. After the user chooses "Done, continue", take a fresh screenshot to confirm the checkpoint cleared, then continue the task. If they cancel or time out, summarize progress and stop. Never ask the user to tell you the code or solve the CAPTCHA for you to type — they complete it directly in the live view.
+${BOOKING_SAFETY_BLOCK}
 
 DO NOT
 - Do not use the bash tool for anything — it's not available here. Use the computer tool for everything.
 - Do not emit a <BUILD_READY> or <TOOL> marker. This is a computer-use agent, not a codegen agent.
+
+${BOOKING_SEARCH_BEHAVIOR}
 
 STRUCTURED FINDINGS (for research / comparison / list tasks)
 If the user asked for a list of items — products, articles, results, places, options, anything
@@ -1346,6 +1616,11 @@ async function openBrowserbaseSession(c: BrowserbaseCreds): Promise<{ sessionId:
     body: JSON.stringify({
       projectId: c.projectId,
       region: c.region || "us-east-1",
+      // Keep the session warm between runs so a follow-up like "book option 2"
+      // (Case B) can re-enter the same live browser instead of hitting a dead
+      // session. 15-minute idle timeout bounds cost if no follow-up arrives.
+      keepAlive: true,
+      timeout: 900,
     }),
   });
   if (!res.ok) {

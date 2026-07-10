@@ -10,6 +10,7 @@
 import React, { useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View, ViewStyle, StyleProp } from 'react-native';
 import type {
+  OfficeAgentAccountability,
   OfficeAgentLiveOps,
   OfficeBuildingBoard,
   OfficeRunNode,
@@ -271,6 +272,40 @@ export function OfficeAgentLiveOpsLines({
   );
 }
 
+// ── Per-agent accountability line (O1, P38) ──────────────────────────────────
+// "✅ Fixed login flow · 2h ago  ·  ✓3 ✗1 today · $0.42" — the last finished
+// outcome + 24h counts/cost from buildOfficeAgentAccountabilityIndex. Renders
+// nothing when the agent has no finished runs in the window.
+
+export function OfficeAgentAccountabilityLine({
+  entry,
+  statusNote,
+}: {
+  entry: OfficeAgentAccountability | null | undefined;
+  statusNote?: string;
+}) {
+  if (!entry && !statusNote) return null;
+  const toneColor = entry?.tone === 'danger' ? '#ef4444' : '#22c55e';
+  const counts: string[] = [];
+  if (entry) {
+    if (entry.completed24h > 0) counts.push(`✓${entry.completed24h}`);
+    if (entry.failed24h > 0) counts.push(`✗${entry.failed24h}`);
+    if (entry.costUsd24h > 0) counts.push(`$${entry.costUsd24h.toFixed(2)}`);
+  }
+  return (
+    <View style={s.liveOpsWrap}>
+      {entry ? (
+        <Text style={[s.accountabilityLine, { color: toneColor }]} numberOfLines={1}>
+          {entry.lastLine}{counts.length > 0 ? `  ·  ${counts.join(' ')} today` : ''}
+        </Text>
+      ) : null}
+      {statusNote ? (
+        <Text style={s.statusNoteLine} numberOfLines={1}>⚠️ {statusNote}</Text>
+      ) : null}
+    </View>
+  );
+}
+
 // ── Desktop pixel-agent "building" badge ─────────────────────────────────────
 
 export function OfficeBuildingBadge() {
@@ -420,6 +455,15 @@ const s = StyleSheet.create({
   liveOpsMeta: {
     fontSize: 11,
     color: '#666',
+    fontFamily: 'monospace',
+  },
+  accountabilityLine: {
+    fontSize: 11,
+    fontFamily: 'monospace',
+  },
+  statusNoteLine: {
+    fontSize: 11,
+    color: '#e8b339',
     fontFamily: 'monospace',
   },
   // Desktop badge

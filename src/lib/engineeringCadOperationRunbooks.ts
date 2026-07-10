@@ -164,13 +164,9 @@ function commonObserveSteps(targetName: string): EngineeringCadRunbookStep[] {
         tool: 'desktop.file_stat',
         evidence: ['project/source files exist', 'datasets and output folder grants known', 'working folder is scoped'],
       }),
-      step('observe', 'Confirm MATLAB session and project state', `Launch or focus ${targetName}, then confirm the active window, current folder/project, command window/editor state, and MATLAB version/toolbox context before running code.`, {
-        tool: 'desktop.window_state',
-        evidence: ['active app identity', 'current project/folder', 'version/toolbox evidence when available'],
-      }),
-      step('observe', 'Inspect command/editor/UI state', 'Read accessibility/menu state for command window, editor tabs, Simulink model windows, dialogs, and app/toolbox panels before typing or clicking.', {
-        tool: 'desktop.read_a11y_tree',
-        evidence: ['command/editor/model state', 'unique control/menu identity'],
+      step('observe', 'Observe MATLAB screen state in one pass', `Use the combined observation (P18): running/frontmost state, window titles, command window/editor/model accessibility state, the Δ since the last read, and a deterministic next-step suggestion for ${targetName} — one round trip instead of separate window/a11y reads.`, {
+        tool: 'desktop.observe_app',
+        evidence: ['active app identity + window titles', 'command/editor/model a11y state', 'Δ diff vs last read', 'next-step suggestion'],
       }),
       step('observe', 'Capture figure/model proof state', 'Capture a screenshot when figures, Simulink models, scopes, or app windows are part of the proof.', {
         tool: 'desktop.screenshot',
@@ -183,13 +179,9 @@ function commonObserveSteps(targetName: string): EngineeringCadRunbookStep[] {
       tool: 'desktop.file_stat',
       evidence: ['source file exists', 'sidecar/xref folder known when present', 'output folder grant known when writing'],
     }),
-    step('observe', 'Confirm active app and document', `Launch or focus ${targetName}, then confirm the active window, drawing/model name, and file path before any command input.`, {
-      tool: 'desktop.window_state',
-      evidence: ['active app identity', 'active document/window title', 'file path or staged source identity'],
-    }),
-    step('observe', 'Capture command/UI state', 'Read accessibility/menu state for command line, palettes, panels, dialogs, sheets, and export windows before typing or clicking.', {
-      tool: 'desktop.read_a11y_tree',
-      evidence: ['command prompt or dialog state', 'unique control/menu identity'],
+    step('observe', 'Observe app screen state in one pass', `Use the combined observation (P18): launch/focus need, active window and document titles, command line/palette/dialog accessibility state, the Δ since the last read, and a deterministic next-step suggestion for ${targetName} — one round trip instead of separate window/a11y reads.`, {
+      tool: 'desktop.observe_app',
+      evidence: ['active app identity + document/window title', 'command/dialog a11y state', 'Δ diff vs last read', 'next-step suggestion'],
     }),
     step('observe', 'Capture visual geometry state', 'Capture a screenshot to verify drawing/model contents, units indicators, selected objects, and visible command feedback.', {
       tool: 'desktop.screenshot',
@@ -225,7 +217,11 @@ function buildRunbook(task: string, operation: EngineeringCadOperation): Enginee
       approvalBefore: [],
       steps: [
         ...common,
-        step('act', 'Run read-only measure/list commands', 'Use app-native measure/list/layer/object commands or verified menu actions only; do not mutate geometry.', {
+        step('act', 'Inspect the CAD file directly first', 'For STL/DXF/STEP/SCAD files, read structure without opening any app (P15): triangle counts, bounding box, layers, entities, units, STEP schema/products. Falls back to app-native commands when the file needs a live document.', {
+          tool: 'desktop.cad_inspect_file',
+          evidence: ['parsed format summary', 'units and measurement values or an explicit units-unknown note'],
+        }),
+        step('act', 'Run read-only measure/list commands', 'When live-app state is needed, use app-native measure/list/layer/object commands or verified menu actions only; do not mutate geometry.', {
           tool: 'desktop.type_text',
           evidence: ['command result transcript or visible status', 'units and measurement values'],
         }),
@@ -311,6 +307,11 @@ function buildRunbook(task: string, operation: EngineeringCadOperation): Enginee
       steps: [
         ...common,
         approvalStep('Model and BIM edits can affect production, manufacturing, or permit deliverables.'),
+        step('act', 'Create NEW parts via local code-CAD when no existing document is the target', 'For "design/model a new part from description" asks (P15): generate OpenSCAD source (src/lib/cadCodeExecutor buildOpenScadCompilePlan), write it with desktop.file_write_text, compile to STL plus a PNG render proof, and iterate on compiler errors. Deterministic, headless, no CAD app required. Editing EXISTING app documents still needs the app-native route below.', {
+          tool: 'desktop.cad_compile',
+          approvalRequired: true,
+          evidence: ['generated source receipt', 'compile exit code', 'output STL file_stat', 'PNG render proof'],
+        }),
         step('act', 'Run app-native model/BIM operation', 'Use the dedicated API/add-in/script route for the target app when available; otherwise build the adapter before retrying.', {
           tool: 'agent.build_app_capability',
           approvalRequired: true,
@@ -408,7 +409,12 @@ function buildRunbook(task: string, operation: EngineeringCadOperation): Enginee
       steps: [
         ...common.slice(0, 1),
         approvalStep('Batch or cloud conversion needs explicit source, output, upload, and credential approval.'),
-        step('act', 'Run batch conversion route', 'Prefer APS/cloud/vendor CLI/API where approved; otherwise delegate a bounded conversion adapter buildout.', {
+        step('act', 'Run local headless conversion when FreeCAD is installed', 'For STEP/FCStd/IGES/DXF → STEP/STL/DXF conversions, generate a FreeCAD python script (src/lib/cadCodeExecutor buildFreeCadPythonScript), write it with desktop.file_write_text, then compile headlessly (P15). Mesh→B-rep (e.g. STL→STEP) is honestly unsupported.', {
+          tool: 'desktop.cad_compile',
+          approvalRequired: true,
+          evidence: ['generated script receipt', 'exit code + output file_stat per converted file'],
+        }),
+        step('act', 'Run cloud/vendor conversion route otherwise', 'Prefer APS/cloud/vendor CLI/API where approved; otherwise delegate a bounded conversion adapter buildout.', {
           tool: 'agent.build_app_capability',
           approvalRequired: true,
           evidence: ['source file list/count', 'conversion route', 'API/job or adapter smoke result'],

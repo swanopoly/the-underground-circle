@@ -40,6 +40,7 @@ import {
   type OpenSwanToolSurface,
 } from './openswanToolRuntime';
 import type { AgentToolDefinition } from './agentExecutionCore';
+import { extractToolResultImageSideChannel } from './agentExecutionCore';
 import type { ToolParallelPolicy } from './toolBatchParallelism';
 
 /**
@@ -76,6 +77,8 @@ export function getOpenSwanToolsForSurface(
     name: tool.name,
     description: tool.description,
     input_schema: tool.input_schema as Record<string, unknown>,
+    // X4 (P47): carry curated input_examples through to the provider.
+    ...(tool.input_examples ? { input_examples: tool.input_examples } : {}),
     handler: async (input) => {
       try {
         const result = await executeOpenSwanRuntimeTool(
@@ -83,7 +86,15 @@ export function getOpenSwanToolsForSurface(
           input as any,
           ctx,
         );
-        const data: Record<string, unknown> = { raw: result };
+        // P21 image side channel (PRODUCER seam — LOCKSTEP with
+        // agentExecutionCore's extraction/consumption): a large base64 field
+        // becomes `data.image` and the raw copy carries an omission marker,
+        // so screenshots reach the model as REAL image blocks instead of
+        // flooding the tool_result text as stringified base64.
+        const sideChannel = extractToolResultImageSideChannel(result);
+        const data: Record<string, unknown> = sideChannel
+          ? { raw: sideChannel.sanitizedRaw, image: sideChannel.image }
+          : { raw: result };
         if (includeFormatted) {
           try {
             data.text = formatOpenSwanRuntimeToolResult(tool.name as OpenSwanRuntimeToolName, result as any);
@@ -126,6 +137,13 @@ export function getProgressiveOpenSwanTools(
   opts?: {
     /** Same semantics as `getOpenSwanToolsForSurface`. Default true. */
     includeFormattedText?: boolean;
+    /**
+     * P25: chat mode ('plan' | 'build' | …). Forwarded to the same catalog
+     * mode filter the legacy path applies — BOTH for the pinned core and for
+     * search-unlocked additions, so progressive disclosure can't leak
+     * execute-tagged tools into plan mode.
+     */
+    mode?: string | null;
   },
 ): {
   tools: AgentToolDefinition[];
@@ -142,6 +160,7 @@ export function getProgressiveOpenSwanTools(
   const tools = getOpenSwanToolsForSurface(surface, runtimeCtx, {
     allowedToolNames: pinnedNames,
     includeFormattedText: opts?.includeFormattedText,
+    mode: opts?.mode,
   });
 
   // Deferred tools the model has unlocked via tools.search during THIS run.
@@ -173,6 +192,7 @@ export function getProgressiveOpenSwanTools(
       return getOpenSwanToolsForSurface(surface, runtimeCtx, {
         allowedToolNames: [...unlocked],
         includeFormattedText: opts?.includeFormattedText,
+        mode: opts?.mode,
       });
     },
   };

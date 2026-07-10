@@ -46,7 +46,9 @@ export default function ToolCallCheckpointStrip({
   const refresh = useCallback(async () => {
     if (!circleId) return;
     if (checkpointId) {
-      const all = await listCheckpoints(circleId, { limit: 1 });
+      // Search a window, not just the newest row — the strip may render for
+      // a checkpoint that is no longer the circle's latest.
+      const all = await listCheckpoints(circleId, { limit: 25 });
       const match = all.find((r) => r.id === checkpointId);
       setRows(match ? [match] : []);
       return;
@@ -65,7 +67,12 @@ export default function ToolCallCheckpointStrip({
     const outcome = await restoreCheckpoint(row.id);
     setBusy((b) => ({ ...b, [row.id]: false }));
     if (!outcome.ok) {
-      setError((e) => ({ ...e, [row.id]: outcome.error || 'restore failed' }));
+      // Drift refusal is a safety feature, not a failure — say so instead of
+      // echoing the raw hash-mismatch error.
+      const friendly = outcome.drift
+        ? 'Not restored: this was edited again after the checkpoint, so restoring would overwrite the newer change. Compare to review.'
+        : `Restore failed: ${outcome.error || 'unknown error'}. Nothing was changed.`;
+      setError((e) => ({ ...e, [row.id]: friendly }));
       return;
     }
     onRestored?.(row);

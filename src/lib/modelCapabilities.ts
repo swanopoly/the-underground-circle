@@ -6,8 +6,6 @@
  * Returns structured results with rendered artifacts.
  */
 
-import { supabase } from './supabase';
-
 const GEMINI_API_KEY = process.env.EXPO_PUBLIC_ALLOW_PLATFORM_MODEL_KEYS === 'true'
   ? process.env.EXPO_PUBLIC_GEMINI_API_KEY || ''
   : '';
@@ -67,12 +65,227 @@ const MODEL_CAPABILITIES: Record<string, ModelCapability[]> = {
   'deepseek-v3':      ['text', 'code'],
 };
 
+// ── Model id normalization ──────────────────────────────────────────────────
+//
+// Model ids arrive provider-prefixed from the marketplace/router surfaces
+// (`openrouter/anthropic/claude-sonnet-4-6`, `google_ai/gemini-2.5-pro`,
+// `huggingface_endpoint/cswan801/BlackSwan-v5`, ...). This normalizer strips
+// those routing prefixes down to the bare model id so capability lookups key
+// on one canonical form. It mirrors the prefix/alias treatment in
+// src/lib/crossProviderRouter.ts (`providerFromModelPrefix`: heads are exact
+// segment matches; `hugging_face` -> `huggingface`, `z_ai` -> `zai`) — keep
+// the two in agreement when adding providers.
+
+/** Routing/provider heads that get stripped. Includes the underscore/hyphen
+ *  alias spellings so `hugging_face/x` === `huggingface/x` and
+ *  `z_ai/x` === `zai/x`. */
+const PROVIDER_PREFIX_HEADS = new Set<string>([
+  'openrouter',
+  'openai', 'openai_compatible',
+  'anthropic',
+  'google_ai', 'googleai', 'google',
+  'deepseek',
+  'huggingface', 'huggingface_endpoint', 'hugging_face', 'hf',
+  'groq',
+  'mistral', 'mistral_ai', 'mistralai',
+  'cohere',
+  'perplexity',
+  'together', 'together_ai',
+  'fireworks', 'fireworks_ai',
+  'zai', 'z_ai',
+  'minimax',
+  'ollama',
+  'github', 'github-models', 'github_models',
+  'replicate',
+  'openswan',
+  // Vendor/org heads seen inside OpenRouter/HF-style ids.
+  'meta-llama', 'deepseek-ai', 'qwen', 'black-forest-labs', 'stabilityai',
+  'moonshotai', 'x-ai',
+]);
+
+/**
+ * Canonicalize a model id for capability lookup:
+ *  - trims and lowercases,
+ *  - iteratively strips known provider/vendor prefix segments
+ *    (`openrouter/anthropic/claude-sonnet-4-6` -> `claude-sonnet-4-6`),
+ *  - treats alias heads identically (`hugging_face` -> `huggingface`,
+ *    `z_ai` -> `zai`) because both spellings are in the strip set.
+ * Unknown heads (e.g. a HF org like `cswan801/`) are preserved so distinct
+ * models never collapse into each other.
+ */
+export function normalizeModelId(modelId: string): string {
+  let id = (modelId || '').trim().toLowerCase();
+  if (!id) return '';
+  // Iteratively strip known heads; each pass shortens the string.
+  for (;;) {
+    const slashIdx = id.indexOf('/');
+    if (slashIdx <= 0) break;
+    const head = id.slice(0, slashIdx);
+    const rest = id.slice(slashIdx + 1);
+    if (!rest || !PROVIDER_PREFIX_HEADS.has(head)) break;
+    id = rest;
+  }
+  return id;
+}
+
 export function getModelCapabilities(modelId: string): ModelCapability[] {
-  return MODEL_CAPABILITIES[modelId] || ['text'];
+  // Exact key first (back-compat), then the normalized form so
+  // provider-prefixed ids resolve to the same registry entry.
+  return MODEL_CAPABILITIES[modelId]
+    || MODEL_CAPABILITIES[normalizeModelId(modelId)]
+    || ['text'];
 }
 
 export function modelCanDo(modelId: string, cap: ModelCapability): boolean {
   return getModelCapabilities(modelId).includes(cap);
+}
+
+// ── Per-model capability flags ───────────────────────────────────────────────
+//
+// Boolean gates any layer can use to decide "can this model tool / see /
+// drive a computer" without re-deriving it from ModelCapability arrays.
+// UNKNOWN ids fail closed: no tool use, no computer use, no vision.
+
+export interface ModelCapabilityFlags {
+  /** Model reliably supports structured tool/function calling. */
+  toolUse: boolean;
+  /** Model can drive the native Anthropic computer-use screenshot/action
+   *  loop. Only Sonnet-capable Claude models qualify (edge-loop requirement
+   *  in supabase/functions/computer-use-agent). */
+  computerUse: boolean;
+  /** Model accepts image inputs. */
+  vision: boolean;
+  /** Model supports token streaming. */
+  streaming: boolean;
+  /** Image-generation-only model — no chat/tool loop at all. */
+  imageOnly: boolean;
+  /** Conservative known-safe max output tokens (a floor, not the provider
+   *  ceiling), or null when we have no verified number. */
+  maxOutputTokens: number | null;
+}
+
+/** Fail-closed defaults for ids we do not recognize. */
+export const UNKNOWN_MODEL_CAPABILITY_FLAGS: ModelCapabilityFlags = Object.freeze({
+  toolUse: false,
+  computerUse: false,
+  vision: false,
+  streaming: true,
+  imageOnly: false,
+  maxOutputTokens: null,
+});
+
+function flagSet(partial: Partial<ModelCapabilityFlags>): ModelCapabilityFlags {
+  return { ...UNKNOWN_MODEL_CAPABILITY_FLAGS, ...partial };
+}
+
+const IMAGE_ONLY_FLAGS = flagSet({ imageOnly: true, streaming: false });
+const TOOL_CHAT_FLAGS = flagSet({ toolUse: true });
+const TOOL_VISION_FLAGS = flagSet({ toolUse: true, vision: true });
+/** Sonnet-capable Claude: full loop incl. native computer use. */
+const CLAUDE_SONNET_FLAGS = flagSet({ toolUse: true, vision: true, computerUse: true, maxOutputTokens: 8192 });
+/** Other Claude tiers: tools + vision, but not the computer-use loop. */
+const CLAUDE_CHAT_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 8192 });
+const GEMINI_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 8192 });
+/** Perplexity sonar: search-grounded text, no function calling. */
+const SONAR_FLAGS = flagSet({});
+
+/** Explicit per-model flags, keyed by normalizeModelId() output. */
+const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
+  // Image generation (imageOnly, never tool-loop)
+  'flux-schnell':        IMAGE_ONLY_FLAGS,
+  'flux-dev':            IMAGE_ONLY_FLAGS,
+  'stable-diffusion-xl': IMAGE_ONLY_FLAGS,
+
+  // BlackSwan-v5 (app-trained Qwen; P8) — now registered DELIBERATELY with
+  // the same fail-closed tool/vision posture the unknown-default gave it by
+  // accident, plus streaming:false (llm-proxy buffers HF responses and
+  // Anthropic-native streaming never applies). Tool/computer work never
+  // routes here — the Auto lane guards + executor swap own that guarantee.
+  // One normalized key covers huggingface/…, huggingface_endpoint/…, and
+  // the bare repo id.
+  'cswan801/blackswan-v5': flagSet({ streaming: false }),
+
+  // Anthropic
+  'claude-sonnet-4-6':   CLAUDE_SONNET_FLAGS,
+  'claude-fable-5':      CLAUDE_CHAT_FLAGS,
+  'claude-opus-4-8':     CLAUDE_CHAT_FLAGS,
+  'claude-opus-4-7':     CLAUDE_CHAT_FLAGS,
+  'claude-opus-4-6':     CLAUDE_CHAT_FLAGS,
+  'claude-haiku-4-5':          CLAUDE_CHAT_FLAGS,
+  'claude-haiku-4-5-20251001': CLAUDE_CHAT_FLAGS,
+
+  // OpenAI
+  'gpt-4o':        TOOL_VISION_FLAGS,
+  'gpt-5.5-pro':   TOOL_VISION_FLAGS,
+  'gpt-5.5':       TOOL_VISION_FLAGS,
+  'gpt-5.4':       TOOL_VISION_FLAGS,
+  'gpt-5.4-mini':  TOOL_VISION_FLAGS,
+  'gpt-5.4-nano':  TOOL_CHAT_FLAGS,
+  'gpt-4.1-nano':  TOOL_VISION_FLAGS,
+  'codex-mini':    TOOL_CHAT_FLAGS,
+
+  // Google
+  'gemini-3.5-flash':         GEMINI_FLAGS,
+  'gemini-3.1-pro-preview':   GEMINI_FLAGS,
+  'gemini-3.1-flash-lite':    GEMINI_FLAGS,
+  'gemini-2.5-pro':           GEMINI_FLAGS,
+  'gemini-2.5-flash':         GEMINI_FLAGS,
+  'gemini-2.5-flash-lite':    GEMINI_FLAGS,
+  'gemini-2.5-flash-preview': GEMINI_FLAGS,
+
+  // DeepSeek — chat/v3 line supports function calling; the r1 reasoner
+  // line does not, so it stays fail-closed on toolUse.
+  'deepseek-v3':   TOOL_CHAT_FLAGS,
+  'deepseek-v3.2': TOOL_CHAT_FLAGS,
+  'deepseek-r1':   flagSet({}),
+
+  // Mistral / Qwen / Llama (Groq-hosted etc.)
+  'mistral-large-3':  TOOL_CHAT_FLAGS,
+  'qwen-3.5-coder':   TOOL_CHAT_FLAGS,
+  'qwen-3.5-flash':   TOOL_CHAT_FLAGS,
+  'qwen-3.5-plus':    TOOL_CHAT_FLAGS,
+  'llama-4-scout':    TOOL_VISION_FLAGS,
+  'llama-4-maverick': TOOL_VISION_FLAGS,
+
+  // Perplexity sonar — search answers, no tool loop.
+  'sonar-pro':           SONAR_FLAGS,
+  'sonar-reasoning-pro': SONAR_FLAGS,
+  'sonar-deep-research': SONAR_FLAGS,
+};
+
+/** Family fallbacks for ids not in the explicit table (dated snapshots,
+ *  provider variants). Ordered: first match wins; image-only families are
+ *  checked before chat families. Anything unmatched stays fail-closed. */
+const FAMILY_FLAG_PATTERNS: Array<{ pattern: RegExp; flags: ModelCapabilityFlags }> = [
+  { pattern: /(^|[-_/.])(flux|sdxl|dall-e|dalle)([-_/.\d]|$)|stable-diffusion|(^|[-_/.])imagen([-_/.\d]|$)/, flags: IMAGE_ONLY_FLAGS },
+  { pattern: /^claude-sonnet\b/,                 flags: CLAUDE_SONNET_FLAGS },
+  { pattern: /^claude-(opus|fable|haiku)\b/,     flags: CLAUDE_CHAT_FLAGS },
+  { pattern: /^(gpt-4o|gpt-4\.1|gpt-5)/,         flags: TOOL_VISION_FLAGS },
+  { pattern: /^gemini-/,                         flags: GEMINI_FLAGS },
+  { pattern: /^(deepseek-v|deepseek-chat)/,      flags: TOOL_CHAT_FLAGS },
+  { pattern: /^(mistral|ministral|magistral)-/,  flags: TOOL_CHAT_FLAGS },
+  { pattern: /^llama-4/,                         flags: TOOL_VISION_FLAGS },
+  { pattern: /^llama-3/,                         flags: TOOL_CHAT_FLAGS },
+  { pattern: /^qwen/,                            flags: TOOL_CHAT_FLAGS },
+  { pattern: /^sonar\b/,                         flags: SONAR_FLAGS },
+];
+
+/**
+ * Per-model capability flags for routing decisions. Accepts raw or
+ * provider-prefixed ids (normalized internally). Unknown ids return the
+ * conservative fail-closed defaults ({toolUse:false, computerUse:false,
+ * vision:false, streaming:true, imageOnly:false, maxOutputTokens:null}).
+ * Always returns a fresh object — safe for callers to mutate.
+ */
+export function getModelCapabilityFlags(modelId: string): ModelCapabilityFlags {
+  const norm = normalizeModelId(modelId);
+  if (!norm) return { ...UNKNOWN_MODEL_CAPABILITY_FLAGS };
+  const exact = MODEL_CAPABILITY_FLAGS[norm];
+  if (exact) return { ...exact };
+  for (const family of FAMILY_FLAG_PATTERNS) {
+    if (family.pattern.test(norm)) return { ...family.flags };
+  }
+  return { ...UNKNOWN_MODEL_CAPABILITY_FLAGS };
 }
 
 // ── Intent detection ────────────────────────────────────────────────────────
@@ -85,12 +298,13 @@ export type UserIntent =
   | 'audio_gen'
   | 'text';
 
+// Image intent must be imperative (verb + image noun) or slash-command-style.
+// Bare mentions of "photo"/"logo"/"imagine" in ordinary text used to hijack
+// the whole turn into image generation before the selected model ever ran.
 const IMAGE_PATTERNS = [
   /\b(generate|create|make|draw|paint|design|render|show me)\b.*(image|picture|photo|illustration|artwork|icon|logo|avatar|banner|thumbnail|poster|meme|wallpaper|sprite|pixel art)/i,
-  /\b(image|picture|photo|illustration|artwork|logo|icon|banner|poster|meme)\b/i,
-  /\bimagine\b/i,
-  /\b(visuali[sz]e|depict|sketch|portrait)\b/i,
-  /\b(generate|create|make|draw|paint|render)\b.*\b(best|cool|beautiful|stunning|epic|amazing)/i,
+  /^\/?(imagine|image)\s/i,
+  /\b(image|picture|photo|illustration|artwork) of\b/i,
 ];
 
 // WEBPAGE_PATTERNS is intentionally empty. This detector used to auto-fire
@@ -157,6 +371,14 @@ export function pickBestModel(intent: UserIntent): string {
 export interface CapabilityResult {
   handled: boolean;
   response: string;
+  /**
+   * Set when a capability lane was attempted but ALL its backends failed and
+   * the result deliberately stays handled:false so the normal tiered chat
+   * path recovers. Callers should show this one-liner (backend names + plain
+   * next action, never key material) so the user learns why no image/page
+   * artifact arrived instead of silently getting a text-only answer.
+   */
+  fallbackNotice?: string;
   artifacts?: Array<{
     kind: 'image' | 'webpage' | 'code' | 'video' | 'audio' | 'summary';
     title: string;
@@ -321,7 +543,9 @@ export async function routeByCapability(
       .trim() || message;
 
     // Try HF first for dedicated image models
+    const attemptedImageBackends: string[] = [];
     if (['flux-schnell', 'flux-dev', 'stable-diffusion-xl'].includes(effectiveModel)) {
+      attemptedImageBackends.push(effectiveModel);
       const hfResult = await generateImageHF(imagePrompt, effectiveModel);
       if (hfResult) {
         return {
@@ -338,6 +562,7 @@ export async function routeByCapability(
     }
 
     // Fallback to Gemini image gen
+    if (GEMINI_API_KEY) attemptedImageBackends.push('Gemini image gen');
     const geminiResult = await generateImageGemini(imagePrompt);
     if (geminiResult) {
       return {
@@ -352,11 +577,15 @@ export async function routeByCapability(
       };
     }
 
-    // All image gen APIs failed — still handle it so text AI doesn't give a canned "I can't" response
-    return {
-      handled: true,
-      response: `Image generation is temporarily unavailable. The model "${effectiveModel}" didn't respond. Try again in a moment, or switch to a different image model (Flux Schnell, Flux Dev, or Stable Diffusion XL).`,
-    };
+    // All image gen APIs failed — return handled:false so the caller's
+    // normal tiered path recovers with the user's selected model instead of
+    // rendering a dead-end "temporarily unavailable" bubble. The notice tells
+    // the user WHY no image is coming (backend names only, never keys) with a
+    // plain next action.
+    const fallbackNotice = attemptedImageBackends.length > 0
+      ? `Image generation didn't work just now (${attemptedImageBackends.join(' and ')} failed), so I'll answer in text instead. Try again in a minute, or pick a different image model.`
+      : `Image generation isn't set up yet (no image backend is configured), so I'll answer in text instead. Add a Google AI key in Marketplace to enable it.`;
+    return { handled: false, response: '', fallbackNotice };
   }
 
   // ── Webpage Generation ────────────────────────────────────────────────────

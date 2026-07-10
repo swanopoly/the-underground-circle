@@ -15,6 +15,15 @@ import {
   formatCountdown,
   planClarifyTimeout,
 } from '../src/lib/clarifyTimeout';
+import { buildChatAutomationPlan } from '../src/lib/chatAutomationPlanner';
+import {
+  isDecisionRelevantAmbiguity,
+  describeClarificationValue,
+} from '../src/lib/clarificationGate';
+
+function planAsks(message: string): boolean {
+  return buildChatAutomationPlan({ message }).execution.kind === 'ask_clarification';
+}
 
 let failures = 0;
 function fail(m: string) { failures += 1; console.error('FAIL:', m); }
@@ -159,6 +168,76 @@ async function main() {
     const stub = makeStub(false);
     await autoResolveOnTimeout('abc', { supabase: stub, defaultChoice: 'No, stop' });
     assert(stub.calls[0].payload.choice === 'No, stop', 'auto-resolve: custom defaultChoice honoured');
+  }
+
+  // ─── clarificationGate: decision-relevance (over-ask guard) ─────
+  // Research: over-asking on already-specified tasks hurts UX; the dominant
+  // failure is UNDER-clarifying (answering prematurely). So the gate must (a)
+  // NOT fire on fully-specified input, and (b) still fire when a
+  // decision-relevant slot is empty.
+
+  // (a) Fully-specified conversational actions must NEVER ask — end-to-end
+  // through the real planner (this is the behaviour the gate guarantees).
+  {
+    const specified = [
+      'create a task to ship the newsletter friday',
+      'Create a task to review the invoice',
+      'make a ticket to fix the login bug on mobile',
+      'Generate an image of a neon swan over a city at night',
+      'draw a picture of a dragon guarding a castle',
+      'Schedule a WordPress post about launch recap for 2026-07-01',
+      'publish to wordpress: Spring sale — 20% off all plans through June',
+      'draft a wordpress post about our new pricing page and launch recap',
+    ];
+    for (const message of specified) {
+      assert(!planAsks(message), `over-ask guard: specified input does NOT clarify — "${message.slice(0, 44)}"`);
+    }
+  }
+
+  // (b) Genuinely-underspecified conversational actions must still ASK.
+  {
+    const underspecified = [
+      'create a task',
+      'make a ticket',
+      'add a todo',
+      'generate an image',
+      'draw a picture',
+      'schedule a wordpress post',
+      'post to wordpress',
+    ];
+    for (const message of underspecified) {
+      assert(planAsks(message), `under-ask guard: empty slot still clarifies — "${message}"`);
+    }
+  }
+
+  // (c) The pure gate itself: fully-specified (no missing params) → never ask.
+  {
+    const g = isDecisionRelevantAmbiguity({ message: 'create a task to ship the newsletter', intentType: 'create_task', missingParams: [] });
+    assert(g.ask === false && g.reason === 'fully_specified', 'gate: no missing params → ask=false (fully_specified)');
+  }
+  // (d) The pure gate: decision-relevant empty slot → ask, with a reason code.
+  {
+    const g = isDecisionRelevantAmbiguity({ message: 'create a task', intentType: 'create_task', missingParams: ['task description'] });
+    assert(g.ask === true && g.reason === 'missing_task_subject', 'gate: empty task subject → ask=true (missing_task_subject)');
+  }
+  // (e) The pure gate: a purely stylistic/reversible gap → proceed with default.
+  {
+    const g = isDecisionRelevantAmbiguity({ message: 'generate an image of a red barn', intentType: 'generate_image', missingParams: ['style'] });
+    assert(g.ask === false && g.reason === 'gap_is_stylistic_or_reversible', 'gate: stylistic-only gap → ask=false (safe default)');
+  }
+  // (f) A schedule with no date is decision-relevant even if subject text exists.
+  {
+    const g = isDecisionRelevantAmbiguity({ message: 'schedule a wordpress post about the launch', intentType: 'wordpress_schedule', missingParams: ['publish date'] });
+    assert(g.ask === true && g.reason === 'missing_publish_date', 'gate: missing schedule date → ask=true (missing_publish_date)');
+  }
+  // (g) describeClarificationValue: bounded, content-free rationale for both branches.
+  {
+    const asked = describeClarificationValue('missing_image_subject');
+    assert(asked.length > 0 && asked.length <= 120 && /Asked:/.test(asked), 'describe: ask reason is a bounded rationale');
+    const skipped = describeClarificationValue('fully_specified');
+    assert(skipped.length > 0 && skipped.length <= 120 && /Proceeded:/.test(skipped), 'describe: not-asked reason is a bounded rationale');
+    const unknown = describeClarificationValue(null);
+    assert(unknown.length > 0, 'describe: null reason still yields a rationale');
   }
 
   if (failures > 0) {

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import {
+  COMPUTER_USE_PINNED_LOOP_MODEL,
   buildChatComputerHandoffContext,
   formatChatComputerHandoffForMessage,
+  formatComputerTaskModelResolutionNotice,
+  resolveComputerTaskLoopModel,
 } from '../src/lib/chatComputerHandoffContext';
 import { buildChatComputerRequestRoute } from '../src/lib/chatComputerRequestRouter';
 import { buildChatComputerRequestUserNotice } from '../src/lib/chatComputerRequestUx';
@@ -327,5 +330,66 @@ assert.equal(localFiles.surface, 'local_files');
 assert(localFiles.touched.includes('surface:local_files'));
 assert.equal(formatChatComputerHandoffForMessage(localFiles), '', 'successful local-file handoff stays quiet by default');
 assert(formatChatComputerHandoffForMessage(localFiles, { visibility: 'debug' }).includes('Local file task'));
+
+// ─── Model substitution visibility (2.5) ────────────────────────────────────
+// Every substitution becomes visible; computer-use-capable models get NO notice.
+
+const keptSonnet = resolveComputerTaskLoopModel('claude-sonnet-4-6');
+assert.equal(keptSonnet.substituted, false, 'sonnet keeps driving the native loop');
+assert.equal(keptSonnet.resolvedModel, 'claude-sonnet-4-6');
+assert.equal(keptSonnet.reason, null);
+assert.equal(formatComputerTaskModelResolutionNotice(keptSonnet), '', 'computer-use-capable model → no substitution notice at all');
+
+const prefixedSonnet = resolveComputerTaskLoopModel('anthropic/claude-sonnet-4-6');
+assert.equal(prefixedSonnet.substituted, false, 'anthropic/-prefixed sonnet is not a substitution');
+assert.equal(prefixedSonnet.resolvedModel, 'claude-sonnet-4-6');
+
+const marketplaceSonnet = resolveComputerTaskLoopModel('openrouter/anthropic/claude-sonnet-4-6');
+assert.equal(marketplaceSonnet.substituted, false, 'provider-prefixed sonnet has computerUse:true → no notice');
+
+// Edge-loop parity: resolveComputerUseModel keeps ANY claude-*sonnet id, so
+// legacy sonnet ids the capability table does not list must never produce a
+// false substitution notice.
+const legacySonnet = resolveComputerTaskLoopModel('claude-3-5-sonnet-20241022');
+assert.equal(legacySonnet.substituted, false, 'legacy sonnet ids the edge keeps stay notice-free');
+assert.equal(legacySonnet.resolvedModel, 'claude-3-5-sonnet-20241022');
+
+const substituted = resolveComputerTaskLoopModel('deepseek/deepseek-reasoner');
+assert.equal(substituted.substituted, true, 'non-sonnet model → native loop pins sonnet');
+assert.equal(substituted.resolvedModel, COMPUTER_USE_PINNED_LOOP_MODEL);
+assert.equal(substituted.requestedModel, 'deepseek/deepseek-reasoner', 'requested id preserved verbatim');
+assert.equal(substituted.reason, 'computer_use_requires_sonnet');
+assert.equal(
+  formatComputerTaskModelResolutionNotice(substituted),
+  'Screen loop needs computer-use, so it runs on claude-sonnet-4-6; your pick (deepseek-reasoner) still plans and verifies.',
+  'compact notice uses short (provider-stripped) model names',
+);
+
+const opusRequested = resolveComputerTaskLoopModel('claude-opus-4-8');
+assert.equal(opusRequested.substituted, true, 'opus has computerUse:false → substitution is visible');
+assert.equal(
+  formatComputerTaskModelResolutionNotice(opusRequested),
+  'Screen loop needs computer-use, so it runs on claude-sonnet-4-6; your pick (claude-opus-4-8) still plans and verifies.',
+);
+
+const unknownModel = resolveComputerTaskLoopModel('mystery-org/model-x');
+assert.equal(unknownModel.substituted, true, 'unknown ids fail closed → pinned loop model + visible notice');
+assert.equal(unknownModel.resolvedModel, COMPUTER_USE_PINNED_LOOP_MODEL);
+
+const noModel = resolveComputerTaskLoopModel('');
+assert.equal(noModel.substituted, false, 'no requested model is the plain default, not a substitution');
+assert.equal(noModel.resolvedModel, COMPUTER_USE_PINNED_LOOP_MODEL);
+assert.equal(formatComputerTaskModelResolutionNotice(noModel), '', 'default pin without a request → no notice');
+assert.equal(resolveComputerTaskLoopModel(null).substituted, false, 'null model → default, no notice');
+
+// Bounded-payload rule: absurdly long ids still yield one compact line.
+const longId = resolveComputerTaskLoopModel(`openrouter/${'x'.repeat(300)}`);
+assert.equal(longId.substituted, true);
+const longNotice = formatComputerTaskModelResolutionNotice(longId);
+assert(longNotice.length <= 160, 'substitution notice stays compact even for oversized model ids');
+assert(
+  longNotice.startsWith('Screen loop needs computer-use, so it runs on claude-sonnet-4-6;'),
+  'notice shape holds for oversized ids',
+);
 
 console.log('All chat computer handoff context smoke cases passed.');

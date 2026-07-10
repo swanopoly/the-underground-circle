@@ -387,6 +387,41 @@ function main() {
     },
     'run_computer_task',
   );
+  // P22 regression: "open <AppName> on my computer" is a LAUNCH, not a file
+  // search for a file named after the app. Generic-machine root
+  // (computer/mac/laptop) + no file extension ⇒ launch_app. Real file opens
+  // (extension present, or a Finder-folder root like desktop/downloads) stay
+  // file searches — asserted right below.
+  assertIntent('Open Photoshop on my computer', 'launch_app', { appQuery: 'Photoshop' }, 'run_computer_task');
+  assertIntent('open Illustrator on my mac', 'launch_app', { appQuery: 'Illustrator' }, 'run_computer_task');
+  // P22b: new-document phrasing covers spreadsheet/presentation/etc, not just
+  // "document/file" — otherwise "start a new spreadsheet" launched an app
+  // literally named "a new spreadsheet".
+  assertIntent('start a new spreadsheet', 'press_keys', { }, 'run_computer_task');
+  assertIntent('make a new presentation', 'press_keys', { }, 'run_computer_task');
+  {
+    const seq2 = detectLocalComputerAwarenessIntentSequence('open Excel on my mac and create a new spreadsheet');
+    assert(seq2[0]?.kind === 'launch_app' && seq2[0]?.appQuery === 'Excel', 'Excel launch step has a clean appQuery (no "on my mac" trailing)', `saw ${seq2[0]?.appQuery}`);
+    assert(seq2.some((s) => s.kind === 'press_keys' && s.combo === 'Cmd+N'), 'new spreadsheet step maps to Cmd+N', seq2.map((s) => `${s.kind}:${(s as any).combo || ''}`).join(','));
+    assert(!seq2.some((s) => s.kind === 'launch_app' && /on my mac/i.test(s.appQuery || '')), 'no launch step carries a location suffix', seq2.map((s) => s.appQuery || '').join(','));
+  }
+  {
+    // P22b: "save it as <file>" as a trailing sequence step — the bare "it"
+    // (no following noun) used to break the regex and abort the whole
+    // multi-step task.
+    const seq3 = detectLocalComputerAwarenessIntentSequence('open photoshop on my computer and create a new project then save it as hero.png');
+    assert(seq3.length >= 3, 'launch+create+save is a full 3-part sequence (no abort)', `saw ${seq3.length}`);
+    assert(seq3[0]?.kind === 'launch_app' && /^photoshop$/i.test(seq3[0]?.appQuery || ''), 'step 1 launches Photoshop', `saw ${seq3[0]?.kind}/${seq3[0]?.appQuery}`);
+    assert(seq3.some((s) => s.kind === 'press_keys' && s.combo === 'Cmd+N'), 'step 2 creates a new document', seq3.map((s) => (s as any).combo || s.kind).join(','));
+    assert(seq3.some((s) => (s.kind === 'paste_text' && /hero\.png/i.test((s as any).text || '')) || s.kind === 'semantic_click'), 'step 3 carries the save-as filename', seq3.map((s) => s.kind).join(','));
+  }
+  {
+    const seq = detectLocalComputerAwarenessIntentSequence('Open Photoshop on my computer and create a new project');
+    assert(seq.length >= 2, 'launch+create sequence has both steps', `saw ${seq.length}`);
+    assert(seq[0]?.kind === 'launch_app' && seq[0]?.appQuery === 'Photoshop', 'first step launches Photoshop (not a file search)', `saw ${seq[0]?.kind}/${seq[0]?.appQuery}`);
+    assert(!seq.some((s) => s.kind === 'open_file_search_match' || s.kind === 'file_search'), 'no file-search step for a fileless launch+create', seq.map((s) => s.kind).join(','));
+    assert(seq.some((s) => s.kind === 'press_keys' && s.combo === 'Cmd+N'), 'create-a-new-project maps to Cmd+N', seq.map((s) => `${s.kind}:${(s as any).combo || ''}`).join(','));
+  }
   assertExtraIntent(
     'Can you find the landscaping-img.png image on my desktop',
     'file_search',

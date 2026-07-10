@@ -1,6 +1,6 @@
 ---
 name: app-task-automation
-description: Reliably complete a task in any desktop or web app — even an unfamiliar one — by observing real state, finding the control through the basics every app shares, acting one bounded step at a time, and verifying each change before the next. Use for "open/use/control <app> and do X", file/menu/form work, or any computer-use request.
+description: Reliably complete a task in any desktop or web app — even an unfamiliar one — by observing real state, finding the control through the basics every app shares, acting one bounded step at a time, and verifying each change before the next. Use for "open/use/control [app] and do X", file/menu/form work, or any computer-use request.
 version: 1.0.0
 tags: [app, desktop, browser, automation, computer-use, observe-act-verify, accessibility]
 ---

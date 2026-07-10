@@ -99,6 +99,14 @@ const EXISTING_TOOLS: Record<DesignAppAutomationAppId, string[]> = {
     'desktop.photoshop_update_text_layer',
     'desktop.photoshop_place_asset',
     'desktop.photoshop_export_proof',
+    // P15: ExtendScript adapters shipped — these ops are no longer gaps.
+    'desktop.photoshop_apply_adjustment_layer',
+    'desktop.photoshop_apply_selection_or_mask',
+    'desktop.photoshop_resize_canvas_or_image',
+    // P16: layer management, transforms, and color mode shipped too.
+    'desktop.photoshop_manage_layers',
+    'desktop.photoshop_transform_layer',
+    'desktop.photoshop_convert_color_mode',
   ],
 };
 
@@ -502,17 +510,19 @@ function inDesignGap(plan: DesignAppAutomationPlan, operation: DesignAppAutomati
 
 function photoshopGap(plan: DesignAppAutomationPlan, operation: DesignAppAutomationOperation): DesignAppAdapterGapContract | null {
   const missingToolByOperation: Partial<Record<DesignAppAutomationOperation, string>> = {
-    resize_layout: 'desktop.photoshop_resize_canvas_or_image',
-    edit_adjustment_layers: 'desktop.photoshop_apply_adjustment_layer',
-    apply_selection_or_mask: 'desktop.photoshop_apply_selection_or_mask',
+    // P15: resize_layout, edit_adjustment_layers, and apply_selection_or_mask
+    // are IMPLEMENTED (ExtendScript adapters in scripts/claude-bridge.js via
+    // src/lib/photoshopExtendScriptAdapters.ts) — they are deliberately absent
+    // here so no buildout gap is filed for them. InDesign's resize_layout gap
+    // lives in inDesignGap and is unaffected.
     generative_fill_or_remove: 'desktop.photoshop_generative_fill_or_remove',
     generate_ai_asset: 'desktop.firefly_generate_image_asset',
     generative_expand_asset: 'desktop.photoshop_generative_expand',
     create_creative_variants: 'desktop.firefly_batch_generate_variants',
     apply_layer_effects: 'desktop.photoshop_apply_layer_effects',
-    manage_layers: 'desktop.photoshop_manage_layers',
-    transform_layer: 'desktop.photoshop_transform_layer',
-    convert_color_mode: 'desktop.photoshop_convert_color_mode',
+    // P16: manage_layers, transform_layer, and convert_color_mode are
+    // IMPLEMENTED ExtendScript adapters — deliberately absent so no
+    // buildout gap is filed for them.
     manage_artboards: 'desktop.photoshop_manage_artboards',
     manage_smart_objects: 'desktop.photoshop_manage_smart_objects',
   };

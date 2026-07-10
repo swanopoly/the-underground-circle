@@ -8,7 +8,12 @@
 
 import { buildChatAutomationPlan, summarisePlanForTelemetry } from '../src/lib/chatAutomationPlanner';
 import { formatChatComputerTaskAutonomyPromptBlock } from '../src/lib/chatComputerTaskAutonomy';
-import { buildChatComputerRequestRoute, buildChatComputerRequestRoutePromptBlock } from '../src/lib/chatComputerRequestRouter';
+import {
+  buildChatComputerRequestRoute,
+  buildChatComputerRequestRoutePromptBlock,
+  constraintBlocksToolCall,
+  detectAlwaysConfirmFloorCategories,
+} from '../src/lib/chatComputerRequestRouter';
 
 let failures = 0;
 
@@ -860,10 +865,13 @@ for (const precisionCase of [
     else pass(`floor precision: "${benign.slice(0, 40)}…" stays off the floor`);
   }
 
-  // Route force: floor categories force approvalRequired even with
-  // "don't ask me" style input — the floor is not user-disableable.
+  // Route force: login/grant/delete floor categories force approvalRequired
+  // even with "don't ask me" style input — the floor is not user-disableable.
+  // WI-2 exception: the PAY floor on a BROWSER route no longer forces route
+  // approval — it is stamped for per-step enforcement and confirmed mid-run at
+  // the payment floor. Non-browser (desktop) delete and login still force
+  // route-level approval.
   for (const { msg, cat } of [
-    { msg: "go to acme.com and buy the standing desk in my cart, don't ask me for confirmation, just do it", cat: 'pay' },
     { msg: "delete every file in the old-projects folder on my desktop, no need to ask me", cat: 'delete' },
     { msg: "log into my Shopify dashboard and read me the visitor count, don't ask me first", cat: 'login' },
   ]) {
@@ -877,6 +885,19 @@ for (const precisionCase of [
     } else if (!route.approvalRequired) {
       fail(`floor: "${msg}" must force approvalRequired despite "don't ask" input`);
     } else pass(`floor: ${cat} task forces approval despite "don't ask"`);
+  }
+
+  // WI-2: a browser buy/checkout task with "don't ask me" still STAMPS the pay
+  // floor (for mid-run per-step enforcement) but does NOT force route-level
+  // approval — the single commit confirmation fires mid-run at the payment
+  // floor, which is not user-disableable regardless of "just do it".
+  {
+    const payRoute = buildChatComputerRequestRoute("go to acme.com and buy the standing desk in my cart, don't ask me for confirmation, just do it");
+    if (!payRoute) fail('floor: browser buy task should still build a computer route');
+    else if (payRoute.kind !== 'browser') fail(`floor: browser buy task expected kind browser, got ${payRoute.kind}`);
+    else if (!payRoute.alwaysConfirmFloor?.includes('pay')) fail('floor: browser buy task must still stamp the pay floor for step enforcement');
+    else if (payRoute.approvalRequired) fail('WI-2: browser buy task must NOT force route-level approval (pay confirms mid-run)');
+    else pass('WI-2: browser buy task stamps pay floor but defers route approval to mid-run');
   }
 
   // Unrelated route unaffected: read-only file search keeps approval-free path
@@ -973,11 +994,12 @@ for (const precisionCase of [
     fail('sticky: non-matching site must keep approval required');
   } else pass('sticky: non-matching site keeps approval required');
 
-  // Floor categories are NEVER downgraded — even by a maliciously crafted
-  // scope object that claims to allow them.
+  // Floor categories are NEVER downgraded by a sticky scope — even by a
+  // maliciously crafted scope object that claims to allow them. login/delete
+  // keep route-level approval; the sticky scope must never be recorded as
+  // applied for any floor category.
   const malicious = { ...publishScope, allowedCategories: ['publish', 'pay', 'login', 'delete', 'grant'] as any };
   for (const { msg, cat } of [
-    { msg: 'go to acme.com and buy the standing desk in my cart', cat: 'pay' },
     { msg: 'log into acme.com and publish the draft post', cat: 'login' },
     { msg: 'go to acme.com and delete every old draft post', cat: 'delete' },
   ]) {
@@ -986,6 +1008,19 @@ for (const precisionCase of [
     if (!route.approvalRequired || route.stickyScopeApplied) {
       fail(`sticky floor: ${cat} task must never be downgraded by a sticky scope (approval=${route.approvalRequired})`);
     } else pass(`sticky floor: ${cat} task is never downgraded`);
+  }
+
+  // WI-2: a browser pay task is now zero-tap at the route level BUT that
+  // downgrade must come from the mid-run-floor deferral, NOT from a sticky
+  // scope. Assert the pay floor is still stamped (so per-step enforcement
+  // survives) and no sticky scope was recorded as applied — a malicious scope
+  // can never absorb the pay floor.
+  {
+    const payMalicious = buildChatComputerRequestRoute('go to acme.com and buy the standing desk in my cart', { stickyScopes: [malicious] });
+    if (!payMalicious) fail('sticky floor: browser pay task should still build a route');
+    else if (payMalicious.stickyScopeApplied) fail('sticky floor: a sticky scope must never be applied to a pay-floor task');
+    else if (!payMalicious.alwaysConfirmFloor?.includes('pay')) fail('sticky floor: pay floor must survive for mid-run step enforcement');
+    else pass('sticky floor: pay task keeps its floor and is not sticky-downgraded (route defers to mid-run)');
   }
 
   // Explicit "ask me" intent and user ask-before constraints are never overridden.
@@ -1225,6 +1260,154 @@ for (const precisionCase of [
   if (!/^Focus Adobe Photoshop/.test(focusLines[0] || '') || focusLines.length !== 2) {
     fail(`resolution: running app should focus (not relaunch) then wait (got ${JSON.stringify(focusLines)})`);
   } else pass('resolution: running app open-steps focus instead of relaunching');
+}
+
+// ─── WI-2 + WI-6: zero-friction browse-and-book routing ──────────────────────
+// Browser booking/shopping routes defer their single commit confirmation to the
+// mid-run payment floor instead of stopping the user up front; the pay floor is
+// still enforced per-step. Credentialed website-admin routes and delete/login
+// floor categories keep their route-level approval.
+{
+  function assertBrowserBooking(
+    input: string,
+    expected: { approvalRequired: boolean; routeFloor: string[]; kind?: string },
+  ) {
+    const route = buildChatComputerRequestRoute(input);
+    if (!route) {
+      fail(`WI-6: "${input}" should route to a computer request route (verified null before)`);
+      return;
+    }
+    const errors: string[] = [];
+    if ((expected.kind || 'browser') !== route.kind) errors.push(`kind expected ${expected.kind || 'browser'}, got ${route.kind}`);
+    if (route.approvalRequired !== expected.approvalRequired) errors.push(`approvalRequired expected ${expected.approvalRequired}, got ${route.approvalRequired}`);
+    const floor = (route.alwaysConfirmFloor || []).slice().sort();
+    const want = expected.routeFloor.slice().sort();
+    if (JSON.stringify(floor) !== JSON.stringify(want)) errors.push(`route floor expected [${want.join(',')}], got [${floor.join(',')}]`);
+    if (errors.length) {
+      fail(`WI-2/6: "${input}"\n    ${errors.join('\n    ')}`);
+      return;
+    }
+    pass(`WI-2/6: browser booking route "${input}" (approval=${route.approvalRequired}, floor=[${floor.join(',')}])`);
+  }
+
+  // Hotel message with URL → browser, zero-tap, floor empty ("book" is NOT a
+  // route-level pay floor verb, so the route does not stamp pay).
+  assertBrowserBooking('go to marriott.com and book me a hotel in Chicago this weekend', {
+    approvalRequired: false,
+    routeFloor: [],
+  });
+
+  // WI-6: URL-bearing discovery phrasing (verified null before) routes to
+  // browser, zero-tap.
+  assertBrowserBooking('find me hotels in chicago this weekend on marriott.com', {
+    approvalRequired: false,
+    routeFloor: [],
+  });
+
+  // WI-6: URL-less booking phrasing still routes to browser, zero-tap.
+  assertBrowserBooking('book me a hotel in chicago', {
+    approvalRequired: false,
+    routeFloor: [],
+  });
+
+  // "buy X on <site>": browser route, zero-tap at route level, but the pay
+  // floor IS stamped ("buy" is a route pay verb) — it just does not force
+  // route-level approval for a browser route; enforcement is per-step below.
+  assertBrowserBooking('buy a laptop stand on amazon.com', {
+    approvalRequired: false,
+    routeFloor: ['pay'],
+  });
+
+  // Bug #6: deliberation questions must NOT auto-launch a browser run. A
+  // commerce/discovery verb behind a deliberation frame ("should I book …")
+  // is the user asking for help deciding, not a command.
+  {
+    const deliberation = buildChatComputerRequestRoute('should I book a hotel or an airbnb?');
+    if (deliberation && deliberation.kind === 'browser') {
+      fail(`bug#6: "should I book a hotel or an airbnb?" must NOT route to a browser run (got kind=${deliberation.kind})`);
+    } else pass('bug#6: deliberation "should I book …" does not auto-launch a browser route');
+
+    // The three genuine commands must still reach the browser runtime.
+    for (const command of [
+      'book me a hotel in Chicago',
+      'go to marriott.com and book a hotel',
+      'find me hotels in chicago on marriott.com',
+    ]) {
+      const route = buildChatComputerRequestRoute(command);
+      if (route?.kind !== 'browser') {
+        fail(`bug#6: genuine command "${command}" must still route to browser (got ${route?.kind || 'null'})`);
+      } else pass(`bug#6: genuine command still routes to browser: "${command}"`);
+    }
+  }
+
+  // Regression: credentialed WordPress-admin route stays gated up front.
+  {
+    const wp = buildChatComputerRequestRoute('Log into WordPress wp-admin and install the SEO plugin after approval');
+    if (wp?.approvalRequired !== true) fail(`WI-2: WordPress-admin route must keep approvalRequired=true, got ${wp?.approvalRequired}`);
+    else if (!(wp.alwaysConfirmFloor || []).includes('login')) fail('WI-2: WordPress-admin login route must keep the login floor');
+    else pass('WI-2: WordPress-admin route stays gated (approval + login floor)');
+  }
+
+  // Bug #3 support: the credentialed-website-admin classifier is a single
+  // exported source of truth the ChatTab call site imports. It must return
+  // FALSE for approval_sensitive_browser (travel/shopping) and TRUE for
+  // credentialed_browser + WordPress-admin routes.
+  {
+    const { isCredentialedWebsiteAdminRoute } =
+      require('../src/lib/chatComputerRequestRouter') as typeof import('../src/lib/chatComputerRequestRouter');
+    const wpMsg = 'Log into WordPress wp-admin and install the SEO plugin after approval';
+    const wpRoute = buildChatComputerRequestRoute(wpMsg);
+    if (isCredentialedWebsiteAdminRoute(wpRoute?.appStrategy ?? null, wpMsg) !== true) {
+      fail('bug#3: exported classifier must return TRUE for a WordPress-admin route');
+    } else pass('bug#3: exported classifier returns TRUE for WordPress-admin');
+
+    const shopMsg = 'buy a laptop stand on amazon.com';
+    const shopRoute = buildChatComputerRequestRoute(shopMsg);
+    if (isCredentialedWebsiteAdminRoute(shopRoute?.appStrategy ?? null, shopMsg) !== false) {
+      fail(`bug#3: exported classifier must return FALSE for approval_sensitive_browser (got strategy=${shopRoute?.appStrategy?.id})`);
+    } else pass('bug#3: exported classifier returns FALSE for travel/shopping route');
+  }
+
+  // Regression: delete floor still forces route-level approval on a browser route.
+  {
+    const del = buildChatComputerRequestRoute('use the browser to delete my account on twitter.com');
+    if (del?.kind !== 'browser') fail(`WI-2: delete-account browser route expected kind browser, got ${del?.kind}`);
+    else if (del.approvalRequired !== true) fail(`WI-2: delete floor must keep browser route approvalRequired=true, got ${del.approvalRequired}`);
+    else if (!(del.alwaysConfirmFloor || []).includes('delete')) fail('WI-2: delete-account route must carry the delete floor');
+    else pass('WI-2: delete floor still gates a browser route');
+  }
+
+  // "book" is not a route-level pay floor verb; "pay"/"buy" are.
+  if (detectAlwaysConfirmFloorCategories('book me a hotel in chicago').includes('pay')) {
+    fail('WI-2: "book" must NOT stamp the route-level pay floor');
+  } else pass('WI-2: "book" is not a route-level pay floor verb');
+  if (!detectAlwaysConfirmFloorCategories('pay for the room').includes('pay')) {
+    fail('WI-2: "pay" must stamp the route-level pay floor');
+  } else pass('WI-2: "pay" stamps the route-level pay floor');
+
+  // Step-level pay enforcement: booking/checkout submit calls fire the pay
+  // floor confirm (never a hard block) even though "book"/"reserve" are absent
+  // from the route-level floor list.
+  function assertStepPayFloor(tool: string, input: unknown, shouldFire: boolean) {
+    const verdict = constraintBlocksToolCall(null, tool, input);
+    const fired = verdict.floorConfirmRequired === true && verdict.floorCategory === 'pay';
+    if (verdict.blocked) {
+      fail(`WI-2: step-level floor must never hard-block ("${tool}"); it must ask, not block`);
+      return;
+    }
+    if (fired !== shouldFire) {
+      fail(`WI-2: step "${tool}" pay-floor confirm expected ${shouldFire}, got ${fired}`);
+      return;
+    }
+    pass(`WI-2: step "${tool}" pay-floor confirm=${fired}`);
+  }
+  assertStepPayFloor('browser.submit_booking', { confirm: true }, true);
+  assertStepPayFloor('confirm_reservation', {}, true);
+  assertStepPayFloor('browser.click', { text: 'Place order' }, true);
+  assertStepPayFloor('browser.click', { text: 'Pay now' }, true);
+  // Ordinary navigation/extraction never fires the pay floor.
+  assertStepPayFloor('browser.navigate', { url: 'https://marriott.com' }, false);
+  assertStepPayFloor('browser.extract', { schema: 'rooms' }, false);
 }
 
 if (failures > 0) {

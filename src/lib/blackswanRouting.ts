@@ -92,6 +92,197 @@ export function canUseAnthropicChatStream(modelId: string | null | undefined): b
   return isNativeAnthropicModel(modelId) && !isMarketplaceRoutedModel(modelId);
 }
 
+/**
+ * App-domain vocabulary detector for the Auto router (P8). BlackSwan-v5 is
+ * trained on Underground Circle app data (conversations, missions,
+ * check-ins, proof-of-work, XP/streaks, office agents) — for questions
+ * ABOUT that domain it is the best-grounded model available; for general
+ * knowledge it is not. High-precision term list on purpose: a false
+ * negative just keeps the turn on a frontier model, a false positive
+ * routes a general question to an app specialist — so only unambiguous
+ * app vocabulary counts.
+ */
+const APP_GROUNDED_TERM_RE = new RegExp(
+  [
+    '\\bcircle members?\\b', '\\bmy circle\\b', '\\bour circle\\b',
+    '\\bmissions?\\b', '\\bcheck-?ins?\\b', '\\bstreaks?\\b',
+    '\\bproof of work\\b', '\\bnorth star\\b', '\\bmemory bank\\b',
+    '\\bswan\\s?bot\\b', '\\bblack\\s?swan\\b', '\\bopen\\s?swan\\b',
+    '\\boffice agents?\\b', '\\bxp\\b', '\\bshout-?outs?\\b',
+    '\\bthe feed\\b', '\\bproof-of-work\\b',
+  ].join('|'),
+  'i',
+);
+
+/** True when a message reads as a question/statement about THIS app's domain. */
+export function looksLikeAppGroundedMessage(message: string | null | undefined): boolean {
+  const text = String(message || '').trim();
+  if (!text) return false;
+  return APP_GROUNDED_TERM_RE.test(text);
+}
+
+/**
+ * Confidence proxy for the BlackSwan Auto lane (reliability guard).
+ *
+ * BlackSwan-v5 is a small fine-tuned model (Qwen3.5-4B). The published
+ * small-model research is consistent: tiny models discriminate poorly on
+ * HARD / BROAD / AMBIGUOUS inputs, and a wrong answer reads to the user as
+ * "the model got dumber." This guard does NOT remove BlackSwan from Auto —
+ * BlackSwan still owns every simple app-grounded turn it was trained for
+ * (status / memory / casual / social + light `looksLikeAppGroundedMessage`
+ * questions). It only ESCALATES the genuinely-hard SUBSET of that same lane
+ * to the frontier model the lane would otherwise have used — a proxy for
+ * "this turn is beyond a 4B model's reliable discrimination," never a
+ * BlackSwan removal and never a route to any other BlackSwan id.
+ *
+ * Deliberately CONSERVATIVE: the whole point of the lane is BlackSwan, so we
+ * bias toward KEEPING it. Escalate only on clear hard-for-a-small-model
+ * signals; a false negative just leaves an easy turn on BlackSwan (fine),
+ * while a false positive needlessly spends a frontier call, so the bar is
+ * "unambiguous hard signal," mirroring the high-precision app-domain matcher.
+ *
+ * Hard signals (any one fires):
+ *   1. Multi-step / sequenced work — "then", "after that", numbered lists,
+ *      "step 1", bulleted sequences. Ordering + chaining is where small
+ *      models drop or reorder steps.
+ *   2. Explicit tool/action/execution verbs — "deploy", "run", "open",
+ *      "book", "install", "refactor", etc. These imply DOING, not the Q&A
+ *      recall BlackSwan is trained for. (The provider strip + tool-loop
+ *      executor swap already handle true tool turns; this catches
+ *      action-shaped phrasing that still lands in the conversational lane.)
+ *   3. Code / technical reasoning — "debug", "why does", "explain the
+ *      difference", "trade-offs", "architecture", "root cause", stack
+ *      traces, code fences. Comparative / causal reasoning is exactly the
+ *      hard-discrimination case for a 4B model.
+ *   4. Long / compound messages — > ~400 chars OR > ~2 question marks.
+ *      Length and multi-question compounds broaden the input past the small
+ *      model's reliable band.
+ *   5. Explicit ambiguity the small model would fumble — "not sure",
+ *      "either ... or", "it depends", "figure out", "what's the best way".
+ */
+const BLACKSWAN_ESCALATION_SIGNALS: Array<{ reason: string; test: (text: string, lower: string) => boolean }> = [
+  {
+    reason: 'multi_step',
+    // Sequencing words as whole words, or a numbered/bulleted list of steps.
+    test: (_text, lower) =>
+      /\b(?:then|and then|after that|afterwards?|next,|followed by|first\b.*\bthen|step\s*\d)\b/i.test(lower)
+      // Two+ numbered items ("1. ... 2. ...") or two+ bullet lines.
+      || /(?:^|\n)\s*(?:[-*•]|\d+[.)])\s+.*(?:\n\s*(?:[-*•]|\d+[.)])\s+)/.test(_text),
+  },
+  {
+    reason: 'action_verb',
+    // Execution verbs that imply DOING, not recall/Q&A. Whole-word matched so
+    // "running total" / "opened issues" don't trip it; paired with word
+    // boundaries and common object nouns to keep precision high.
+    test: (_text, lower) =>
+      /\b(?:deploy|redeploy|install|uninstall|configure|set\s?up|refactor|rebuild|migrate|provision|book|purchase|order|schedule|automate|execute|run\s+(?:the|a|this|that|my)|open\s+(?:the|a|this|that|my)|create\s+(?:a|the|an)|delete|remove|update\s+(?:the|my|a)|send\s+(?:a|the|an)|push\s+(?:the|a|to)|merge\s+(?:the|a|this)|fix\s+(?:the|this|my|a))\b/i.test(lower),
+  },
+  {
+    reason: 'technical_reasoning',
+    test: (_text, lower) =>
+      /\b(?:debug|root\s?cause|stack\s?trace|traceback|exception|why\s+(?:does|is|isn'?t|are|aren'?t|do|did|can'?t|won'?t)|explain\s+(?:the\s+)?(?:difference|why|how)|difference\s+between|trade[\s-]?offs?|architecture|design\s+pattern|time\s+complexity|big\s?-?o|race\s+condition|memory\s+leak|refactor)\b/i.test(lower)
+      // Fenced code / inline code blocks are a strong technical-reasoning tell.
+      || /```/.test(_text),
+  },
+  {
+    reason: 'ambiguous',
+    test: (_text, lower) =>
+      /\b(?:not\s+sure|i'?m\s+not\s+sure|unsure|it\s+depends|depends\s+on|figure\s+out|what'?s\s+the\s+best\s+way|which\s+(?:is\s+)?(?:better|best)|either\b.*\bor\b|should\s+i\s+.*\bor\b|help\s+me\s+(?:decide|choose|figure))\b/i.test(lower),
+  },
+];
+
+const BLACKSWAN_LONG_MESSAGE_CHARS = 400;
+const BLACKSWAN_MAX_QUESTION_MARKS = 2;
+
+export type BlackSwanEscalationReason =
+  | 'multi_step'
+  | 'action_verb'
+  | 'technical_reasoning'
+  | 'long_compound'
+  | 'ambiguous';
+
+/**
+ * Decide whether an app-grounded Auto turn should ESCALATE from BlackSwan to
+ * the lane's frontier fallback. Pure + dependency-light (string only) so it
+ * stays smoke-testable. Conservative by design — see the signal set above.
+ *
+ * Returns `escalate: false, reason: null` for the simple grounded turns
+ * BlackSwan is designed for; `escalate: true` with the first matching reason
+ * for the genuinely-hard subset.
+ */
+export function shouldEscalateBlackSwanToFrontier(
+  message: string | null | undefined,
+): { escalate: boolean; reason: BlackSwanEscalationReason | null } {
+  const text = String(message || '').trim();
+  // Empty / whitespace: nothing hard to detect — keep BlackSwan.
+  if (!text) return { escalate: false, reason: null };
+  const lower = text.toLowerCase();
+
+  // Long / compound is a first-class signal (length + multi-question).
+  const questionMarks = (text.match(/\?/g) || []).length;
+  if (text.length > BLACKSWAN_LONG_MESSAGE_CHARS || questionMarks > BLACKSWAN_MAX_QUESTION_MARKS) {
+    return { escalate: true, reason: 'long_compound' };
+  }
+
+  for (const signal of BLACKSWAN_ESCALATION_SIGNALS) {
+    if (signal.test(text, lower)) {
+      return { escalate: true, reason: signal.reason as BlackSwanEscalationReason };
+    }
+  }
+
+  return { escalate: false, reason: null };
+}
+
+/**
+ * Human-facing, ≤60-char clause naming WHY the BlackSwan lane escalated to a
+ * frontier model. Companion to `shouldEscalateBlackSwanToFrontier`; used by
+ * the Auto transparency layer so users see "hard turn → frontier fallback",
+ * never a raw reason key. No provider ids, no jargon.
+ */
+export function describeBlackSwanEscalation(
+  reason: BlackSwanEscalationReason | null | undefined,
+): string {
+  switch (reason) {
+    case 'multi_step':
+      return 'multi-step request → frontier fallback';
+    case 'action_verb':
+      return 'action request → frontier fallback';
+    case 'technical_reasoning':
+      return 'technical reasoning → frontier fallback';
+    case 'long_compound':
+      return 'long/compound request → frontier fallback';
+    case 'ambiguous':
+      return 'ambiguous request → frontier fallback';
+    default:
+      return 'app-domain turn → app-trained BlackSwan';
+  }
+}
+
+/**
+ * Composer-pattern plan/execute split for computer tasks (P9, from the
+ * verified Cursor research: "create the plan with one model and build it
+ * with another" — Cursor 2.0 Plan Mode; the browser loop itself stays a
+ * separate tool-scoped agent). The TEXT-ONLY planner/validator pass for
+ * browser/app automation is exactly where the app-trained model wins: it
+ * knows the app's sites, pipelines, missions, and vocabulary. The native
+ * screenshot/action loop is untouched — the edge function keeps its
+ * Sonnet pin regardless of what plans.
+ *
+ * Returns the BlackSwan endpoint id ONLY for Auto turns when the
+ * `blackswan` integration is connected; explicit picks return null so the
+ * caller's model is used for planning too (explicit picks stay
+ * authoritative everywhere).
+ */
+export function resolveComputerTaskPlannerModel(
+  selectedModel: string | null | undefined,
+  connectedProviders?: ReadonlySet<string> | null,
+): string | null {
+  const selected = String(selectedModel || '').trim();
+  if (selected && selected !== 'auto') return null;
+  if (!connectedProviders || !connectedProviders.has('blackswan')) return null;
+  return BLACKSWAN_ENDPOINT_MODEL_ID;
+}
+
 export function externalProviderForModel(modelId: string | null | undefined): string | null {
   const model = (modelId || '').trim();
   if (!model || model === 'auto' || model === 'blackswan') return null;

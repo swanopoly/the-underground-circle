@@ -19,6 +19,11 @@ import {
   resolveComputerTaskPendingQuestionState,
 } from './computerTaskState';
 import type { LiveAction, LiveScreenshot } from '../components/ComputerUseLiveCard';
+import {
+  resolveComputerTaskLoopModel,
+  type ComputerTaskModelResolution,
+} from './chatComputerHandoffContext';
+import { translateComputerUseErrorMessage } from './chatUserFacingOutcomes';
 
 export type TaskStatus = 'idle' | 'starting' | 'running' | 'done' | 'error';
 
@@ -58,6 +63,17 @@ export interface ComputerUseTaskState {
   screenshots: LiveScreenshot[];
   /** Live token + cost ticker, updated per Claude turn. */
   usage: LiveUsage | null;
+  /**
+   * Model substitution visibility (2.5): non-null ONLY when the requested
+   * model was swapped for the Sonnet computer-use pin, so cards can render
+   * the substitution notice (see
+   * `formatComputerTaskModelResolutionNotice`). Mirrors the edge
+   * loop's `model_resolved` SSE event deterministically at start time (the
+   * edge coercion is a pure function of the requested model). Optional so
+   * existing state literals (e.g. useComputerUseQueue) stay valid — absent
+   * means the same as null: no substitution to show.
+   */
+  modelResolution?: ComputerTaskModelResolution | null;
   /** Non-null while the agent is paused waiting for user approval. */
   pendingConfirmation: PendingConfirmation | null;
   result: {
@@ -88,21 +104,18 @@ const EMPTY_STATE: ComputerUseTaskState = {
   actions: [],
   screenshots: [],
   usage: null,
+  modelResolution: null,
   pendingConfirmation: null,
   result: null,
   errorMessage: null,
   rawErrorMessage: null,
 };
 
-function sanitizeComputerUseErrorMessage(message: string | null | undefined): string {
-  const text = String(message || '').trim();
-  if (!text) return 'Computer Use could not finish. Technical details were saved for recovery.';
-  if (/^cancel/i.test(text)) return text;
-  if (!/\b(?:HTTP\s+\d{3}|supabase|edge function|fetch failed|Failed to fetch|NetworkError|TypeError|ECONN|ETIMEDOUT|EADDR|JWT|Bearer|postgres|PostgREST|stack|functions\/v1|computer-use-agent|Browserbase.*(?:error|failed)|Anthropic.*(?:error|failed))\b/i.test(text)) {
-    return text;
-  }
-  return 'Computer Use could not finish. Technical details were saved for recovery.';
-}
+// Phase 2b (docs/CHAT_UX_INTEGRATION_UPGRADE_PLAN.md): display policy lives
+// in the chatUserFacingOutcomes owner — classified failures render as plain
+// language + one next action instead of the old strip-jargon-or-generic
+// fallback. Raw text still lands in `rawErrorMessage` for recovery/debug.
+const sanitizeComputerUseErrorMessage = translateComputerUseErrorMessage;
 
 export function useComputerUseTask(circleId: string, userId?: string, threadId?: string | null) {
   const [state, setState] = useState<ComputerUseTaskState>(EMPTY_STATE);
@@ -142,7 +155,18 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
 
   const run = useCallback(async (
     task: string,
-    options?: { sessionId?: string; model?: string | null },
+    options?: {
+      sessionId?: string;
+      model?: string | null;
+      /** Booking-class run: raises edge caps (iterations/tokens/cost/wall)
+       *  so a multi-leg checkout can complete. Non-booking runs unchanged. */
+      booking?: boolean;
+      /** Explicit per-run cost cap. Omit to defer to booking-class / circle
+       *  / edge defaults. */
+      maxCostUsd?: number;
+      maxIterations?: number;
+      maxTokensBudget?: number;
+    },
   ): Promise<{ started: boolean; reason?: string }> => {
     if (!task.trim()) return { started: false, reason: 'Empty task.' };
     if (handleRef.current) return { started: false, reason: 'Another task is already running.' };
@@ -153,13 +177,28 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
       return { started: false, reason: credsResult.reason };
     }
 
-    setState({ ...EMPTY_STATE, status: 'starting', task });
+    // 2.5 substitution visibility: consume the edge loop's model coercion
+    // into task state up front. `startComputerUseAgent`'s SSE dispatcher
+    // ignores unknown events, so mirror the (deterministic) `model_resolved`
+    // event locally — same inputs, same shape. Null when the requested model
+    // already drives the native loop (no substitution → no notice).
+    const modelResolution = resolveComputerTaskLoopModel(options?.model);
+    setState({
+      ...EMPTY_STATE,
+      status: 'starting',
+      task,
+      modelResolution: modelResolution.substituted ? modelResolution : null,
+    });
     handleRef.current = startComputerUseAgent({
       task,
       circleId,
       userId,
       model: options?.model || undefined,
       sessionId: options?.sessionId,
+      booking: options?.booking,
+      maxCostUsd: options?.maxCostUsd,
+      maxIterations: options?.maxIterations,
+      maxTokensBudget: options?.maxTokensBudget,
       browserbase: credsResult.creds.browserbase,
       onRunStarted: ({ runId }) => {
         runIdRef.current = runId;
@@ -177,6 +216,12 @@ export function useComputerUseTask(circleId: string, userId?: string, threadId?:
       },
       onReasoning: (text) => {
         if (!text.trim()) return;
+        setState((prev) => ({ ...prev, reasoning: [...prev.reasoning, text] }));
+      },
+      onSteeringApplied: ({ note }) => {
+        // Steering confirmation rides the reasoning stream the live card
+        // already renders — the user sees exactly when their note landed.
+        const text = `🧭 Steering applied: ${String(note || '').slice(0, 200)}`;
         setState((prev) => ({ ...prev, reasoning: [...prev.reasoning, text] }));
       },
       onConfirmationRequired: (info) => {

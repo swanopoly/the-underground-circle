@@ -143,7 +143,33 @@ const quietPhotoshopSaveForWebHandoff = buildChatComputerHandoffContext({
   groundingStatus: 'ready',
   requestNotice: buildChatComputerRequestUserNotice(quietPhotoshopSaveForWebRoute!),
 });
-assert.equal(buildChatDesignTaskCardModel(quietPhotoshopSaveForWebHandoff.metadata), null, 'quiet Photoshop Save for Web route suppresses the complex design-task card');
+// Policy update (P12): "save it as a png" now trips the `save` constraint
+// category, so desktop/app routes carry route-level approval — the notice is
+// approval-tone, NOT quiet, and the design card must therefore SHOW (hiding
+// an approval-needed card would bury the gate). The quiet-suppression
+// predicate itself stays covered synthetically below.
+const approvalSaveCard = buildChatDesignTaskCardModel(quietPhotoshopSaveForWebHandoff.metadata);
+assert(approvalSaveCard, 'approval-gated Photoshop save route keeps the design-task card visible');
+const syntheticQuietNotice = {
+  ...buildChatComputerRequestUserNotice(quietPhotoshopSaveForWebRoute!),
+  visibility: 'hidden',
+} as any;
+syntheticQuietNotice.autonomy = { ...syntheticQuietNotice.autonomy, canRunQuietly: true };
+const syntheticQuietHandoff = buildChatComputerHandoffContext({
+  task: 'inspect the open Photoshop document layers',
+  entrypoint: 'agent_runtime',
+  adapterId: 'desktop_app_adapter',
+  taskKind: 'app_task',
+  taskLabel: 'Deterministic desktop sequence',
+  preflightStatus: 'ready',
+  groundingStatus: 'ready',
+  requestNotice: syntheticQuietNotice,
+});
+assert.equal(
+  buildChatDesignTaskCardModel(syntheticQuietHandoff.metadata),
+  null,
+  'genuinely quiet (hidden + canRunQuietly) design route still suppresses the card',
+);
 
 const browserHandoff = buildChatComputerHandoffContext({
   task: 'Open https://example.com and list prices',

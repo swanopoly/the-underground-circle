@@ -30,6 +30,11 @@ import {
   parseDesktopAttachmentTaskFiles,
   selectDesktopAttachmentsToPreOpen,
 } from './chatDesktopAttachmentRouting';
+import {
+  formatComputerTaskModelResolutionNotice,
+  resolveComputerTaskLoopModel,
+  type ComputerTaskModelResolution,
+} from './chatComputerHandoffContext';
 import { openPath as bridgeOpenPath, waitForApp as bridgeWaitForApp } from './desktopBridge';
 import {
   formatGenericAppNavigatorPromptBlock,
@@ -81,7 +86,22 @@ export interface ComputerTaskRuntimeResult {
    * AX-coverage telemetry described in appAutomationControlSurfaces.
    */
   surfaceEscalations?: ComputerTaskSurfaceEscalation[] | null;
+  /**
+   * 2.5 substitution visibility: non-null ONLY when the user's selected
+   * model cannot drive the native screenshot/action loop, so the Sonnet pin
+   * (owned by the computer-use edge function) will substitute it there.
+   * Text-only planner/validator steps in this runtime always keep
+   * `args.model` unchanged. Additive optional field — bounded (three short
+   * strings + a flag) so persisted payloads stay small.
+   */
+  modelResolution?: ComputerTaskModelResolution | null;
   warnings: string[];
+  /**
+   * P54: set when the model-driven pre-flight clarifier decided the task
+   * needs answers before execution — `response` carries the batched
+   * questions; nothing was executed. The user's reply re-enters planning.
+   */
+  clarification?: { questions: string[]; assumptions: string[] } | null;
 }
 
 /**
@@ -605,6 +625,88 @@ async function captureLiveSurfaceObservations(audit: ComputerCapabilityAudit | n
   }
 }
 
+/**
+ * P54/P57 — the model-driven ONE-SHOT clarifier check, shared by BOTH
+ * computer lanes: the app/file/hybrid runtime below AND ChatTab's
+ * browser_runtime handler (which bypasses this runtime for execution).
+ *
+ * Returns null when execution should proceed (ready, gated off, opted out,
+ * already asked, or ANY failure — fail-open by contract: a broken clarifier
+ * must never block a task; the loop's observe/approve gates still protect
+ * every mutation). Returns the batched questions + chat message otherwise.
+ * Opt-out: localStorage['uc_model_clarifier']='0'. One shot per
+ * (circle, task) via the module registry in computerTaskClarifier.
+ */
+export async function runComputerTaskClarifierCheck(input: {
+  task: string;
+  circleId: string;
+  userId: string;
+  executionSummary: string;
+  appResolutionName?: string | null;
+  hasAttachments?: boolean;
+  chatHistoryTail?: string | null;
+  isLaunchOnly: boolean;
+}): Promise<{ questions: string[]; assumptions: string[]; message: string } | null> {
+  try {
+    let enabled = true;
+    try { enabled = typeof localStorage === 'undefined' || localStorage.getItem('uc_model_clarifier') !== '0'; } catch {}
+    if (!enabled) return null;
+
+    const {
+      shouldRunComputerTaskClarifier, markClarifierAsked, buildClarifierUserMessage,
+      parseClarifierResponse, formatClarifierQuestionsForChat, CLARIFIER_SYSTEM_PROMPT,
+    } = await import('./computerTaskClarifier');
+
+    const gate = shouldRunComputerTaskClarifier({
+      task: input.task,
+      circleId: input.circleId,
+      isLaunchOnly: input.isLaunchOnly,
+    });
+    if (!gate.run) return null;
+    markClarifierAsked(gate.key);
+
+    const { supabase } = await import('./supabase');
+    const { getFreshAccessToken } = await import('./authSession');
+    const accessToken = await getFreshAccessToken().catch(() => null);
+    const invoke = supabase.functions.invoke('swanbot-ai', {
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+      body: {
+        message: buildClarifierUserMessage({
+          task: input.task,
+          executionSummary: input.executionSummary,
+          appResolution: input.appResolutionName || null,
+          hasAttachments: input.hasAttachments === true,
+          chatHistoryTail: input.chatHistoryTail || null,
+        }),
+        circleId: input.circleId,
+        userId: input.userId,
+        model: 'claude-haiku-4-5',
+        system_override: CLARIFIER_SYSTEM_PROMPT,
+      },
+    });
+    const raced: any = await Promise.race([
+      invoke,
+      new Promise((resolve) => setTimeout(() => resolve(null), 8000)),
+    ]);
+    const replyText: string = raced?.data?.response
+      || (Array.isArray(raced?.data?.content)
+        ? raced.data.content.filter((b: any) => b?.type === 'text').map((b: any) => b.text).join('\n')
+        : '');
+    const verdict = parseClarifierResponse(replyText);
+    if (!verdict.ready && verdict.questions.length > 0) {
+      return {
+        questions: verdict.questions.map((q) => q.q),
+        assumptions: verdict.assumptions,
+        message: formatClarifierQuestionsForChat(verdict),
+      };
+    }
+    return null;
+  } catch (clarifierErr) {
+    console.warn('[computerTaskRuntime] clarifier skipped (fail-open):', clarifierErr);
+    return null;
+  }
+}
+
 export async function executeComputerTaskWithAgent(args: {
   task: string;
   circleId: string;
@@ -656,9 +758,55 @@ export async function executeComputerTaskWithAgent(args: {
     : null;
   const canRequestCapabilityBuildout = !args.disableCapabilityBuildout && !readyCapabilityBuildout;
   const isAttachedDesktopFileTask = args.task.includes(DESKTOP_ATTACHMENT_TASK_MARKER);
+
+  // P54: model-driven ONE-SHOT clarification. Before activating bridges/
+  // apps/pipelines, a cheap model pass judges whether the task is executable
+  // as specified; when it isn't, we return the batched questions as this
+  // turn's response (ChatTab renders it like any task response; the user's
+  // reply re-enters planning with the answers). Shared with the BROWSER lane
+  // via runComputerTaskClarifierCheck (P57 parity). Never runs on a
+  // buildout-retry pass (the task was already clarified before the gap).
+  if (!readyCapabilityBuildout) {
+    const clarification = await runComputerTaskClarifierCheck({
+      task: args.task,
+      circleId: args.circleId,
+      userId: args.userId,
+      executionSummary: `${execution.preview.kind} · ${execution.preview.label}`,
+      appResolutionName: args.appResolution?.best?.displayName || null,
+      hasAttachments: isAttachedDesktopFileTask,
+      chatHistoryTail: args.chatHistory ? args.chatHistory.slice(-1500) : null,
+      isLaunchOnly: execution.preview.kind === 'app_task' && !hasFollowUpIntent(args.task),
+    });
+    if (clarification) {
+      return {
+        adapterId: adapterIdForKind(execution.preview.kind),
+        execution,
+        response: clarification.message,
+        warnings: [],
+        clarification: {
+          questions: clarification.questions,
+          assumptions: clarification.assumptions,
+        },
+      };
+    }
+  }
   const attachedDesktopFiles = isAttachedDesktopFileTask ? parseDesktopAttachmentTaskFiles(args.task) : [];
 
+  // 2.5 substitution visibility: capability flags (via
+  // resolveComputerTaskLoopModel → getModelCapabilityFlags) decide whether
+  // the user's selected model can drive the NATIVE screenshot/action loop.
+  // Every executeAgentRun call below — the text-only planner/validator
+  // steps — KEEPS args.model unchanged; only the native computer-use loop
+  // (browser route) pins Sonnet, and when it will, the swap is surfaced as
+  // a compact notice instead of happening silently. A model with
+  // computerUse:true produces no notice at all.
+  const loopModelResolution = resolveComputerTaskLoopModel(args.model);
+  const modelResolution = loopModelResolution.substituted ? loopModelResolution : null;
+
   const warnings: string[] = [];
+  if (modelResolution && adapterIdForKind(execution.preview.kind) === 'browser_adapter') {
+    warnings.push(formatComputerTaskModelResolutionNotice(modelResolution));
+  }
   if (!execution.readiness.ready && execution.readiness.missing.length > 0) {
     warnings.push(execution.readiness.summary);
   }
@@ -805,6 +953,7 @@ export async function executeComputerTaskWithAgent(args: {
         execution,
         response: appResult.message,
         surfaceEscalations,
+        modelResolution,
         warnings: [...warnings, ...appResult.warnings],
       };
     }
@@ -819,6 +968,7 @@ export async function executeComputerTaskWithAgent(args: {
       adapterId: 'file_adapter',
       execution,
       response: fileResult.message,
+      modelResolution,
       warnings: [...warnings, ...fileResult.warnings],
     };
   }
@@ -875,6 +1025,7 @@ export async function executeComputerTaskWithAgent(args: {
         response: [appResult.message, visibleCapabilityBuildoutMessage(capabilityBuildout)].filter(Boolean).join('\n\n'),
         capabilityBuildout,
         surfaceEscalations,
+        modelResolution,
         warnings,
       };
     }
@@ -896,6 +1047,7 @@ export async function executeComputerTaskWithAgent(args: {
         adapterId: 'app_adapter',
         execution,
         response: appResult.message,
+        modelResolution,
         warnings,
       };
     }
@@ -1124,6 +1276,7 @@ export async function executeComputerTaskWithAgent(args: {
         handoffSuggestion: retryAttempt.handoffSuggestion,
         capabilityBuildout: retriedCapabilityBuildout,
         surfaceEscalations,
+        modelResolution,
         warnings,
       };
     }
@@ -1137,6 +1290,7 @@ export async function executeComputerTaskWithAgent(args: {
       runId: null,
       capabilityBuildout,
       surfaceEscalations,
+      modelResolution,
       warnings,
     };
   }
@@ -1224,6 +1378,7 @@ export async function executeComputerTaskWithAgent(args: {
       handoffSuggestion: retryAttempt.handoffSuggestion || result.handoffSuggestion,
       capabilityBuildout: retriedCapabilityBuildout,
       surfaceEscalations,
+      modelResolution,
       warnings,
     };
   }
@@ -1266,6 +1421,7 @@ export async function executeComputerTaskWithAgent(args: {
     handoffSuggestion: result.handoffSuggestion,
     capabilityBuildout,
     surfaceEscalations,
+    modelResolution,
     warnings,
   };
 }

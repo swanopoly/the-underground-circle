@@ -97,7 +97,18 @@ async function runDispatchCases() {
       ctx: baseCtx,
     });
     assertEqual(outcome.status, 'failed', 'dispatch: failed when handler throws');
-    assert(outcome.message.includes('kaboom'), 'dispatch: surfaces thrown message');
+    // P12 policy alignment (desktop-runtime-wiring E-gate): the VISIBLE
+    // message hides thrown transport internals; diagnostics live in
+    // warnings + data.rawError.
+    assert(
+      outcome.message.includes('Technical details were saved for recovery'),
+      'dispatch: visible message hides thrown internals',
+    );
+    assert(
+      String((outcome.data as any)?.rawError || '').includes('kaboom')
+        && (outcome.warnings || []).some((w) => w.includes('kaboom')),
+      'dispatch: thrown message retained in rawError + warnings diagnostics',
+    );
   }
 
   // ─── dispatch: deferred when approvalGate refuses ──────────────────────

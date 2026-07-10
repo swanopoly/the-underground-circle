@@ -14,7 +14,7 @@ import { persistChatMessage, updateChatMessageContent } from './chatService';
 import type { ResearchDocumentReference } from './researchControl';
 import { getResearchDocumentReferences } from './researchControl';
 import type { SwanBotStructuredArtifact, SwanBotStructuredResponse } from './swanbot';
-import type { PersistedChatRecoveryOption, PersistedChatRecoveryReliabilitySummary } from './persistedChatMetadata';
+import type { PersistedBestOfNRace, PersistedChatRecoveryOption, PersistedChatRecoveryReliabilitySummary, PersistedComputerFindings } from './persistedChatMetadata';
 import { getWikiArticleReferences, type WikiArticleReference } from './wikiData';
 
 export async function buildChatInfluenceReferences(params: {
@@ -78,6 +78,8 @@ export function persistMainChatBotMessageWithRetry(params: {
   recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
   computerHandoff?: ChatComputerHandoffMetadata | null;
   chatAutomationPlanPreview?: ChatAutomationPlanPreview | null;
+  computerFindings?: PersistedComputerFindings | null;
+  bestOfN?: PersistedBestOfNRace | null;
   modeOutcomeSummary?: {
     headline: string;
     bulletPoints?: string[];
@@ -117,6 +119,8 @@ export function persistMainChatBotMessageWithRetry(params: {
     recoveryReliability,
     computerHandoff,
     chatAutomationPlanPreview,
+    computerFindings,
+    bestOfN,
     modeOutcomeSummary,
     observedEval,
     routing,
@@ -153,6 +157,8 @@ export function persistMainChatBotMessageWithRetry(params: {
           recoveryReliability,
           computerHandoff,
           chatAutomationPlanPreview,
+          computerFindings,
+          bestOfN,
           modeOutcomeSummary,
           observedEval,
           routing,

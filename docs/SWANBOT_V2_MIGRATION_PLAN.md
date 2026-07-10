@@ -15,7 +15,7 @@
 | **M1** Flag + client router + plan doc | `uc_swanbot_v2_enabled` localStorage flag, `/v2 on|off` slash command, `callSwanBotV2`, tier-2 route switcher in `swanbot.ts` | Shipped 2026-04-23 |
 | **M2** Client-delegated tool protocol | v2 returns pending `clientToolCalls` for client-only tools; client executes via bridge + posts `{ continuationRunId, toolResults }` back to the same edge function; desktop tools registered in v2 as `clientOnly: true` | Shipped 2026-04-23; hardened with continuation validation, retry, mixed-batch handling, and stale-resume rejection |
 | **M3** Full OpenSwan tool parity | Port the OpenSwan runtime-facing tool families into v2's `TOOLS: ToolDef[]` (Supabase-backed tools direct; client-delegated via M2 protocol) | Shipped for the current 73-tool source catalog; source-derived readiness smoke guards drift |
-| **M4** Flip the default | Default `uc_swanbot_v2_enabled = true`; v1 becomes opt-out for regression escapes | Blocked until `swanbotOpenSwanReadiness` reports ready |
+| **M4** Flip the default | Default `uc_swanbot_v2_enabled = true`; v1 becomes opt-out for regression escapes | Client default flipped 2026-07-07 with a session circuit breaker (see status log); telemetry sign-off still gates calling M4 done |
 | **M5** Delete v1 | Retire `swanbot-ai` edge function + `BLACKSWAN_TOOLS` array | After 30 days of M4 with no rollbacks |
 
 ---
@@ -197,3 +197,31 @@ If v2 goes sideways at any phase:
 | M3 | Source-derived v2 catalog parity passes · smoke tests cover representative read/write/client-delegated tool families · `agent_runs.metadata` captures the full trace |
 | M4 | `swanbotOpenSwanReadiness` returns ready · default flipped · v1/v2 telemetry shows v2 ≥ v1 on completion rate · no regressions reported |
 | M5 | `swanbot-ai/` directory deleted · no imports remain · roadmap doc updated |
+
+---
+
+## Status log
+
+- **2026-07-07 — M4 default flip (client side) + session circuit breaker.**
+  `isSwanbotV2Enabled()` in `src/lib/swanbotRouting.ts` now returns true unless
+  localStorage `uc_swanbot_v2_enabled === 'false'` — the exact `!== 'false'`
+  opt-out semantics planned in the M4 section. Absent keys, garbage values, and
+  localStorage-less runtimes (native) all default ON; the unchanged M1 v1
+  fallback in `swanbot.ts` makes that safe. New in the same module: a session
+  circuit breaker (`recordSwanbotV2Outcome` / `isSwanbotV2CircuitOpen` /
+  `resetSwanbotV2Circuit` / `describeSwanbotV2Circuit`). After **2 consecutive
+  v2 transport failures** (the router's null/throw signal — model-content
+  issues return strings and count as success), the router in `callSwanBotAI`
+  skips the v2 attempt for the rest of the session so users stop paying a
+  doomed v2 round trip per message. In-memory only: any v2 success, `/v2 on`
+  (`enableSwanbotV2()` resets the breaker), or a reload closes it. `/v2` status
+  copy now reports "v2 typed loop (default) — `/v2 off` to use the legacy loop"
+  and surfaces "v2 paused this session after repeated failures — `/v2 on` to
+  retry." while the breaker is open. **Honest op note:** the deployed
+  `swanbot-v2-ai` edge function must be current in production
+  (`npx supabase functions deploy swanbot-v2-ai`) — if it is stale or missing,
+  every fresh session pays two failed v2 attempts before the breaker opens, and
+  the v1 fallback keeps chat working either way. The
+  `swanbotOpenSwanReadiness` telemetry gate remains the bar for declaring M4
+  *done* and starting M5's 30-day clock; rollback is one commit
+  (restore `=== 'true'`) or per-device `/v2 off`.

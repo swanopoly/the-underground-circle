@@ -19,9 +19,33 @@
  *      return `compressed: false` with the original messages — the
  *      caller proceeds with the uncompressed context rather than a
  *      corrupted one.
+ *   5. **Images are never stringified.** tool_result blocks may carry a
+ *      content ARRAY with Anthropic image blocks (P21 screenshot side
+ *      channel). Those count as a FIXED token estimate and are replaced
+ *      with the pruned-text marker before the summariser ever sees them —
+ *      a 200KB base64 payload must not become "compressed text".
  */
 
 import type { AgentMessage, AgentMessageContentBlock } from './agentExecutionCore';
+
+/**
+ * Marker text that replaces a pruned/compressed screenshot image block.
+ * Shared by `agentExecutionCore`'s live-image pruning (MAX_LIVE_IMAGES) and
+ * this module's pre-summariser image scrub. Defined HERE (the leaf module)
+ * because the core already imports this file — the reverse import would be
+ * a cycle.
+ */
+export const PRUNED_IMAGE_PLACEHOLDER_TEXT =
+  '[screenshot pruned to save context — re-take desktop.screenshot if you need a fresh look]';
+
+/**
+ * Fixed token estimate for one Anthropic image block. Screenshots land
+ * around ~1.1k tokens at typical desktop resolutions (Anthropic vision
+ * pricing ≈ w*h/750); a fixed constant keeps the threshold math stable and
+ * — critically — keeps a 100s-of-KB base64 string from being counted as
+ * ~50k TEXT tokens it will never cost.
+ */
+export const IMAGE_BLOCK_TOKEN_ESTIMATE = 1100;
 
 export interface CompressContextOptions {
   /** Fraction of `maxContextTokens` that triggers compression. Default 0.50. */
@@ -59,6 +83,7 @@ const MIN_DROP_COUNT = 4;  // not worth summarising fewer than this
  *  this for billing. */
 export function estimateMessagesTokens(messages: AgentMessage[]): number {
   let chars = 0;
+  let imageTokens = 0;
   for (const m of messages) {
     if (typeof m.content === 'string') {
       chars += m.content.length;
@@ -67,10 +92,57 @@ export function estimateMessagesTokens(messages: AgentMessage[]): number {
     for (const block of m.content) {
       if (block.type === 'text') chars += block.text.length;
       else if (block.type === 'tool_use') chars += JSON.stringify(block.input || {}).length + block.name.length + 32;
-      else if (block.type === 'tool_result') chars += block.content.length + 32;
+      else if (block.type === 'tool_result') {
+        if (typeof block.content === 'string') {
+          chars += block.content.length + 32;
+        } else {
+          // Content-array tool_result (P21 image side channel): text parts
+          // count by chars; each image block counts as a FIXED estimate —
+          // never via its base64 length (which would be ~50x too high).
+          chars += 32;
+          for (const part of block.content) {
+            if (part.type === 'text') chars += part.text.length;
+            else if (part.type === 'image') imageTokens += IMAGE_BLOCK_TOKEN_ESTIMATE;
+          }
+        }
+      }
     }
   }
-  return Math.ceil(chars / DEFAULT_CHARS_PER_TOKEN);
+  return Math.ceil(chars / DEFAULT_CHARS_PER_TOKEN) + imageTokens;
+}
+
+// ─── Image scrub (P21) ─────────────────────────────────────────────────────
+
+/**
+ * Returns a copy of `messages` where every image block inside a tool_result
+ * content array is replaced with the shared pruned-text marker. Copy-on-write
+ * and pure: untouched messages/blocks keep their original object identity and
+ * the input array is never mutated.
+ *
+ * Used on the summariser INPUT in `compressContextIfOversized` so an injected
+ * summariser (which typically stringifies messages into a prompt) can never
+ * see — let alone re-emit — a base64 payload. Compression output therefore
+ * carries the marker text, matching the core's live-image pruning marker.
+ */
+export function replaceToolResultImageBlocksWithMarkers(messages: AgentMessage[]): AgentMessage[] {
+  return messages.map((m) => {
+    if (typeof m.content === 'string') return m;
+    let changed = false;
+    const blocks = m.content.map((block) => {
+      if (block.type !== 'tool_result' || typeof block.content === 'string') return block;
+      if (!block.content.some((part) => part.type === 'image')) return block;
+      changed = true;
+      return {
+        ...block,
+        content: block.content.map((part) =>
+          part.type === 'image'
+            ? { type: 'text' as const, text: PRUNED_IMAGE_PLACEHOLDER_TEXT }
+            : part,
+        ),
+      };
+    });
+    return changed ? { ...m, content: blocks } : m;
+  });
 }
 
 // ─── Main entry point ──────────────────────────────────────────────────────
@@ -131,7 +203,10 @@ export async function compressContextIfOversized(
 
   let summary: string;
   try {
-    summary = (await opts.summariser(toCompress)).trim();
+    // P21: scrub image blocks to the marker BEFORE the summariser sees the
+    // messages — base64 payloads must never be stringified into a summary
+    // prompt (or echoed back into the compressed text).
+    summary = (await opts.summariser(replaceToolResultImageBlocksWithMarkers(toCompress))).trim();
   } catch {
     return {
       compressed: false,

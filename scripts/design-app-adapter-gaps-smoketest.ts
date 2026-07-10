@@ -56,7 +56,12 @@ const photoshopGapPlan = buildDesignAppAdapterGapPlan(photoshopTask);
 
 assert.equal(photoshopGapPlan?.appId, 'adobe_photoshop');
 assert(photoshopGapPlan?.gaps.some((gap) => gap.operation === 'generative_fill_or_remove'));
-assert(photoshopGapPlan?.gaps.some((gap) => gap.operation === 'edit_adjustment_layers'));
+// P15: adjustment layers, selection/mask, and resize are SHIPPED ExtendScript
+// adapters — they must never be filed as gaps again.
+assert(!photoshopGapPlan?.gaps.some((gap) => gap.operation === 'edit_adjustment_layers'),
+  'edit_adjustment_layers is a shipped adapter, not a gap');
+assert(!photoshopGapPlan?.gaps.some((gap) => gap.operation === 'apply_selection_or_mask'),
+  'apply_selection_or_mask is a shipped adapter, not a gap');
 assert(photoshopGapPlan?.sourceRefs.some((ref) => ref.url.includes('/photoshop/uxp/scripting/')));
 assert(photoshopGapPlan?.sourceRefs.some((ref) => ref.url.includes('/executeasmodal/')));
 assert(photoshopGapPlan?.sourceRefs.some((ref) => ref.url.includes('/batchplay/')));
@@ -71,10 +76,29 @@ assert(generativeGap?.requiredEvidence.some((item) => item.includes('selection/m
 assert(generativeGap?.focusedSmokeCases.some((item) => item.includes('selection or mask')));
 assert(generativeGap?.failClosedRules.some((item) => item.includes('executeAsModal')));
 
-const adjustmentGap = photoshopGapPlan?.gaps.find((gap) => gap.operation === 'edit_adjustment_layers');
-assert(adjustmentGap?.missingBridgeTools.includes('desktop.photoshop_apply_adjustment_layer'));
-assert(adjustmentGap?.requiredEvidence.some((item) => item.includes('adjustment descriptor')));
-assert(adjustmentGap?.failClosedRules.some((item) => item.includes('blind sliders')));
+// P15 shipped-adapter runbook bindings (same pattern as layer-state above).
+{
+  const psRunbooks = buildDesignAppOperationRunbookPlan(photoshopTask);
+  const adjustmentRunbook = psRunbooks?.runbooks.find((runbook) => runbook.operation === 'edit_adjustment_layers');
+  assert(adjustmentRunbook?.steps.some((step) => step.tool === 'desktop.photoshop_apply_adjustment_layer'),
+    'adjustment runbook acts through the shipped adapter');
+  assert(!adjustmentRunbook?.steps.some((step) => (step.tool || '').includes('agent.build_app_capability')),
+    'adjustment runbook no longer routes to capability buildout');
+  const maskRunbook = psRunbooks?.runbooks.find((runbook) => runbook.operation === 'apply_selection_or_mask');
+  if (maskRunbook) {
+    assert(maskRunbook.steps.some((step) => step.tool === 'desktop.photoshop_apply_selection_or_mask'),
+      'selection/mask runbook acts through the shipped adapter');
+  }
+  const resizeTask = 'Open this Photoshop PSD and resize the image to 1200x800 px.';
+  const resizeRunbooks = buildDesignAppOperationRunbookPlan(resizeTask);
+  const resizeRunbook = resizeRunbooks?.runbooks.find((runbook) => runbook.operation === 'resize_layout');
+  if (resizeRunbook) {
+    assert(resizeRunbook.steps.some((step) => step.tool === 'desktop.photoshop_resize_canvas_or_image'),
+      'photoshop resize runbook acts through the shipped geometry adapter');
+    assert(resizeRunbook.failClosedConditions.some((item) => item.includes('active selection')),
+      'crop without selection fails closed');
+  }
+}
 
 const promptBlock = buildDesignAppAdapterGapPromptBlock(photoshopTask) || '';
 assert(promptBlock.includes('Design App Adapter Gap Contracts'));
@@ -96,8 +120,9 @@ const layerEffectsGap = psEffectsGap?.gaps.find((gap) => gap.operation === 'appl
 assert(layerEffectsGap?.missingBridgeTools.includes('desktop.photoshop_apply_layer_effects'), 'PS layer effects → adapter gap');
 assert(layerEffectsGap?.requiredBridgeToolsBeforeRetry.includes('desktop.photoshop_layer_inventory'));
 assert(layerEffectsGap?.controlSurface.includes('batchPlay'));
-const manageLayersGap = psEffectsGap?.gaps.find((gap) => gap.operation === 'manage_layers');
-assert(manageLayersGap?.missingBridgeTools.includes('desktop.photoshop_manage_layers'), 'PS layer CRUD → adapter gap');
+// P16: manage_layers shipped (rename/duplicate/reorder/group) — no gap filed.
+assert(!psEffectsGap?.gaps.some((gap) => gap.operation === 'manage_layers'),
+  'manage_layers is a shipped adapter, not a gap');
 assert(psEffectsGap?.sourceRefs.some((ref) => ref.url.includes('/batchplay/')));
 
 const idStylePagesTask = 'Open this InDesign file, apply the Heading paragraph style to the title, and add two pages with master B applied.';
@@ -118,22 +143,31 @@ const pagesRunbook = idStyleRunbooks?.runbooks.find((r) => r.operation === 'mana
 assert.equal(pagesRunbook?.risk, 'high');
 assert(pagesRunbook?.adapterGap?.adapterId === managePagesGap?.adapterId, 'manage_pages runbook wires its gap contract');
 const effectsRunbooks = buildDesignAppOperationRunbookPlan(psEffectsTask);
-assert.equal(effectsRunbooks?.runbooks.find((r) => r.operation === 'manage_layers')?.risk, 'high');
+const manageLayersRunbook = effectsRunbooks?.runbooks.find((r) => r.operation === 'manage_layers');
+assert.equal(manageLayersRunbook?.risk, 'high');
+assert(manageLayersRunbook?.steps.some((step) => step.tool === 'desktop.photoshop_manage_layers'),
+  'manage_layers runbook acts through the shipped adapter');
+assert(manageLayersRunbook?.failClosedConditions.some((item) => /delete\/merge\/flatten/.test(item)),
+  'destructive layer ops stay fail-closed');
 assert(effectsRunbooks?.runbooks.some((r) => r.operation === 'apply_layer_effects'));
 
 // ── Tier-3 batch 2: PS transform/color-mode, ID tables/font resolution ─────
+// P16: transform_layer + convert_color_mode shipped — no gaps; runbooks bind the tools.
 const psTransformTask = 'Open this Photoshop PSD and rotate the logo layer 90 degrees, then flip it horizontally.';
-const transformGap = buildDesignAppAdapterGapPlan(psTransformTask)?.gaps.find((gap) => gap.operation === 'transform_layer');
-assert(transformGap?.missingBridgeTools.includes('desktop.photoshop_transform_layer'), 'PS transform → adapter gap');
-assert(transformGap?.controlSurface.includes('batchPlay'));
-assert(transformGap?.requiredBridgeToolsBeforeRetry.includes('desktop.photoshop_layer_inventory'));
-assert.equal(buildDesignAppOperationRunbookPlan(psTransformTask)?.runbooks.find((r) => r.operation === 'transform_layer')?.risk, 'high');
+assert(!buildDesignAppAdapterGapPlan(psTransformTask)?.gaps.some((gap) => gap.operation === 'transform_layer'),
+  'transform_layer is a shipped adapter, not a gap');
+const transformRunbook = buildDesignAppOperationRunbookPlan(psTransformTask)?.runbooks.find((r) => r.operation === 'transform_layer');
+assert.equal(transformRunbook?.risk, 'high');
+assert(transformRunbook?.steps.some((step) => step.tool === 'desktop.photoshop_transform_layer'),
+  'transform runbook acts through the shipped adapter');
 
 const psColorTask = 'Open this PSD and convert it to CMYK color mode for print.';
-const colorModeGap = buildDesignAppAdapterGapPlan(psColorTask)?.gaps.find((gap) => gap.operation === 'convert_color_mode');
-assert(colorModeGap?.missingBridgeTools.includes('desktop.photoshop_convert_color_mode'), 'PS color-mode → adapter gap');
-assert(colorModeGap?.requiredEvidence.some((item) => item.includes('color mode/profile')));
-assert.equal(buildDesignAppOperationRunbookPlan(psColorTask)?.runbooks.find((r) => r.operation === 'convert_color_mode')?.risk, 'high');
+assert(!buildDesignAppAdapterGapPlan(psColorTask)?.gaps.some((gap) => gap.operation === 'convert_color_mode'),
+  'convert_color_mode is a shipped adapter, not a gap');
+const colorRunbook = buildDesignAppOperationRunbookPlan(psColorTask)?.runbooks.find((r) => r.operation === 'convert_color_mode');
+assert.equal(colorRunbook?.risk, 'high');
+assert(colorRunbook?.steps.some((step) => step.tool === 'desktop.photoshop_convert_color_mode'),
+  'color-mode runbook acts through the shipped adapter');
 
 const idTableTask = 'Open this InDesign file and create a 4x3 pricing table, then merge the header cells.';
 const tablesGap = buildDesignAppAdapterGapPlan(idTableTask)?.gaps.find((gap) => gap.operation === 'manage_tables');

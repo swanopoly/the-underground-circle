@@ -95,7 +95,9 @@ import RunCostDrawer from './chat/RunCostDrawer';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
 import { createStagedFile, getSignedUrl, revokeStagedPreviews, uploadAttachment, type StagedFile } from '../../../lib/chatAttachments';
-import { soulKeyForProfile, resolveModelForProfile } from '../../../lib/serviceProfileSouls';
+import { soulKeyForProfile, resolveModelForProfile, explainAutoModelChoice, spiritIdForProfile } from '../../../lib/serviceProfileSouls';
+import BestOfNResultCard from '../../../components/BestOfNResultCard';
+import type { PersistedBestOfNRace } from '../../../lib/persistedChatMetadata';
 import { canUseAnthropicChatStream } from '../../../lib/blackswanRouting';
 import { analyzeMessageRouting } from '../../../lib/messageRouting';
 import { dispatchBridgeTask, sendTerminalAgentSessionMessage, wakeAndAssignTask } from '../../../lib/bridgeTaskDispatcher';
@@ -146,9 +148,43 @@ import DesktopBridgeStatusChip from '../../../components/DesktopBridgeStatusChip
 import WebSearchStatusChip from '../../../components/WebSearchStatusChip';
 import RunApprovalBanner from '../../../components/RunApprovalBanner';
 import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
+import ChatAttentionStrip from '../../../components/ChatAttentionStrip';
+import ToolCallCheckpointStrip from '../../../components/ToolCallCheckpointStrip';
+import ChatComputerFindingsCard from '../../../components/ChatComputerFindingsCard';
+import ChatMemoryAttributionRow from '../../../components/ChatMemoryAttributionRow';
+import ComputerTaskSteeringBar from '../../../components/ComputerTaskSteeringBar';
+import { useComputerTaskScheduleRunner } from '../../../lib/computerTaskScheduleRunner';
+import {
+  isOpenSwanSteeringScopeActive,
+  pushOpenSwanSteeringNote,
+} from '../../../lib/openswanSteering';
+import {
+  BLACKSWAN_ENDPOINT_MODEL_ID,
+  isLocalOllamaBlackSwan,
+  looksLikeAppGroundedMessage,
+  resolveComputerTaskPlannerModel,
+} from '../../../lib/blackswanRouting';
+import {
+  buildChatAttentionState,
+  resolveApprovalExpiresAt,
+  type ChatAttentionAction,
+  type ChatAttentionItem,
+} from '../../../lib/chatAttentionQueue';
+import {
+  formatChatUserFacingOutcome,
+  providerBlockerFromFailure,
+  translateChatFailure,
+} from '../../../lib/chatUserFacingOutcomes';
+import {
+  buildRoomHandoffSeedMessage,
+  detectRoomHandoffSuggestion,
+} from '../../../lib/chatRoomHandoff';
 import RecordingBadge from '../../../components/RecordingBadge';
 import { useComputerUseTask } from '../../../lib/useComputerUseTask';
-import { resolveComputerUseConfirmation } from '../../../lib/computerUseConfirmations';
+import { resolveComputerUseConfirmation, sendComputerUseSteeringNote } from '../../../lib/computerUseConfirmations';
+import { decideBrowserAutoStart } from '../../../lib/computerTaskAutoStart';
+import { matchBookingFollowup, type BookingFollowupLastRun } from '../../../lib/computerTaskFollowup';
+import { computerFindingsMetadata, type PersistedComputerFindings } from '../../../lib/persistedChatMetadata';
 import { buildAgentMonitorTaskFromComputerUseState } from '../../../lib/agentMonitorState';
 import {
   getMatchingChatSlashCommands,
@@ -162,12 +198,16 @@ import ChatBuildStudio from './chat/ChatBuildStudioV2';
 import ChatBotIdentityRow from '../../../components/chat/ChatBotIdentityRow';
 import CodingWorkbenchPreview from '../../../components/chat/CodingWorkbenchPreview';
 import ChatInlineRichText from '../../../components/chat/ChatInlineRichText';
+import ChatMessageDetailsDisclosure from '../../../components/chat/ChatMessageDetailsDisclosure';
+import AgentReceiptCard from '../../../components/AgentReceiptCard';
+import { buildAgentReceipt, shouldRenderReceipt } from '../../../lib/agentReceipt';
 import RunExecutionCard from '../../../components/chat/RunExecutionCard';
 import RunHistoryDrawer from '../../../components/chat/RunHistoryDrawer';
 import ChatSlashCommandPalette from '../../../components/chat/ChatSlashCommandPalette';
 import { buildOpenSwanExecutionStream, type OpenSwanExecutionContract } from '../../../lib/openswanExecution';
 import {
   clearChatAgentAvatar,
+  formatPersistedChatBotMessage,
   getChatAgentAvatarSource,
   isPersistedChatBotMessage,
   loadChatAgentAvatar,
@@ -178,14 +218,23 @@ import {
   saveChatAgentAvatar,
   saveChatAgentName,
   saveLastThreadBuildArtifact,
+  stripPersistedChatBotPrefix,
+  type PersistedChatBotMetadata,
   type PersistedChatRecoveryReliabilitySummary,
 } from '../../../lib/chatAgentIdentity';
+import {
+  deriveOutcomeVerdict,
+  mapReactionToSignal,
+  type ChatOutcomeVerdict,
+  type ChatUserSignal,
+} from '../../../lib/chatOutcomeSignals';
 import {
   buildChatInfluenceReferences,
   persistMainChatBotMessageWithRetry,
   updateMainChatBotMessageWithRetry,
 } from '../../../lib/chatAgentService';
 import { buildChatAutomationPlan, type ChatAutomationPlan } from '../../../lib/chatAutomationPlanner';
+import { UNIFIED_CONVERSATIONAL_INTENT_TYPES } from '../../../lib/chatConversationalCutoverParity';
 import { buildChatAutomationPlanPreview, type ChatAutomationPlanPreview } from '../../../lib/chatAutomationPlanPreview';
 import { createHitlApprovalGate } from '../../../lib/chatApprovalGate';
 import { recallForClarification, reconstructClarificationAnswer } from '../../../lib/chatGapFill';
@@ -200,6 +249,13 @@ import {
   isQuietSuccessfulComputerTaskWarning,
 } from '../../../lib/chatComputerOutcomeUx';
 import { buildChatComputerRequestUserNotice } from '../../../lib/chatComputerRequestUx';
+import { isCredentialedWebsiteAdminRoute } from '../../../lib/chatComputerRequestRouter';
+import {
+  deserializeChatFailureLedger,
+  deserializeLastAppResolution,
+  serializeChatFailureLedger,
+  serializeLastAppResolution,
+} from '../../../lib/chatSessionStatePersistence';
 import type { ComputerTaskEvidenceContract } from '../../../lib/computerTaskEvidenceContract';
 import { buildChatDesignTaskCardModel } from '../../../lib/chatDesignTaskCard';
 import {
@@ -240,6 +296,7 @@ import {
   loadCircleChatMembers,
   loadThreadMessages,
   persistChatMessage,
+  updateChatMessageContent,
 } from '../../../lib/chatService';
 import {
   FEATURED_QUICK_ACTIONS,
@@ -659,6 +716,14 @@ function mapPersistedRowsToChatMessages(
       recoveryReliability: metadata?.recoveryReliability || undefined,
       computerHandoff: metadata?.computerHandoff || undefined,
       chatAutomationPlanPreview: metadata?.chatAutomationPlanPreview || undefined,
+      computerFindings: metadata?.computerFindings || undefined,
+      bestOfN: (metadata as any)?.bestOfN || undefined,
+      // WI-4/WI-11: rebuild the "Book option N" quick-reply chips on reload so
+      // they survive persistence (the pending-record path carries live
+      // quickReplies already). Label must match the live builder exactly.
+      quickReplies: metadata?.computerFindings?.items?.length
+        ? metadata.computerFindings.items.map((_, i) => `Book option ${i + 1}`)
+        : undefined,
       routing: metadata?.routing || undefined,
       ...deriveChatActivityFlags(row.content),
     };
@@ -821,6 +886,15 @@ type ChatMessage = {
   computerHandoff?: ChatComputerHandoffMetadata;
   chatAutomationPlanPreview?: ChatAutomationPlanPreview | null;
   computerPreflightBlockers?: { task: string; items: PreflightBlockerItem[] };
+  /** Structured browser-run findings (bounded) persisted on the completion
+   *  message so "book option N" follow-ups can resolve durably after reload. */
+  computerFindings?: PersistedComputerFindings | null;
+  /** Best-of-N race results (bounded) — interactive adopt/race-again card. */
+  bestOfN?: PersistedBestOfNRace | null;
+  /** Flywheel telemetry (Cursor-Tab precedent): machine-derived outcome
+   *  verdict + the user's accept/reject/edit-resend/steer signal, persisted as
+   *  tiny enums so it becomes BlackSwan training data. See chatOutcomeSignals. */
+  outcomeSignal?: { verdict: ChatOutcomeVerdict; signal?: ChatUserSignal; lane?: string; model?: string } | null;
   quickReplies?: string[];    // tappable suggested replies (e.g. clarification answers)
   delegatedTo?: string;       // subagent that handled this message
   delegatedSubagents?: string[];
@@ -864,6 +938,8 @@ type ChatBotMessageExtra = {
   computerHandoff?: ChatComputerHandoffMetadata;
   chatAutomationPlanPreview?: ChatAutomationPlanPreview | null;
   computerPreflightBlockers?: { task: string; items: PreflightBlockerItem[] };
+  computerFindings?: PersistedComputerFindings | null;
+  bestOfN?: PersistedBestOfNRace | null;
   quickReplies?: string[];
   localOnly?: boolean;
   runId?: string | null;
@@ -953,8 +1029,13 @@ function buildMessageRouteChips(message: ChatMessage): ChatMessageRouteChip[] {
   const provider = source.provider || message.routing?.provider_routed || null;
   const localExecution = isLocalExecutionSource(source, effectiveModel);
   if (localExecution) return [];
+  // P22: prefer the handoff's true surface for the displayed Route so a
+  // desktop/app task doesn't read "browser". Display-only — nothing about
+  // routing/executor selection changes.
+  const routeValue = formatHandoffSurfaceRouteLabel(message.computerHandoff)
+    || formatRouteSurfaceLabel(source.surface);
   const chips: ChatMessageRouteChip[] = [
-    { label: 'Route', value: formatRouteSurfaceLabel(source.surface), tone: localExecution ? 'local' : 'route' },
+    { label: 'Route', value: routeValue, tone: localExecution ? 'local' : 'route' },
   ];
 
   if (selectedModel) {
@@ -1076,6 +1157,50 @@ function formatRecoveryEvidenceLabel(value: string): string {
     .replace(/[_:]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// P22: display-only route/surface label for computer/desktop/app-task
+// messages. The plan preview's `routeLabel` is hardcoded 'browser' for the
+// forced computer-task path (and the preview smoke locks that value), so we
+// derive a surface-accurate label from the handoff metadata for DISPLAY only —
+// executor selection still keys off the unchanged routeId.
+function formatHandoffSurfaceRouteLabel(
+  handoff?: ChatComputerHandoffMetadata | null,
+): string | null {
+  switch (handoff?.surface) {
+    case 'desktop':
+      return 'Desktop app';
+    case 'local_files':
+      return 'Local files';
+    case 'browser':
+      return 'Browser';
+    case 'computer':
+      return 'Computer';
+    default:
+      return null;
+  }
+}
+
+// P22: the one always-visible compact summary line for a computer/desktop/
+// app-task message. Prefers the concise user-facing notice summary the route
+// already produced, then the app-choice ("Using <app> · <surface>"), then the
+// first sentence of the body. Bounded so the collapsed row stays one glance.
+function buildComputerTaskSummaryLine(args: {
+  handoff?: ChatComputerHandoffMetadata | null;
+  appChoiceCard: { selectedAppName: string; surfaceLabel: string } | null;
+  body: string;
+}): string {
+  const notice = args.handoff?.requestNotice;
+  const noticeSummary = String(notice?.summary || '').replace(/\s+/g, ' ').trim();
+  const appLine = args.appChoiceCard
+    ? `Using ${args.appChoiceCard.selectedAppName} · ${args.appChoiceCard.surfaceLabel}`
+    : '';
+  const firstSentence = String(args.body || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(/(?<=[.!?])\s/)[0] || '';
+  const base = noticeSummary || appLine || firstSentence || 'Computer task';
+  return base.length > 140 ? `${base.slice(0, 139)}…` : base;
 }
 
 function getRecoveryReliabilityStatus(summary?: PersistedChatRecoveryReliabilitySummary | null): {
@@ -1204,6 +1329,23 @@ function findLatestRecoveryOptionsMessage(messages: ChatMessage[]): ChatMessage 
     if (message.isBot && message.recoveryOptions && message.recoveryOptions.length > 0) {
       return message;
     }
+  }
+  return null;
+}
+
+// Receipt Retry affordance: the user prompt that immediately preceded a bot
+// message, so "Retry" on its receipt re-sends the exact original request. Pure
+// and bounded (returns the text or null; slash-commands are skipped so retry
+// never re-fires a command).
+function findPriorUserPromptForMessage(messages: ChatMessage[], botMessageId: string): string | null {
+  const botIndex = messages.findIndex((message) => message.id === botMessageId);
+  if (botIndex < 0) return null;
+  for (let index = botIndex - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message.isUser) continue;
+    const text = (message.content || '').trim();
+    if (!text || text.startsWith('/')) return null;
+    return text.slice(0, 4000);
   }
   return null;
 }
@@ -1593,7 +1735,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // each call so a freshly-typed message gets routed by its own intent
   // (not the previous turn's). Returns the original pick when not auto.
   const resolveSendModel = useCallback((messageText: string): string | null => {
-    if (selectedModel !== 'auto') return selectedModel;
+    if (selectedModel !== 'auto') {
+      // P8 hard rule: the retired local-Ollama BlackSwan normalizes to the
+      // one real BlackSwan — cswan801/BlackSwan-v5 on the dedicated endpoint.
+      return isLocalOllamaBlackSwan(selectedModel) ? BLACKSWAN_ENDPOINT_MODEL_ID : selectedModel;
+    }
     try {
       const draft = (messageText || '').trim();
       const route = draft.length > 0
@@ -1608,6 +1754,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         route?.intent,
         providerSetForTurn,
         route?.complexity,
+        // P8: app-domain questions can route to the app-trained BlackSwan.
+        { appGroundedHint: looksLikeAppGroundedMessage(draft) },
+        // P27: raw message → BlackSwan reliability guard escalates the hard
+        // subset of the grounded lane (multi-step/technical/ambiguous) to frontier.
+        draft,
       );
     } catch {
       return null;
@@ -1629,7 +1780,40 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         route?.intent,
         providerSetForTurn,
         route?.complexity,
+        // P8: app-domain questions can route to the app-trained BlackSwan.
+        { appGroundedHint: looksLikeAppGroundedMessage(draft) },
+        // P27: raw message → BlackSwan reliability guard escalates the hard
+        // subset of the grounded lane (multi-step/technical/ambiguous) to frontier.
+        draft,
       );
+    } catch {
+      return null;
+    }
+  }, [selectedModel, input, sessionProfile, connectedProviderSet]);
+  // P11 transparency: WHY Auto picked that model — Cursor shows the id, we
+  // show the reason ("app question → app-trained BlackSwan"). Anti-drift
+  // matrix in smoke:blackswan-auto-routing guarantees this explainer can
+  // never disagree with the real router.
+  const autoModelReason = useMemo(() => {
+    if (selectedModel !== 'auto') return null;
+    try {
+      const draft = (input || '').trim();
+      const route = draft.length > 0
+        ? analyzeMessageRouting(draft, 'main_chat').route
+        : null;
+      const providerSetForTurn = looksLikeActionRequest(draft)
+        ? new Set(Array.from(connectedProviderSet).filter((p) => p !== 'blackswan'))
+        : connectedProviderSet;
+      return explainAutoModelChoice(
+        spiritIdForProfile((sessionProfile as any) || 'senior'),
+        null,
+        route?.intent,
+        route?.complexity,
+        undefined,
+        undefined,
+        providerSetForTurn,
+        { appGroundedHint: looksLikeAppGroundedMessage(draft) },
+      ).reason;
     } catch {
       return null;
     }
@@ -1713,6 +1897,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [agentNameDraft, setAgentNameDraft] = useState('');
   const [agentAvatarUri, setAgentAvatarUri] = useState<string | null>(null);
   const pendingHitlApprovals = useAgentApprovals(circleId);
+  // "Needs you" attention strip state (plan §1b/§1c/§2b). Declared up here —
+  // ahead of sendMessage and the persistence effects that reference the
+  // setters — while the derived attention state is computed just before the
+  // main return where all inputs exist.
+  const [attentionProviderBlocker, setAttentionProviderBlocker] =
+    useState<{ provider: string; reason: string } | null>(null);
+  const [dismissedAttentionIds, setDismissedAttentionIds] = useState<Set<string>>(new Set());
+  const [, setAttentionTick] = useState(0);
+  // Latest memory-bank checkpoint → live Restore strip above the composer
+  // (plan §2c; the id previously appeared only as prose).
+  const [latestMemoryCheckpointId, setLatestMemoryCheckpointId] = useState<string | null>(null);
+  // The Restore strip is per-conversation context — clear it on thread
+  // switch so thread A's checkpoint never floats above thread B (P12).
+  useEffect(() => { setLatestMemoryCheckpointId(null); }, [activeThreadId]);
+  // Room handoff (plan §4c): dismissible per-thread suggestion when the
+  // conversation turns into multi-file project work.
+  const [dismissedRoomHandoffThreads, setDismissedRoomHandoffThreads] = useState<Set<string>>(new Set());
+  const [roomHandoffBusy, setRoomHandoffBusy] = useState(false);
+  // Recurring watches (plan §6a): while chat is open, due watches run
+  // headless and post diff-only updates to their originating thread. The
+  // runner is fail-soft (missing table / creds → silent skip) and never
+  // grants approvals — watch tasks are floor-checked read-only at create.
+  useComputerTaskScheduleRunner({ circleId, userId: currentUserId, enabled: !!circleId });
   const chatAutomationApprovalGate = useMemo(() => createHitlApprovalGate({
     sessionKey: activeThreadId ? `chat::${activeThreadId}` : `chat::${circleId}`,
     agentName,
@@ -1775,6 +1982,27 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // Wave-2 task→app resolution: the last route's app choice, kept so a
   // follow-up "use Pixelmator instead" can record a category preference.
   const lastAppResolutionRef = useRef<import('../../../lib/chatComputerRequestRouter').ChatComputerAppResolution | null>(null);
+  // The transient last-route pointer survives reload so a "use X instead" sent
+  // as the FIRST message after a refresh still has the previous resolution to
+  // diff against (the durable per-category preference persists separately). A
+  // bounded, JSON-safe single-slot mirror — hydrated once per circle.
+  const lastAppResolutionStorageKey = circleId ? `uc_last_app_resolution::${circleId}` : null;
+  const persistLastAppResolution = useCallback(() => {
+    if (!lastAppResolutionStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const serialized = serializeLastAppResolution(lastAppResolutionRef.current);
+      if (serialized === null) localStorage.removeItem(lastAppResolutionStorageKey);
+      else localStorage.setItem(lastAppResolutionStorageKey, serialized);
+    } catch { /* quota — last-route pointer is best-effort */ }
+  }, [lastAppResolutionStorageKey]);
+  useEffect(() => {
+    if (!lastAppResolutionStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const restored = deserializeLastAppResolution(localStorage.getItem(lastAppResolutionStorageKey));
+      if (restored && !lastAppResolutionRef.current) lastAppResolutionRef.current = restored;
+    } catch { /* corrupt state — start clean */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastAppResolutionStorageKey]);
   const [pendingCapabilityBuildoutNotice, setPendingCapabilityBuildoutNotice] = useState<{
     key: string;
     task: string;
@@ -1789,9 +2017,49 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     [computerUseTask.state],
   );
   const computerUsePostedKeyRef = useRef<string | null>(null);
+  // Idempotency key for the mirrored mid-run confirmation chat bubble so a
+  // single pay/book confirmation posts exactly once (StrictMode-safe).
+  const computerConfirmPostedKeyRef = useRef<string | null>(null);
   const capabilityAutoRetryKeyRef = useRef<string | null>(null);
   const capabilityBuildoutNoticeKeyRef = useRef<string | null>(null);
   const chatFailureRecoveryLedgerRef = useRef<Map<string, ChatFailureRecoveryLedgerEntry>>(new Map());
+  // Duplicate-handoff suppression survives reload. Bounded localStorage mirror
+  // of the ledger — hydrated once per circle, pruned to the same 60-minute
+  // retention / 64-entry cap the runtime enforces, so a reload-to-retry can't
+  // reset the suppression window and fire a redundant recovery handoff the
+  // ledger already saw. Entries are tiny (five numeric fields).
+  const failureLedgerStorageKey = circleId ? `uc_chat_failure_ledger::${circleId}` : null;
+  const persistChatFailureLedger = useCallback(() => {
+    if (!failureLedgerStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const serialized = serializeChatFailureLedger(
+        chatFailureRecoveryLedgerRef.current.entries(),
+        Date.now(),
+        CHAT_FAILURE_RECOVERY_LEDGER_RETENTION_MS,
+        CHAT_FAILURE_RECOVERY_LEDGER_MAX,
+      );
+      if (serialized === null) localStorage.removeItem(failureLedgerStorageKey);
+      else localStorage.setItem(failureLedgerStorageKey, serialized);
+    } catch { /* quota — suppression ledger is best-effort */ }
+  }, [failureLedgerStorageKey]);
+  useEffect(() => {
+    if (!failureLedgerStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const raw = localStorage.getItem(failureLedgerStorageKey);
+      const bounded = deserializeChatFailureLedger(
+        raw,
+        Date.now(),
+        CHAT_FAILURE_RECOVERY_LEDGER_RETENTION_MS,
+        CHAT_FAILURE_RECOVERY_LEDGER_MAX,
+      );
+      for (const [fingerprint, entry] of bounded) {
+        if (!chatFailureRecoveryLedgerRef.current.has(fingerprint)) {
+          chatFailureRecoveryLedgerRef.current.set(fingerprint, entry);
+        }
+      }
+    } catch { /* corrupt state — start clean */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failureLedgerStorageKey]);
   // Use Computer console — the pop-up that collects the task before
   // planning. Opens from the Quick Actions "Use Computer" chip and from
   // the __COMPUTER_USE__ slash action.
@@ -2196,6 +2464,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const oldestKey = Array.from(ledger.entries()).sort((a, b) => a[1].lastAt - b[1].lastAt)[0]?.[0];
         if (oldestKey) ledger.delete(oldestKey);
       }
+      persistChatFailureLedger();
 
       const recovery = await startChatFailureRecovery({
         ...baseRecoveryInput,
@@ -2208,6 +2477,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         ...ledgerEntry,
         lastSuccessfulHandoffAt: recovery.recovery.ok ? now : ledgerEntry.lastSuccessfulHandoffAt,
       });
+      persistChatFailureLedger();
       recordSessionArchiveEvent({
         kind: 'tool',
         summary: recovery.archiveSummary,
@@ -2461,6 +2731,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const computerTaskModel = selectedModel !== 'auto'
       ? selectedModel
       : (businessModelPickerId || resolveSendModel(trimmed) || undefined);
+    // Composer-pattern split (P9): on Auto, the app-trained BlackSwan plans
+    // the browser/app task (it knows the app's sites, pipelines, and
+    // vocabulary) while the runtime keeps computerTaskModel — and the
+    // native screen loop keeps its Sonnet pin regardless. Explicit picks
+    // plan with the picked model.
+    const computerTaskPlannerModel =
+      resolveComputerTaskPlannerModel(selectedModel, connectedProviderSet) || computerTaskModel;
     const groundingState = buildComputerTaskGroundingStateFromExecution(execution);
     const groundingNextSteps = groundingState?.nextAction
       ? [`Grounding next action: ${groundingState.nextAction}`]
@@ -2617,6 +2894,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     // instead" can record the user's preferred app for the category.
     if (computerPlan.computerRequestRoute) {
       lastAppResolutionRef.current = computerPlan.computerRequestRoute.appResolution ?? null;
+      persistLastAppResolution();
     }
     const computerEvidenceContract = computerPlan.computerRequestRoute?.evidenceContract || null;
     const computerAppRouteDecision = computerPlan.computerRequestRoute?.appAutomationRouteDecision || execution.preflight.routeDecision || null;
@@ -2648,6 +2926,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         preflightSummary: details.preflightSummary,
         complexityPlan: details.complexityPlan || execution.complexityPlan,
       });
+      // W5/X1 (P45): every computer-task terminal (all three call sites
+      // funnel here) is classified through the unified lane boundary and the
+      // two-axis signal rides the recovery archive tags. Telemetry only —
+      // the evidence-recovery flow stays authoritative.
+      let laneTags: string[] = [];
+      try {
+        const { normalizeThrownError, buildChatLaneOutcomeTags, summarizeChatLaneOutcomeForTelemetry } =
+          await import('../../../lib/chatLaneOutcome');
+        const laneOutcome = normalizeThrownError('computer_task', details.failureMessage);
+        laneTags = buildChatLaneOutcomeTags(laneOutcome);
+        console.warn('[ChatTab] lane terminal:', JSON.stringify(summarizeChatLaneOutcomeForTelemetry(laneOutcome)));
+        // X7 (P48): registry + degradation-scope tags.
+        const { recordChatLaneOutcomeNow, buildChatLaneHealthTags } =
+          await import('../../../lib/chatLaneHealthRegistry');
+        recordChatLaneOutcomeNow(laneOutcome);
+        laneTags = [...laneTags, ...buildChatLaneHealthTags('computer_task', Date.now())];
+      } catch {}
       return startMainChatFailureRecoveryPayload({
         task: trimmed,
         failureMessage: details.failureMessage,
@@ -2670,6 +2965,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           (details.evidenceContract || computerEvidenceContract)?.targetName
             ? `evidence_contract:${(details.evidenceContract || computerEvidenceContract)?.targetName}`
             : '',
+          ...laneTags,
         ].filter(Boolean),
       });
     };
@@ -2817,12 +3113,42 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         handlers: {
           run_computer_task: async () => {
             if (execution.entrypoint === 'browser_runtime') {
+              // P57: browser-lane parity for the P54 model-driven one-shot
+              // clarifier (the app/file/hybrid lane gets it inside
+              // executeComputerTaskWithAgent; this lane bypasses that
+              // runtime). Fail-open by contract — null means proceed.
+              try {
+                const { runComputerTaskClarifierCheck } = await import('../../../lib/computerTaskRuntime');
+                const clarification = await runComputerTaskClarifierCheck({
+                  task: trimmed,
+                  circleId,
+                  userId: currentUserId || '',
+                  executionSummary: `browser · ${execution.preview.label}`,
+                  isLaunchOnly: false,
+                });
+                if (clarification) {
+                  return {
+                    executionKind: 'run_computer_task',
+                    status: 'needs_input',
+                    message: clarification.message,
+                    data: {
+                      adapterId: 'browser_adapter',
+                      clarification: {
+                        questions: clarification.questions,
+                        assumptions: clarification.assumptions,
+                      },
+                    },
+                  };
+                }
+              } catch { /* fail-open — proceed to planning */ }
               const plan = await describeComputerUsePlan({
                 task: trimmed,
                 circleId,
                 agentName,
                 userId: currentUserId || undefined,
-                model: computerTaskModel,
+                // P9: text-only planning may use the app-trained planner;
+                // the screen loop keeps its Sonnet pin downstream.
+                model: computerTaskPlannerModel,
                 planningContext: execution.dispatchPrefix,
                 computerAppPreflight: execution.preflight,
                 computerAppGroundingTrace: execution.computerAppGroundingTrace,
@@ -3204,6 +3530,79 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const handoffBlock = formatChatComputerHandoffForMessage(handoffContext);
       let shouldShowPendingHandoff = Boolean(handoff);
       let shouldClearPendingHandoff = false;
+      // WI-1: zero-tap auto-start. A plain-web browser route with no login/
+      // delete/grant floor and no "ask me first" constraint launches without
+      // the permission dialog. The pay/book floor (route.alwaysConfirmFloor may
+      // carry 'pay') is a MID-RUN gate enforced by the edge loop, so it does
+      // not block the start tap here. WordPress/website-admin credentialed
+      // routes and desktop mutations still fail closed to the dialog.
+      const autoStartRoute = computerPlan.computerRequestRoute;
+      const browserAutoStart = (browserPlan && browserActions && autoStartRoute)
+        ? decideBrowserAutoStart({
+            routeKind: autoStartRoute.kind,
+            entrypoint: execution.entrypoint,
+            alwaysConfirmFloor: autoStartRoute.alwaysConfirmFloor ?? null,
+            userConstraints: autoStartRoute.userConstraints ?? null,
+            websitePlatformAdmin: isCredentialedWebsiteAdminRoute(autoStartRoute.appStrategy ?? null, trimmed),
+          })
+        : { autoStart: false as const, reason: 'no-browser-plan' };
+      if (browserPlan && browserActions && browserAutoStart.autoStart) {
+        // Auto-start: run the dialog's onAllow body inline (including the
+        // grantComputerTaskScopes / recordStickyAllowScopeUse persistence that
+        // otherwise only fires from the dialog) then launch immediately.
+        // browserAutoStart.reason is secret-safe — log for audit only.
+        console.log('[ChatTab] browser auto-start:', browserAutoStart.reason);
+        const autoPermission: ComputerUsePermission = browserPlan.recommendedPermission || 'ask_for_new_sites';
+        const autoGrantIdsToPersist = deriveGrantedScopesFromBrowserPermission(autoPermission, grantIds);
+        const autoStickyScopeId = computerStickyScopeApplied?.scopeId || null;
+        computerUsePostedKeyRef.current = null;
+        await persistComputerTaskState({
+          task: trimmed,
+          taskKind: String(outcome.data?.taskKind || execution.preview.kind),
+          taskLabel: String(outcome.data?.taskLabel || execution.preview.label),
+          phase: 'executing',
+          adapterId: String(outcome.data?.adapterId || 'browser_adapter'),
+          grantedAccess: Array.from(new Set([...grantIds, ...autoGrantIdsToPersist])),
+          accessPlan: grantSummary || execution.grants.summary,
+          nextSteps: ['Run browser task', 'Summarize findings'],
+          grounding: outcomeGroundingState,
+          complexity: compactComputerTaskComplexityPlan(outcomeComplexityPlan),
+        });
+        await grantComputerTaskScopes(circleId, autoGrantIdsToPersist).catch(() => {});
+        if (autoStickyScopeId) {
+          void import('../../../lib/computerGrantGateStore')
+            .then(({ recordStickyAllowScopeUse }) => recordStickyAllowScopeUse([autoStickyScopeId]))
+            .catch(() => {});
+        }
+        // WI-1 default backend: with no Browserbase configured the plan runs on
+        // the local playwright bridge. computerUseTask.run only drives the cloud
+        // (Stagehand) agent, so mirror the manual onAllow path and dispatch the
+        // bridge run here; it posts its own launch message.
+        if (browserPlan.backend === 'playwright_bridge') {
+          await runLocalBrowserPlan(browserPlan, autoPermission, null);
+          return { handled: true as const, browser: true, autoStarted: true as const };
+        }
+        const autoStarted = await computerUseTask.run(trimmed, {
+          model: resolveSendModel(trimmed) || undefined,
+        });
+        if (!autoStarted.started) {
+          addBotMessage('**Computer Use** could not start. Check the connection and try again.', undefined, {
+            source: computerTaskSource,
+          });
+        } else {
+          // WI-1: the run has already launched, so surface it as launched (not
+          // "APPROVAL REQUIRED"). Override on both the posted card and the
+          // persisted metadata copy so a reload does not re-show the approval.
+          const launchedBrowserPlan = { ...browserPlan, requiresApproval: false, status: 'launched' as const };
+          addBotMessage(`Browser run started — live view\n\n${trimmed}`, undefined, {
+            runId: outcome.runId || null,
+            browserPlans: [launchedBrowserPlan],
+            computerHandoff: handoffContext.metadata,
+            source: computerTaskSource,
+          });
+        }
+        return { handled: true as const, browser: !!browserPlan, autoStarted: true as const };
+      }
       if (browserPlan && browserActions) {
         setPendingComputerUseTask(trimmed);
         setPendingComputerUsePlan(browserPlan);
@@ -3590,6 +3989,46 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     missingParams: string[];
     askedAt: number;
   }>>(new Map());
+  // Plan §1c: parked clarifications survive reload. Bounded localStorage
+  // mirror of the ref — hydrated once per circle, pruned to the same
+  // 15-minute freshness window the resume path enforces, so "Waiting on
+  // you: task title" reappears in the attention strip after a refresh
+  // instead of the request dying silently.
+  const clarificationStorageKey = circleId ? `uc_pending_clarifications::${circleId}` : null;
+  const persistPendingClarifications = useCallback(() => {
+    if (!clarificationStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const entries = [...pendingClarificationRef.current.entries()]
+        .filter(([, value]) => Date.now() - value.askedAt < 15 * 60 * 1000)
+        .slice(-5);
+      if (entries.length === 0) localStorage.removeItem(clarificationStorageKey);
+      else localStorage.setItem(clarificationStorageKey, JSON.stringify(Object.fromEntries(entries)));
+    } catch { /* quota — clarification parking is best-effort */ }
+  }, [clarificationStorageKey]);
+  useEffect(() => {
+    if (!clarificationStorageKey || typeof localStorage === 'undefined') return;
+    try {
+      const raw = localStorage.getItem(clarificationStorageKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, {
+        originalMessage: string;
+        pendingIntent: string | null;
+        missingParams: string[];
+        askedAt: number;
+      }>;
+      let hydrated = false;
+      for (const [key, value] of Object.entries(parsed)) {
+        if (!value || typeof value.askedAt !== 'number') continue;
+        if (Date.now() - value.askedAt >= 15 * 60 * 1000) continue;
+        if (!pendingClarificationRef.current.has(key)) {
+          pendingClarificationRef.current.set(key, value);
+          hydrated = true;
+        }
+      }
+      if (hydrated) setAttentionTick((tick) => tick + 1);
+    } catch { /* corrupt state — start clean */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clarificationStorageKey]);
   // Guards against re-asking while we're resolving a clarification answer.
   const resolvingClarificationRef = useRef(false);
   const scrollOffsetRef = useRef(0);
@@ -3754,6 +4193,35 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       window.removeEventListener('drop', handleDrop);
     };
   }, [addDroppedFiles, globalFileDragActive]);
+
+  // P20 — paste-an-image: Cmd+V a screenshot/copied image anywhere in the chat
+  // and it rides the SAME staged-upload path as drag-drop (storage-backed, so
+  // downstream lanes like WordPress media upload can reach the bytes). Text
+  // pastes are untouched — we only intercept when actual image files are on
+  // the clipboard.
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+    const handlePaste = (event: ClipboardEvent) => {
+      const items = Array.from(event.clipboardData?.items || []);
+      const files: File[] = [];
+      for (const item of items) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          if (file) {
+            // Pasted screenshots often arrive unnamed — give them a stable name.
+            files.push(file.name && file.name !== 'image.png'
+              ? file
+              : new File([file], `pasted-${Date.now().toString(36)}.${(item.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '') || 'png'}`, { type: item.type }));
+          }
+        }
+      }
+      if (files.length === 0) return;
+      event.preventDefault();
+      addDroppedFiles(files);
+    };
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, [addDroppedFiles]);
 
   // ─── Init ────────────────────────────────────────────────────────────────
 
@@ -4986,6 +5454,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       computerHandoff: extra?.computerHandoff,
       chatAutomationPlanPreview: extra?.chatAutomationPlanPreview,
       computerPreflightBlockers: extra?.computerPreflightBlockers,
+      computerFindings: extra?.computerFindings,
+      bestOfN: extra?.bestOfN,
       quickReplies: extra?.quickReplies,
       taskPlan: extra?.taskPlan,
       toolEvents: extra?.toolEvents,
@@ -5027,6 +5497,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (messageThreadId) {
       saveRecoverableChatMessage(messageThreadId, msg);
     }
+    // Flywheel: derive the outcome verdict from the data already in scope so
+    // it can be stamped onto the row once persisted (Cursor-Tab precedent).
+    // Deterministic + fail-safe: recovery affordances => partial, an approval/
+    // blocker gate => blocked, clean artifact/text => completed.
+    const finalizeVerdict = deriveOutcomeVerdict({
+      hadError: false,
+      hadRecoveryOptions: (extra?.recoveryOptions?.length || 0) > 0,
+      approvalPending: extra?.chatAutomationPlanPreview?.approvalRequired === true
+        || (extra?.computerPreflightBlockers?.items?.length || 0) > 0,
+      producedArtifact: (artifacts?.length || 0) > 0
+        || (extra?.browserPlans?.length || 0) > 0
+        || (extra?.computerFindings?.items?.length || 0) > 0
+        || (extra?.bestOfN?.candidates?.length || 0) > 0,
+      producedText: (content || '').trim().length > 0,
+    });
     if (currentUserId && messageThreadId) {
       persistMainChatBotMessageWithRetry({
         circleId,
@@ -5055,6 +5540,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         recoveryReliability: extra?.recoveryReliability,
         computerHandoff: extra?.computerHandoff,
         chatAutomationPlanPreview: extra?.chatAutomationPlanPreview,
+        computerFindings: extra?.computerFindings,
+        bestOfN: extra?.bestOfN,
         routing: extra?.routing,
         onError: (error) => {
           console.error('[ChatTab] Unexpected error persisting bot msg:', error);
@@ -5064,6 +5551,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           setMessages(prev => prev.map((message) => (
             message.id === msgId ? { ...message, dbId } : message
           )));
+          // Stamp the finalize verdict now that the row has a dbId. The stamp
+          // is best-effort and swallows its own errors, so it never blocks UI.
+          stampOutcomeSignalRef.current(msgId, { verdict: finalizeVerdict });
         },
       });
     }
@@ -5343,6 +5833,34 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     await clearChatSessionArchive(circleId, activeThreadId).catch(() => {});
   }, [activeThreadId, circleId, computerUseTask]);
 
+  // Mirror the single mid-run confirmation (the pay/book floor) as a PERSISTED
+  // chat bubble with Yes/No quick replies, in addition to the live overlay, so
+  // the user can confirm from the transcript and it survives reload. v1 reuses
+  // the quickReplies chip surface; the answer routes back through sendMessage →
+  // the booking follow-up / confirmation intercept. Idempotency-keyed by the
+  // confirmation id so it posts exactly once even under StrictMode re-render.
+  useEffect(() => {
+    const pending = computerUseTask.state.pendingConfirmation;
+    if (!pending || !pending.id) return;
+    const key = `confirm::${pending.id}`;
+    if (computerConfirmPostedKeyRef.current === key) return;
+    computerConfirmPostedKeyRef.current = key;
+    // Restate the LIVE question text (carries amount+merchant from the edge);
+    // it is model-authored/untrusted, so it is shown as plain text only — no
+    // secrets/card data are ever placed here (guest-card entry is isolated in
+    // the live session view via human_takeover, never in chat context).
+    const question = String(pending.question || 'Confirm this action to continue?').slice(0, 600);
+    addBotMessage(question, undefined, {
+      quickReplies: ['Yes', 'No'],
+      source: {
+        actor: 'OpenSwan',
+        surface: 'main_chat_computer_confirmation',
+        selectedModel,
+        effectiveModel: selectedModel !== 'auto' ? selectedModel : null,
+      },
+    });
+  }, [computerUseTask.state.pendingConfirmation, selectedModel]);
+
   // When the Computer Use agent completes (or errors out), post its result
   // to chat once. Deduped via a ref keyed on runId so React StrictMode
   // double-invocation doesn't double-post.
@@ -5427,7 +5945,61 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const extractedData = result.extractedData
         ? `\n\n**Extracted Data**\n\`\`\`json\n${JSON.stringify(result.extractedData, null, 2).slice(0, 4000)}\n\`\`\``
         : '';
-      addBotMessage(`${header}\n\n${result.summary}${findings}${extractedData}`, undefined, { runId });
+      // WI-4: persist bounded structured findings + attach "Book option N"
+      // quick replies so the follow-up seam (WI-5) can resolve durably after
+      // reload. Findings carry only title/url/price/rating/notes text — no
+      // secrets/card data — and the builder clamps + caps to 10 items.
+      const computerFindings = computerFindingsMetadata(result.findings, {
+        runId: runId || null,
+        sessionId: sessionId || computerUseTask.state.sessionId || null,
+      });
+      const bookQuickReplies = computerFindings && computerFindings.items.length
+        ? computerFindings.items.map((_, i) => `Book option ${i + 1}`)
+        : undefined;
+      // Repeat-run diff (plan §5c): when this same task ran before, lead
+      // with what CHANGED instead of re-dumping the list — including an
+      // explicit "no changes". Best-effort lookup; the message posts either
+      // way. Owner for matching/diff/copy: src/lib/computerRunDiff.ts.
+      void (async () => {
+        let diffBlock = '';
+        try {
+          if (result.findings?.length) {
+            const { normalizeComputerTaskForComparison, diffComputerRunFindings, formatComputerRunDiffSummary } =
+              await import('../../../lib/computerRunDiff');
+            const normalizedTask = normalizeComputerTaskForComparison(task);
+            if (normalizedTask) {
+              const { data: priorRuns } = await supabase
+                .from('computer_use_runs')
+                .select('id, task, findings, completed_at')
+                .eq('circle_id', circleId)
+                .eq('status', 'done')
+                .not('findings', 'is', null)
+                .neq('id', runId || '')
+                .order('completed_at', { ascending: false })
+                .limit(10);
+              const prior = (priorRuns || []).find(
+                (row) => normalizeComputerTaskForComparison(String(row.task || '')) === normalizedTask,
+              );
+              if (prior && Array.isArray(prior.findings) && prior.findings.length) {
+                const diff = diffComputerRunFindings(prior.findings as any[], result.findings || []);
+                const completedAt = Date.parse(String(prior.completed_at || ''));
+                diffBlock = formatComputerRunDiffSummary(diff, {
+                  previousAgeMs: Number.isFinite(completedAt) ? Math.max(0, Date.now() - completedAt) : null,
+                });
+              }
+            }
+          }
+        } catch { /* diff is a bonus — never delay or drop the result */ }
+        addBotMessage(
+          `${header}\n\n${diffBlock ? `${diffBlock}\n\n` : ''}${result.summary}${findings}${extractedData}`,
+          undefined,
+          {
+            runId,
+            computerFindings: computerFindings || undefined,
+            quickReplies: bookQuickReplies,
+          },
+        );
+      })();
     } else if (status === 'error' && errorMessage) {
       const key = `err::${task}::${errorMessage.slice(0, 80)}`;
       if (computerUsePostedKeyRef.current === key) return;
@@ -6180,6 +6752,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const pendingClarify = pendingClarificationRef.current.get(clarifyKey);
       if (pendingClarify) {
         pendingClarificationRef.current.delete(clarifyKey);
+        persistPendingClarifications();
         const fresh = Date.now() - pendingClarify.askedAt < 15 * 60 * 1000;
         const cancelled = /\b(nevermind|never\s*mind|cancel|forget it|forget that|skip it|no thanks|stop)\b/i.test(content);
         // A reply ending in "?" is almost certainly a new question, not the
@@ -6204,6 +6777,91 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }
         // stale / cancelled / nothing to build → fall through and treat the
         // reply as a normal message (the pending entry is already cleared).
+      }
+    }
+
+    // ── Booking follow-up seam ("book option 2") ────────────────────────────
+    // WI-5: after the clarification collision guard and before the automation
+    // planner, see whether this reply is a pick against the last browser run's
+    // findings. Runs ONLY when a prior computer run left durable findings (or a
+    // live confirmation is open) — matchBookingFollowup fails closed to none
+    // for unrelated chat, so a false positive can't hijack a normal message.
+    if (
+      !overrideText?.startsWith('__')
+      && !content.startsWith('/')
+      && !resolvingClarificationRef.current
+    ) {
+      // Reconstruct lastComputerRun from the most recent completion message
+      // that carried persisted structured findings (survives reload) plus the
+      // live task state (session id / open confirmation).
+      const findingsMessage = [...messages].reverse().find(
+        (m) => m.isBot && m.computerFindings && (m.computerFindings.items?.length || 0) > 0,
+      );
+      const livePending = computerUseTask.state.pendingConfirmation;
+      const livePendingId = livePending?.id || null;
+      const runAlive = computerUseTask.state.status === 'running'
+        || computerUseTask.state.status === 'starting';
+      // Decline the mirrored mid-run (pay/book) confirmation: a clear "No"
+      // while a confirmation is live resolves it negatively. matchBookingFollowup
+      // only maps affirmatives/selections, so handle the decline here so the
+      // "No" chip on the confirmation bubble cleanly stops the run at the floor.
+      if (runAlive && livePendingId
+        && /^(n|no|nope|cancel|stop|don'?t|do not|abort|decline|not now)\b/i.test(content.trim())) {
+        addUserMessage((options?.displayText || content).trim());
+        setInput('');
+        setReplyTo(null);
+        try {
+          await resolveComputerUseConfirmation(livePendingId, 'no');
+        } catch {
+          addBotMessage('I could not record that. Try again in a moment.', undefined, { localOnly: true });
+        }
+        return;
+      }
+      const lastComputerRun: BookingFollowupLastRun | null = findingsMessage?.computerFindings || livePendingId
+        ? {
+            runId: findingsMessage?.computerFindings?.runId
+              ?? findingsMessage?.runId
+              ?? null,
+            sessionId: findingsMessage?.computerFindings?.sessionId
+              ?? computerUseTask.state.sessionId
+              ?? null,
+            findings: findingsMessage?.computerFindings?.items || null,
+            // Case A only fires while a confirmation is live; once terminal we
+            // leave this null so Case B (synthesize + continue session) fires.
+            pendingConfirmationId: runAlive ? livePendingId : null,
+            completedAt: runAlive ? null : (findingsMessage ? Date.now() : null),
+          }
+        : null;
+      if (lastComputerRun) {
+        const followup = matchBookingFollowup(content, lastComputerRun);
+        if (followup.kind === 'resolve_confirmation') {
+          addUserMessage((options?.displayText || content).trim());
+          setInput('');
+          setReplyTo(null);
+          try {
+            await resolveComputerUseConfirmation(followup.confirmationId, followup.choice);
+          } catch {
+            addBotMessage('I could not record that booking choice. Try again in a moment.', undefined, { localOnly: true });
+          }
+          return;
+        }
+        if (followup.kind === 'continue_session') {
+          addUserMessage((options?.displayText || content).trim());
+          setInput('');
+          setReplyTo(null);
+          const started = await computerUseTask.run(followup.task, {
+            sessionId: followup.sessionId ?? undefined,
+            booking: true,
+            model: resolveSendModel(followup.task) || undefined,
+          });
+          if (!started.started) {
+            addBotMessage('I could not continue that booking run. The browser session may have expired — say "book" again to start fresh.', undefined, { localOnly: true });
+          } else {
+            addBotMessage('Continuing the booking run — live view', undefined, { localOnly: true });
+          }
+          return;
+        }
+        // kind === 'none' → fall through to normal routing untouched.
       }
     }
 
@@ -6708,7 +7366,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         return;
       }
     }
-    if (content.startsWith('/memory-bank') || content.startsWith('/mb')) {
+    if (lowerContent.startsWith('/memory-bank') || lowerContent.startsWith('/mb')) {
       try {
         const { executeMemoryBankCommand } = await import('../../../lib/memoryBankChatCommands');
         const outcome = await executeMemoryBankCommand(content, {
@@ -6716,6 +7374,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           userId: currentUserId || 'anonymous',
         });
         if (outcome) {
+          // Plan §2c: destructive memory-bank writes get a live Restore
+          // strip (rendered above the composer) instead of a prose-only id.
+          if (outcome.checkpointId) setLatestMemoryCheckpointId(outcome.checkpointId);
           addBotMessage(outcome.message, undefined, { localOnly: true });
           return;
         }
@@ -6997,7 +7658,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           }
         }
         const shared = await executeSharedComputerTask(content);
-        if (shared?.handled && !shared.browser) {
+        // WI-1: a zero-tap auto-started browser run owns the turn — return so
+        // the parallel SwanBot text stream does not post a duplicate answer on
+        // top of the live browser card. Non-auto-started browser plans (the
+        // approval-dialog path) still fall through to today's behavior.
+        if (shared?.handled && (!shared.browser || shared.autoStarted)) {
           return;
         }
       }
@@ -7041,8 +7706,47 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           return;
         }
         if (outcome.status === 'skipped') return;
+        // Approval transparency (Phase 1b): the gate says when an earlier
+        // approval covered this run instead of silently reusing it.
+        const approvalNotice = typeof outcome.data?.approvalNotice === 'string'
+          ? outcome.data.approvalNotice
+          : null;
+        if (outcome.status === 'completed') {
+          // A completed run means any provider blocker is fixed.
+          setAttentionProviderBlocker(null);
+          // Handlers post their own success text, so the reuse notice gets
+          // its own compact line for completed runs (plan §1 follow-up).
+          if (approvalNotice) {
+            addBotMessage(approvalNotice, undefined, {
+              localOnly: true,
+              runId: outcome.runId || null,
+              source: {
+                actor: 'OpenSwan',
+                surface,
+                selectedModel,
+                effectiveModel: 'chat-automation-approval-notice',
+              },
+            });
+          }
+          return;
+        }
         if (outcome.status !== 'deferred' && outcome.status !== 'failed' && outcome.status !== 'blocked') return;
-        addBotMessage(outcome.message, undefined, {
+        // Phase 2b: lead with plain language + one next action when the
+        // failure classifies; keep the raw message as a detail line so no
+        // information is lost. Deferred messages are already human-written
+        // by the gate, so they pass through untranslated.
+        const translated = outcome.status !== 'deferred'
+          ? translateChatFailure(outcome.message)
+          : null;
+        if (translated) {
+          const blocker = providerBlockerFromFailure(outcome.message);
+          if (blocker) setAttentionProviderBlocker(blocker);
+        }
+        const messageParts = translated
+          ? [formatChatUserFacingOutcome(translated), `_Details: ${String(outcome.message).slice(0, 200)}_`]
+          : [outcome.message];
+        if (approvalNotice) messageParts.push(approvalNotice);
+        addBotMessage(messageParts.join('\n\n'), undefined, {
           localOnly: true,
           runId: outcome.runId || null,
           chatAutomationPlanPreview: outcome.data?.chatAutomationPlanPreview as ChatAutomationPlanPreview | undefined,
@@ -7066,8 +7770,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const clarifyResumeKey = activeThreadId || 'main';
       const clarificationResumeStore: ChatClarificationResumeStore = {
         pending: pendingClarificationRef.current.get(clarifyResumeKey) || null,
-        setPending: (pending) => { pendingClarificationRef.current.set(clarifyResumeKey, pending); },
-        clearPending: () => { pendingClarificationRef.current.delete(clarifyResumeKey); },
+        setPending: (pending) => {
+          pendingClarificationRef.current.set(clarifyResumeKey, pending);
+          persistPendingClarifications();
+        },
+        clearPending: () => {
+          pendingClarificationRef.current.delete(clarifyResumeKey);
+          persistPendingClarifications();
+        },
       };
       // Underspecified request — ask for the missing details instead of
       // guessing or fabricating a placeholder. Recall context first (memory +
@@ -7336,24 +8046,42 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             });
           }
           postDispatcherStopOutcome(conversationalOutcome, 'main_chat_conversational_command_dispatch');
-          // Only fall through to the legacy conversationalRouter when this
-          // handler declined (intent not cut over yet, or executor didn't handle).
+          // Only fall through to the plan-derived guarded net below when this
+          // handler declined (intent not cut over yet, or executor didn't
+          // handle). That net reuses `plan.intent.intent` — it never
+          // re-classifies the message.
           if (shouldStopAfterDispatcherOutcome(conversationalOutcome)) return;
         }
       }
-    }
 
-    if (!lowerContent.startsWith('/')) {
-      try {
-        const { detectConversationalIntent, executeConversationalIntent } = await import('../../../lib/conversationalRouter');
-        const intent = detectConversationalIntent(content, currentAttachments as any);
-        if (intent.type !== 'none') {
-          const shouldShowWorkbench = intent.type === 'generate_image' || isCodingGenerationRequest(content, sessionProfile) || currentAttachments.some((attachment) => attachment.isFigma) || !!figmaPromptContext;
+      // C2 classify-once cutover: the plan-derived guarded net for a matched
+      // conversational action that the unified dispatcher above did NOT own.
+      // `buildChatAutomationPlan` already ran the planner's detector (this whole
+      // block is inside the `!lowerContent.startsWith('/')` guard where `plan`
+      // is in scope), so we REUSE `plan.intent.intent` here —
+      // `detectConversationalIntent` is NOT called again on the plain-chat turn
+      // (no double classification). The planner is a superset of the old legacy
+      // detector, so this net is unreachable in practice today (every actionable
+      // conversational intent is in the unified allowlist); it survives only as
+      // a fail-safe for a future planner intent that isn't wired into the
+      // unified path yet. `executeConversationalIntent` self-guards
+      // external-mutation intents via legacyPathRequiresApprovalGate (returns
+      // null → fall through to the normal approval-gated pipeline), so this net
+      // can never reach a live publish/schedule.
+      if (
+        plan.intent.kind === 'conversational_action'
+        && plan.intent.intent.type !== 'none'
+        && !UNIFIED_CONVERSATIONAL_INTENT_TYPES.includes(plan.intent.intent.type)
+      ) {
+        try {
+          const conversationalIntent = plan.intent.intent;
+          const { executeConversationalIntent } = await import('../../../lib/conversationalRouter');
+          const shouldShowWorkbench = conversationalIntent.type === 'generate_image' || isCodingGenerationRequest(content, sessionProfile) || currentAttachments.some((attachment) => attachment.isFigma) || !!figmaPromptContext;
           if (shouldShowWorkbench) {
             startCodingWorkbench([content, buildAttachmentPromptContext(currentAttachments), figmaPromptContext].filter(Boolean).join('\n\n'));
           }
           setBotTyping(true);
-          const result = await executeConversationalIntent(intent, {
+          const result = await executeConversationalIntent(conversationalIntent as any, {
             circleId, userId: currentUserId || '', userName: currentUserName,
             model: effectiveSelectedModel !== 'auto' ? effectiveSelectedModel : undefined,
             fullMessage: content, attachments: currentAttachments as any,
@@ -7361,6 +8089,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           setBotTyping(false);
           if (shouldShowWorkbench) stopCodingWorkbench();
           if (result?.handled) {
+            // The unified path owns __SHOW_MEMORIES__ (via modalToOpen:
+            // 'memory_viewer') for show_memories, which is in the allowlist and
+            // therefore never reaches this net — so this handles the signal
+            // without any risk of double-opening the viewer.
             if (result.message === '__SHOW_MEMORIES__') {
               setShowMemoryViewer(true);
             } else {
@@ -7368,8 +8100,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             }
             return;
           }
-        }
-      } catch {}
+        } catch {}
+      }
     }
 
     // ─── Governance commands ───────────────────────────────────────
@@ -7772,6 +8504,367 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
+    // ─── Code review — /review <pr-url | #123 | latest> (plan §P13) ─────────
+    // Also fires when the message is JUST a GitHub PR link — paste a PR,
+    // get a review. Read-only: never writes to GitHub.
+    {
+      const isReviewCommand = lowerContent === '/review' || lowerContent.startsWith('/review ');
+      const soloPrLink = !isReviewCommand
+        && !lowerContent.startsWith('/')
+        && /^https:\/\/(www\.)?github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+\/?$/i.test(content);
+      if (isReviewCommand || soloPrLink) {
+        (async () => {
+          setBotTyping(true);
+          try {
+            const { executeReviewCommand } = await import('../../../lib/reviewChatCommand');
+            const commandText = soloPrLink ? `/review ${content}` : content;
+            const result = await executeReviewCommand(commandText, {
+              circleId,
+              userId: currentUserId || '',
+            });
+            addBotMessage(result?.message || 'Review did not produce output — try `/review latest`.', undefined, { localOnly: true });
+          } catch (e: any) {
+            await addRecoverableChatErrorMessage({
+              title: 'Code review failed',
+              task: content,
+              error: e,
+              executionKind: 'review_command',
+              source: 'review_command_error',
+              touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/reviewChatCommand.ts'],
+            });
+          } finally {
+            setBotTyping(false);
+          }
+        })();
+        return;
+      }
+    }
+
+    // ─── PR-link affordance (plan §P14) ──────────────────────────────────────
+    // A GitHub PR URL mid-sentence gets a one-tap review chip WITHOUT
+    // hijacking the message — the sentence still flows to the normal lanes
+    // below. The chip label IS the /review command, so tapping it routes
+    // through the existing intercept above. Solo links never reach here
+    // (the review lane returned already).
+    if (!lowerContent.startsWith('/')) {
+      void (async () => {
+        try {
+          const { detectGithubPrUrl } = await import('../../../lib/reviewChatCommand');
+          const pr = detectGithubPrUrl(content);
+          if (!pr) return;
+          addBotMessage(
+            `Spotted a PR link — want a code review of ${pr.owner}/${pr.repo}#${pr.number}? Tap below.`,
+            undefined,
+            {
+              localOnly: true,
+              quickReplies: [`/review https://github.com/${pr.owner}/${pr.repo}/pull/${pr.number}`],
+            },
+          );
+        } catch {
+          // Advisory only — never block the message over the chip.
+        }
+      })();
+    }
+
+    // ─── Natural watch phrasing → /watch (P23) ───────────────────────────────
+    // "watch https://…/pricing for changes every day" and "watch my downloads
+    // folder for new pdfs" previously fell to plain chat / a one-off computer
+    // task. Rewrite them into the real /watch pipeline (same resend pattern as
+    // bare PR links → /review). Conservative: message must START with a watch
+    // verb AND contain a URL or a folder-watch target.
+    if (!lowerContent.startsWith('/') && /^(?:please\s+)?(?:watch|monitor|keep\s+an\s+eye\s+on)\s+/i.test(content)) {
+      try {
+        const { detectFolderWatchRequest } = await import('../../../lib/folderWatchModel');
+        const hasUrl = /https?:\/\/[^\s]+|(?:^|\s)[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:\/[^\s]*)?(?=\s|$)/i.test(content);
+        const folderTarget = detectFolderWatchRequest(content);
+        if (hasUrl || folderTarget) {
+          const rest = content.replace(/^(?:please\s+)?(?:watch|monitor|keep\s+an\s+eye\s+on)\s+/i, '').trim();
+          addBotMessage(`🪄 Setting that up as a recurring watch (\`/watch\`).`, undefined, { localOnly: true });
+          void sendMessage(`/watch ${rest}`);
+          return;
+        }
+      } catch {
+        // Advisory rewrite only — fall through to normal routing.
+      }
+    }
+
+    // ─── What's on my screen — /screen [app] (P19) ──────────────────────────
+    // One-tap observation of the frontmost (or named) app: state, windows,
+    // what changed since the last look, and a suggested next step. Read-only.
+    if (lowerContent === '/screen' || lowerContent.startsWith('/screen ')) {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { parseScreenCommand, buildScreenQuickReplies } = await import('../../../lib/screenChatCommand');
+          const parsed = parseScreenCommand(content);
+          if (!parsed) return;
+          if (!parsed.ok) {
+            addBotMessage(parsed.error, undefined, { localOnly: true });
+            return;
+          }
+          const { runAppScreenObservation } = await import('../../../lib/appScreenObserver');
+          const obs = await runAppScreenObservation({ appName: parsed.appName ?? undefined });
+          if (!obs) {
+            addBotMessage(
+              "I can't see the screen right now — the desktop bridge is offline. Start it with `npm run bridge`, then try /screen again.",
+              undefined,
+              { localOnly: true },
+            );
+            return;
+          }
+          addBotMessage(obs.describeForChat, undefined, {
+            localOnly: true,
+            quickReplies: buildScreenQuickReplies(obs),
+          });
+        } catch (e: any) {
+          addBotMessage(`Could not observe the screen: ${e?.message || 'unknown error'}.`, undefined, { localOnly: true });
+        } finally {
+          setBotTyping(false);
+        }
+      })();
+      return;
+    }
+
+    // ─── App integrations — /integrations [list|connect|act] (P30) ───────────
+    // list/connect are pure replies; `act <goal>` hands the goal to the main
+    // agent loop, which already has integrations.list + custom_api.read/request
+    // (approval-gated) tools to figure the API call out with the model.
+    if (lowerContent === '/integrations' || lowerContent.startsWith('/integrations ')
+      || lowerContent === '/integration' || lowerContent.startsWith('/integration ')) {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { parseIntegrationsCommand, buildIntegrationsListReply, buildIntegrationsConnectGuide } =
+            await import('../../../lib/integrationsChatCommand');
+          const parsed = parseIntegrationsCommand(content);
+          if (!parsed) return;
+          if (!parsed.ok) {
+            addBotMessage(parsed.error, undefined, { localOnly: true });
+            return;
+          }
+          if (parsed.kind === 'list') {
+            const { listCircleIntegrations } = await import('../../../lib/circleIntegrations');
+            const records = circleId ? await listCircleIntegrations(circleId).catch(() => []) : [];
+            addBotMessage(buildIntegrationsListReply(records as any), undefined, { localOnly: true });
+            return;
+          }
+          if (parsed.kind === 'connect') {
+            const { INTEGRATION_DEFINITIONS } = await import('../../../lib/circleIntegrations');
+            const q = parsed.query.trim().toLowerCase();
+            const def = Object.values(INTEGRATION_DEFINITIONS).find((d: any) =>
+              d.provider === q || (d.label || '').toLowerCase().includes(q)) || null;
+            addBotMessage(buildIntegrationsConnectGuide(parsed.query, def as any), undefined, { localOnly: true });
+            return;
+          }
+          // kind === 'act' — let the agent loop figure out and run the call.
+          const hint = parsed.integrationHint ? ` using the ${parsed.integrationHint} integration` : '';
+          addBotMessage('🪄 Working out the integration call — I\'ll ask you to approve before anything is sent.', undefined, { localOnly: true });
+          void sendMessage(`Use my connected integrations to: ${parsed.goal}${hint}. Steps: (1) check integrations.list to find the right Custom API and its known endpoints; (2) if unsure of the shape, custom_api.read a relevant GET; (3) call integration.compose_action with your proposed method/path/body to validate it into approval-ready args; (4) call custom_api.request with those exact args for my approval before executing.`);
+        } catch (e: any) {
+          addBotMessage(`Could not run that integration command: ${e?.message || 'unknown error'}.`, undefined, { localOnly: true });
+        } finally {
+          setBotTyping(false);
+        }
+      })();
+      return;
+    }
+
+    // ─── App automation status — /apps [name] (P17) ─────────────────────────
+    // Overview of automatable apps, or a per-app detail card with a LIVE
+    // reachability check (bridge → installed → running → focus → a11y).
+    if (lowerContent === '/apps' || lowerContent.startsWith('/apps ')) {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { parseAppsCommand, buildAppsOverview, buildAppDetail, buildAppsQuickReplies } =
+            await import('../../../lib/appsChatCommand');
+          const parsed = parseAppsCommand(content);
+          if (!parsed) return;
+          if (!parsed.ok) {
+            addBotMessage(parsed.error, undefined, { localOnly: true });
+            return;
+          }
+          if (!parsed.appQuery) {
+            const { buildAppsOverviewWithLive } = await import('../../../lib/appsChatCommand');
+            const browserStatus = async (): Promise<string | null> => {
+              try {
+                const [{ isBrowserBridgeAvailable }, { getCircleIntegration }] = await Promise.all([
+                  import('../../../lib/browserBridge'),
+                  import('../../../lib/circleIntegrations'),
+                ]);
+                const [localOnline, browserbase] = await Promise.all([
+                  isBrowserBridgeAvailable().catch(() => false),
+                  circleId ? getCircleIntegration(circleId, 'browserbase').catch(() => null) : Promise.resolve(null),
+                ]);
+                const localLine = localOnline ? 'local browser bridge online' : 'local browser bridge offline';
+                const cloudLine = browserbase ? 'Browserbase connected (cloud sessions ready)' : 'Browserbase not connected (Marketplace)';
+                return `${localLine} · ${cloudLine}. Web apps (Figma, Canva, Onshape) route here.`;
+              } catch {
+                return null;
+              }
+            };
+            addBotMessage(await buildAppsOverviewWithLive({ browserStatus }), undefined, {
+              localOnly: true,
+              quickReplies: buildAppsQuickReplies(true),
+            });
+            return;
+          }
+          const probeReachability = async (appName: string) => {
+            try {
+              const { runAppReachabilityProbe } = await import('../../../lib/appReachabilityProbe');
+              const { report, text } = await runAppReachabilityProbe(appName);
+              return {
+                text,
+                status: report.status,
+                chatCanFix: report.chatCanFix,
+                resolvedAppName: report.resolvedAppName,
+              };
+            } catch {
+              return null;
+            }
+          };
+          const detail = await buildAppDetail(parsed.appQuery, { probeReachability });
+          addBotMessage(detail.message, undefined, {
+            localOnly: true,
+            quickReplies: buildAppsQuickReplies(false, detail.resolvedSlug, detail.fixChip),
+          });
+        } catch (e: any) {
+          addBotMessage(`Could not load app status: ${e?.message || 'unknown error'}.`, undefined, { localOnly: true });
+        } finally {
+          setBotTyping(false);
+        }
+      })();
+      return;
+    }
+
+    // ─── Create anything — /create <brief> (plan §P13) ──────────────────────
+    // Classifies the brief and re-dispatches through the existing pipelines.
+    if (
+      lowerContent === '/create' || lowerContent.startsWith('/create ')
+      || lowerContent === '/make' || lowerContent.startsWith('/make ')
+    ) {
+      (async () => {
+        try {
+          const { parseCreateCommand, buildCreateDirective, formatCreateRoutingNote } =
+            await import('../../../lib/createChatCommand');
+          const parsed = parseCreateCommand(content);
+          if (!parsed) return;
+          if (!parsed.ok) {
+            addBotMessage(parsed.error, undefined, { localOnly: true });
+            return;
+          }
+          const directive = buildCreateDirective(parsed.brief);
+          if (directive.action.kind === 'reply') {
+            addBotMessage(directive.action.message, undefined, { localOnly: true });
+            return;
+          }
+          addBotMessage(formatCreateRoutingNote(directive), undefined, { localOnly: true });
+          // Re-dispatch through the normal send path so the existing
+          // planner/commands/approval gates all apply unchanged.
+          void sendMessage(directive.action.message);
+        } catch (e: any) {
+          await addRecoverableChatErrorMessage({
+            title: 'Create routing failed',
+            task: content,
+            error: e,
+            executionKind: 'create_command',
+            source: 'create_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/createChatCommand.ts'],
+          });
+        }
+      })();
+      return;
+    }
+
+    // ─── Best-of-N race — /bestof model1,model2 <task> (plan §P10) ──────────
+    // Cursor's verified pattern: race the same task across models, judge,
+    // present the winner. Text-only generations — no tools, no side effects.
+    if (
+      lowerContent === '/bestof' || lowerContent.startsWith('/bestof ')
+      || lowerContent === '/best-of-n' || lowerContent.startsWith('/best-of-n ')
+    ) {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { parseBestOfNCommand, resolveRaceModels, runBestOfNRace, summarizeBestOfNRace, BEST_OF_N_MAX_CANDIDATES } =
+            await import('../../../lib/bestOfNRace');
+          const { bestOfNMetadata } = await import('../../../lib/persistedChatMetadata');
+          const parsed = parseBestOfNCommand(content);
+          if (!parsed || !parsed.ok) {
+            addBotMessage(
+              (parsed && !parsed.ok && parsed.error)
+                || `Usage: \`/bestof model1,model2 <task>\` (2–${BEST_OF_N_MAX_CANDIDATES} models; aliases: auto, sonnet, haiku, opus, gpt, blackswan).`,
+              undefined,
+              { localOnly: true },
+            );
+            return;
+          }
+          const models = resolveRaceModels(parsed.models, connectedProviderSet);
+          addBotMessage(
+            `🏁 Racing ${models.length} models on "${parsed.task.slice(0, 80)}" — judging when all finish…`,
+            undefined,
+            { localOnly: true },
+          );
+          const result = await runBestOfNRace({
+            models,
+            task: parsed.task,
+            circleId,
+            userId: currentUserId || '',
+          });
+          // P11: interactive card (adopt / race again) rides bounded
+          // metadata alongside the text report.
+          addBotMessage(result.formattedReport, undefined, {
+            localOnly: true,
+            bestOfN: bestOfNMetadata(summarizeBestOfNRace(result)),
+          });
+        } catch (e: any) {
+          await addRecoverableChatErrorMessage({
+            title: 'Best-of-N race failed',
+            task: content,
+            error: e,
+            executionKind: 'bestof_command',
+            source: 'bestof_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/bestOfNRace.ts'],
+          });
+        } finally {
+          setBotTyping(false);
+        }
+      })();
+      return;
+    }
+
+    // ─── Watch commands — intercept /watch (recurring monitors, plan §6a) ────
+    if (lowerContent.startsWith('/watch') && (lowerContent === '/watch' || lowerContent[6] === ' ')) {
+      (async () => {
+        setBotTyping(true);
+        try {
+          const { executeWatchCommand } = await import('../../../lib/watchChatCommands');
+          const { detectAlwaysConfirmFloorCategories } = await import('../../../lib/chatComputerRequestRouter');
+          const result = await executeWatchCommand(content, {
+            circleId,
+            userId: currentUserId || '',
+            threadId: activeThreadId || null,
+            // Watches are read-only monitoring — tasks carrying always-confirm
+            // floor intent (pay/delete/login/grant) are rejected at create.
+            floorCategoriesFor: (task) => detectAlwaysConfirmFloorCategories(task),
+          });
+          addBotMessage(result?.message || 'No response.', undefined, { localOnly: true });
+        } catch (e: any) {
+          await addRecoverableChatErrorMessage({
+            title: 'Watch command failed',
+            task: content,
+            error: e,
+            executionKind: 'watch_command',
+            source: 'watch_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/watchChatCommands.ts'],
+          });
+        } finally {
+          setBotTyping(false);
+        }
+      })();
+      return;
+    }
+
     // ─── Mission commands — intercept /mission requests ──────────────────────
     if (lowerContent.startsWith('/mission') && (lowerContent === '/mission' || lowerContent[8] === ' ')) {
       (async () => {
@@ -7781,6 +8874,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           const result = await executeMissionCommand(content, {
             circleId,
             userId: currentUserId || '',
+            // Receipt loop (plan §3c): chat-created missions stamp this
+            // thread so task dispatches post receipts back here.
+            threadId: activeThreadId || null,
           });
           addBotMessage(result.message || 'No response.', undefined, { localOnly: true });
         } catch (e: any) {
@@ -8116,6 +9212,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         addBotMessage(capResult.response, arts.length > 0 ? arts : undefined);
         return;
       }
+      if (capResult.fallbackNotice) {
+        // A capability backend (image gen) failed — say why before the normal
+        // model answers in text, so the missing artifact isn't a silent mystery.
+        addBotMessage(capResult.fallbackNotice);
+      }
     } catch (capErr) {
       setBotTyping(false);
       console.warn('[Chat] Capability routing error:', capErr);
@@ -8169,8 +9270,71 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         attachmentContext = figmaPromptContext;
       }
 
+      // P20 — attached images + WordPress wording → deterministic upload
+      // directive: exact wp.upload_media recipes with the real storage paths,
+      // approval-gated as always, drafts by default. Advisory lane — any
+      // failure here must never block the send.
+      let wpImageDirective = '';
+      try {
+        const stagedImageUploads = currentStagedFiles.filter(
+          (f) => (f.mimeType || '').startsWith('image/') && f.attachment?.storagePath,
+        );
+        const pickerImages = currentAttachments.filter((a) => a.type === 'image');
+        const imageCount = stagedImageUploads.length + pickerImages.length;
+        if (imageCount > 0) {
+          const { detectWordPressImagePostIntent, buildWpImageUploadDirective, summarizeWpImagePlanForUser } =
+            await import('../../../lib/wpImagePostFlow');
+          const wpIntent = detectWordPressImagePostIntent({ text: content, imageAttachmentCount: imageCount });
+          if (wpIntent) {
+            // Picker images carry base64 but no storage path — stage them now
+            // (web only) so wp.upload_media can reach the bytes.
+            const pickerUploads: Array<{ name: string; mimeType: string; storagePath: string }> = [];
+            if (Platform.OS === 'web' && currentUserId) {
+              for (const att of pickerImages) {
+                if (!att.base64) continue;
+                try {
+                  const bytes = Uint8Array.from(atob(att.base64), (c) => c.charCodeAt(0));
+                  const file = new File([bytes], att.name || 'image.jpg', { type: att.mimeType || 'image/jpeg' });
+                  const uploaded = await uploadAttachment({ file, circleId, threadId: activeThreadId, userId: currentUserId });
+                  if (uploaded?.storagePath) {
+                    pickerUploads.push({ name: file.name, mimeType: file.type, storagePath: uploaded.storagePath });
+                  }
+                } catch {
+                  // Best-effort — unstaged picker images are simply left out.
+                }
+              }
+            }
+            const wpAttachments = [
+              ...stagedImageUploads.map((f) => ({ name: f.name, mimeType: f.mimeType, storagePath: f.attachment!.storagePath })),
+              ...pickerUploads,
+            ];
+            if (wpAttachments.length > 0) {
+              wpImageDirective = buildWpImageUploadDirective({
+                attachments: wpAttachments,
+                siteUrl: wpIntent.siteUrl,
+                wantsSlide: wpIntent.wantsSlide,
+                wantsPost: wpIntent.wantsPost,
+              });
+              addBotMessage(
+                summarizeWpImagePlanForUser({
+                  count: wpAttachments.length,
+                  siteUrl: wpIntent.siteUrl,
+                  wantsSlide: wpIntent.wantsSlide,
+                  wantsPost: wpIntent.wantsPost,
+                }),
+                undefined,
+                { localOnly: true },
+              );
+            }
+          }
+        }
+      } catch {
+        // Advisory only.
+      }
+
       const fullPrompt = [
         attachmentContext,
+        wpImageDirective,
         replyContext,
         recoveryOptionPromptContext,
         cleanContent,
@@ -8340,6 +9504,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             const canStream = terminalTransport.path === 'stream_plain_chat' || escalateOnToolUse;
 
             if (canStream) {
+              // W5 (P39): hoisted so the catch below can normalize the stream
+              // terminal through the unified lane boundary (chatLaneOutcome).
+              // The load-bearing distinction: interrupted ≠ failed — an
+              // interrupted stream left PARTIAL text on screen and must never
+              // be silently re-run as batch.
+              let streamAccumulated = '';
+              let streamPendingMsgId: string | null = null;
+              let streamInterruptedResult: import('../../../lib/swanbotStream').StreamChatResult | undefined;
               try {
                 const { buildStreamableSystemPrompt } = await import('../../../lib/swanbot');
                 const { streamChatResponse } = await import('../../../lib/swanbotStream');
@@ -8383,6 +9555,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   }
                 }
                 const pendingMsg = addPendingBotMessage('');
+                streamPendingMsgId = pendingMsg.id;
                 setRunStatus('running');
                 let accumulated = '';
                 let streamingUsage: SwanBotStructuredResponse['usage'] | undefined;
@@ -8412,6 +9585,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     ...(streamTools ? { tools: streamTools } : {}),
                     onDelta: (text) => {
                       accumulated += text;
+                      streamAccumulated = accumulated;
                       updateBotMessage(pendingMsg.id, { content: accumulated, isPending: false });
                     },
                     onUsage: (usage) => {
@@ -8428,7 +9602,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                       }
                       resolve();
                     },
-                    onError: (msg) => reject(new Error(msg)),
+                    // W5 (P39): the second argument carries the interrupted
+                    // terminal result (partial toolUses/stopReason) — capture
+                    // it so the catch can tell pre-handshake from mid-stream.
+                    onError: (msg, result) => {
+                      streamInterruptedResult = result;
+                      reject(new Error(msg));
+                    },
                   });
                   // Store cancel handle in case we need to abort
                   streamingBuildCleanupRef.current = handle.cancel;
@@ -8513,11 +9693,61 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     },
                   });
                 }
+                // X7 (P48): record the clean stream terminal so lane failure
+                // rates have a denominator (successes count too).
+                try {
+                  const { recordChatLaneTerminalNow } = await import('../../../lib/chatLaneHealthRegistry');
+                  recordChatLaneTerminalNow({ lane: 'stream', status: 'completed' });
+                } catch {}
                 setRunStatus('idle');
                 setBotTyping(false);
                 stopCodingWorkbench();
                 return;
               } catch (streamErr) {
+                // W5 (P39): normalize the stream terminal through the unified
+                // lane boundary before deciding what to do. The invariant it
+                // enforces: a MID-STREAM interruption with partial text on
+                // screen is `interrupted`, not `failed` — silently re-running
+                // the whole turn as batch would render the answer twice and
+                // could double side effects on the escalation path. Only
+                // pre-handshake / no-output failures keep the legacy batch
+                // fallback (retry-safe: nothing was delivered).
+                try {
+                  const { normalizeStreamResult, summarizeChatLaneOutcomeForTelemetry } =
+                    await import('../../../lib/chatLaneOutcome');
+                  const laneOutcome = normalizeStreamResult({
+                    result: streamInterruptedResult ?? null,
+                    errorMessage: streamErr instanceof Error ? streamErr.message : String(streamErr),
+                    text: streamAccumulated,
+                    model: streamCandidateModel,
+                  });
+                  console.warn(
+                    '[ChatTab] stream lane terminal:',
+                    JSON.stringify(summarizeChatLaneOutcomeForTelemetry(laneOutcome)),
+                  );
+                  // X7 (P48): feed the per-lane health registry (observability only).
+                  try {
+                    const { recordChatLaneOutcomeNow } = await import('../../../lib/chatLaneHealthRegistry');
+                    recordChatLaneOutcomeNow(laneOutcome);
+                  } catch {}
+                  if (laneOutcome.status === 'interrupted' && streamAccumulated.length > 0) {
+                    if (streamPendingMsgId) {
+                      updateBotMessage(streamPendingMsgId, {
+                        content: `${streamAccumulated}\n\n⚠️ _Stream interrupted — the answer above may be incomplete. Say "continue" to pick up from here._`,
+                        isPending: false,
+                      });
+                    }
+                    streamingBuildCleanupRef.current = null;
+                    setRunStatus('idle');
+                    setBotTyping(false);
+                    stopCodingWorkbench();
+                    return;
+                  }
+                } catch (boundaryErr) {
+                  // The boundary is observability + a stop decision — its own
+                  // failure must never take down the legacy fallback.
+                  console.warn('[ChatTab] lane-outcome normalize failed:', boundaryErr);
+                }
                 console.warn('[ChatTab] Streaming failed, falling back to batch:', streamErr);
                 // Fall through to batch path below
               }
@@ -8601,6 +9831,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // like nothing happened. Previously hardcoded to [], which is
             // why "ask it to add a room and the screen just refreshes"
             // felt like a silent no-op.
+            // X7 (P48): record the clean batch terminal so lane failure rates
+            // have a denominator (visible routing fallback carried through).
+            try {
+              const { recordChatLaneTerminalNow } = await import('../../../lib/chatLaneHealthRegistry');
+              recordChatLaneTerminalNow({
+                lane: 'openswan_v2',
+                status: 'completed',
+                fallback: !!structured.routing?.routing_fallback,
+              });
+            } catch {}
             const runtimeToolEvents: OpenSwanToolEvent[] = (structured.toolEvents || []).map((evt: any) => ({
               tool: evt.tool,
               status: evt.status === 'passed' || evt.status === 'completed'
@@ -8730,10 +9970,26 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           } catch (batchErr) {
             const batchMessage = batchErr instanceof Error ? batchErr.message : String(batchErr || 'Unknown error');
             const batchStack = batchErr instanceof Error ? batchErr.stack || null : null;
+            // W5/X1: classify this lane terminal through the unified boundary
+            // so the archive carries the two-axis recovery signal per lane
+            // (telemetry only — the recovery flow below stays authoritative).
+            let batchLaneTags: string[] = [];
+            try {
+              const { normalizeThrownError, buildChatLaneOutcomeTags, summarizeChatLaneOutcomeForTelemetry } =
+                await import('../../../lib/chatLaneOutcome');
+              const laneOutcome = normalizeThrownError('openswan_v2', batchErr);
+              batchLaneTags = buildChatLaneOutcomeTags(laneOutcome);
+              console.warn('[ChatTab] lane terminal:', JSON.stringify(summarizeChatLaneOutcomeForTelemetry(laneOutcome)));
+              // X7 (P48): registry + degradation-scope tags (lane-isolated vs multi-lane).
+              const { recordChatLaneOutcomeNow, buildChatLaneHealthTags } =
+                await import('../../../lib/chatLaneHealthRegistry');
+              recordChatLaneOutcomeNow(laneOutcome);
+              batchLaneTags = [...batchLaneTags, ...buildChatLaneHealthTags('openswan_v2', Date.now())];
+            } catch {}
             recordSessionArchiveError(
               `OpenSwan session failed: ${batchMessage}`,
               batchStack,
-              ['surface:main_chat', 'runtime:openswan'],
+              ['surface:main_chat', 'runtime:openswan', ...batchLaneTags],
             );
             const recovery = await startMainChatFailureRecoveryPayload({
               task: cleanContent,
@@ -8778,10 +10034,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       } catch (err) {
         const chatErrorMessage = err instanceof Error ? err.message : String(err || 'Unknown error');
         const chatErrorStack = err instanceof Error ? err.stack || null : null;
+        // W5/X1: the outermost sendMessage boundary — normalize + tag so an
+        // unshaped failure is still legible as a lane terminal in the archive.
+        let outerLaneTags: string[] = [];
+        try {
+          const { normalizeThrownError, buildChatLaneOutcomeTags, summarizeChatLaneOutcomeForTelemetry } =
+            await import('../../../lib/chatLaneOutcome');
+          const laneOutcome = normalizeThrownError('send_message', err);
+          outerLaneTags = buildChatLaneOutcomeTags(laneOutcome);
+          console.warn('[ChatTab] lane terminal:', JSON.stringify(summarizeChatLaneOutcomeForTelemetry(laneOutcome)));
+          // X7 (P48): registry + degradation-scope tags.
+          const { recordChatLaneOutcomeNow, buildChatLaneHealthTags } =
+            await import('../../../lib/chatLaneHealthRegistry');
+          recordChatLaneOutcomeNow(laneOutcome);
+          outerLaneTags = [...outerLaneTags, ...buildChatLaneHealthTags('send_message', Date.now())];
+        } catch {}
         recordSessionArchiveError(
           `Chat execution failed: ${chatErrorMessage}`,
           chatErrorStack,
-          ['surface:main_chat'],
+          ['surface:main_chat', ...outerLaneTags],
         );
         const errorMessage = (isCodingGenerationRequest(cleanContent, sessionProfile) || isFigmaBuildRequest)
           ? "Build failed before OpenSwan could finish the draft. Try again."
@@ -8989,9 +10260,61 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     }
   };
 
+  // ─── Flywheel outcome signal (Cursor-Tab precedent) ─────────────────────────
+  // Stamp the machine-derived verdict and/or the user's accept/reject/edit-
+  // resend/steer signal onto a bot message so it becomes BlackSwan training
+  // data. Fully additive + non-blocking: it updates local state and best-effort
+  // re-persists the compact enums into the row metadata. A persistence failure
+  // must NEVER affect the chat UI, so everything below is wrapped/swallowed.
+  const stampOutcomeSignalRef = useRef<(messageId: string, patch: { verdict?: ChatOutcomeVerdict; signal?: ChatUserSignal }) => void>(() => {});
+  stampOutcomeSignalRef.current = (
+    messageId: string,
+    patch: { verdict?: ChatOutcomeVerdict; signal?: ChatUserSignal },
+  ) => {
+    if (!patch || (!patch.verdict && !patch.signal)) return;
+    let target: ChatMessage | null = null;
+    setMessages((prev) => prev.map((msg) => {
+      if (msg.id !== messageId || !msg.isBot) return msg;
+      const prior = msg.outcomeSignal || undefined;
+      // Never downgrade a real verdict back to 'unknown' (a later reaction
+      // carries no verdict); keep the strongest info we already have.
+      const nextVerdict = patch.verdict && patch.verdict !== 'unknown'
+        ? patch.verdict
+        : prior?.verdict || patch.verdict || 'unknown';
+      const merged: NonNullable<ChatMessage['outcomeSignal']> = {
+        verdict: nextVerdict,
+        signal: patch.signal || prior?.signal,
+        lane: prior?.lane || msg.source?.surface || undefined,
+        model: prior?.model
+          || msg.source?.effectiveModel
+          || msg.source?.selectedModel
+          || undefined,
+      };
+      target = { ...msg, outcomeSignal: merged };
+      return target;
+    }));
+    // Best-effort durable persistence: read-modify-write the row metadata with
+    // the tiny outcome enums. Guarded so nothing here can surface to the user.
+    try {
+      const row = target as ChatMessage | null;
+      if (!row?.dbId || !row.outcomeSignal) return;
+      const existing = readPersistedChatBotMetadata(row.content) as PersistedChatBotMetadata | null;
+      const visible = stripPersistedChatBotPrefix(row.content);
+      const nextContent = formatPersistedChatBotMessage(agentName, visible, {
+        ...(existing || {}),
+        outcomeSignal: row.outcomeSignal,
+      });
+      if (nextContent === row.content) return;
+      void updateChatMessageContent(row.dbId, nextContent).catch(() => {});
+    } catch {
+      // swallow — telemetry must never break chat
+    }
+  };
+
   // ─── Reactions ────────────────────────────────────────────────────────────
 
   const toggleReaction = (messageId: string, emoji: string) => {
+    let addedReaction = false;
     setMessages(prev => prev.map(msg => {
       if (msg.id !== messageId) return msg;
       const reactions = { ...msg.reactions };
@@ -9002,12 +10325,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         if (reactions[emoji].length === 0) delete reactions[emoji];
       } else {
         reactions[emoji] = [...users, uid];
+        addedReaction = true;
         // Trigger floating emoji
         addFloatingReaction(emoji, 200 + Math.random() * 100, 300 + Math.random() * 100);
       }
       return { ...msg, reactions };
     }));
     setShowReactions(null);
+    // Flywheel: an ADDED 👍/👎 is an explicit accept/reject the user made —
+    // record it as training signal. Removing a reaction is ambiguous, so we
+    // leave any prior signal intact.
+    if (addedReaction) {
+      const signal = mapReactionToSignal(emoji);
+      if (signal) stampOutcomeSignalRef.current(messageId, { signal });
+    }
   };
 
   // ─── Delete Message ───────────────────────────────────────────────────
@@ -9289,6 +10620,246 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const bodyContent = appChoiceCard
       ? stripChatAppChoiceLine(visibleContent, handoffMetadata?.requestNotice?.appChoiceLine)
       : visibleContent;
+    const hasPlanCard = !!item.chatAutomationPlanPreview;
+    const hasRecoveryOptions = !!(item.recoveryOptions && item.recoveryOptions.length > 0);
+    // P22: computer/desktop/app-task messages collapse their explanatory cards
+    // behind ONE "Details" disclosure. Everything else renders byte-identical.
+    const isComputerTaskMessage = !!handoffMetadata || !!recoveryReliabilityCard || hasPlanCard;
+    const computerSummaryLine = isComputerTaskMessage
+      ? buildComputerTaskSummaryLine({ handoff: handoffMetadata, appChoiceCard, body: bodyContent })
+      : '';
+    // Status cue comes only from data the metadata already carries.
+    const failedSummaryPrefix = recoveryReliabilityCard || hasRecoveryOptions
+      ? item.recoveryReliability?.userActionRequired
+        ? 'Needs your input'
+        : "Couldn't finish"
+      : null;
+    const disclosureStatusTone: 'neutral' | 'attention' | 'approval' | 'complete' = failedSummaryPrefix
+      ? item.recoveryReliability?.userActionRequired ? 'approval' : 'attention'
+      : 'neutral';
+    // Display-only Route override so the Plan card shows a desktop-accurate
+    // Route for desktop/app tasks (routeId semantics unchanged).
+    const planRouteLabelOverride = formatHandoffSurfaceRouteLabel(handoffMetadata);
+
+    // ── SIGNATURE Receipt (the #1 branding/capability gap) ──────────────────
+    // At-a-glance "what did the agent do → who approved → proof → verified?"
+    // assembled from data already on this bot message. Additive + non-blocking:
+    // plain chat replies yield null (shouldRenderReceipt === false) and render
+    // byte-identically. Retry re-sends the original user prompt when one is
+    // trivially recoverable AND the turn didn't cleanly complete; undo has no
+    // safe generic implementation, so it stays undefined (button hidden).
+    const priorUserPrompt = item.isBot ? findPriorUserPromptForMessage(messages, item.id) : null;
+    const verdictNeedsRetry = item.outcomeSignal?.verdict === 'failed'
+      || item.outcomeSignal?.verdict === 'partial'
+      || item.outcomeSignal?.verdict === 'blocked'
+      || hasRecoveryOptions;
+    const agentReceipt = item.isBot
+      ? buildAgentReceipt({
+          content: item.content,
+          computerHandoff: handoffMetadata,
+          artifacts: item.artifacts,
+          computerFindings: item.computerFindings,
+          browserPlans: item.browserPlans,
+          toolEvents: item.toolEvents,
+          recoveryOptions: item.recoveryOptions,
+          outcomeSignal: item.outcomeSignal,
+          canRetry: !!priorUserPrompt && verdictNeedsRetry,
+        })
+      : null;
+    const receiptBlock = agentReceipt && shouldRenderReceipt(agentReceipt) ? (
+      <AgentReceiptCard
+        receipt={agentReceipt}
+        onRetry={priorUserPrompt && agentReceipt.canRetry
+          ? () => { void sendMessage(priorUserPrompt); }
+          : undefined}
+      />
+    ) : null;
+
+    // ── Relocatable explanatory blocks (verbatim JSX; only their PLACEMENT
+    //    changes for computer-task messages — collapsed into the disclosure). ──
+    const appChoiceBlock = appChoiceCard ? (
+      <View style={styles.appChoiceSection}>
+        <View style={styles.appChoiceCard}>
+          <View style={styles.appChoiceHeader}>
+            <View style={styles.appChoiceTitleWrap}>
+              <Text style={styles.messageSourceLabel}>App Choice</Text>
+              <Text style={styles.appChoiceTitle} numberOfLines={1}>
+                Using {appChoiceCard.selectedAppName}
+              </Text>
+            </View>
+            <View style={styles.appChoicePill}>
+              <Text style={styles.appChoicePillText} numberOfLines={1}>
+                {appChoiceCard.availabilityLabel}
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.appChoiceMeta} numberOfLines={1}>
+            {appChoiceCard.surfaceLabel}{appChoiceCard.openStep ? ` · ${appChoiceCard.openStep}` : ''}
+          </Text>
+          <Text style={styles.appChoiceReason} numberOfLines={2}>{appChoiceCard.reason}</Text>
+          {appChoiceCard.alternatives.length > 0 ? (
+            <View style={styles.appChoiceAlternativeRow}>
+              {appChoiceCard.alternatives.map((alternative) => (
+                <Pressable
+                  key={alternative}
+                  onPress={() => {
+                    setInput(`use ${alternative} instead`);
+                    inputRef.current?.focus();
+                  }}
+                  style={styles.appChoiceAlternative}
+                  accessibilityLabel={`Use ${alternative} instead`}
+                >
+                  <Text style={styles.appChoiceAlternativeText} numberOfLines={1}>
+                    Use {alternative}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          ) : appChoiceCard.switchHint ? (
+            <Text style={styles.appChoiceHint} numberOfLines={1}>{appChoiceCard.switchHint}</Text>
+          ) : null}
+        </View>
+      </View>
+    ) : null;
+
+    const designTaskBlock = designTaskCard ? (
+      <View style={[styles.messageSourceSection, styles.designTaskSection]}>
+        <Text style={styles.messageSourceLabel}>Design Task</Text>
+        <View
+          style={[
+            styles.designTaskCard,
+            designTaskCard.statusTone === 'attention' && styles.designTaskCardAttention,
+            designTaskCard.statusTone === 'approval' && styles.designTaskCardApproval,
+            designTaskCard.statusTone === 'complete' && styles.designTaskCardComplete,
+          ]}
+        >
+          <View style={styles.designTaskHeader}>
+            <View style={styles.designTaskTitleWrap}>
+              <Text style={styles.designTaskTitle} numberOfLines={1}>{designTaskCard.title}</Text>
+              <Text style={styles.designTaskSubtitle} numberOfLines={1}>{designTaskCard.subtitle}</Text>
+            </View>
+            <View
+              style={[
+                styles.designTaskStatusPill,
+                designTaskCard.statusTone === 'attention' && styles.designTaskStatusAttention,
+                designTaskCard.statusTone === 'approval' && styles.designTaskStatusApproval,
+                designTaskCard.statusTone === 'complete' && styles.designTaskStatusComplete,
+              ]}
+            >
+              <Text style={styles.designTaskStatusText}>{designTaskCard.statusLabel}</Text>
+            </View>
+          </View>
+          {designTaskCard.packageSummary ? (
+            <Text style={styles.designTaskMeta} numberOfLines={1}>Package: {designTaskCard.packageSummary}</Text>
+          ) : null}
+          {designTaskCard.creativeAiSummary ? (
+            <Text style={styles.designTaskMeta} numberOfLines={1}>AI: {designTaskCard.creativeAiSummary}</Text>
+          ) : null}
+          <View style={styles.designTaskOperationRow}>
+            {designTaskCard.operations.slice(0, 4).map((operation) => (
+              <View key={operation} style={styles.designTaskOperationPill}>
+                <Text style={styles.designTaskOperationText} numberOfLines={1}>{operation}</Text>
+              </View>
+            ))}
+          </View>
+          <View style={styles.designTaskPhaseRow}>
+            {designTaskCard.phases.map((phase) => (
+              <View key={phase.id} style={styles.designTaskPhaseItem}>
+                <View
+                  style={[
+                    styles.designTaskPhaseDot,
+                    phase.state === 'done' && styles.designTaskPhaseDone,
+                    phase.state === 'current' && styles.designTaskPhaseCurrent,
+                    phase.state === 'blocked' && styles.designTaskPhaseBlocked,
+                  ]}
+                />
+                <Text
+                  style={[
+                    styles.designTaskPhaseLabel,
+                    phase.state === 'current' && styles.designTaskPhaseLabelCurrent,
+                    phase.state === 'blocked' && styles.designTaskPhaseLabelBlocked,
+                  ]}
+                  numberOfLines={1}
+                >
+                  {phase.label}
+                </Text>
+              </View>
+            ))}
+          </View>
+          <Text style={styles.designTaskNextAction} numberOfLines={2}>Next: {designTaskCard.nextAction}</Text>
+          {designTaskCard.proofSignals.length > 0 ? (
+            <Text style={styles.designTaskProof} numberOfLines={2}>
+              Proof: {designTaskCard.proofSignals.slice(0, 2).join('; ')}
+            </Text>
+          ) : null}
+          {designTaskCard.reviewChecklist.length > 0 ? (
+            <Text style={styles.designTaskReview} numberOfLines={2}>
+              Review: {designTaskCard.reviewChecklist.slice(0, 3).join('; ')}
+            </Text>
+          ) : null}
+        </View>
+      </View>
+    ) : null;
+
+    const bodyTextBlock = (
+      <ChatInlineRichText
+        content={bodyContent}
+        accentColor={accentColor}
+        textColor={messageDensity === 'compact' ? '#bbb' : '#ccc'}
+      />
+    );
+
+    const recoveryReliabilityBlock = recoveryReliabilityCard ? (
+      <View style={styles.recoveryReliabilitySection}>
+        <Text style={styles.messageSourceLabel}>Recovery Status</Text>
+        <View
+          style={[
+            styles.recoveryReliabilityCard,
+            {
+              borderColor: `${recoveryReliabilityCard.color}55`,
+              backgroundColor: `${recoveryReliabilityCard.color}10`,
+            },
+          ]}
+        >
+          <View style={styles.recoveryReliabilityHeader}>
+            <View style={styles.recoveryReliabilityTitleWrap}>
+              <Text style={[styles.recoveryReliabilityTitle, { color: recoveryReliabilityCard.color }]} numberOfLines={1}>
+                {recoveryReliabilityCard.title}
+              </Text>
+              <Text style={styles.recoveryReliabilitySubtitle} numberOfLines={1}>
+                {recoveryReliabilityCard.subtitle}
+              </Text>
+            </View>
+            <View style={[styles.recoveryReliabilityPill, { borderColor: `${recoveryReliabilityCard.color}66` }]}>
+              <Text style={[styles.recoveryReliabilityPillText, { color: recoveryReliabilityCard.color }]}>
+                {recoveryReliabilityCard.statusLabel}
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.recoveryReliabilityDetail} numberOfLines={2}>
+            {recoveryReliabilityCard.detail}
+          </Text>
+          {recoveryReliabilityCard.chips.length > 0 ? (
+            <View style={styles.recoveryReliabilityChipRow}>
+              {recoveryReliabilityCard.chips.map((chip) => (
+                <View key={chip} style={styles.recoveryReliabilityChip}>
+                  <Text style={styles.recoveryReliabilityChipText} numberOfLines={1}>{chip}</Text>
+                </View>
+              ))}
+            </View>
+          ) : null}
+        </View>
+      </View>
+    ) : null;
+
+    const planCardBlock = item.chatAutomationPlanPreview ? (
+      <ChatAutomationPlanCard
+        preview={item.chatAutomationPlanPreview}
+        accentColor={accentColor}
+        routeLabelOverride={planRouteLabelOverride}
+      />
+    ) : null;
+
     return (
       <View>
         {/* Pending "BUILDING NOW" chip removed — the rotating verb in
@@ -9342,133 +10913,43 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             ))}
           </View>
         ) : null}
-        {appChoiceCard ? (
-          <View style={styles.appChoiceSection}>
-            <View style={styles.appChoiceCard}>
-              <View style={styles.appChoiceHeader}>
-                <View style={styles.appChoiceTitleWrap}>
-                  <Text style={styles.messageSourceLabel}>App Choice</Text>
-                  <Text style={styles.appChoiceTitle} numberOfLines={1}>
-                    Using {appChoiceCard.selectedAppName}
-                  </Text>
-                </View>
-                <View style={styles.appChoicePill}>
-                  <Text style={styles.appChoicePillText} numberOfLines={1}>
-                    {appChoiceCard.availabilityLabel}
-                  </Text>
-                </View>
-              </View>
-              <Text style={styles.appChoiceMeta} numberOfLines={1}>
-                {appChoiceCard.surfaceLabel}{appChoiceCard.openStep ? ` · ${appChoiceCard.openStep}` : ''}
-              </Text>
-              <Text style={styles.appChoiceReason} numberOfLines={2}>{appChoiceCard.reason}</Text>
-              {appChoiceCard.alternatives.length > 0 ? (
-                <View style={styles.appChoiceAlternativeRow}>
-                  {appChoiceCard.alternatives.map((alternative) => (
-                    <Pressable
-                      key={alternative}
-                      onPress={() => {
-                        setInput(`use ${alternative} instead`);
-                        inputRef.current?.focus();
-                      }}
-                      style={styles.appChoiceAlternative}
-                      accessibilityLabel={`Use ${alternative} instead`}
-                    >
-                      <Text style={styles.appChoiceAlternativeText} numberOfLines={1}>
-                        Use {alternative}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </View>
-              ) : appChoiceCard.switchHint ? (
-                <Text style={styles.appChoiceHint} numberOfLines={1}>{appChoiceCard.switchHint}</Text>
-              ) : null}
-            </View>
-          </View>
-        ) : null}
-        {designTaskCard ? (
-          <View style={[styles.messageSourceSection, styles.designTaskSection]}>
-            <Text style={styles.messageSourceLabel}>Design Task</Text>
-            <View
-              style={[
-                styles.designTaskCard,
-                designTaskCard.statusTone === 'attention' && styles.designTaskCardAttention,
-                designTaskCard.statusTone === 'approval' && styles.designTaskCardApproval,
-                designTaskCard.statusTone === 'complete' && styles.designTaskCardComplete,
-              ]}
+        {isComputerTaskMessage ? (
+          <>
+            {/* P22: always-visible compact summary line — one glance at what
+                this computer/desktop/app task is doing. */}
+            <Text
+              style={[styles.computerTaskSummaryLine, { color: messageDensity === 'compact' ? '#bbb' : '#ccc' }]}
+              numberOfLines={2}
             >
-              <View style={styles.designTaskHeader}>
-                <View style={styles.designTaskTitleWrap}>
-                  <Text style={styles.designTaskTitle} numberOfLines={1}>{designTaskCard.title}</Text>
-                  <Text style={styles.designTaskSubtitle} numberOfLines={1}>{designTaskCard.subtitle}</Text>
-                </View>
-                <View
-                  style={[
-                    styles.designTaskStatusPill,
-                    designTaskCard.statusTone === 'attention' && styles.designTaskStatusAttention,
-                    designTaskCard.statusTone === 'approval' && styles.designTaskStatusApproval,
-                    designTaskCard.statusTone === 'complete' && styles.designTaskStatusComplete,
-                  ]}
-                >
-                  <Text style={styles.designTaskStatusText}>{designTaskCard.statusLabel}</Text>
-                </View>
-              </View>
-              {designTaskCard.packageSummary ? (
-                <Text style={styles.designTaskMeta} numberOfLines={1}>Package: {designTaskCard.packageSummary}</Text>
-              ) : null}
-              {designTaskCard.creativeAiSummary ? (
-                <Text style={styles.designTaskMeta} numberOfLines={1}>AI: {designTaskCard.creativeAiSummary}</Text>
-              ) : null}
-              <View style={styles.designTaskOperationRow}>
-                {designTaskCard.operations.slice(0, 4).map((operation) => (
-                  <View key={operation} style={styles.designTaskOperationPill}>
-                    <Text style={styles.designTaskOperationText} numberOfLines={1}>{operation}</Text>
-                  </View>
-                ))}
-              </View>
-              <View style={styles.designTaskPhaseRow}>
-                {designTaskCard.phases.map((phase) => (
-                  <View key={phase.id} style={styles.designTaskPhaseItem}>
-                    <View
-                      style={[
-                        styles.designTaskPhaseDot,
-                        phase.state === 'done' && styles.designTaskPhaseDone,
-                        phase.state === 'current' && styles.designTaskPhaseCurrent,
-                        phase.state === 'blocked' && styles.designTaskPhaseBlocked,
-                      ]}
-                    />
-                    <Text
-                      style={[
-                        styles.designTaskPhaseLabel,
-                        phase.state === 'current' && styles.designTaskPhaseLabelCurrent,
-                        phase.state === 'blocked' && styles.designTaskPhaseLabelBlocked,
-                      ]}
-                      numberOfLines={1}
-                    >
-                      {phase.label}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-              <Text style={styles.designTaskNextAction} numberOfLines={2}>Next: {designTaskCard.nextAction}</Text>
-              {designTaskCard.proofSignals.length > 0 ? (
-                <Text style={styles.designTaskProof} numberOfLines={2}>
-                  Proof: {designTaskCard.proofSignals.slice(0, 2).join('; ')}
-                </Text>
-              ) : null}
-              {designTaskCard.reviewChecklist.length > 0 ? (
-                <Text style={styles.designTaskReview} numberOfLines={2}>
-                  Review: {designTaskCard.reviewChecklist.slice(0, 3).join('; ')}
-                </Text>
-              ) : null}
-            </View>
-          </View>
-        ) : null}
-        <ChatInlineRichText
-          content={bodyContent}
-          accentColor={accentColor}
-          textColor={messageDensity === 'compact' ? '#bbb' : '#ccc'}
-        />
+              {failedSummaryPrefix ? `${failedSummaryPrefix} — ${computerSummaryLine}` : computerSummaryLine}
+            </Text>
+            {/* P22: all explanatory cards collapse behind ONE Details toggle. */}
+            <ChatMessageDetailsDisclosure
+              summary="Details"
+              statusLabel={failedSummaryPrefix || undefined}
+              statusTone={disclosureStatusTone}
+              accentColor={accentColor}
+            >
+              {appChoiceBlock}
+              {designTaskBlock}
+              {bodyTextBlock}
+              {recoveryReliabilityBlock}
+              {planCardBlock}
+            </ChatMessageDetailsDisclosure>
+          </>
+        ) : (
+          <>
+            {appChoiceBlock}
+            {designTaskBlock}
+            {bodyTextBlock}
+          </>
+        )}
+        {/* SIGNATURE Receipt: the at-a-glance accountability summary. Rendered
+            once here (both branches) directly under the body/summary and above
+            the detailed artifact/run cards, so it is visible, not buried. It
+            does NOT duplicate the P22 Details disclosure (which shows the
+            verbose per-card breakdown) — this is the one-glance verdict. */}
+        {receiptBlock}
         <ChatArtifacts
           artifacts={item.artifacts}
           accentColor={accentColor}
@@ -9545,48 +11026,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           onRetryCheck={(checkId) => handleRetryVerificationCheck(item, checkId)}
           retryingCheckId={retryingLedgerCheck?.messageId === item.id ? retryingLedgerCheck.checkId : null}
         />
-        {recoveryReliabilityCard ? (
-          <View style={styles.recoveryReliabilitySection}>
-            <Text style={styles.messageSourceLabel}>Recovery Status</Text>
-            <View
-              style={[
-                styles.recoveryReliabilityCard,
-                {
-                  borderColor: `${recoveryReliabilityCard.color}55`,
-                  backgroundColor: `${recoveryReliabilityCard.color}10`,
-                },
-              ]}
-            >
-              <View style={styles.recoveryReliabilityHeader}>
-                <View style={styles.recoveryReliabilityTitleWrap}>
-                  <Text style={[styles.recoveryReliabilityTitle, { color: recoveryReliabilityCard.color }]} numberOfLines={1}>
-                    {recoveryReliabilityCard.title}
-                  </Text>
-                  <Text style={styles.recoveryReliabilitySubtitle} numberOfLines={1}>
-                    {recoveryReliabilityCard.subtitle}
-                  </Text>
-                </View>
-                <View style={[styles.recoveryReliabilityPill, { borderColor: `${recoveryReliabilityCard.color}66` }]}>
-                  <Text style={[styles.recoveryReliabilityPillText, { color: recoveryReliabilityCard.color }]}>
-                    {recoveryReliabilityCard.statusLabel}
-                  </Text>
-                </View>
-              </View>
-              <Text style={styles.recoveryReliabilityDetail} numberOfLines={2}>
-                {recoveryReliabilityCard.detail}
-              </Text>
-              {recoveryReliabilityCard.chips.length > 0 ? (
-                <View style={styles.recoveryReliabilityChipRow}>
-                  {recoveryReliabilityCard.chips.map((chip) => (
-                    <View key={chip} style={styles.recoveryReliabilityChip}>
-                      <Text style={styles.recoveryReliabilityChipText} numberOfLines={1}>{chip}</Text>
-                    </View>
-                  ))}
-                </View>
-              ) : null}
-            </View>
-          </View>
-        ) : null}
+        {/* P22: the "Recovery Status" card moved into the Details disclosure
+            near the top of computer-task messages; the actionable Recovery
+            Options below stay always-visible. */}
         {item.recoveryOptions && item.recoveryOptions.length > 0 ? (
           <View style={styles.recoveryOptionSection}>
             <Text style={styles.messageSourceLabel}>Recovery Options</Text>
@@ -9927,12 +11369,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 accentColor={accentColor}
               />
             ) : null}
-            {item.chatAutomationPlanPreview ? (
-              <ChatAutomationPlanCard
-                preview={item.chatAutomationPlanPreview}
-                accentColor={accentColor}
-              />
-            ) : null}
+            {/* P22: the Plan + Evidence-Contract card moved into renderContent's
+                Details disclosure (a message with a plan preview is always a
+                computer-task message), so it renders collapsed-by-default with
+                the other explanatory cards instead of expanded below the bubble. */}
             {item.searchResults ? (
               <SearchResultsCard
                 query={item.searchResults.query}
@@ -9985,11 +11425,57 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 }}
               />
             ) : null}
-            {item.quickReplies && item.quickReplies.length > 0 ? (
+            {item.computerFindings && (item.computerFindings.items?.length || 0) > 0 ? (
+              /* Plan §3a: numbered findings inline — tapping fires the same
+                 WI-5 follow-up the user would type. The card supersedes the
+                 bare "Book option N" quick-reply chips for these messages. */
+              <ChatComputerFindingsCard
+                findings={item.computerFindings}
+                accentColor={accentColor}
+                onPickOption={(optionNumber) => { void sendMessage(`Book option ${optionNumber}`); }}
+              />
+            ) : null}
+            {item.bestOfN && (item.bestOfN.candidates?.length || 0) > 0 ? (
+              /* P11: interactive best-of-N — every candidate one tap to
+                 adopt; race again pre-fills the same command. */
+              <BestOfNResultCard
+                race={item.bestOfN}
+                accentColor={accentColor}
+                onAdopt={(candidateIndex) => {
+                  const candidate = item.bestOfN?.candidates?.[candidateIndex];
+                  if (candidate?.text) {
+                    addBotMessage(
+                      `✅ Adopted **${candidate.model}**'s answer:\n\n${candidate.text}`,
+                      undefined,
+                      { localOnly: true },
+                    );
+                  }
+                }}
+                onRaceAgain={() => {
+                  const models = (item.bestOfN?.candidates || []).map((c) => c.model).join(',');
+                  setInput(`/bestof ${models} ${item.bestOfN?.task || ''}`.trim());
+                  inputRef.current?.focus();
+                }}
+              />
+            ) : null}
+            {item.quickReplies && item.quickReplies.length > 0
+              && !(item.computerFindings && (item.computerFindings.items?.length || 0) > 0) ? (
               <QuickReplyChips
                 replies={item.quickReplies}
                 accentColor={accentColor}
                 onPick={(reply) => { void sendMessage(reply); }}
+              />
+            ) : null}
+            {item.isBot ? (
+              /* Plan §3b: memory attribution + one-tap Remember (routes
+                 through the existing /remember path). */
+              <ChatMemoryAttributionRow
+                memoriesUsed={item.memoriesUsed}
+                memoryRefCount={item.memoryRefs?.length || 0}
+                canRemember={(item.content || '').length >= 120}
+                onOpenMemories={() => setShowMemoryViewer(true)}
+                onRemember={() => { void sendMessage(`/remember ${item.content.slice(0, 280)}`); }}
+                accentColor={accentColor}
               />
             ) : null}
             {item.showRunTrace && item.runId ? (
@@ -10032,6 +11518,155 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       </View>
     </ScrollView>
   );
+
+  // ─── "Needs you" attention strip ─────────────────────────────────────────
+  // Phase 1c of docs/CHAT_UX_INTEGRATION_UPGRADE_PLAN.md. Folds every
+  // waiting-on-the-user state (pending/expiring/expired approvals, parked
+  // clarifications, live computer-task questions, recovery choices,
+  // provider blockers) into one strip via `chatAttentionQueue`, so blocked
+  // work stops dying silently. State lives up near the other declarations;
+  // this derived block sits before the early `!loaded` return to keep hook
+  // order unconditional.
+  const attentionRecoverySource = (() => {
+    // Only the latest bot message: recovery is offered exactly while the
+    // failure is still the freshest state of the conversation.
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (!message.isBot) continue;
+      return (message.recoveryOptions?.length ?? 0) > 0 ? message : null;
+    }
+    return null;
+  })();
+  const chatAttention = buildChatAttentionState({
+    approvals: pendingHitlApprovals,
+    pendingClarification: pendingClarificationRef.current.get(activeThreadId || 'main') || null,
+    pendingTaskQuestion: computerUseTask.state.pendingConfirmation,
+    recoveryOptions: attentionRecoverySource?.recoveryOptions ?? null,
+    recoveryContextLabel: attentionRecoverySource?.recoveryReliability?.targetName
+      ?? attentionRecoverySource?.recoveryReliability?.taskFamily
+      ?? null,
+    recoveryRefId: attentionRecoverySource?.id ?? null,
+    providerBlockers: attentionProviderBlocker ? [attentionProviderBlocker] : null,
+  }, { dismissedIds: dismissedAttentionIds });
+  const chatAttentionItems = chatAttention.items.filter((item) =>
+    // Live pending approvals already render with approve/reject buttons in
+    // HitlApprovalBanner directly below the strip; keep them out of the row
+    // list (the status line still counts them) and show only the states
+    // that have no other surface. Dismissals are filtered inside the
+    // builder so the status line stays truthful.
+    item.kind !== 'approval_pending'
+      && item.kind !== 'approval_expiring',
+  );
+  const chatAttentionActive = chatAttention.statusLine !== null;
+  useEffect(() => {
+    // Reclassify countdowns/expiry while something is waiting on the user.
+    if (!chatAttentionActive) return;
+    const timer = setInterval(() => setAttentionTick((tick) => tick + 1), 30_000);
+    return () => clearInterval(timer);
+  }, [chatAttentionActive]);
+  const handleChatAttentionAction = (item: ChatAttentionItem, action: ChatAttentionAction) => {
+    if (action.kind === 'dismiss') {
+      if (item.kind === 'clarification_waiting') {
+        pendingClarificationRef.current.delete(activeThreadId || 'main');
+        persistPendingClarifications();
+      }
+      setDismissedAttentionIds((prev) => new Set(prev).add(item.id));
+      return;
+    }
+    if (action.kind === 'refile_approval') {
+      // Re-run the original request. The approval gate flips the stale row
+      // to `expired` and files a fresh proposal with an explicit
+      // "your earlier approval expired" message.
+      const row = pendingHitlApprovals.find((approval) => approval.id === item.refId);
+      const commandText = (row?.payload as Record<string, any> | undefined)?.plan?.commandText;
+      setDismissedAttentionIds((prev) => new Set(prev).add(item.id));
+      if (typeof commandText === 'string' && commandText.trim()) {
+        void sendMessage(commandText);
+      } else {
+        addBotMessage(
+          'That approval expired and I could not recover the original request — please resend it and I will file a fresh approval.',
+          undefined,
+          { localOnly: true },
+        );
+      }
+      return;
+    }
+    if (action.kind === 'cancel_task' && item.kind === 'task_question_waiting') {
+      computerUseTask.cancel();
+      return;
+    }
+    if (action.kind === 'choose_recovery') {
+      // Same as the user typing the recommended option — the recovery seam
+      // handles the text like any other reply.
+      const option = attentionRecoverySource?.recoveryOptions?.find((candidate) => candidate.id === item.refId)
+        ?? attentionRecoverySource?.recoveryOptions?.[0];
+      setDismissedAttentionIds((prev) => new Set(prev).add(item.id));
+      if (option) void sendMessage(option.label);
+      return;
+    }
+    if (action.kind === 'open_marketplace') {
+      handleSidebarMarketplace();
+      return;
+    }
+    // answer_clarification / answer_task_question: answering happens in the
+    // composer / live task card — the strip only points the user there.
+  };
+
+  // ─── Room handoff suggestion (plan §4c) ──────────────────────────────────
+  // Conservative detector: several distinct files + user build intent in the
+  // trailing window. Dismissible per thread; accepting creates the room,
+  // seeds it with context, and jumps there — this thread stays usable.
+  const roomHandoffThreadKey = activeThreadId || 'main';
+  const roomHandoffSuggestion = useMemo(() => {
+    if (messages.length < 4) return null;
+    if (dismissedRoomHandoffThreads.has(roomHandoffThreadKey)) return null;
+    return detectRoomHandoffSuggestion(
+      messages.map((message) => ({ content: message.content || '', isBot: !!message.isBot })),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, roomHandoffThreadKey, dismissedRoomHandoffThreads]);
+  const handleAcceptRoomHandoff = async () => {
+    if (!roomHandoffSuggestion || roomHandoffBusy || !circleId) return;
+    setRoomHandoffBusy(true);
+    try {
+      const { createRoom, sendAgentMessage } = await import('./rooms/roomRepository');
+      const roomId = await createRoom(
+        circleId,
+        roomHandoffSuggestion.suggestedRoomName,
+        'Continued from main chat',
+      );
+      if (!roomId) throw new Error('room creation failed');
+      const latestUserAsk = [...messages].reverse().find((message) => !message.isBot)?.content || null;
+      await sendAgentMessage(
+        roomId,
+        agentName,
+        buildRoomHandoffSeedMessage({
+          filesMentioned: roomHandoffSuggestion.filesMentioned,
+          latestUserAsk,
+        }),
+        { source: 'chat_handoff', threadId: activeThreadId || null },
+      );
+      const { primeRoomWorkspaceLaunch } = await import('../../../lib/roomWorkspaceLauncher');
+      primeRoomWorkspaceLaunch({ circleId, roomId });
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: 'ROOMS' } })); } catch {}
+      }
+      setDismissedRoomHandoffThreads((prev) => new Set(prev).add(roomHandoffThreadKey));
+      addBotMessage(
+        `Set up room **${roomHandoffSuggestion.suggestedRoomName}** with this conversation's context — continuing there. This thread stays available for follow-ups.`,
+        undefined,
+        { localOnly: true },
+      );
+    } catch {
+      addBotMessage(
+        'Could not create the room — try again, or create one from the Rooms tab and I will keep helping here.',
+        undefined,
+        { localOnly: true },
+      );
+    } finally {
+      setRoomHandoffBusy(false);
+    }
+  };
 
   // ─── Main Return ─────────────────────────────────────────────────────────
 
@@ -10207,6 +11842,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         }}
         onOpenRunHistory={() => setShowRunHistory(true)}
         resolvedAutoModel={autoResolvedModel}
+        autoModelReason={autoModelReason}
+        onOpenThread={handleSelectThread}
       />
       {showReopenBuilderPill ? (
         <View style={styles.builderReopenBar}>
@@ -11422,11 +13059,123 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           reflects starts/stops from any tab. */}
       <RecordingBadge />
 
+      {/* Live Restore strip for the latest memory-bank checkpoint (plan §2c).
+          Success/refusal feedback renders in the strip; a restore also posts
+          a confirmation message via onRestored. */}
+      {latestMemoryCheckpointId && circleId ? (
+        <View style={{ marginHorizontal: 12 }}>
+          <ToolCallCheckpointStrip
+            circleId={circleId}
+            checkpointId={latestMemoryCheckpointId}
+            accentColor={accentColor}
+            onRestored={() => {
+              addBotMessage(
+                'Restored — the memory bank change was rolled back to the checkpoint.',
+                undefined,
+                { localOnly: true },
+              );
+              setLatestMemoryCheckpointId(null);
+            }}
+          />
+        </View>
+      ) : null}
+
+      {/* Mid-run steering (plan §4e) — visible while a computer task runs
+          and is NOT paused on a question (the confirmation card owns input
+          then). Notes are guidance-only; the approval floor is untouched. */}
+      {computerUseTask.state.status === 'running'
+        && !computerUseTask.state.pendingConfirmation
+        && computerUseTask.state.runId ? (
+        <ComputerTaskSteeringBar
+          taskLabel={(computerUseTask.state.task || 'computer task').slice(0, 80)}
+          accentColor={accentColor}
+          onSend={(note) => sendComputerUseSteeringNote(computerUseTask.state.runId!, note)}
+          onStop={() => computerUseTask.cancel()}
+        />
+      ) : null}
+
+      {/* Mid-run steering for OpenSwan typed-loop turns (plan §7b) — same
+          bar, in-memory bus instead of the DB channel. Hidden while a
+          computer task owns the bar above. Guidance-only; the typed loop's
+          approval gates are untouched. No Stop (turns have no cancel handle
+          surfaced yet). */}
+      {botTyping
+        && runStatus === 'running'
+        && !!activeThreadId
+        && computerUseTask.state.status !== 'running'
+        && isOpenSwanSteeringScopeActive(activeThreadId) ? (
+        <ComputerTaskSteeringBar
+          taskLabel={(currentRunStep || 'OpenSwan run').slice(0, 80)}
+          accentColor={accentColor}
+          onSend={async (note) => pushOpenSwanSteeringNote(activeThreadId, note)}
+        />
+      ) : null}
+
+      {/* Room handoff suggestion (plan §4c) — dismissible, never automatic. */}
+      {roomHandoffSuggestion ? (
+        <View style={{
+          flexDirection: 'row', alignItems: 'center', gap: 8,
+          marginHorizontal: 12, marginBottom: 6, paddingHorizontal: 10, paddingVertical: 8,
+          borderWidth: 1, borderColor: accentColor + '33', borderRadius: 10, backgroundColor: '#0d150d',
+        }}>
+          <Text style={{ flex: 1, color: '#d9e4d3', fontSize: 12 }} numberOfLines={2}>
+            {roomHandoffSuggestion.reason}
+          </Text>
+          <Pressable
+            disabled={roomHandoffBusy}
+            onPress={() => { void handleAcceptRoomHandoff(); }}
+            style={{ borderWidth: 1, borderColor: accentColor + '55', backgroundColor: accentColor + '22', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, opacity: roomHandoffBusy ? 0.5 : 1 }}
+          >
+            <Text style={{ color: accentColor, fontSize: 11, fontWeight: '700' }} numberOfLines={1}>
+              {roomHandoffBusy ? 'Setting up…' : `Continue in room “${roomHandoffSuggestion.suggestedRoomName}”`}
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setDismissedRoomHandoffThreads((prev) => new Set(prev).add(roomHandoffThreadKey))}
+            style={{ borderRadius: 8, paddingHorizontal: 8, paddingVertical: 6, backgroundColor: '#131d13' }}
+          >
+            <Text style={{ color: '#9fb29b', fontSize: 11, fontWeight: '600' }}>Not now</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {/* "Needs you" attention strip — chatAttentionQueue folds expiring/
+          expired approvals, parked clarifications, live computer-task
+          questions, recovery choices, and provider blockers into one summary
+          so blocked work stops dying silently. */}
+      <ChatAttentionStrip
+        state={chatAttention}
+        items={chatAttentionItems}
+        onAction={handleChatAttentionAction}
+        accentColor={accentColor}
+      />
+
       {/* HITL pending chat approvals — `dispatchChatAutomationPlan` writes
           these to agent_approvals through chatApprovalGate. Surface them in
           Chat as well as Office so approval-gated requests do not disappear
-          after the Plan Card defers. */}
-      <HitlApprovalBanner approvals={pendingHitlApprovals} circleId={circleId} />
+          after the Plan Card defers. Edit & Resend (plan §6c) rejects the
+          stale proposal and prefills the composer so the edited command
+          files a FRESH approval. */}
+      <HitlApprovalBanner
+        approvals={pendingHitlApprovals.filter((approval) => {
+          // P12 fix: rows past their timeout (nothing sweeps DB status)
+          // must not show live APPROVE buttons here while the attention
+          // strip above declares them expired — the strip's "Ask again"
+          // is the only affordance for those.
+          const expiresAt = resolveApprovalExpiresAt(approval.requested_at, approval.timeout_seconds);
+          return expiresAt === null || expiresAt > Date.now();
+        })}
+        circleId={circleId}
+        onEditAndResend={(_approval, commandText) => {
+          setInput(commandText);
+          inputRef.current?.focus();
+          // Flywheel: Edit & Resend is an implicit "that wasn't quite it" —
+          // stamp edit_resend on the most recent persisted bot message (the
+          // proposal being edited) if we can identify one. Fire-and-forget.
+          const priorBot = [...messages].reverse().find((m) => m.isBot && !!m.dbId);
+          if (priorBot) stampOutcomeSignalRef.current(priorBot.id, { signal: 'edit_resend' });
+        }}
+      />
 
       {/* HITL pending approvals — v2 M3d writes to agent_run_approvals
           from `approvals.request`; surface inline so users can
@@ -13707,6 +15456,11 @@ function EnhancedInput({
         route?.intent,
         providerSetForTurn,
         route?.complexity,
+        // P12 fix: the picker preview must use the SAME hint as send-time
+        // resolution, or the dropdown shows a different model than the one
+        // that actually runs (BlackSwan app-question lane).
+        { appGroundedHint: looksLikeAppGroundedMessage(draft) },
+        draft,
       );
       return resolved;
     } catch {
@@ -15402,6 +17156,11 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 1,
     textTransform: 'uppercase' as any,
+  },
+  computerTaskSummaryLine: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '600',
   },
   messageSourceCard: {
     borderRadius: 12,

@@ -49,6 +49,9 @@ export interface OfficeAgent {
   parentSessionKey?: string;
   isSynthetic?: boolean;
   isProviderMain?: boolean;
+  /** Fail-visible status annotation (e.g. "bridge offline — status stale").
+   *  Set by reconcileAgentStatusWithConnection; never hides, only explains. */
+  statusNote?: string;
 }
 
 export const STATUS_COLORS: Record<AgentStatus, string> = {
@@ -140,6 +143,45 @@ export function deriveHeartbeatStatus(opts: {
   if (age < 60_000) return 'active';      // beat in last 60s
   if (age < 5 * 60_000) return 'idle';    // beat in last 5 min
   return 'offline';
+}
+
+// ─── Bridge-aware status reconcile (O2, P38) ─────────────────────────────────
+// Session-derived status decays slowly (active → building → idle over up to an
+// hour), so when an execution bridge dies an agent can read "Active/Building"
+// with no working bridge behind it. This reconciles the agent's status with its
+// OWN connection's live state. FAIL-VISIBLE: it only DEMOTES and ANNOTATES —
+// it never upgrades a status, never hides an agent, and leaves agents without
+// a connection (DB rows, synthetic pins) untouched. Pure — caller passes nowMs.
+
+/** How stale lastActive must be before a disconnected bridge demotes the status. */
+export const BRIDGE_RECONCILE_STALE_MS = 60_000;
+
+export interface AgentStatusReconcileResult {
+  status: AgentStatus;
+  statusNote?: string;
+}
+
+export function reconcileAgentStatusWithConnection(
+  agent: Pick<OfficeAgent, 'status' | 'lastActive' | 'connectionId'>,
+  connectionStatus: 'connected' | 'connecting' | 'disconnected' | 'error' | null | undefined,
+  nowMs: number,
+): AgentStatusReconcileResult {
+  const status = agent?.status;
+  // No connection linkage, or the bridge is fine → untouched.
+  if (!agent?.connectionId || !connectionStatus || connectionStatus === 'connected') {
+    return { status };
+  }
+  // Only live-looking statuses can mislead; idle/offline/error stay as-is.
+  if (status !== 'active' && status !== 'building') return { status };
+
+  const lastMs = agent.lastActive ? new Date(agent.lastActive).getTime() : NaN;
+  const fresh = Number.isFinite(lastMs) && nowMs - lastMs < BRIDGE_RECONCILE_STALE_MS;
+  if (fresh) {
+    // Genuine recent activity but the connection disagrees — keep the status,
+    // but say so instead of silently trusting either side.
+    return { status, statusNote: 'bridge disconnected' };
+  }
+  return { status: 'offline', statusNote: 'bridge offline — status stale' };
 }
 
 // Agent colors for assignment

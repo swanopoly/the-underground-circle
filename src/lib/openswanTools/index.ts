@@ -27,6 +27,10 @@ export interface OpenSwanToolDef {
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
+  /** X4 (P47): curated, schema-validated example inputs (Anthropic
+   *  `input_examples`, GA) — attached at the catalog chokepoint for the
+   *  gnarliest schemas; absent for most tools. */
+  input_examples?: Array<Record<string, unknown>>;
 }
 
 export interface ToolContext {

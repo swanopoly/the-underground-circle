@@ -577,3 +577,94 @@ export function buildAgentLiveOps(
     },
   };
 }
+
+// ─── Per-agent accountability rollup (O1, P38) ───────────────────────────────
+// "What did this agent actually do lately, and did it work?" — the last
+// finished outcome + 24h completed/failed counts + 24h cost, keyed by the SAME
+// case-insensitive agent-name seam the building board uses
+// (deriveAgentName → opsRunNodesByAgent in OfficeTab). Same limitation applies:
+// runs without an explicit agent label attach to a generic surface label, not a
+// roster agent. Pure — caller supplies nowMs.
+
+export const OFFICE_ACCOUNTABILITY_WINDOW_MS = 24 * 60 * 60 * 1000;
+const ACCOUNTABILITY_TITLE_MAX = 48;
+
+export interface OfficeAgentAccountability {
+  /** "✅ Fixed login flow · 2h ago" / "❌ Deploy failed · 20m ago". */
+  lastLine: string;
+  /** Tone for the line: good = last finished run completed, danger = failed. */
+  tone: 'good' | 'danger';
+  completed24h: number;
+  failed24h: number;
+  /** Sum of estimated_cost over the window's finished runs (2dp). */
+  costUsd24h: number;
+}
+
+/**
+ * Index finished runs (completed/failed within `windowMs` of `nowMs`) by the
+ * board's derived agent-name key (lowercased). Building/queued runs are the
+ * live board's job and are ignored here. Returns an empty map for no input.
+ */
+export function buildOfficeAgentAccountabilityIndex(
+  runs: AgentRunLike[] | null | undefined,
+  opts: { nowMs: number; windowMs?: number },
+): Map<string, OfficeAgentAccountability> {
+  const map = new Map<string, OfficeAgentAccountability & { lastMs: number }>();
+  const nowMs = Number.isFinite(opts?.nowMs) ? opts.nowMs : 0;
+  const windowMs = Number.isFinite(opts?.windowMs) && (opts.windowMs as number) > 0
+    ? (opts.windowMs as number)
+    : OFFICE_ACCOUNTABILITY_WINDOW_MS;
+
+  for (const run of Array.isArray(runs) ? runs : []) {
+    if (!run || !FINISHED_STATUS_SET.has(run.status)) continue;
+    const endedMs = parseTimestampMs(run.completed_at) ?? parseTimestampMs(run.created_at);
+    if (endedMs == null || endedMs > nowMs || nowMs - endedMs > windowMs) continue;
+
+    const key = deriveAgentName(run).trim().toLowerCase();
+    if (!key) continue;
+
+    const failed = run.status === 'failed';
+    const entry = map.get(key) || {
+      lastLine: '',
+      tone: 'good' as const,
+      completed24h: 0,
+      failed24h: 0,
+      costUsd24h: 0,
+      lastMs: -1,
+    };
+    if (failed) entry.failed24h += 1; else entry.completed24h += 1;
+    entry.costUsd24h += toFiniteNumber(run.estimated_cost);
+
+    if (endedMs > entry.lastMs) {
+      entry.lastMs = endedMs;
+      const title = truncateText(
+        (typeof run.title === 'string' && run.title.trim()) || 'Untitled run',
+        ACCOUNTABILITY_TITLE_MAX,
+      );
+      entry.lastLine = `${failed ? '❌' : '✅'} ${title} · ${formatRelativeTime(nowMs - endedMs)}`;
+      entry.tone = failed ? 'danger' : 'good';
+    }
+    map.set(key, entry);
+  }
+
+  const out = new Map<string, OfficeAgentAccountability>();
+  for (const [key, entry] of map) {
+    out.set(key, {
+      lastLine: entry.lastLine,
+      tone: entry.tone,
+      completed24h: entry.completed24h,
+      failed24h: entry.failed24h,
+      costUsd24h: round2(entry.costUsd24h),
+    });
+  }
+  return out;
+}
+
+/** Compact chip suffix for the desktop quick bar: "✓3 ✗1" (empty when nothing). */
+export function formatAccountabilityCounts(entry: OfficeAgentAccountability | null | undefined): string {
+  if (!entry) return '';
+  const parts: string[] = [];
+  if (entry.completed24h > 0) parts.push(`✓${entry.completed24h}`);
+  if (entry.failed24h > 0) parts.push(`✗${entry.failed24h}`);
+  return parts.join(' ');
+}

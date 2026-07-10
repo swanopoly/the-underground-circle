@@ -305,8 +305,17 @@ export type SubagentTypedCoreLoopOutcome = {
   toolCalls: SubagentToolCallRecord[];
   /** Aggregated across every turn; undefined when the provider reported
    *  none (legacy-loop parity: it reported no usage at all). `total`
-   *  includes cache read/creation tokens, matching the O1 accumulator. */
-  usage?: { input_tokens: number; output_tokens: number; total_tokens: number };
+   *  includes cache read/creation tokens, matching the O1 accumulator.
+   *  GAP-2: `cache_read_tokens` / `cache_creation_tokens` carry the split so
+   *  the delegated-usage rollup in the session runtime preserves the
+   *  cache-discipline ratio (additive alongside total_tokens). */
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    cache_read_tokens: number;
+    cache_creation_tokens: number;
+  };
 };
 
 /**
@@ -321,7 +330,9 @@ export async function runSubagentTypedCoreLoop(
   args: SubagentTypedCoreLoopArgs,
 ): Promise<SubagentTypedCoreLoopOutcome> {
   const toolCalls: SubagentToolCallRecord[] = [];
-  const usageAcc = { input: 0, output: 0, cache: 0, saw: false };
+  // GAP-2: track cache reads vs creation separately (not just an aggregate)
+  // so the split survives into the delegated-usage rollup.
+  const usageAcc = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, saw: false };
 
   const runResult = await runAgent({
     initialMessages: [{ role: 'user', content: args.userMessage }],
@@ -344,8 +355,8 @@ export async function runSubagentTypedCoreLoop(
         usageAcc.saw = true;
         usageAcc.input += event.usage.input_tokens || 0;
         usageAcc.output += event.usage.output_tokens || 0;
-        usageAcc.cache += (event.usage.cache_read_input_tokens || 0)
-          + (event.usage.cache_creation_input_tokens || 0);
+        usageAcc.cacheRead += event.usage.cache_read_input_tokens || 0;
+        usageAcc.cacheCreation += event.usage.cache_creation_input_tokens || 0;
       }
       try { args.onEvent?.(event); } catch { /* persistence is best-effort */ }
     },
@@ -358,7 +369,9 @@ export async function runSubagentTypedCoreLoop(
       ? {
           input_tokens: usageAcc.input,
           output_tokens: usageAcc.output,
-          total_tokens: usageAcc.input + usageAcc.output + usageAcc.cache,
+          total_tokens: usageAcc.input + usageAcc.output + usageAcc.cacheRead + usageAcc.cacheCreation,
+          cache_read_tokens: usageAcc.cacheRead,
+          cache_creation_tokens: usageAcc.cacheCreation,
         }
       : undefined,
   };

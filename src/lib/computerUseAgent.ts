@@ -32,6 +32,13 @@ export interface ComputerUseAgentOpts {
   browserbase: { apiKey: string; projectId: string; region?: string };
   maxIterations?: number;
   maxTokensBudget?: number;
+  /** Max USD cost for this run. Omit to defer to the circle setting / the
+   *  edge default (booking-class runs default higher when `booking` is set). */
+  maxCostUsd?: number;
+  /** Booking-class flag. When true, the edge loop raises the run caps
+   *  (iterations/tokens/cost/wall-clock) so a multi-leg checkout can finish.
+   *  Non-booking runs are unchanged. */
+  booking?: boolean;
   onRunStarted?: (info: { runId: string }) => void;
   onSessionStarted?: (info: { sessionId: string; liveUrl: string }) => void;
   /** Fired when the agent pauses for user approval via the `ask_user`
@@ -47,6 +54,10 @@ export interface ComputerUseAgentOpts {
   /** Fired once the confirmation row is resolved (user picked, or the
    *  server timed out). Client should clear the pending card. */
   onConfirmationResolved?: (info: { id: string | null; choice: string }) => void;
+  /** Mid-run steering note accepted by the loop (plan §4e/§5a) — fires when
+   *  the note is injected at an iteration boundary, so the UI can show
+   *  exactly when the user's guidance landed. */
+  onSteeringApplied?: (info: { note: string }) => void;
   /** Running token / cost ticker. Fires once per Claude turn. The client
    *  uses it to show a live ticker so users know roughly how much the
    *  task has cost so far. `inputTokens` is the *total* input-side count
@@ -63,6 +74,10 @@ export interface ComputerUseAgentOpts {
     estimatedCost: number;
   }) => void;
   onAction?: (info: { tool: string; input: any }) => void;
+  /** Fired before run_started when the edge loop substitutes the requested
+   *  model for the Sonnet computer-use pin, so the UI can say "running on X
+   *  (your model plans/verifies)" instead of substituting silently. */
+  onModelResolved?: (info: { requestedModel: string; resolvedModel: string; reason: string }) => void;
   onScreenshot?: (info: { b64: string; url?: string }) => void;
   onReasoning?: (text: string) => void;
   onResult?: (info: {
@@ -141,6 +156,8 @@ export function startComputerUseAgent(opts: ComputerUseAgentOpts): AgentHandle {
           browserbase: opts.browserbase,
           maxIterations: opts.maxIterations,
           maxTokensBudget: opts.maxTokensBudget,
+          maxCostUsd: opts.maxCostUsd,
+          booking: opts.booking,
         }),
         signal: controller.signal,
       });
@@ -183,6 +200,7 @@ export function startComputerUseAgent(opts: ComputerUseAgentOpts): AgentHandle {
           try { parsed = JSON.parse(data); } catch { continue; }
           switch (event) {
             case 'run_started':             opts.onRunStarted?.(parsed); break;
+            case 'model_resolved':          opts.onModelResolved?.(parsed); break;
             case 'session_started':         opts.onSessionStarted?.(parsed); break;
             case 'action':                  opts.onAction?.(parsed); break;
             case 'screenshot':              opts.onScreenshot?.(parsed); break;
@@ -192,6 +210,7 @@ export function startComputerUseAgent(opts: ComputerUseAgentOpts): AgentHandle {
             case 'error':                   opts.onError(parsed?.message || 'agent error'); break;
             case 'confirmation_required':   opts.onConfirmationRequired?.(parsed); break;
             case 'confirmation_resolved':   opts.onConfirmationResolved?.(parsed); break;
+            case 'steering_applied':        opts.onSteeringApplied?.(parsed); break;
             case 'usage':                   opts.onUsage?.(parsed); break;
             // Heartbeat is a keepalive — no callback needed, just drop it.
             case 'heartbeat':               break;

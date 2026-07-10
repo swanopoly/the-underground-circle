@@ -171,7 +171,19 @@ export type ApprovalGate = (
   plan: ChatAutomationPlan,
   ctx: ChatTransportContext,
 ) => Promise<
-  | { pass: true }
+  | {
+      pass: true;
+      /**
+       * User-facing note about WHY the gate passed when that isn't obvious —
+       * today: "an earlier approval covered this". Silent reuse of a prior
+       * approval surprised users (idempotency-key dedupe matches similar
+       * requests), so the gate says so and the dispatcher surfaces it on the
+       * outcome (`data.approvalNotice`).
+       */
+      notice?: string;
+      /** The pre-existing approval row that covered this pass, when any. */
+      approvalId?: string;
+    }
   | {
       pass: false;
       deferred: {
@@ -179,6 +191,12 @@ export type ApprovalGate = (
         message: string;
         category?: ApprovalDeferralCategory;
         retryable?: boolean;
+        /**
+         * Epoch ms when the pending/filed proposal auto-expires, when known.
+         * Lets the UI show a countdown and announce expiry instead of the
+         * card silently dying (surfaced as `data.approvalExpiresAt`).
+         */
+        expiresAt?: number | null;
       };
     }
 >;
@@ -243,6 +261,8 @@ export async function dispatchChatAutomationPlan(
   // `plan.approval.required` is false (for example, a circle can set a
   // normally-safe category to "never"). If the gate defers, we short-circuit
   // and no transport runs.
+  let gateNotice: string | undefined;
+  let gateApprovalId: string | undefined;
   if (opts.approvalGate) {
     const gate = await opts.approvalGate(plan, ctx);
     if (!gate.pass) {
@@ -251,19 +271,42 @@ export async function dispatchChatAutomationPlan(
       const category = gate.deferred.category;
       const retryable = gate.deferred.retryable
         ?? (category ? isApprovalDeferralRetryable(category) : false);
+      const expiresAt = gate.deferred.expiresAt ?? null;
+      const data: Record<string, unknown> = {};
+      if (category) {
+        data.approvalCategory = category;
+        data.approvalRetryable = retryable;
+      }
+      if (expiresAt !== null) data.approvalExpiresAt = expiresAt;
       const outcome: ChatAutomationOutcome = {
         executionKind: 'deferred',
         status: 'deferred',
         message: gate.deferred.message,
         approvalId: gate.deferred.approvalId,
         durationMs: Date.now() - started,
-        ...(category ? { data: { approvalCategory: category, approvalRetryable: retryable } } : {}),
+        ...(Object.keys(data).length > 0 ? { data } : {}),
       };
       const finalOutcome = attachPlanPreview(plan, outcome);
       try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
       return finalOutcome;
     }
+    gateNotice = gate.notice;
+    gateApprovalId = gate.approvalId;
   }
+
+  // Carry the gate's pass-through transparency onto whatever outcome the
+  // transport produces: the reuse notice tells the user an earlier approval
+  // covered this run (instead of silent dedupe), and the approval id keeps
+  // the outcome linkable to the covering row.
+  const applyGateTransparency = (outcome: ChatAutomationOutcome): ChatAutomationOutcome => {
+    if (gateNotice) {
+      outcome.data = { ...(outcome.data || {}), approvalNotice: gateNotice };
+    }
+    if (gateApprovalId && outcome.approvalId === undefined) {
+      outcome.approvalId = gateApprovalId;
+    }
+    return outcome;
+  };
 
   const handler = opts.handlers[plan.execution.kind];
   if (!handler) {
@@ -273,7 +316,7 @@ export async function dispatchChatAutomationPlan(
       message: `No handler registered for execution kind "${plan.execution.kind}". Falling back to caller's legacy path.`,
       durationMs: Date.now() - started,
     };
-    const finalOutcome = attachPlanPreview(plan, outcome);
+    const finalOutcome = attachPlanPreview(plan, applyGateTransparency(outcome));
     try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
     return finalOutcome;
   }
@@ -288,7 +331,9 @@ export async function dispatchChatAutomationPlan(
     outcome = {
       executionKind: plan.execution.kind,
       status: 'failed',
-      message: `That automation step hit an internal error: ${err instanceof Error ? err.message : String(err)}`,
+      // Policy (desktop-runtime-wiring E-gate): visible copy hides thrown
+      // transport internals; diagnostics stay in warnings + data.rawError.
+      message: 'That automation step hit an internal error. Technical details were saved for recovery.',
       warnings: [`Transport threw: ${err instanceof Error ? err.message : String(err)}`],
       data: {
         rawError: err instanceof Error ? err.message : String(err),
@@ -297,7 +342,7 @@ export async function dispatchChatAutomationPlan(
     };
   }
 
-  const finalOutcome = attachPlanPreview(plan, outcome);
+  const finalOutcome = attachPlanPreview(plan, applyGateTransparency(outcome));
   try { await opts.onOutcome?.(plan, finalOutcome, ctx); } catch {}
   return finalOutcome;
 }

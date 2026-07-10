@@ -14,6 +14,10 @@ import {
   resolveOpenSwanRuntimeApprovalDecision,
   stableApprovalJson,
 } from '../src/lib/openswanToolApprovals';
+import {
+  constraintBlocksToolCall,
+  resolveChatComputerConstraintInputs,
+} from '../src/lib/chatComputerRequestRouter';
 
 let failures = 0;
 
@@ -109,7 +113,41 @@ const legacyExact = resolveOpenSwanRuntimeApprovalDecision({
 });
 assert(legacyExact.kind === 'pass', 'legacy exact tool and args payload passes execution');
 
+// Session-path constraint hydration: the typed-core session runtime must
+// populate `context.userConstraints` from the SAME turn-message source the
+// chat loop uses, and the runtime backstop must enforce it at dispatch.
+// The enforcement itself is pure — exercise the exact hydrate → verdict pair.
+const sessionConstraintInputs = resolveChatComputerConstraintInputs(
+  'Update the draft but never send any emails while doing it.',
+);
+assert(
+  sessionConstraintInputs.userConstraints !== null
+    && sessionConstraintInputs.userConstraints.forbidden.includes('send'),
+  'session turn message parses a forbidden send constraint',
+);
+const sessionConstraintVerdict = constraintBlocksToolCall(
+  sessionConstraintInputs.userConstraints,
+  'browser.click_element',
+  { targetLabel: 'Send email' },
+);
+assert(sessionConstraintVerdict.blocked === true, 'hydrated session constraints block a send tool call');
+const sessionNoConstraint = resolveChatComputerConstraintInputs('Summarize the latest standup notes.');
+assert(
+  constraintBlocksToolCall(sessionNoConstraint.userConstraints, 'browser.observe_page', {}).blocked === false,
+  'constraint-free session turn does not block ordinary tool calls',
+);
+
+const sessionRuntimeSource = readFileSync('src/lib/openswanSessionRuntime.ts', 'utf8');
+assert(
+  sessionRuntimeSource.includes('userConstraints: resolveChatComputerConstraintInputs(args.userMessage).userConstraints'),
+  'session runtime hydrates tool-context userConstraints from the turn message',
+);
+
 const runtimeSource = readFileSync('src/lib/openswanToolRuntime.ts', 'utf8');
+assert(
+  runtimeSource.includes('constraintBlocksToolCall(context.userConstraints ?? null, tool, args)'),
+  'runtime dispatch backstop reads context.userConstraints for enforcement',
+);
 assert(runtimeSource.includes("if (tool.startsWith('wp.'))"), 'OpenSwan runtime has explicit wp.* policy branch');
 assert(
   /const readOnly = tool === 'wp\.discover_types' \|\| tool === 'wp\.list_posts'/.test(runtimeSource),

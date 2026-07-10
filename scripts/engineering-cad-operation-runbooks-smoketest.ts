@@ -38,7 +38,10 @@ assert(autocadPlan?.operations.includes('export_plot'));
 
 const draftRunbook = autocadPlan?.runbooks.find((runbook) => runbook.operation === 'draft_2d_geometry');
 assert.equal(draftRunbook?.risk, 'review');
-assert(draftRunbook?.steps.some((step) => step.tool === 'desktop.window_state'));
+assert(draftRunbook?.steps.some((step) => step.tool === 'desktop.observe_app'),
+  'P18: runbooks observe via the combined one-round-trip tool');
+assert(!draftRunbook?.steps.some((step) => step.tool === 'desktop.window_state'),
+  'P18: separate window-state observe step replaced by observe_app');
 assert(draftRunbook?.steps.some((step) => step.tool === 'approvals.request' && step.approvalRequired));
 assert(draftRunbook?.steps.some((step) => step.tool === 'desktop.type_text' && step.approvalRequired));
 assert(draftRunbook?.failClosedConditions.some((item) => item.includes('units/scale/origin')));

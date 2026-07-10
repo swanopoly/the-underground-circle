@@ -33,13 +33,42 @@ import { isRetryableProviderError } from './agentProviders/fallbackChain';
 
 export type RetryAttemptResult<T> =
   | { ok: true; value: T }
-  | { ok: false; retryable: boolean };
+  | {
+      ok: false;
+      retryable: boolean;
+      /**
+       * Optional server `Retry-After` hint (ms) for the NEXT wait. Only used
+       * when `retryable` is true; clamped to the cap by the backoff. Omit to
+       * fall back to full-jitter exponential backoff.
+       */
+      retryAfterMs?: number | null;
+    };
+
+/**
+ * Hard ceiling on any single backoff wait. Even at high attempt counts (or a
+ * hostile `Retry-After`) one sleep can never exceed this — keeps the total
+ * turn latency bounded. AWS's "Exponential Backoff And Jitter" analysis found
+ * *full* jitter (`random(0, cap)`) cut contended call volume by >50% vs. fixed
+ * or partial backoff, so that's the schedule we use.
+ */
+export const TRANSIENT_RETRY_CAP_MS = 20_000;
 
 export interface TransientRetryOptions {
   /** Max RETRIES after the first try. Default 2 (up to 3 attempts total). */
   maxRetries?: number;
-  /** Base backoff in ms; retry n waits `baseDelayMs * 2^n` (n 0-indexed). Default 400. */
+  /**
+   * Base backoff in ms. The uncapped ceiling for retry n (0-indexed) is
+   * `baseDelayMs * 2^n`; the actual wait is `random(0, min(cap, ceiling))`
+   * (full jitter). Default 400.
+   */
   baseDelayMs?: number;
+  /** Hard cap on any single wait. Default {@link TRANSIENT_RETRY_CAP_MS}. */
+  capMs?: number;
+  /**
+   * Jitter source, `[0, 1)`. Injectable so smokes are deterministic; defaults
+   * to `Math.random`. Full jitter multiplies this by the capped ceiling.
+   */
+  rng?: () => number;
   /** Injected sleeper so smoke tests run instantly. Default real setTimeout. */
   sleep?: (ms: number) => Promise<void>;
   /** Fired before each retry sleep with the upcoming (1-based) attempt + delay. */
@@ -47,10 +76,39 @@ export interface TransientRetryOptions {
 }
 
 /**
- * Run `attempt` with bounded exponential-backoff retry on RETRYABLE
- * failures. Returns the success value, or `null` when the attempt fails
- * terminally (non-retryable) or all retries are exhausted. `attempt`
- * receives the 0-based try index. Pure aside from the injected sleeper.
+ * Full-jitter capped exponential backoff. Pure — exported so smokes can pin
+ * the envelope without sleeping. The ceiling doubles per attempt (`base * 2^n`)
+ * then plateaus at `cap`; the returned wait is a uniform sample in
+ * `[0, min(cap, ceiling)]`. A finite non-negative `retryAfterMs` (server
+ * `Retry-After` hint) overrides the computed value but is still clamped to
+ * `cap` so a hostile header can't hang the caller.
+ */
+export function transientBackoffMs(
+  attempt: number,
+  opts: { baseDelayMs?: number; capMs?: number; rng?: () => number; retryAfterMs?: number | null } = {},
+): number {
+  const base = Math.max(0, opts.baseDelayMs ?? 400);
+  const cap = Math.max(0, opts.capMs ?? TRANSIENT_RETRY_CAP_MS);
+  // Server hint wins when present + usable — but never past our own ceiling.
+  if (typeof opts.retryAfterMs === 'number' && Number.isFinite(opts.retryAfterMs) && opts.retryAfterMs >= 0) {
+    return Math.min(opts.retryAfterMs, cap);
+  }
+  const rng = opts.rng ?? Math.random;
+  const n = Math.max(0, Math.floor(attempt));
+  // `2 ** n` can overflow to Infinity at large n; Math.min collapses it to cap.
+  const ceiling = Math.min(cap, base * 2 ** n);
+  const r = rng();
+  const unit = Number.isFinite(r) ? Math.min(1, Math.max(0, r)) : 0;
+  return Math.floor(unit * ceiling);
+}
+
+/**
+ * Run `attempt` with bounded full-jitter exponential-backoff retry on
+ * RETRYABLE failures. Returns the success value, or `null` when the attempt
+ * fails terminally (non-retryable) or all retries are exhausted. `attempt`
+ * receives the 0-based try index and may return a `retryAfterMs` on a
+ * retryable failure to honor a server `Retry-After` hint for the next wait.
+ * Pure aside from the injected sleeper + jitter source.
  */
 export async function runWithTransientRetry<T>(
   attempt: (tryIndex: number) => Promise<RetryAttemptResult<T>>,
@@ -58,6 +116,8 @@ export async function runWithTransientRetry<T>(
 ): Promise<T | null> {
   const maxRetries = Math.max(0, Math.floor(opts.maxRetries ?? 2));
   const baseDelayMs = Math.max(0, opts.baseDelayMs ?? 400);
+  const capMs = Math.max(0, opts.capMs ?? TRANSIENT_RETRY_CAP_MS);
+  const rng = opts.rng ?? Math.random;
   const sleep = opts.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
   for (let tryIndex = 0; tryIndex <= maxRetries; tryIndex += 1) {
@@ -66,7 +126,12 @@ export async function runWithTransientRetry<T>(
     if (!result.retryable) return null;        // structural — don't retry
     if (tryIndex === maxRetries) return null;  // exhausted
 
-    const delayMs = baseDelayMs * 2 ** tryIndex;
+    const delayMs = transientBackoffMs(tryIndex, {
+      baseDelayMs,
+      capMs,
+      rng,
+      retryAfterMs: result.retryAfterMs,
+    });
     try { opts.onRetry?.({ attempt: tryIndex + 1, delayMs }); } catch { /* observer never blocks retry */ }
     await sleep(delayMs);
   }

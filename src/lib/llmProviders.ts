@@ -51,6 +51,10 @@ export interface ProviderModel {
 
 export interface LLMProxyResponse {
   response: string;
+  /** Present when the provider returned tool calls and the request sent
+   *  tools through llm-proxy. Callers that can execute tools should treat
+   *  this as an escalation trigger instead of rendering `response`. */
+  toolCalls?: Array<{ id: string; name: string; arguments: string }>;
   usage: {
     model: string;
     provider: string;
@@ -128,18 +132,25 @@ export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
     { id: 'llama-3.1-8b-instant',    label: 'Llama 3.1 8B Instant', provider: 'groq', contextWindow: 131072, costTier: 'cheap' },
   ],
   ollama: [
-    { id: 'blackswan',   label: 'BlackSwan (Local)', provider: 'ollama', contextWindow: 4096,  costTier: 'free' },
+    // 'blackswan' (local Ollama weight) intentionally REMOVED (P8): the one
+    // and only BlackSwan is cswan801/BlackSwan-v5 on the circle's dedicated
+    // HF Inference Endpoint (the `blackswan` integration). Stale persisted
+    // local picks normalize to it in serviceProfileSouls / ChatTab.
     { id: 'llama3.2',    label: 'Llama 3.2',         provider: 'ollama', contextWindow: 131072, costTier: 'free' },
     { id: 'qwen3',       label: 'Qwen 3',            provider: 'ollama', contextWindow: 40960,  costTier: 'free' },
     { id: 'qwen2.5',     label: 'Qwen 2.5',          provider: 'ollama', contextWindow: 32768,  costTier: 'free' },
     { id: 'mistral',     label: 'Mistral',            provider: 'ollama', contextWindow: 32768,  costTier: 'free' },
   ],
-  replicate: [
-    { id: 'flux-schnell', label: 'Flux Schnell (fast)', provider: 'replicate', contextWindow: 0, costTier: 'cheap' },
-    { id: 'flux-dev',     label: 'Flux Dev (quality)',   provider: 'replicate', contextWindow: 0, costTier: 'mid' },
-    { id: 'stable-diffusion-xl', label: 'Stable Diffusion XL', provider: 'replicate', contextWindow: 0, costTier: 'cheap' },
-    { id: 'stable-diffusion',    label: 'Stable Diffusion',    provider: 'replicate', contextWindow: 0, costTier: 'cheap' },
-  ],
+  // Replicate is intentionally empty: the llm-proxy edge function does not
+  // support a `replicate` provider, so listing models here would make them
+  // selectable but fail at runtime (provider drift). Re-add the models below
+  // only after llm-proxy (supabase/functions/llm-proxy/index.ts) gains
+  // Replicate support. Keys can still be stored for image-gen surfaces.
+  // { id: 'flux-schnell', label: 'Flux Schnell (fast)', provider: 'replicate', contextWindow: 0, costTier: 'cheap' },
+  // { id: 'flux-dev',     label: 'Flux Dev (quality)',   provider: 'replicate', contextWindow: 0, costTier: 'mid' },
+  // { id: 'stable-diffusion-xl', label: 'Stable Diffusion XL', provider: 'replicate', contextWindow: 0, costTier: 'cheap' },
+  // { id: 'stable-diffusion',    label: 'Stable Diffusion',    provider: 'replicate', contextWindow: 0, costTier: 'cheap' },
+  replicate: [],
   'github-models': [
     { id: 'gpt-4.1',                      label: 'GPT-4.1',         provider: 'github-models', contextWindow: 1047576, costTier: 'free' },
     { id: 'gpt-4.1-mini',                 label: 'GPT-4.1 Mini',    provider: 'github-models', contextWindow: 1047576, costTier: 'free' },

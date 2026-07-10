@@ -5,13 +5,21 @@
  *   OST-G1 — the legacy dual tool path `runOpenSwanRuntimeToolLoop` has zero
  *            callers (only the pure `extractBrowserPlansFromToolActions` helper
  *            is imported from `openswanRuntimeToolLoop`).
- *   OST-G2 — the session runtime keeps T2/T8 seams dark (parallelToolConcurrency
- *            pinned to 1; resolveAdditionalTools / toolParallelPolicyProvider /
- *            getProgressiveOpenSwanTools commented out, not passed live).
+ *   OST-G2 — the session runtime keeps the wired/dark seam split of 2026-07-01
+ *            (f9c9a0b): the T2 progressive-disclosure seam is LIVE
+ *            (getProgressiveOpenSwanTools called, resolveAdditionalTools passed
+ *            into the typed-core run) while T8 parallelism stays dark
+ *            (parallelToolConcurrency pinned to 1; toolParallelPolicyProvider
+ *            comment-only).
  *   OST-G3 — agentExecutionCore.runAgent advertises an additive-only tool set:
  *            without resolveAdditionalTools the set is identical turn-over-turn;
  *            with one it only GROWS (never shrinks).
  *   OST-G4 — typed run-ledger paths preserve input/output/cache token rollups.
+ *   OST-G5 — the AI-first flags flipped default-ON on 2026-07-01 stay ON:
+ *            stream->escalate defaults ON when the flag is unset (explicit
+ *            '0'/'false'/'off' opt-out still turns it OFF), and the mass-deploy
+ *            tool stays enabled AND approval-gated (mandatory 'ask' policy,
+ *            50-agent ceiling, $10 per-deploy cost cap).
  *
  * Run: npm run smoke:openswan-typed-runtime-invariants
  */
@@ -19,6 +27,17 @@
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { join, resolve } from 'path';
 import { runAgent, type AgentProvider, type AgentToolDefinition } from '../src/lib/agentExecutionCore';
+import {
+  chooseChatTerminalTransport,
+  isStreamEscalateOnToolUseEnabled,
+  STREAM_ESCALATE_ON_TOOL_USE_FLAG,
+} from '../src/lib/chatTerminalTransportPolicy';
+import {
+  capDeployCount,
+  MAX_AGENTS_PER_DEPLOY,
+  PER_DEPLOY_COST_CAP_USD,
+  shouldRequireApproval,
+} from '../src/lib/agentDeployPolicy';
 
 let failures = 0;
 function fail(message: string): void {
@@ -91,7 +110,7 @@ assert(
   importerFiles.join(' | '),
 );
 
-// ── OST-G2: T2/T8 seams stay dark in the session runtime ───────────────────
+// ── OST-G2: T2 seam is LIVE (2026-07-01), T8 parallelism stays dark ─────────
 const sessionSrc = readFileSync(join(repoRoot, 'src/lib/openswanSessionRuntime.ts'), 'utf8');
 const persistenceSrc = readFileSync(join(repoRoot, 'src/lib/agentRunPersistence.ts'), 'utf8');
 const subagentSrc = readFileSync(join(repoRoot, 'src/lib/subagentRegistry.ts'), 'utf8');
@@ -102,9 +121,21 @@ function allMentionsAreComments(src: string, token: string): boolean {
   if (lines.length === 0) return true; // absent is fine (still dark)
   return lines.every((l) => l.trim().startsWith('//'));
 }
-assert(allMentionsAreComments(sessionSrc, 'resolveAdditionalTools'), 'resolveAdditionalTools is comment-only in session runtime (dark)');
+function hasLiveMention(src: string, token: string): boolean {
+  return src.split('\n').some((l) => l.includes(token) && !l.trim().startsWith('//'));
+}
+// Progressive disclosure was un-darkened in f9c9a0b: the session runtime must
+// import + call the bridge helper and pass its resolver into the typed core.
+assert(
+  /import\s*\{[^}]*getProgressiveOpenSwanTools[^}]*\}\s*from\s*['"]\.\/openswanBridge['"]/.test(sessionSrc)
+    && hasLiveMention(sessionSrc, 'getProgressiveOpenSwanTools('),
+  'getProgressiveOpenSwanTools is imported and called LIVE in the session runtime (wired 2026-07-01)',
+);
+assert(
+  sessionSrc.split('\n').some((l) => l.trim() === 'resolveAdditionalTools,'),
+  'resolveAdditionalTools is passed LIVE into the typed-core run (wired 2026-07-01)',
+);
 assert(allMentionsAreComments(sessionSrc, 'toolParallelPolicyProvider'), 'toolParallelPolicyProvider is comment-only in session runtime (dark)');
-assert(allMentionsAreComments(sessionSrc, 'getProgressiveOpenSwanTools'), 'getProgressiveOpenSwanTools is comment-only in session runtime (dark)');
 
 // ── OST-G4: typed run-ledger token rollups stay complete ───────────────────
 assert(
@@ -138,6 +169,87 @@ assert(
   sessionSrc.includes('finalUsageTotals.input += delegatedUsageTotals.input')
     && sessionSrc.includes('cached_tokens: finalUsageTotals.cached'),
   'session runtime finalizes parent runs with parent plus delegated token totals',
+);
+
+// ── OST-G5: AI-first flags stay default-ON (flipped 2026-07-01, f9c9a0b) ────
+// (a) stream->escalate defaults ON when the flag is unset. Node has no
+// localStorage, so this call IS the unset case.
+type FlagStore = { localStorage?: { getItem: (k: string) => string | null } };
+delete (globalThis as FlagStore).localStorage;
+assert(isStreamEscalateOnToolUseEnabled() === true, 'stream->escalate defaults ON when the flag is unset');
+assert(
+  chooseChatTerminalTransport({ canStreamAnthropic: true }).path === 'stream_then_escalate',
+  'simple streamable chat resolves to stream_then_escalate by default',
+);
+// (b) explicit opt-out values still turn it OFF; other stored values stay ON.
+function withStoredFlag<T>(value: string | null, run: () => T): T {
+  (globalThis as FlagStore).localStorage = {
+    getItem: (k: string) => (k === STREAM_ESCALATE_ON_TOOL_USE_FLAG ? value : null),
+  };
+  try {
+    return run();
+  } finally {
+    delete (globalThis as FlagStore).localStorage;
+  }
+}
+for (const optOut of ['0', 'false', 'off']) {
+  assert(
+    withStoredFlag(optOut, () => isStreamEscalateOnToolUseEnabled()) === false,
+    `stream->escalate opt-out value '${optOut}' turns the flag OFF`,
+  );
+}
+assert(
+  withStoredFlag('off', () => chooseChatTerminalTransport({ canStreamAnthropic: true }).path) === 'stream_plain_chat',
+  'opted-out simple streamable chat falls back to legacy stream_plain_chat',
+);
+for (const stillOn of [null, '1', 'true']) {
+  assert(
+    withStoredFlag(stillOn, () => isStreamEscalateOnToolUseEnabled()) === true,
+    `stream->escalate stays ON for stored value ${JSON.stringify(stillOn)}`,
+  );
+}
+// Explicit caller override always wins over the flag (both directions).
+assert(
+  chooseChatTerminalTransport({ canStreamAnthropic: true, streamEscalateOnToolUse: false }).path === 'stream_plain_chat'
+    && chooseChatTerminalTransport({ canStreamAnthropic: true, streamEscalateOnToolUse: true }).path === 'stream_then_escalate',
+  'explicit streamEscalateOnToolUse override wins over the flag',
+);
+
+// (c) mass-deploy tool: flag stays ON, and enablement stays flag-governed for
+// both advertising and loop reachability (source-level — the runtime module
+// transitively imports react-native so it cannot be imported here).
+const toolRuntimeSrc = readFileSync(join(repoRoot, 'src/lib/openswanToolRuntime.ts'), 'utf8');
+assert(
+  /const DEPLOY_AGENTS_TOOL_ENABLED:\s*boolean\s*=\s*true\b/.test(toolRuntimeSrc),
+  'DEPLOY_AGENTS_TOOL_ENABLED is ON (enabled 2026-07-01)',
+);
+assert(
+  toolRuntimeSrc.includes('...(DEPLOY_AGENTS_TOOL_ENABLED ? [TEAM_DEPLOY_AGENTS_TOOL_DEFINITION] : [])'),
+  'deploy tool advertising stays governed by DEPLOY_AGENTS_TOOL_ENABLED',
+);
+const loopGateIdx = toolRuntimeSrc.indexOf('if (DEPLOY_AGENTS_TOOL_ENABLED) {');
+assert(
+  loopGateIdx >= 0 && toolRuntimeSrc.slice(loopGateIdx, loopGateIdx + 200).includes("TOOL_LOOP_SAFE_NAMES.add('team.deploy_agents')"),
+  'deploy tool loop reachability stays governed by DEPLOY_AGENTS_TOOL_ENABLED',
+);
+// The deploy tool must stay mandatory-'ask' even while enabled.
+const deployPolicyIdx = toolRuntimeSrc.indexOf("if (tool === 'team.deploy_agents')");
+assert(
+  deployPolicyIdx >= 0 && toolRuntimeSrc.slice(deployPolicyIdx, deployPolicyIdx + 700).includes("approvalMode: 'ask'"),
+  "deploy tool policy remains mandatory approvalMode: 'ask'",
+);
+// Caps stay 50 agents / $10 per deploy (behavioral — agentDeployPolicy is pure).
+assert(MAX_AGENTS_PER_DEPLOY === 50, 'deploy ceiling remains 50 agents per deploy');
+assert(PER_DEPLOY_COST_CAP_USD === 10, 'per-deploy cost cap remains $10');
+const capped = capDeployCount(9999);
+assert(capped.count === 50 && capped.truncated === true, 'capDeployCount clamps oversized requests to the 50-agent ceiling');
+assert(
+  shouldRequireApproval({ count: 50, estimateUsd: 0 }).required === true,
+  'large fan-outs still require approval regardless of cost',
+);
+assert(
+  shouldRequireApproval({ count: 1, estimateUsd: 10.01 }).required === true,
+  'estimates over the $10 cap still require approval regardless of count',
 );
 
 // ── OST-G3: additive-only advertised tool set (behavioral) ─────────────────

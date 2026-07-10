@@ -1,6 +1,9 @@
 import { supabase } from './supabase';
 import { semanticSearchMemories } from './memoryEmbeddings';
 import { nextCronOccurrence, parseRecurrence, scheduleAction } from './scheduledActions';
+import { buildIntegrationActionOutcome, buildIntegrationReceiptLines } from './integrationActionReceipt';
+import { attachToolInputExamples } from './toolInputExamples';
+import { recordIntegrationOutcomeNow, getIntegrationHealthHintNow } from './integrationHealthRegistry';
 import type { OpenSwanExecutionStatus } from './openswanExecution';
 import type { OpenSwanTaskPlan, OpenSwanToolName } from './openswanTaskPlanner';
 import type { SwanBotStructuredArtifact } from './swanbot';
@@ -49,6 +52,13 @@ import {
   buildCapabilityManifestPrompt,
   suggestCapabilitiesForMessage,
 } from './chatCapabilityManifest';
+import {
+  buildMessagingPayload,
+  describeMessagingNotify,
+  validateMessagingNotifyArgs,
+  type MessagingField,
+  type MessagingProvider,
+} from './messagingNotify';
 
 export type OpenSwanToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
 export type OpenSwanRuntimeToolName =
@@ -76,6 +86,7 @@ export type OpenSwanRuntimeToolName =
   | 'wp.update_post'
   | 'wp.trash_post'
   | 'wp.list_posts'
+  | 'docs.create_document'
   | 'credentials.get'
   | 'vault.list'
   | 'vault.find'
@@ -107,6 +118,8 @@ export type OpenSwanRuntimeToolName =
   | 'integrations.list'
   | 'custom_api.read'
   | 'custom_api.request'
+  | 'integration.compose_action'
+  | 'messaging.notify'
   | 'office.list_agents'
   // ── Circle / Agent / Office editing (chat-driven UI mutations) ────
   // Anything a user can edit in Circle Settings / Office Customize
@@ -161,6 +174,19 @@ export type OpenSwanRuntimeToolName =
   | 'desktop.photoshop_update_text_layer'
   | 'desktop.photoshop_place_asset'
   | 'desktop.photoshop_export_proof'
+  | 'desktop.photoshop_apply_adjustment_layer'
+  | 'desktop.photoshop_apply_selection_or_mask'
+  | 'desktop.photoshop_resize_canvas_or_image'
+  | 'desktop.photoshop_manage_layers'
+  | 'desktop.photoshop_transform_layer'
+  | 'desktop.photoshop_convert_color_mode'
+  | 'desktop.illustrator_document_status'
+  | 'desktop.illustrator_export_proof'
+  | 'desktop.cad_compile'
+  | 'desktop.cad_inspect_file'
+  | 'desktop.design_export'
+  | 'desktop.observe_app'
+  | 'desktop.app_reachability'
   | 'desktop.list_running_apps'
   | 'desktop.list_installed_apps'
   | 'desktop.list_browser_tabs'
@@ -209,8 +235,8 @@ export type OpenSwanRuntimeToolName =
   | 'context.search'
   // ── Phase-3 mass-agent deploy (runtime-only; not a planner tool). Lets the
   //    driving model fan a task out to a swarm of TRANSIENT agents. Gated
-  //    behind DEPLOY_AGENTS_TOOL_ENABLED (default OFF) so it is NOT advertised
-  //    until the deploy path is runtime-proven, and always approval-gated. ──
+  //    behind DEPLOY_AGENTS_TOOL_ENABLED (ON since 2026-07-01; a flag revert
+  //    stops advertising it everywhere), and always approval-gated. ──
   | 'team.deploy_agents';
 
 export type OpenSwanToolDefinition = {
@@ -350,6 +376,25 @@ type CustomApiRequestArgs = CustomApiBaseArgs & {
   body?: unknown;
 };
 
+type IntegrationComposeActionArgs = {
+  integrationId?: string;
+  apiName?: string;
+  goal: string;
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  path: string;
+  query?: Record<string, unknown>;
+  body?: unknown;
+  summary?: string;
+};
+
+type MessagingNotifyArgs = {
+  provider: MessagingProvider;
+  title?: string;
+  body: string;
+  linkUrl?: string;
+  fields?: MessagingField[];
+};
+
 type ScheduleActionArgs = {
   kind: string;
   payload: Record<string, unknown>;
@@ -442,6 +487,8 @@ export type OpenSwanToolExecutionArgs = {
   'integrations.list': Record<string, never>;
   'custom_api.read': CustomApiReadArgs;
   'custom_api.request': CustomApiRequestArgs;
+  'integration.compose_action': IntegrationComposeActionArgs;
+  'messaging.notify': MessagingNotifyArgs;
   'office.list_agents': Record<string, never>;
   'agent.codex_acquire_asset': { goal: string; outputDir?: string; expectedFileName?: string; sourceUrl?: string; taskContext?: string; sessionId?: string; launchIfMissing?: boolean };
   'agent.recover_failed_task': { task: string; failureMessage: string; failureStack?: string; outcomeStatus?: string; executionKind?: string; runId?: string; planSummary?: string; groundingSummary?: string; preflightSummary?: string; source?: string; sessionId?: string; launchIfMissing?: boolean };
@@ -452,6 +499,7 @@ export type OpenSwanToolExecutionArgs = {
   'approvals.resolve': { approvalId: string; status: 'approved' | 'rejected' };
   'wp.update_post': { siteUrl: string; onePasswordItem: string; postId: number; postType?: string; title?: string; content?: string; status?: 'draft' | 'publish' | 'private' | 'pending' | 'future'; slug?: string; excerpt?: string; date?: string; featuredMedia?: number; menuOrder?: number; meta?: Record<string, unknown>; vault?: string };
   'wp.trash_post': { siteUrl: string; onePasswordItem: string; postId: number; postType?: string; expectedTitle?: string; reason?: string; vault?: string };
+  'docs.create_document': { title: string; markdown: string };
   'vault.list': { platform?: string; query?: string; action?: string };
   'vault.find': VaultCredentialQueryArgs;
   'vault.grants': VaultCredentialQueryArgs;
@@ -482,6 +530,19 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.photoshop_update_text_layer': { appName?: string; layerName: string; replacementText: string; expectedDocumentName?: string; sourceDocumentPath?: string };
   'desktop.photoshop_place_asset': { appName?: string; assetPath: string; layerName?: string; expectedDocumentName?: string; sourceDocumentPath?: string };
   'desktop.photoshop_export_proof': { appName?: string; outputPath: string; format?: 'png' | 'jpg' | 'jpeg'; quality?: number; expectedDocumentName?: string; sourceDocumentPath?: string };
+  'desktop.photoshop_apply_adjustment_layer': { appName?: string; targetDocumentName?: string; layerName?: string; kind: 'levels' | 'curves' | 'hue_saturation' | 'brightness_contrast' | 'black_white'; preserveExisting?: boolean };
+  'desktop.photoshop_apply_selection_or_mask': { appName?: string; targetDocumentName?: string; layerName?: string; mode: 'select_only' | 'mask_layer' };
+  'desktop.photoshop_resize_canvas_or_image': { appName?: string; targetDocumentName?: string; op: 'image_resize' | 'canvas_resize' | 'crop_to_selection'; widthPx?: number; heightPx?: number; anchor?: string };
+  'desktop.photoshop_manage_layers': { appName?: string; targetDocumentName?: string; action: 'rename' | 'duplicate' | 'reorder' | 'group'; layerName: string; newName?: string; position?: 'top' | 'bottom' | 'above' | 'below'; referenceLayerName?: string };
+  'desktop.photoshop_transform_layer': { appName?: string; targetDocumentName?: string; layerName: string; op: 'move' | 'scale' | 'rotate'; deltaX?: number; deltaY?: number; scalePercent?: number; rotateDegrees?: number };
+  'desktop.photoshop_convert_color_mode': { appName?: string; targetDocumentName?: string; mode: 'rgb' | 'cmyk' | 'grayscale' };
+  'desktop.illustrator_document_status': { appName?: string; expectedDocumentName?: string };
+  'desktop.illustrator_export_proof': { appName?: string; outputPath: string; format?: 'png' | 'svg'; scalePercent?: number; expectedDocumentName?: string };
+  'desktop.cad_compile': { engine: 'openscad' | 'freecadcmd' | 'blender'; sourcePath: string; outputPath: string; extraArgs?: string[]; timeoutMs?: number };
+  'desktop.cad_inspect_file': { path: string; maxBytes?: number };
+  'desktop.design_export': { engine: 'inkscape' | 'sketchtool'; sourcePath: string; outputPath: string; options?: { widthPx?: number; heightPx?: number; pdfVersion?: string; format?: string; scale?: number }; timeoutMs?: number };
+  'desktop.observe_app': { appName?: string; taskHint?: string; maxDepth?: number; maxNodes?: number; target?: string };
+  'desktop.app_reachability': { appName: string };
   'desktop.list_running_apps': { response_format?: ToolResponseFormat };
   'desktop.list_installed_apps': { response_format?: ToolResponseFormat };
   'desktop.list_browser_tabs': { browsers?: string[]; response_format?: ToolResponseFormat };
@@ -683,6 +744,8 @@ export type OpenSwanToolExecutionResultMap = {
   'integrations.list': { ok: boolean; resultsText: string };
   'custom_api.read': { ok: boolean; resultsText: string; status?: number; approvalVerified?: boolean };
   'custom_api.request': { ok: boolean; resultsText: string; status?: number; approvalVerified?: boolean; approvalRequest?: { id: string; required: boolean; status: string } };
+  'integration.compose_action': { ok: boolean; resultsText: string };
+  'messaging.notify': { ok: boolean; resultsText: string; status?: number; approvalVerified?: boolean; approvalRequest?: { id: string; required: boolean; status: string } };
   'office.list_agents': { ok: boolean; resultsText: string };
   'agent.codex_acquire_asset': { ok: boolean; resultsText: string; provider?: string; sessionId?: string; launched?: boolean };
   'agent.recover_failed_task': { ok: boolean; resultsText: string; provider?: string; sessionId?: string; launched?: boolean; recoveryAction?: string; recoveryRunbook?: Record<string, unknown> };
@@ -714,6 +777,7 @@ export type OpenSwanToolExecutionResultMap = {
   'approvals.request': { ok: boolean; resultsText: string };
   'approvals.resolve': { ok: boolean; resultsText: string };
   'wp.trash_post': { ok: boolean; resultsText: string };
+  'docs.create_document': { ok: boolean; resultsText: string };
   'vault.list': { ok: boolean; resultsText: string };
   'vault.find': { ok: boolean; resultsText: string };
   'vault.grants': { ok: boolean; resultsText: string };
@@ -744,6 +808,19 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.photoshop_update_text_layer': { ok: boolean; resultsText: string };
   'desktop.photoshop_place_asset': { ok: boolean; resultsText: string };
   'desktop.photoshop_export_proof': { ok: boolean; resultsText: string };
+  'desktop.photoshop_apply_adjustment_layer': { ok: boolean; resultsText: string };
+  'desktop.photoshop_apply_selection_or_mask': { ok: boolean; resultsText: string };
+  'desktop.photoshop_resize_canvas_or_image': { ok: boolean; resultsText: string };
+  'desktop.photoshop_manage_layers': { ok: boolean; resultsText: string };
+  'desktop.photoshop_transform_layer': { ok: boolean; resultsText: string };
+  'desktop.photoshop_convert_color_mode': { ok: boolean; resultsText: string };
+  'desktop.illustrator_document_status': { ok: boolean; resultsText: string };
+  'desktop.illustrator_export_proof': { ok: boolean; resultsText: string };
+  'desktop.cad_compile': { ok: boolean; resultsText: string };
+  'desktop.cad_inspect_file': { ok: boolean; resultsText: string };
+  'desktop.design_export': { ok: boolean; resultsText: string };
+  'desktop.observe_app': { ok: boolean; resultsText: string };
+  'desktop.app_reachability': { ok: boolean; resultsText: string };
   'desktop.list_running_apps': { ok: boolean; resultsText: string };
   'desktop.list_installed_apps': { ok: boolean; resultsText: string };
   'desktop.list_browser_tabs': { ok: boolean; resultsText: string };
@@ -808,16 +885,16 @@ const RESPONSE_FORMAT_PROPERTY = {
 } as const;
 
 /**
- * DEFAULT-OFF feature flag for the model-callable mass-agent deploy tool
- * (`team.deploy_agents`). The Phase-3 deploy stack (plan -> caps -> model
- * policy -> orchestrator) is built and smoke-passing but NOT yet runtime-proven
- * against a live circle, and it spends money + spawns agents. So it ships
- * SAFE-DORMANT: while this is `false` the tool is NOT added to TOOL_DEFINITIONS
- * (never advertised to the model on any surface, never loop-eligible) and the
- * dispatch handler returns a clear `disabled` result if it is somehow called.
- * Flip to `true` ONLY after the orchestrator's `// TODO(prove-web-path)` markers
- * are proven; reverting is a one-line change. Even when enabled the tool is
- * always approval-gated (policy approvalMode:'ask') and honors the 50/$10 caps.
+ * Feature flag for the model-callable mass-agent deploy tool
+ * (`team.deploy_agents`) — ENABLED 2026-07-01 (user decision). While `true`
+ * the tool is added to TOOL_DEFINITIONS (advertised + loop-eligible on its
+ * surfaces); flipping back to `false` is the one-line revert to SAFE-DORMANT
+ * (never advertised on any surface, never loop-eligible, and the dispatch
+ * handler returns a clear `disabled` result if it is somehow still called).
+ * Invariants that hold regardless of the flag: the tool is ALWAYS
+ * approval-gated (policy approvalMode:'ask'), deployed agents are TRANSIENT
+ * (auto-retire, never persisted as office agents), and the orchestrator
+ * enforces the hard 50-agent / ~$10 per-deploy caps.
  */
 const DEPLOY_AGENTS_TOOL_ENABLED: boolean = true; // enabled 2026-07-01 (user); mass deploy still gated by mandatory 'ask' approval + 50-agent/$10 caps
 
@@ -910,7 +987,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'browser.wp_admin_source_intelligence',
     label: 'Read WordPress Admin Source Intelligence',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Read the current local browser page source, immediately parse it into bounded/redacted WordPress admin facts, and return no raw HTML. Use on wp-admin or Dealer Inspire pages before DI Slides/page/plugin/settings tasks to identify current screen, post type, rows, action links, quick-edit support, session/auth markers, and plugin signals.',
+    description: 'Read the current local browser page source, immediately parse it into bounded/redacted WordPress admin facts, and return no raw HTML. Use before DI Slides/page/plugin/settings tasks — run it on wp-admin or Dealer Inspire pages to identify current screen, post type, rows, action links, quick-edit support, session/auth markers, and plugin signals.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1507,6 +1584,19 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     description: 'List posts or custom post-type items from a WordPress site via its REST API. Use wp.discover_types first when the post type is unknown, especially for Dealer Inspire/DI Slides sites.',
     inputSchema: { type: 'object', properties: { siteUrl: { type: 'string', description: 'WordPress site URL, e.g. https://example.com/wp.' }, onePasswordItem: { type: 'string', description: '1Password item name holding the WP credentials.' }, postType: { type: 'string', description: 'e.g. posts, pages, di_slide, flavor_di_slides' }, perPage: { type: 'number', description: 'Max items to return per page.' } }, required: ['siteUrl', 'onePasswordItem'] },
   },
+  // ── Google Docs (Drive-backed document creation) ─────────────────────────
+  // LOCKSTEP: `src/lib/googleDocsCreate.ts` owns the API mechanics — token
+  // resolution from the user's Google Workspace connection, markdown→HTML
+  // conversion, the Drive multipart upload, and scope/expiry error mapping.
+  // This entry only registers the tool; keep schema, policy, and the
+  // dispatch case in step with that module.
+  {
+    name: 'docs.create_document',
+    label: 'Create Google Doc',
+    surfaces: ['main_chat', 'room_chat'],
+    description: 'Creates a real Google Doc in the user\'s connected Google Drive from markdown content — headings, lists, bold/italic, links, and code blocks become Doc formatting. Use when the user wants an actual Google Doc rather than a chat artifact or download. Requires approval before writing to their Drive, and requires the Google Drive connection from Marketplace; fails with a plain-language fix when Drive is not connected.',
+    inputSchema: { type: 'object', properties: { title: { type: 'string', description: 'Document title shown in Google Drive and the Docs editor.' }, markdown: { type: 'string', description: 'Full document body as markdown (headings, lists, bold/italic, links, fenced code). Max 60,000 characters.' } }, required: ['title', 'markdown'] },
+  },
   {
     name: 'credentials.get',
     label: 'Get Credentials',
@@ -1577,7 +1667,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'vault.runbook',
     label: 'Build Vault Runbook',
     surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
-    description: 'Build safe agent instructions for using a saved login. Includes credential id, allowed actions, origins, remote Computer Use fill_saved_login guidance, and local OpenSwan browser.fill_credential_field guidance when a 1Password item mapping exists. Never returns the secret.',
+    description: 'Build safe agent instructions for using a saved login. Includes credential id, allowed actions, origins, remote Computer Use fill_saved_login guidance, and local OpenSwan browser.fill_credential_field guidance when a 1Password item mapping exists. Never returns the secret. Use when a browser/desktop task needs to sign in with a saved credential and you want the fill guidance without exposing the value; prefer vault.find/vault.list first to resolve the credential id.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1657,6 +1747,55 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     },
   },
   {
+    name: 'integration.compose_action',
+    label: 'Compose Custom API Action',
+    surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+    description:
+      'Compose + validate a write-like Custom API call from a goal into approval-ready custom_api.request args. Read-only — sends NOTHING: it checks your proposed method/path/body against the connected integration (method in allowed methods; relative path, no host, no "..", no secrets), then returns the exact custom_api.request args to run next plus a one-line approval preview, or a corrective error to fix and re-compose. Prefer this before custom_api.request on the /integrations act flow so the human never sees a malformed call. Use custom_api.read first for read/GET goals.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        integrationId: { type: 'string', description: 'Exact custom_api integration id when known (from integrations.list).' },
+        apiName: { type: 'string', description: 'Configured Custom API name when the id is not known.' },
+        goal: { type: 'string', description: "One line describing what the user wants done, for the approval summary/audit." },
+        method: { type: 'string', enum: ['POST', 'PUT', 'PATCH', 'DELETE'], description: 'Proposed write-like method (must be in the integration allowed methods).' },
+        path: { type: 'string', description: 'Proposed relative API path under baseUrl (e.g. "/issues"). No host, no "..".' },
+        query: { type: 'object', description: 'Scalar query parameters. Secret-shaped keys are stripped.' },
+        body: { description: 'JSON-serializable request body. Never include auth/tokens — the proxy injects auth server-side.' },
+        summary: { type: 'string', description: 'Optional one-line human summary of the call (no secrets).' },
+      },
+      required: ['goal', 'method', 'path'],
+    },
+  },
+  {
+    name: 'messaging.notify',
+    label: 'Post Team Channel Message',
+    surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+    description:
+      'Post a message (completion summary, approval request, or alert) to your team\'s connected Slack, Discord, or Microsoft Teams channel through a guarded incoming webhook. Requires OpenSwan approval — posting to a team channel is an external side effect. The webhook URL is injected server-side, private hosts are blocked, the body is bounded and secret-scrubbed, and no secret or webhook URL is ever returned. Connect the provider in Marketplace first (paste an incoming webhook URL).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        provider: { type: 'string', enum: ['slack', 'discord', 'teams'], description: 'Which connected messaging channel to post to.' },
+        title: { type: 'string', description: 'Optional short heading (<=200 chars).' },
+        body: { type: 'string', description: 'The message body (<=3000 chars). Markdown-safe. Never include secrets.' },
+        linkUrl: { type: 'string', description: 'Optional https link surfaced as an action/button.' },
+        fields: {
+          type: 'array',
+          description: 'Optional up to 6 label/value facts shown under the message.',
+          items: {
+            type: 'object',
+            properties: {
+              label: { type: 'string', description: 'Short fact name shown in bold (<=60 chars), e.g. "Status".' },
+              value: { type: 'string', description: 'Fact value shown next to the label (<=200 chars). Never include secrets.' },
+            },
+          },
+        },
+      },
+      required: ['provider', 'body'],
+    },
+  },
+  {
     name: 'office.list_agents',
     label: 'List Office Agents',
     surfaces: ['main_chat', 'room_chat', 'office'],
@@ -1728,9 +1867,9 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
       required: ['task'],
     },
   },
-  // ── Phase-3 mass-agent deploy — DEFAULT-OFF (see DEPLOY_AGENTS_TOOL_ENABLED).
-  //    Included here ONLY when the flag is on, so when off it is never
-  //    advertised to the model on any surface and never loop-eligible. ──
+  // ── Phase-3 mass-agent deploy — flag-gated, ON since 2026-07-01 (see
+  //    DEPLOY_AGENTS_TOOL_ENABLED). Included here ONLY when the flag is on, so
+  //    a flag revert removes it from every surface and from loop-eligibility. ──
   ...(DEPLOY_AGENTS_TOOL_ENABLED ? [TEAM_DEPLOY_AGENTS_TOOL_DEFINITION] : []),
   // ── Circle / Agent / Office editing tools ────────────────────────
   {
@@ -2616,6 +2755,231 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     },
   },
   {
+    name: 'desktop.photoshop_apply_adjustment_layer',
+    label: 'Apply Photoshop Adjustment Layer',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed Photoshop adjustment layer creation (levels, curves, hue/saturation, brightness/contrast, black & white). Additive only — never modifies existing adjustment layers and never saves the document. Use after photoshop_document_status and photoshop_layer_inventory. Approval-gated document mutation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        targetDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        layerName: { type: 'string', description: 'Optional exact layer name to anchor the new adjustment layer above; defaults to top of stack.' },
+        kind: { type: 'string', enum: ['levels', 'curves', 'hue_saturation', 'brightness_contrast', 'black_white'], description: 'Adjustment layer kind to create.' },
+        preserveExisting: { type: 'boolean', description: 'Keep existing adjustment layers untouched. Defaults to true.' },
+      },
+      required: ['kind'],
+    },
+  },
+  {
+    name: 'desktop.photoshop_apply_selection_or_mask',
+    label: 'Photoshop Select Subject / Mask',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed Photoshop Select Subject (the deterministic core of background removal). mode select_only leaves the selection active and reports bounds; mode mask_layer applies a non-destructive reveal-selection layer mask to the target layer. Never deletes pixels and never saves. Use after photoshop_document_status. Approval-gated document mutation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        targetDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        layerName: { type: 'string', description: 'Optional exact layer name to mask; defaults to the active layer.' },
+        mode: { type: 'string', enum: ['select_only', 'mask_layer'], description: 'select_only reports subject bounds; mask_layer applies a non-destructive layer mask.' },
+      },
+      required: ['mode'],
+    },
+  },
+  {
+    name: 'desktop.photoshop_resize_canvas_or_image',
+    label: 'Photoshop Resize / Canvas / Crop',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed Photoshop geometry operation: image_resize (bicubic, aspect-fill when one dimension given), canvas_resize (9-grid anchored), or crop_to_selection (fails closed without an active selection). Never saves the document. Use after photoshop_document_status. Approval-gated document mutation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        targetDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        op: { type: 'string', enum: ['image_resize', 'canvas_resize', 'crop_to_selection'], description: 'Geometry operation to run.' },
+        widthPx: { type: 'number', description: 'Target width in pixels (integer 1-30000). Required for image/canvas ops unless heightPx given.' },
+        heightPx: { type: 'number', description: 'Target height in pixels (integer 1-30000).' },
+        anchor: { type: 'string', description: 'canvas_resize anchor on the 9-grid, e.g. middle_center (default), top_left, bottom_right.' },
+      },
+      required: ['op'],
+    },
+  },
+  {
+    name: 'desktop.photoshop_manage_layers',
+    label: 'Manage Photoshop Layers',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed Photoshop layer management: rename, duplicate, reorder (top/bottom/above/below a reference layer), or group a named layer. Delete/merge/flatten deliberately do NOT exist here. Fails closed on ambiguous or missing layer names. Never saves the document. Use after photoshop_layer_inventory. Approval-gated document mutation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        targetDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        action: { type: 'string', enum: ['rename', 'duplicate', 'reorder', 'group'], description: 'Layer management action.' },
+        layerName: { type: 'string', description: 'Exact layer name (must match exactly one layer).' },
+        newName: { type: 'string', description: 'New name — required for rename; optional for duplicate/group.' },
+        position: { type: 'string', enum: ['top', 'bottom', 'above', 'below'], description: 'Reorder target position.' },
+        referenceLayerName: { type: 'string', description: 'Reference layer for above/below reorder.' },
+      },
+      required: ['action', 'layerName'],
+    },
+  },
+  {
+    name: 'desktop.photoshop_transform_layer',
+    label: 'Transform Photoshop Layer',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed geometric transform of a named Photoshop layer: move (deltaX/deltaY px), uniform scale (1-1000%), or rotate (±360°), anchored middle-center. Fails closed on background/locked/ambiguous layers. Never saves. Use for moving, scaling, or rotating one named layer; prefer this over manual canvas nudging when the layer name is known. Approval-gated document mutation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        targetDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        layerName: { type: 'string', description: 'Exact layer name (must match exactly one layer).' },
+        op: { type: 'string', enum: ['move', 'scale', 'rotate'], description: 'Transform operation.' },
+        deltaX: { type: 'number', description: 'Move: horizontal delta in px (integer, ±30000).' },
+        deltaY: { type: 'number', description: 'Move: vertical delta in px (integer, ±30000).' },
+        scalePercent: { type: 'number', description: 'Scale: uniform percent 1-1000.' },
+        rotateDegrees: { type: 'number', description: 'Rotate: degrees -360..360.' },
+      },
+      required: ['layerName', 'op'],
+    },
+  },
+  {
+    name: 'desktop.photoshop_convert_color_mode',
+    label: 'Convert Photoshop Color Mode',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed document color mode conversion (RGB / CMYK / Grayscale). Honest no-op when already in the target mode. Use when the working file needs a different color mode (print CMYK vs screen RGB) before an export step. NOTE: CMYK/Grayscale conversion discards color data in the working copy — reversible only until save, and this tool NEVER saves; export/save stays a separately approved step. Approval-gated document mutation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        targetDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        mode: { type: 'string', enum: ['rgb', 'cmyk', 'grayscale'], description: 'Target color mode.' },
+      },
+      required: ['mode'],
+    },
+  },
+  {
+    name: 'desktop.illustrator_document_status',
+    label: 'Illustrator Document Status',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Read-only Illustrator document inventory via ExtendScript: open documents (bounded 12) with name, path, modified/saved state, artboard-0 size in points, artboard/layer/selection counts. Use before any Illustrator mutation or export.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Illustrator app name. Defaults to Illustrator.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+      },
+    },
+  },
+  {
+    name: 'desktop.illustrator_export_proof',
+    label: 'Export Illustrator Proof',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Exports the guarded active Illustrator document as a PNG or SVG proof to an approved local output path (PDF deliberately unsupported — it would re-associate the source document). The source document is never saved. Fails closed unless the output file verifiably exists after export. Use after illustrator_document_status.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Illustrator app name. Defaults to Illustrator.' },
+        outputPath: { type: 'string', description: 'Approved local output path ending in .png or .svg.' },
+        format: { type: 'string', enum: ['png', 'svg'], description: 'Export format. Defaults from the output extension.' },
+        scalePercent: { type: 'number', description: 'PNG only: integer scale 50-400. Defaults to 100.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+      },
+      required: ['outputPath'],
+    },
+  },
+  {
+    name: 'desktop.cad_compile',
+    label: 'Compile CAD Code (OpenSCAD / FreeCAD / Blender)',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Headless local CAD/3D execution via the desktop bridge: compiles .scad with OpenSCAD (STL/3MF/DXF/PNG), runs a generated FreeCAD script via freecadcmd (STEP/FCStd/DXF convert + inspect), or a Blender bpy script (mesh convert stl/obj/ply/gltf/glb + PNG render). Binaries resolve from fixed install paths only; returns exit code, bounded stderr, and output file stat as the receipt. Use this for headless compile-to-file when no CAD/3D GUI is open: build sources with src/lib/cadCodeExecutor first, then compile. Approval-gated local file write.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        engine: { type: 'string', enum: ['openscad', 'freecadcmd', 'blender'], description: 'Which local engine to run.' },
+        sourcePath: { type: 'string', description: 'Approved local source path (.scad for openscad, generated .py for freecadcmd).' },
+        outputPath: { type: 'string', description: 'Approved local output path the compile must produce (verified after).' },
+        extraArgs: { type: 'array', items: { type: 'string' }, description: 'OpenSCAD only: -Dname=value parameter overrides, --render, --imgsize=W,H. Strict allowlist.' },
+        timeoutMs: { type: 'number', description: 'Compile timeout, clamped 5000-120000. Defaults to 60000.' },
+      },
+      required: ['engine', 'sourcePath', 'outputPath'],
+    },
+  },
+  {
+    name: 'desktop.cad_inspect_file',
+    label: 'Inspect CAD File',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Read-only CAD file inspection: STL (triangle count, bounding box for ASCII), DXF (layers, entity counts, units), STEP (schema, product count). Reads the file through the desktop bridge and parses locally — no CAD app needed. Use for inspect/measure evidence before proposing CAD mutations.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Approved local path to the CAD file (.stl, .dxf, .step, .stp, .scad).' },
+        maxBytes: { type: 'number', description: 'Max bytes to read for parsing. Defaults to 2MB.' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'desktop.design_export',
+    label: 'Headless Design Export (Inkscape / sketchtool)',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Headless design file export via fixed local CLIs: Inkscape (SVG → PNG/PDF/EPS, optional pixel dimensions) or Sketch\'s sketchtool (.sketch → PNG document preview). No app window needed. Binaries resolve from fixed install paths only; honest engine_not_installed with an install hint otherwise. Prefer desktop.convert_image instead for plain raster↔raster conversion. Approval-gated local file write.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        engine: { type: 'string', enum: ['inkscape', 'sketchtool'], description: 'Which local export engine to run.' },
+        sourcePath: { type: 'string', description: 'Approved local source (.svg for inkscape, .sketch for sketchtool).' },
+        outputPath: { type: 'string', description: 'Approved local output (.png/.pdf/.eps for inkscape, .png for sketchtool).' },
+        options: { type: 'object', description: 'inkscape: widthPx/heightPx (16-16384, PNG only), pdfVersion. sketchtool: scale (1|2|3).' },
+        timeoutMs: { type: 'number', description: 'Clamped 5000-120000. Defaults to 60000.' },
+      },
+      required: ['engine', 'sourcePath', 'outputPath'],
+    },
+  },
+  {
+    name: 'desktop.observe_app',
+    label: 'Observe App Screen',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      "Examines a desktop app's screen in ONE round trip: running/frontmost state, window titles, and the accessibility tree — then returns what changed since the last read (Δ diff) plus a deterministic next-step suggestion (launch/focus/handle-dialog/proceed/escalate). Read-only. Prefer this observation tool between app actions: cheaper than screenshot loops and it tells you what to do next. Pass taskHint so the suggestion references the goal.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Target app name. Empty = frontmost app.' },
+        taskHint: { type: 'string', description: "One line describing the user's goal, so the next-step suggestion is task-aware." },
+        maxDepth: { type: 'number', description: 'A11y tree depth cap.' },
+        maxNodes: { type: 'number', description: 'A11y tree node cap.' },
+        target: { type: 'string', description: 'Optional targeting query for a pruned interactive slice.' },
+      },
+    },
+  },
+  {
+    name: 'desktop.app_reachability',
+    label: 'Check App Reachability',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Live reachability ladder for a desktop app: bridge online → bridge build has the required commands (stale-bridge detection) → app installed → running → frontmost → accessibility readable. Returns the FIRST blocker with the exact fix (some are chat-fixable: launch/focus). Read-only. Use BEFORE starting app automation, or when app tools fail unexpectedly.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'App to check, e.g. "Photoshop", "FreeCAD", "Figma".' },
+      },
+      required: ['appName'],
+    },
+  },
+  {
     name: 'desktop.list_running_apps',
     label: 'List Running Desktop Apps',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
@@ -3107,6 +3471,7 @@ const COORDINATION_APPROVAL_KINDS: Partial<Record<OpenSwanRuntimeToolName, Appro
   'wp.update_post': 'publish',
   'wp.trash_post': 'publish',
   'wp.upload_media': 'publish',
+  'docs.create_document': 'publish',
   // Room/project file content writes.
   'rooms.create_file': 'file_write',
   'rooms.update_file': 'file_write',
@@ -3221,6 +3586,20 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     };
   }
 
+  if (tool === 'docs.create_document') {
+    // External write into the user's Google Drive — mirrors the wp.* creation
+    // tools: mandatory 'ask' approval, external side effect, 'publish' audit
+    // kind. LOCKSTEP: execution mechanics live in `src/lib/googleDocsCreate.ts`.
+    return {
+      family: 'coordination',
+      approvalMode: 'ask',
+      mutatesState: true,
+      externalSideEffect: true,
+      approvalKind: 'publish',
+      summary: 'Creates a Google Doc in the user\'s connected Google Drive from markdown. Requires approval before writing to the external Drive account.',
+    };
+  }
+
   if (tool === 'custom_api.read') {
     return {
       family: 'knowledge',
@@ -3228,6 +3607,20 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
       mutatesState: false,
       externalSideEffect: true,
       summary: 'Reads from a connected Custom API through the guarded server-side proxy.',
+    };
+  }
+
+  if (tool === 'integration.compose_action') {
+    // Read-only planning helper: validates + previews a proposed write-like
+    // call and returns the custom_api.request args to run next. It sends
+    // NOTHING — the actual write goes through the approval-gated
+    // custom_api.request, so this stays auto/no-side-effect.
+    return {
+      family: 'knowledge',
+      approvalMode: 'auto',
+      mutatesState: false,
+      externalSideEffect: false,
+      summary: 'Composes + validates a write-like Custom API call into approval-ready custom_api.request args (sends nothing).',
     };
   }
 
@@ -3239,6 +3632,20 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
       externalSideEffect: true,
       approvalKind: 'privileged_action',
       summary: 'Sends a write-like request to a connected Custom API through the guarded server-side proxy.',
+    };
+  }
+
+  if (tool === 'messaging.notify') {
+    // Posting to a team channel is an external, publish-shaped side effect —
+    // MUST be approval-gated. The webhook URL is injected server-side and
+    // never leaks; the edge function re-verifies this approval before it POSTs.
+    return {
+      family: 'coordination',
+      approvalMode: 'ask',
+      mutatesState: true,
+      externalSideEffect: true,
+      approvalKind: 'publish',
+      summary: 'Posts a message to a connected Slack/Discord/Teams channel through the guarded server-side messaging webhook proxy.',
     };
   }
 
@@ -3326,6 +3733,10 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
       'desktop.indesign_text_inventory',
       'desktop.photoshop_document_status',
       'desktop.photoshop_layer_inventory',
+      'desktop.illustrator_document_status',
+      'desktop.cad_inspect_file',
+      'desktop.observe_app',
+      'desktop.app_reachability',
     ]);
     const readOnly = readOnlyTools.has(tool);
     const fileWrite = tool === 'desktop.file_rename'
@@ -3660,10 +4071,17 @@ const TOOL_DEPENDENCY_DOMAINS: Partial<Record<OpenSwanRuntimeToolName, { writes?
   'wp.update_post': { writes: ['wordpress'] },
   'wp.trash_post': { writes: ['wordpress'] },
   'wp.upload_media': { writes: ['wordpress'] },
+  'docs.create_document': { writes: ['google_drive'] },
   // External Custom API connectors. Read calls still touch an external
   // service; write calls are ask-gated and verified again inside the proxy.
   'custom_api.read': { reads: ['external_api'] },
   'custom_api.request': { writes: ['external_api'] },
+  // Compose-only: reads local integration metadata + validates a proposed call.
+  // No external read/write of its own — the write is custom_api.request.
+  'integration.compose_action': { reads: ['integrations'] },
+  // Outbound team-channel post. Serialize against other messaging posts so two
+  // agents can't race a duplicate alert into the same channel.
+  'messaging.notify': { writes: ['messaging'] },
 };
 
 /**
@@ -3781,6 +4199,19 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'desktop.photoshop_update_text_layer': ['execute'],
   'desktop.photoshop_place_asset': ['execute'],
   'desktop.photoshop_export_proof': ['execute'],
+  'desktop.photoshop_apply_adjustment_layer': ['execute'],
+  'desktop.photoshop_apply_selection_or_mask': ['execute'],
+  'desktop.photoshop_resize_canvas_or_image': ['execute'],
+  'desktop.photoshop_manage_layers': ['execute'],
+  'desktop.photoshop_transform_layer': ['execute'],
+  'desktop.photoshop_convert_color_mode': ['execute'],
+  'desktop.illustrator_document_status': ['execute'],
+  'desktop.illustrator_export_proof': ['execute'],
+  'desktop.cad_compile': ['execute'],
+  'desktop.cad_inspect_file': ['execute'],
+  'desktop.design_export': ['execute'],
+  'desktop.observe_app': ['execute'],
+  'desktop.app_reachability': ['execute'],
   'desktop.open_url':   ['execute'],
   'desktop.open_path':  ['execute'],
   'desktop.click_at':   ['execute'],
@@ -3841,8 +4272,11 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'wp.update_post': ['execute', 'build', 'design'],
   'wp.trash_post': ['execute', 'build', 'design'],
   'wp.upload_media': ['execute', 'build', 'design'],
+  'docs.create_document': ['execute', 'build', 'design'],
   'custom_api.read': ['execute', 'build', 'support'],
   'custom_api.request': ['execute', 'build'],
+  'integration.compose_action': ['execute', 'build', 'support'],
+  'messaging.notify': ['execute', 'support'],
 };
 
 /** Returns the mode list for a tool (inline def wins over the central map). */
@@ -3904,6 +4338,7 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'wp.create_slide',
   'wp.update_post',
   'wp.trash_post',
+  'docs.create_document',
   'missions.list',
   'missions.create_task',
   'missions.complete_task',
@@ -3938,6 +4373,8 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'integrations.list',
   'custom_api.read',
   'custom_api.request',
+  'integration.compose_action',
+  'messaging.notify',
   'office.list_agents',
   'agent.codex_acquire_asset',
   'agent.recover_failed_task',
@@ -3975,6 +4412,19 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'desktop.photoshop_update_text_layer',
   'desktop.photoshop_place_asset',
   'desktop.photoshop_export_proof',
+  'desktop.photoshop_apply_adjustment_layer',
+  'desktop.photoshop_apply_selection_or_mask',
+  'desktop.photoshop_resize_canvas_or_image',
+  'desktop.photoshop_manage_layers',
+  'desktop.photoshop_transform_layer',
+  'desktop.photoshop_convert_color_mode',
+  'desktop.illustrator_document_status',
+  'desktop.illustrator_export_proof',
+  'desktop.cad_compile',
+  'desktop.cad_inspect_file',
+  'desktop.design_export',
+  'desktop.observe_app',
+  'desktop.app_reachability',
   'desktop.list_running_apps',
   'desktop.list_installed_apps',
   'desktop.list_browser_tabs',
@@ -4046,9 +4496,10 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'context.search',
 ]);
 
-// Phase-3 mass deploy is loop-eligible ONLY when its DEFAULT-OFF flag is on, so
-// the one flag governs both advertising (TOOL_DEFINITIONS) and loop reachability.
-// When off it is absent from both sets and can never be selected mid-loop.
+// Phase-3 mass deploy is loop-eligible ONLY when its feature flag (ON since
+// 2026-07-01) is on, so the one flag governs both advertising (TOOL_DEFINITIONS)
+// and loop reachability. A flag revert removes it from both sets and it can
+// never be selected mid-loop.
 if (DEPLOY_AGENTS_TOOL_ENABLED) {
   TOOL_LOOP_SAFE_NAMES.add('team.deploy_agents');
 }
@@ -4109,6 +4560,7 @@ const TOOL_DISCLOSURE_FAMILY_DEFAULTS: Record<string, OpenSwanToolDisclosure> = 
   desktop: 'deferred',           // 50+ tools incl. Adobe automation.
   browser: 'deferred',           // live controls; browser.plan_task is per-tool pinned.
   wp: 'deferred',
+  docs: 'deferred',            // Google Docs creation — Drive-write long tail.
   vault: 'deferred',
   workspace: 'deferred',
   code: 'deferred',
@@ -4166,6 +4618,27 @@ export type OpenSwanToolCatalogMatch = {
  *
  * An empty query with a `family` filter browses that family.
  */
+// P24: query-token → tool-family synonyms so a defining domain word ranks
+// the family it names. Keep tight — only unambiguous domain aliases.
+// P24: generic CRUD/verb name segments — family-ambiguous, so a whole-segment
+// hit here is partial-tier, not a strong domain signal (see scorer comment).
+const GENERIC_TOOL_VERB_SEGMENTS = new Set<string>([
+  'create', 'add', 'new', 'make', 'remove', 'delete', 'clear', 'trash',
+  'list', 'get', 'read', 'show', 'update', 'set', 'edit', 'manage',
+  'send', 'post', 'run', 'open', 'close', 'start', 'stop',
+]);
+
+const TOOL_SEARCH_FAMILY_SYNONYMS: Record<string, string[]> = {
+  wordpress: ['wp'],
+  wp: ['wp'],
+  document: ['docs'],
+  doc: ['docs'],
+  mission: ['missions', 'tasks'],
+  goal: ['goals'],
+  memory: ['memory'],
+  screenshot: ['desktop', 'browser'],
+};
+
 export function searchOpenSwanToolCatalog(
   query: string,
   opts?: { surface?: OpenSwanToolSurface; family?: string; limit?: number },
@@ -4185,6 +4658,13 @@ export function searchOpenSwanToolCatalog(
     const name = tool.name.toLowerCase();
     const label = tool.label.toLowerCase();
     const description = tool.description.toLowerCase();
+    // P24: match name TOKENS on segment boundaries (split on . and _), not
+    // raw substring — so "app" scores `desktop.launch_app` (segment "app")
+    // but NOT `agent.update_appearance` (segment "appearance" ⊃ "app" only as
+    // a substring). This kills the substring pollution that ranked
+    // update_appearance above launch_app and resize_canvas_or_image above the
+    // WordPress upload tool for image/app queries.
+    const nameSegments = new Set(name.split(/[._]+/).filter(Boolean));
 
     let score = 0;
     if (q) {
@@ -4192,10 +4672,20 @@ export function searchOpenSwanToolCatalog(
       else if (name.includes(q)) score += 400;  // name substring.
       if (label.includes(q)) score += 120;      // full-phrase label hit.
       for (const t of tokens) {
-        if (name.includes(t)) score += 40;
+        // Generic CRUD/verb segments (create/remove/list/…) appear as name
+        // segments across unrelated families, so a whole-segment hit on one
+        // is NOT a strong domain signal — score it at partial tier so
+        // "remove the background from a photo" doesn't top missions.remove_task
+        // over the photoshop tool. Distinctive nouns keep the full bonus.
+        if (nameSegments.has(t)) score += GENERIC_TOOL_VERB_SEGMENTS.has(t) ? 35 : 60;
+        else if (t.length >= 4 && name.includes(t)) score += 35; // partial (e.g. "photo" ⊂ "photoshop") — competitive but below a whole segment.
         if (label.includes(t)) score += 12;
         if (description.includes(t)) score += 3;
-        if (family.toLowerCase() === t) score += 30;
+        // Family match — with a small domain-synonym map so the DEFINING
+        // domain word ("wordpress") scores the family ("wp") it names,
+        // instead of losing to an incidental name-substring elsewhere.
+        const familyTokens = TOOL_SEARCH_FAMILY_SYNONYMS[t] || [t];
+        if (familyTokens.includes(family.toLowerCase())) score += 30;
       }
       if (score <= 0) continue;
     } else if (!familyFilter) {
@@ -4223,7 +4713,7 @@ export function listOpenSwanAnthropicToolsForSurface(
   surface: OpenSwanToolSurface,
   allowedToolNames?: OpenSwanRuntimeToolName[],
   mode?: string | null,
-): Array<{ name: string; description: string; input_schema: Record<string, unknown> }> {
+): Array<{ name: string; description: string; input_schema: Record<string, unknown>; input_examples?: Array<Record<string, unknown>> }> {
   const allow = allowedToolNames?.length ? new Set(allowedToolNames) : null;
   const modeKey = typeof mode === 'string' && mode ? mode : null;
   const surfaceCandidates = TOOL_DEFINITIONS
@@ -4257,11 +4747,17 @@ export function listOpenSwanAnthropicToolsForSurface(
       );
     }
   } catch { /* never throw from observability */ }
-  return result.map((tool) => ({
+  // X4 (P47): decorate the gnarliest schemas with curated, schema-validated
+  // `input_examples` (Anthropic-measured 72→90% param accuracy on complex
+  // inputs; GA, no beta header). The attach helper re-validates every
+  // example against the def's ACTUAL schema and drops non-conforming ones —
+  // an invalid example would 400 the whole request. Tools without curated
+  // examples are byte-identical passthroughs.
+  return attachToolInputExamples(result.map((tool) => ({
     name: tool.name,
     description: tool.description,
     input_schema: tool.inputSchema || { type: 'object', properties: {} },
-  }));
+  })));
 }
 
 /**
@@ -4393,6 +4889,11 @@ function describeDesktopFailure(error?: string, code?: string): string {
  * fence. Structural metadata (counts, truncation trailers, headers) stays
  * OUTSIDE the fence so the model can still trust it.
  */
+// P15 — last a11y snapshot per app (bounded ≤8 apps × ≤400 summary nodes) so
+// consecutive desktop.read_a11y_tree calls report a structured +/-/~ delta.
+// Keyed by app name because the Mac's app state is physically global.
+const lastA11ySnapshotByApp = new Map<string, import('./a11yTreeDiff').A11ySummaryNode[]>();
+
 export function fenceUntrustedObservationText(text: string): string {
   const body = String(text ?? '').replace(/<\s*(\/?)\s*untrusted_quoted\s*>/gi, '[$1untrusted_quoted-tag-removed]');
   return `<untrusted_quoted>\n${body}\n</untrusted_quoted>`;
@@ -4682,6 +5183,8 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'integrations.list':
     case 'custom_api.read':
     case 'custom_api.request':
+    case 'integration.compose_action':
+    case 'messaging.notify':
     case 'office.list_agents':
     case 'agent.codex_acquire_asset':
     case 'agent.recover_failed_task':
@@ -4760,6 +5263,19 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'desktop.photoshop_update_text_layer':
     case 'desktop.photoshop_place_asset':
     case 'desktop.photoshop_export_proof':
+    case 'desktop.photoshop_apply_adjustment_layer':
+    case 'desktop.photoshop_apply_selection_or_mask':
+    case 'desktop.photoshop_resize_canvas_or_image':
+    case 'desktop.photoshop_manage_layers':
+    case 'desktop.photoshop_transform_layer':
+    case 'desktop.photoshop_convert_color_mode':
+    case 'desktop.illustrator_document_status':
+    case 'desktop.illustrator_export_proof':
+    case 'desktop.cad_compile':
+    case 'desktop.cad_inspect_file':
+    case 'desktop.design_export':
+    case 'desktop.observe_app':
+    case 'desktop.app_reachability':
     case 'desktop.list_running_apps':
     case 'desktop.list_installed_apps':
     case 'desktop.list_browser_tabs':
@@ -4984,12 +5500,27 @@ function formatCustomApiProxyResult(
   const status = data.status ? `HTTP ${data.status}` : 'HTTP status unknown';
   const method = data.method ? String(data.method).toUpperCase() : (tool === 'custom_api.read' ? 'GET' : 'REQUEST');
   const url = data.url ? String(data.url) : 'configured Custom API endpoint';
-  const lines = [
+  const lines: string[] = [];
+  // For write-like requests, lead with the extracted proof (created/affected
+  // resource URL/id) so "it created X" is verifiable, not buried in the preview.
+  if (tool === 'custom_api.request') {
+    const outcome = buildIntegrationActionOutcome({
+      tool: 'custom_api.request',
+      ok: data.ok === true,
+      status: typeof data.status === 'number' ? data.status : null,
+      method: data.method,
+      url: data.url,
+      integrationLabel: integration.label || null,
+      bodyPreview: typeof data.bodyPreview === 'string' ? data.bodyPreview : null,
+    });
+    lines.push(...buildIntegrationReceiptLines(outcome), '');
+  }
+  lines.push(
     `${method} ${url} -> ${status}`,
     `Integration: ${String(integration.label || 'Custom API')}${integration.toolNamespace ? ` (${integration.toolNamespace})` : ''}`,
     `Content-Type: ${String(data.contentType || 'unknown')}`,
     `Bytes read: ${Number(data.bytesRead || 0)}${data.truncated ? ' (truncated)' : ''}`,
-  ];
+  );
   if (tool === 'custom_api.request') {
     lines.push(data.approvalVerified ? 'Approval: verified before request' : 'Approval: not verified');
   }
@@ -6228,9 +6759,30 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             : Object.entries(safe).slice(0, 4).map(([key, value]) => `${key}=${value}`);
           return entries.slice(0, provider === 'custom_api' ? 7 : 4).join(', ');
         };
+        // Enrich connected custom_api integrations with their matched preset's
+        // known endpoints, so the agent loop composes a real path on the
+        // `/integrations act` flow (integrations.list is the first tool it reads).
+        const { buildPresetEndpointHint } = await import('./integrationPresets');
         const lines = integrations.map((integration) => {
           const metadata = formatMetadata(integration.provider, integration.metadata);
-          return `- ${integration.label} [${integration.provider}] ${integration.status}${integration.capability_flags?.length ? ` — ${integration.capability_flags.join(', ')}` : ''}${metadata ? ` — metadata: ${metadata}` : ''}`;
+          let hint = '';
+          if (integration.provider === 'custom_api') {
+            const md = integration.metadata || {};
+            const h = buildPresetEndpointHint({
+              baseUrl: typeof md.baseUrl === 'string' ? md.baseUrl : undefined,
+              apiName: typeof md.apiName === 'string' ? md.apiName : undefined,
+            });
+            if (h) hint = ` — ${h}`;
+          }
+          // Fail-visible health (W4): flag a connected-but-failing integration
+          // from this session's recorded outcomes. Keyed by id, or
+          // messaging:<provider> for the built-in messaging channels.
+          const healthKey = /^(slack|discord|teams)$/.test(integration.provider)
+            ? `messaging:${integration.provider}`
+            : integration.id;
+          const healthHint = getIntegrationHealthHintNow(healthKey);
+          const health = healthHint ? ` — ${healthHint}` : '';
+          return `- ${integration.label} [${integration.provider}] ${integration.status}${integration.capability_flags?.length ? ` — ${integration.capability_flags.join(', ')}` : ''}${metadata ? ` — metadata: ${metadata}` : ''}${hint}${health}`;
         });
         return { ok: true, resultsText: lines.join('\n') } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
@@ -6263,6 +6815,20 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           return { ok: false, resultsText: `Custom API proxy failed: ${error.message}` } as any;
         }
         const response = data && typeof data === 'object' ? data as Record<string, any> : {};
+        // Record fail-visible integration health (W4) so a later integrations.list
+        // can flag a connected-but-failing integration. Keyed by the resolved id.
+        const healthKey = String(response.integration?.id || a.integrationId || a.apiName || '').trim();
+        if (healthKey) {
+          const outcome = buildIntegrationActionOutcome({
+            tool: 'custom_api.request',
+            ok: response.ok === true,
+            status: typeof response.status === 'number' ? response.status : null,
+            method,
+            url: typeof response.url === 'string' ? response.url : null,
+            integrationLabel: response.integration?.label || null,
+          });
+          recordIntegrationOutcomeNow(healthKey, { verdict: outcome.verdict, status: outcome.status });
+        }
         if (response.ok !== true) {
           const message = String(response.message || response.error || response.statusText || 'Custom API request failed.');
           const statusText = response.status ? `HTTP ${response.status}` : 'blocked';
@@ -6281,6 +6847,160 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         } as any;
       } catch (e: any) {
         return { ok: false, resultsText: `Custom API request failed: ${e.message || String(e)}` } as any;
+      }
+    }
+    case 'integration.compose_action': {
+      try {
+        const a = (args || {}) as IntegrationComposeActionArgs;
+        const goal = String(a.goal || '').trim();
+        if (!goal) return { ok: false, resultsText: 'integration.compose_action needs a goal describing what to do.' } as any;
+
+        const { listCircleIntegrations } = await import('./circleIntegrations');
+        const integrations = await listCircleIntegrations(context.circleId);
+        const customApis = integrations.filter((i) => i.provider === 'custom_api');
+
+        // Resolve the target: exact id → apiName/display/label → sole connector.
+        const wantId = String(a.integrationId || '').trim();
+        const wantName = String(a.apiName || '').trim().toLowerCase();
+        let target = wantId ? customApis.find((i) => i.id === wantId) : undefined;
+        if (!target && wantName) {
+          target = customApis.find((i) =>
+            String((i.metadata as any)?.apiName || '').toLowerCase() === wantName
+            || String(i.display_name || '').toLowerCase() === wantName
+            || String(i.label || '').toLowerCase() === wantName);
+        }
+        if (!target && !wantId && !wantName && customApis.length === 1) target = customApis[0];
+        if (!target) {
+          const names = customApis
+            .map((i) => (i.metadata as any)?.apiName || i.display_name || i.label)
+            .filter(Boolean).slice(0, 8);
+          return { ok: false, resultsText: customApis.length === 0
+            ? 'No Custom API integration is connected. Connect one in Marketplace (try /integrations connect <name>), then retry.'
+            : `Could not resolve which Custom API to use — pass integrationId or apiName. Connected: ${names.join(', ')}.` } as any;
+        }
+        if (target.status !== 'connected') {
+          return { ok: false, resultsText: `Integration "${target.label}" is ${target.status}, not connected. Fix it in Marketplace first.` } as any;
+        }
+
+        const {
+          effectiveActionMethods,
+          parseIntegrationActionProposal,
+          buildCustomApiRequestArgsFromProposal,
+          describeProposedIntegrationAction,
+        } = await import('./integrationActionComposer');
+        const allowed = effectiveActionMethods(target);
+        if (allowed.length === 0) {
+          return { ok: false, resultsText: `"${target.label}" has no write methods configured — it is read-only. Use custom_api.read for GET, or add allowed methods in Marketplace.` } as any;
+        }
+
+        // Run the model's proposed call through the SAME validator the composer
+        // uses on model text (method allowlist, relative in-host path, no "..",
+        // secret-strip on query/body, body byte cap). Sends nothing.
+        const proposalText = JSON.stringify({
+          method: a.method,
+          path: a.path,
+          query: a.query,
+          body: a.body,
+          summary: (a.summary && String(a.summary).trim()) || goal,
+        });
+        const parsed = parseIntegrationActionProposal(proposalText, { allowedMethods: allowed });
+        if (!parsed.ok) {
+          return { ok: false, resultsText: `Cannot compose the call: ${parsed.error} Fix method/path/body and call integration.compose_action again. Allowed methods: ${allowed.join(', ')}.` } as any;
+        }
+
+        const requestArgs = buildCustomApiRequestArgsFromProposal(target, parsed.proposal);
+        const preview = describeProposedIntegrationAction(target, parsed.proposal);
+        return {
+          ok: true,
+          resultsText: `${preview}\n\nValidated and approval-ready — sends nothing yet. To execute, call custom_api.request with these exact args (it is approval-gated before anything is sent):\n${JSON.stringify(requestArgs)}`,
+        } as any;
+      } catch (e: any) {
+        return { ok: false, resultsText: `integration.compose_action failed: ${e.message || String(e)}` } as any;
+      }
+    }
+    case 'messaging.notify': {
+      // Mirrors custom_api.request: validate/scrub client-side, then invoke the
+      // guarded `messaging-notify` edge function which resolves the incoming
+      // webhook URL server-side, blocks private hosts, RE-VERIFIES the approval
+      // (external side effect), POSTs, and returns a capped, secret-free result.
+      try {
+        const rawArgs = (args || {}) as Record<string, unknown>;
+        const validated = validateMessagingNotifyArgs(rawArgs);
+        if (!validated.ok) {
+          return { ok: false, resultsText: validated.error } as any;
+        }
+        const v = validated.value;
+        // Build the provider payload client-side too, so a payload is always
+        // present even if the edge rebuilds it. The edge is the source of truth
+        // for the actual send (it re-scrubs from messageArgs).
+        const payload = buildMessagingPayload(v.provider, {
+          title: v.title,
+          body: v.body,
+          linkUrl: v.linkUrl,
+          fields: v.fields,
+        });
+        const { data, error } = await supabase.functions.invoke('messaging-notify', {
+          body: {
+            circleId: context.circleId,
+            runId: context.runId || null,
+            provider: v.provider,
+            // Pass the EXACT original args as toolArgs so the edge's approval
+            // key equals the one maybeRequestToolApproval stored for this call.
+            toolName: 'messaging.notify',
+            toolArgs: rawArgs,
+            messageArgs: { title: v.title, body: v.body, linkUrl: v.linkUrl, fields: v.fields },
+            payload,
+          },
+        });
+        if (error) {
+          return { ok: false, resultsText: `Messaging notify failed: ${error.message}` } as any;
+        }
+        const response = data && typeof data === 'object' ? data as Record<string, any> : {};
+        const providerLabel = response.integration?.label || v.provider;
+        // Fail-visible integration health (W4), keyed by messaging:<provider>.
+        {
+          const msgOutcome = buildIntegrationActionOutcome({
+            tool: 'messaging.notify',
+            ok: response.ok === true,
+            status: typeof response.status === 'number' ? response.status : null,
+            provider: v.provider,
+            integrationLabel: providerLabel,
+            providerMessage: typeof response.providerMessage === 'string' ? response.providerMessage : null,
+          });
+          recordIntegrationOutcomeNow(`messaging:${v.provider}`, { verdict: msgOutcome.verdict, status: msgOutcome.status });
+        }
+        if (response.ok !== true) {
+          if (response.error === 'not_connected') {
+            return {
+              ok: false,
+              resultsText: String(response.hint || `No connected ${v.provider} channel. Connect ${v.provider} in Marketplace and paste an incoming webhook URL, then try again.`),
+            } as any;
+          }
+          const detail = String(response.providerMessage || response.message || response.error || response.statusText || 'Message was not posted.');
+          const statusText = response.status ? `HTTP ${response.status}` : 'blocked';
+          return {
+            ok: false,
+            status: typeof response.status === 'number' ? response.status : undefined,
+            approvalVerified: response.approvalVerified === true,
+            resultsText: `${describeMessagingNotify(rawArgs)} — failed (${statusText}): ${detail}`,
+          } as any;
+        }
+        const postOutcome = buildIntegrationActionOutcome({
+          tool: 'messaging.notify',
+          ok: true,
+          status: typeof response.status === 'number' ? response.status : null,
+          provider: providerLabel,
+          integrationLabel: providerLabel,
+          providerMessage: typeof response.providerMessage === 'string' ? response.providerMessage : null,
+        });
+        return {
+          ok: true,
+          status: typeof response.status === 'number' ? response.status : undefined,
+          approvalVerified: response.approvalVerified === true,
+          resultsText: `${postOutcome.summary}. ${describeMessagingNotify(rawArgs)}.`,
+        } as any;
+      } catch (e: any) {
+        return { ok: false, resultsText: `Messaging notify failed: ${e.message || String(e)}` } as any;
       }
     }
     case 'office.list_agents': {
@@ -6466,10 +7186,11 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
       }
     }
     case 'team.deploy_agents': {
-      // SAFETY GATE 1 — DEFAULT-OFF flag. The tool is not advertised when the
-      // flag is off (omitted from TOOL_DEFINITIONS), but if it is somehow
-      // invoked anyway (stale schema, replayed call) fail closed with a clear
-      // disabled result rather than spending budget / spawning agents.
+      // SAFETY GATE 1 — feature flag (ON since 2026-07-01). The tool is not
+      // advertised when the flag is off (omitted from TOOL_DEFINITIONS), but if
+      // it is somehow invoked anyway (stale schema, replayed call) fail closed
+      // with a clear disabled result rather than spending budget / spawning
+      // agents.
       if (!DEPLOY_AGENTS_TOOL_ENABLED) {
         return {
           ok: false,
@@ -7819,6 +8540,395 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
 	        } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
+    case 'desktop.photoshop_apply_adjustment_layer': {
+      try {
+        const { photoshopApplyAdjustmentLayer, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const kind = typeof a.kind === 'string' ? a.kind.trim().toLowerCase() : '';
+        if (!['levels', 'curves', 'hue_saturation', 'brightness_contrast', 'black_white'].includes(kind)) {
+          return { ok: false, resultsText: 'kind must be levels, curves, hue_saturation, brightness_contrast, or black_white.' } as any;
+        }
+        const r = await photoshopApplyAdjustmentLayer({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          targetDocumentName: typeof a.targetDocumentName === 'string' ? a.targetDocumentName : undefined,
+          layerName: typeof a.layerName === 'string' ? a.layerName : undefined,
+          kind: kind as any,
+          preserveExisting: a.preserveExisting !== false,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Photoshop'} is not running.` } as any;
+        if (d.error || !d.createdLayerName) {
+          return { ok: false, ...d, resultsText: `Photoshop did not create the ${kind} adjustment layer: ${d.error || 'no created layer reported'}.` } as any;
+        }
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Created ${kind} adjustment layer "${d.createdLayerName}"${d.documentName ? ` in ${d.documentName}` : ''} (layers ${d.layerCountBefore} → ${d.layerCountAfter}). Document not saved — export or save is a separate approved step.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.photoshop_apply_selection_or_mask': {
+      try {
+        const { photoshopApplySelectionOrMask, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const mode = typeof a.mode === 'string' ? a.mode.trim().toLowerCase() : '';
+        if (!['select_only', 'mask_layer'].includes(mode)) {
+          return { ok: false, resultsText: 'mode must be select_only or mask_layer.' } as any;
+        }
+        const r = await photoshopApplySelectionOrMask({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          targetDocumentName: typeof a.targetDocumentName === 'string' ? a.targetDocumentName : undefined,
+          layerName: typeof a.layerName === 'string' ? a.layerName : undefined,
+          mode: mode as any,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Photoshop'} is not running.` } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Photoshop select subject failed: ${d.error}.` } as any;
+        const boundsText = d.selectionBounds
+          ? `subject bounds ${d.selectionBounds.left},${d.selectionBounds.top} → ${d.selectionBounds.right},${d.selectionBounds.bottom}px`
+          : 'no selection bounds reported';
+        return {
+          ok: true,
+          ...d,
+          resultsText: mode === 'mask_layer'
+            ? `Applied non-destructive layer mask from Select Subject${d.layerName ? ` on "${d.layerName}"` : ''}${d.documentName ? ` in ${d.documentName}` : ''} (${boundsText}). Pixels preserved; document not saved.`
+            : `Select Subject ran${d.documentName ? ` in ${d.documentName}` : ''}: ${boundsText}. Selection left active for the next step.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.photoshop_resize_canvas_or_image': {
+      try {
+        const { photoshopResizeCanvasOrImage, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const op = typeof a.op === 'string' ? a.op.trim().toLowerCase() : '';
+        if (!['image_resize', 'canvas_resize', 'crop_to_selection'].includes(op)) {
+          return { ok: false, resultsText: 'op must be image_resize, canvas_resize, or crop_to_selection.' } as any;
+        }
+        const r = await photoshopResizeCanvasOrImage({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          targetDocumentName: typeof a.targetDocumentName === 'string' ? a.targetDocumentName : undefined,
+          op: op as any,
+          widthPx: Number.isFinite(Number(a.widthPx)) ? Number(a.widthPx) : undefined,
+          heightPx: Number.isFinite(Number(a.heightPx)) ? Number(a.heightPx) : undefined,
+          anchor: typeof a.anchor === 'string' ? a.anchor as any : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Photoshop'} is not running.` } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Photoshop ${op} failed: ${d.error}.` } as any;
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Photoshop ${op} done${d.documentName ? ` in ${d.documentName}` : ''}: ${d.widthPxBefore}×${d.heightPxBefore}px → ${d.widthPxAfter}×${d.heightPxAfter}px. Document not saved — export or save is a separate approved step.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.design_export': {
+      try {
+        const { designExport, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const engine = typeof a.engine === 'string' ? a.engine.trim().toLowerCase() : '';
+        if (!['inkscape', 'sketchtool'].includes(engine)) {
+          return { ok: false, resultsText: 'engine must be inkscape or sketchtool.' } as any;
+        }
+        const sourcePath = typeof a.sourcePath === 'string' ? a.sourcePath.trim() : '';
+        const outputPath = typeof a.outputPath === 'string' ? a.outputPath.trim() : '';
+        if (!sourcePath || !outputPath) return { ok: false, resultsText: 'sourcePath and outputPath are required.' } as any;
+        const r = await designExport({
+          engine: engine as any,
+          sourcePath,
+          outputPath,
+          options: a.options && typeof a.options === 'object' ? a.options : undefined,
+          timeoutMs: Number.isFinite(Number(a.timeoutMs)) ? Number(a.timeoutMs) : undefined,
+        });
+        const d: any = (r as any).data || null;
+        if (!r.ok) {
+          if ((r as any).errorCode === 'engine_not_installed' || d?.installHint) {
+            const { describeDesignExportInstallGuidance } = await import('./designCliExecutor');
+            return { ok: false, resultsText: `${engine} is not installed on this Mac. ${d?.installHint || describeDesignExportInstallGuidance(engine as any)}` } as any;
+          }
+          const stderrExcerpt = d?.stderrTail ? ` stderr: ${String(d.stderrTail).slice(0, 300)}` : '';
+          return { ok: false, resultsText: `${describeDesktopFailure(r.error, r.errorCode)}${stderrExcerpt}` } as any;
+        }
+        const dd = d || {};
+        return {
+          ok: true,
+          ...dd,
+          resultsText: `Design export succeeded via ${engine} in ${dd.durationMs ?? '?'}ms. Output ${dd.output?.path || outputPath} (${dd.output?.bytes ?? '?'} bytes, exists: ${dd.output?.exists === true}).`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.observe_app': {
+      try {
+        const { observeApp, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await observeApp({
+          appName: typeof a.appName === 'string' ? a.appName : undefined,
+          maxDepth: Number.isFinite(Number(a.maxDepth)) ? Number(a.maxDepth) : undefined,
+          maxNodes: Number.isFinite(Number(a.maxNodes)) ? Number(a.maxNodes) : undefined,
+          target: typeof a.target === 'string' && a.target.trim() ? a.target.trim() : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        const { snapshotA11ySummary, diffA11ySummaries, classifyA11yDiffOutcome, describeA11yDiffForModel } = await import('./a11yTreeDiff');
+        const { buildAppScreenNextStep, describeAppScreenNextStepForModel } = await import('./appScreenNextStep');
+        const summary = d.tree ? snapshotA11ySummary(d.tree as any) : [];
+        const appKey = String(d.app || a.appName || 'frontmost').trim().toLowerCase();
+        const prev = lastA11ySnapshotByApp.get(appKey);
+        if (summary.length > 0) {
+          lastA11ySnapshotByApp.set(appKey, summary);
+          if (lastA11ySnapshotByApp.size > 8) {
+            const oldest = lastA11ySnapshotByApp.keys().next().value;
+            if (oldest !== undefined) lastA11ySnapshotByApp.delete(oldest);
+          }
+        }
+        let diffLine = '';
+        let diffOutcome: 'state_changed' | 'no_change' | 'target_appeared' | 'target_disappeared' | null = null;
+        if (prev && summary.length > 0) {
+          const diff = diffA11ySummaries(prev, summary);
+          diffOutcome = classifyA11yDiffOutcome(diff);
+          diffLine = `\nΔ since last read: ${describeA11yDiffForModel(diff, { fence: fenceUntrustedObservationText })}`;
+        }
+        const advice = buildAppScreenNextStep({
+          appName: d.app || String(a.appName || 'frontmost app'),
+          taskHint: typeof a.taskHint === 'string' ? a.taskHint.slice(0, 300) : null,
+          appRunning: d.appRunning,
+          frontmost: d.frontmost,
+          frontmostApp: d.frontmostApp,
+          windowCount: d.windowCount,
+          windowTitles: d.windowTitles,
+          a11ySummary: summary,
+          diffOutcome,
+          lastActionKind: null,
+        });
+        const stateLine = d.appRunning
+          ? `${d.app} is running${d.frontmost ? ' (frontmost)' : ` (behind ${d.frontmostApp || 'another app'})`}, ${d.windowCount} window(s)${d.windowTitles.length ? `: ${fenceUntrustedObservationText(d.windowTitles.slice(0, 4).join(' | '))}` : ''}. A11y nodes: ${d.budget_used}.`
+          : `${d.app} is not running (frontmost: ${d.frontmostApp || 'unknown'}).`;
+        return {
+          ok: true,
+          resultsText: `${stateLine}${diffLine}\n${describeAppScreenNextStepForModel(advice, fenceUntrustedObservationText)}`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.app_reachability': {
+      try {
+        const a = args as any;
+        const appName = typeof a.appName === 'string' ? a.appName.trim() : '';
+        if (!appName) return { ok: false, resultsText: 'appName is required.' } as any;
+        const { runAppReachabilityProbe } = await import('./appReachabilityProbe');
+        const { report, text } = await runAppReachabilityProbe(appName);
+        return { ok: true, status: report.status, chatCanFix: report.chatCanFix, resultsText: text } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.photoshop_manage_layers': {
+      try {
+        const { photoshopManageLayers, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const action = typeof a.action === 'string' ? a.action.trim().toLowerCase() : '';
+        const layerName = typeof a.layerName === 'string' ? a.layerName.trim() : '';
+        if (!['rename', 'duplicate', 'reorder', 'group'].includes(action)) {
+          return { ok: false, resultsText: 'action must be rename, duplicate, reorder, or group.' } as any;
+        }
+        if (!layerName) return { ok: false, resultsText: 'layerName is required.' } as any;
+        const r = await photoshopManageLayers({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          targetDocumentName: typeof a.targetDocumentName === 'string' ? a.targetDocumentName : undefined,
+          action: action as any,
+          layerName,
+          newName: typeof a.newName === 'string' ? a.newName : undefined,
+          position: typeof a.position === 'string' ? a.position as any : undefined,
+          referenceLayerName: typeof a.referenceLayerName === 'string' ? a.referenceLayerName : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Photoshop'} is not running.` } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Photoshop ${action} failed: ${d.error}.` } as any;
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Photoshop ${action} done on layer "${d.layerName || layerName}"${d.resultLayerName && d.resultLayerName !== d.layerName ? ` → "${d.resultLayerName}"` : ''}${d.documentName ? ` in ${d.documentName}` : ''} (layers ${d.layerCountBefore} → ${d.layerCountAfter}). Document not saved.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.photoshop_transform_layer': {
+      try {
+        const { photoshopTransformLayer, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const op = typeof a.op === 'string' ? a.op.trim().toLowerCase() : '';
+        const layerName = typeof a.layerName === 'string' ? a.layerName.trim() : '';
+        if (!['move', 'scale', 'rotate'].includes(op)) return { ok: false, resultsText: 'op must be move, scale, or rotate.' } as any;
+        if (!layerName) return { ok: false, resultsText: 'layerName is required.' } as any;
+        const r = await photoshopTransformLayer({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          targetDocumentName: typeof a.targetDocumentName === 'string' ? a.targetDocumentName : undefined,
+          layerName,
+          op: op as any,
+          deltaX: Number.isFinite(Number(a.deltaX)) ? Number(a.deltaX) : undefined,
+          deltaY: Number.isFinite(Number(a.deltaY)) ? Number(a.deltaY) : undefined,
+          scalePercent: Number.isFinite(Number(a.scalePercent)) ? Number(a.scalePercent) : undefined,
+          rotateDegrees: Number.isFinite(Number(a.rotateDegrees)) ? Number(a.rotateDegrees) : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Photoshop'} is not running.` } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Photoshop ${op} failed: ${d.error}.` } as any;
+        const b = d.boundsBefore; const af = d.boundsAfter;
+        const boundsText = b && af
+          ? ` Bounds ${b.left},${b.top}→${b.right},${b.bottom} became ${af.left},${af.top}→${af.right},${af.bottom}px.`
+          : '';
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Photoshop ${op} applied to layer "${d.layerName || layerName}"${d.documentName ? ` in ${d.documentName}` : ''}.${boundsText} Document not saved.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.photoshop_convert_color_mode': {
+      try {
+        const { photoshopConvertColorMode, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const mode = typeof a.mode === 'string' ? a.mode.trim().toLowerCase() : '';
+        if (!['rgb', 'cmyk', 'grayscale'].includes(mode)) return { ok: false, resultsText: 'mode must be rgb, cmyk, or grayscale.' } as any;
+        const r = await photoshopConvertColorMode({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          targetDocumentName: typeof a.targetDocumentName === 'string' ? a.targetDocumentName : undefined,
+          mode: mode as any,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Photoshop'} is not running.` } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Photoshop color mode conversion failed: ${d.error}.` } as any;
+        return {
+          ok: true,
+          ...d,
+          resultsText: d.converted
+            ? `Converted ${d.documentName || 'document'} from ${d.modeBefore} to ${d.modeAfter}. Not saved — color data loss is reversible until an approved save/export.`
+            : `${d.documentName || 'Document'} is already in ${d.modeAfter} — no conversion needed.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.illustrator_document_status': {
+      try {
+        const { illustratorDocumentStatus, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await illustratorDocumentStatus({
+          appName: typeof a.appName === 'string' ? a.appName : 'Illustrator',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Illustrator'} is not running.` } as any;
+        if (d.status === 'no_document') return { ok: false, ...d, resultsText: 'Illustrator is running but no document is open.' } as any;
+        if (d.status === 'document_mismatch') return { ok: false, ...d, resultsText: `Active Illustrator document is ${d.activeDocumentName || 'unknown'}, not the expected ${a.expectedDocumentName}.` } as any;
+        const docs = Array.isArray(d.documents) ? d.documents : [];
+        const rows = docs.slice(0, 12).map((doc: any) =>
+          `- ${doc.name}${doc.modified ? ' (unsaved changes)' : ''}: ${doc.widthPt}×${doc.heightPt}pt, ${doc.artboardCount} artboards, ${doc.layerCount} layers`);
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Illustrator active document: ${d.activeDocumentName || 'unknown'} (${d.widthPt}×${d.heightPt}pt, ${d.artboardCount} artboards, ${d.layerCount} layers, ${d.selectionCount} selected). ${docs.length} open document(s).${rows.length ? `\n${rows.join('\n')}` : ''}`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.illustrator_export_proof': {
+      try {
+        const { illustratorExportProof, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const outputPath = typeof a.outputPath === 'string' ? a.outputPath.trim() : '';
+        if (!outputPath) return { ok: false, resultsText: 'outputPath is required (.png or .svg).' } as any;
+        const r = await illustratorExportProof({
+          appName: typeof a.appName === 'string' ? a.appName : 'Illustrator',
+          outputPath,
+          format: typeof a.format === 'string' ? a.format as any : undefined,
+          scalePercent: Number.isFinite(Number(a.scalePercent)) ? Number(a.scalePercent) : undefined,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Illustrator'} is not running.` } as any;
+        if (d.error || !d.fileExists) return { ok: false, ...d, resultsText: `Illustrator export failed: ${d.error || 'output file was not created'}.` } as any;
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Exported ${d.documentName || 'document'} as ${String(d.format || '').toUpperCase()} proof → ${d.outputFileName} (${d.sizeBytes} bytes). Source document not saved.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.cad_compile': {
+      try {
+        const { compileCadCode, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const engine = typeof a.engine === 'string' ? a.engine.trim().toLowerCase() : '';
+        if (!['openscad', 'freecadcmd', 'blender'].includes(engine)) {
+          return { ok: false, resultsText: 'engine must be openscad, freecadcmd, or blender.' } as any;
+        }
+        const sourcePath = typeof a.sourcePath === 'string' ? a.sourcePath.trim() : '';
+        const outputPath = typeof a.outputPath === 'string' ? a.outputPath.trim() : '';
+        if (!sourcePath || !outputPath) return { ok: false, resultsText: 'sourcePath and outputPath are required.' } as any;
+        const r = await compileCadCode({
+          engine: engine as any,
+          sourcePath,
+          outputPath,
+          extraArgs: Array.isArray(a.extraArgs) ? a.extraArgs.map((x: unknown) => String(x)).slice(0, 8) : undefined,
+          timeoutMs: Number.isFinite(Number(a.timeoutMs)) ? Number(a.timeoutMs) : undefined,
+        });
+        const d: any = (r as any).data || null;
+        if (!r.ok) {
+          if ((r as any).errorCode === 'engine_not_installed' || d?.installHint) {
+            const { describeCadInstallGuidance } = await import('./cadCodeExecutor');
+            return { ok: false, resultsText: `${engine} is not installed on this Mac. ${d?.installHint || describeCadInstallGuidance(engine as any)}` } as any;
+          }
+          const stderrExcerpt = d?.stderrTail ? ` stderr: ${String(d.stderrTail).slice(0, 300)}` : '';
+          return { ok: false, resultsText: `${describeDesktopFailure(r.error, r.errorCode)}${stderrExcerpt}` } as any;
+        }
+        const dd = d || {};
+        return {
+          ok: true,
+          ...dd,
+          resultsText: `CAD compile succeeded via ${engine} in ${dd.durationMs ?? '?'}ms. Output ${dd.output?.path || outputPath} (${dd.output?.bytes ?? '?'} bytes, exists: ${dd.output?.exists === true}).`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.cad_inspect_file': {
+      try {
+        const { readFile, statFile, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const path = typeof a.path === 'string' ? a.path.trim() : '';
+        if (!path) return { ok: false, resultsText: 'path is required.' } as any;
+        const maxBytes = Number.isFinite(Number(a.maxBytes))
+          ? Math.max(1024, Math.min(2 * 1024 * 1024, Number(a.maxBytes)))
+          : 2 * 1024 * 1024;
+        const stat = await statFile(path);
+        if (!stat.ok || !stat.data) return { ok: false, resultsText: describeDesktopFailure(stat.error, stat.errorCode) } as any;
+        if (!stat.data.exists) return { ok: false, resultsText: `File not found: ${path.split('/').pop() || path}` } as any;
+        const read = await readFile(path, maxBytes);
+        const fileName = path.split('/').pop() || path;
+        const { inspectCadFileText, describeCadInspectionForChat } = await import('./cadFileInspector');
+        // Parse from raw content (structure extraction needs exact bytes); the
+        // inspector's output is bounded structured data — names clamped, counts
+        // capped — so nothing model-visible carries raw file text.
+        const inspection = inspectCadFileText({
+          fileName,
+          textContent: read.ok && read.data ? read.data.content : undefined,
+          fileSizeBytes: typeof stat.data.size === 'number' ? stat.data.size : undefined,
+        });
+        return { ok: true, ...inspection, resultsText: describeCadInspectionForChat(inspection) } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
     case 'desktop.photoshop_set_layer_state': {
       try {
         const { photoshopSetLayerState, isDesktopBridgeAvailable } = await import('./desktopBridge');
@@ -7964,7 +9074,29 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         // E2 — bridge-built slice marker is structural (not app content):
         // it stays OUTSIDE the untrusted fence, before the body.
         const sliceNote = typeof r.data?.sliceMarker === 'string' && r.data.sliceMarker ? `${r.data.sliceMarker}\n` : '';
-        return { ok: true, resultsText: `Accessibility tree for ${r.data?.app || 'frontmost app'} (pid ${r.data?.pid || 0}, nodes ${r.data?.budget_used || 0}):\n${sliceNote}${body}${trailer}` } as any;
+        // P15 — before/after diff: when the same app was read earlier in this
+        // process, append a compact +/-/~ delta so "did my action work?" is a
+        // structured answer instead of another screenshot round-trip. Labels
+        // and values inside the delta go through the untrusted fence.
+        let diffNote = '';
+        try {
+          const { snapshotA11ySummary, diffA11ySummaries, describeA11yDiffForModel } = await import('./a11yTreeDiff');
+          const appKey = String(r.data?.app || a.appName || 'frontmost').trim().toLowerCase();
+          const summary = snapshotA11ySummary(r.data?.tree as any);
+          const prev = lastA11ySnapshotByApp.get(appKey);
+          lastA11ySnapshotByApp.set(appKey, summary);
+          if (lastA11ySnapshotByApp.size > 8) {
+            const oldest = lastA11ySnapshotByApp.keys().next().value;
+            if (oldest !== undefined) lastA11ySnapshotByApp.delete(oldest);
+          }
+          if (prev && summary.length > 0) {
+            const diff = diffA11ySummaries(prev, summary);
+            diffNote = `\nΔ since last read: ${describeA11yDiffForModel(diff, { fence: fenceUntrustedObservationText })}`;
+          }
+        } catch {
+          // Diff is advisory — never fail the read over it.
+        }
+        return { ok: true, resultsText: `Accessibility tree for ${r.data?.app || 'frontmost app'} (pid ${r.data?.pid || 0}, nodes ${r.data?.budget_used || 0}):\n${sliceNote}${body}${trailer}${diffNote}` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'desktop.click_element': {
@@ -8083,6 +9215,29 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const lines = posts.map((p: any) => `- [${p.status}] ${p.title?.rendered || 'Untitled'} (ID: ${p.id})`);
         return { ok: true, resultsText: lines.join('\n') } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    // ── Google Docs (Drive) ──────────────────────────────────────────────
+    case 'docs.create_document': {
+      try {
+        // LOCKSTEP: `googleDocsCreate.ts` owns the API mechanics (token
+        // resolution from the Google Workspace connection, markdown→HTML
+        // conversion, Drive multipart upload, scope/expiry error mapping).
+        // Keep this case a thin adapter; errors are already plain language.
+        const { createGoogleDocFromMarkdown } = await import('./googleDocsCreate');
+        const a = args as { title?: unknown; markdown?: unknown };
+        const title = typeof a.title === 'string' ? a.title : '';
+        const created = await createGoogleDocFromMarkdown({
+          title,
+          markdown: typeof a.markdown === 'string' ? a.markdown : '',
+          circleId: context.circleId,
+          userId: context.userId,
+        });
+        if (!created.ok) return { ok: false, resultsText: created.error } as any;
+        return {
+          ok: true,
+          resultsText: `Created Google Doc: "${title.trim() || 'Untitled document'}"\nURL: ${created.url}\nDocument ID: ${created.documentId}`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e?.message || 'Google Doc creation failed.' } as any; }
     }
     // ── Vault Automation Access ────────────────────────────────────────
     case 'vault.list': {

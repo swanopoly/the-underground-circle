@@ -9,6 +9,15 @@
  */
 
 import { shouldRunLocalComputerAwarenessIntentSequence } from '../src/lib/localComputerAwarenessIntent';
+// 2.5 substitution visibility: the runtime's loop-model resolution is the
+// REAL exported helper (computerTaskRuntime delegates to it), tsx-loadable
+// via chatComputerHandoffContext — no mirror needed for this one.
+import {
+  COMPUTER_USE_PINNED_LOOP_MODEL,
+  formatComputerTaskModelResolutionNotice,
+  resolveComputerTaskLoopModel,
+} from '../src/lib/chatComputerHandoffContext';
+import { getModelCapabilityFlags } from '../src/lib/modelCapabilities';
 // appAutomationControlSurfaces is Node-safe (no RN/supabase) so the pure
 // observe-before-act helpers can be exercised directly here.
 import {
@@ -152,21 +161,28 @@ function main() {
     notesRecipe?.approvalBefore.some((item) => /mutating app state/i.test(item)),
     'notes recipe: records approval before side effect',
   );
+  // The sequence is the one-shot AppleScript-backed `notes_create` bridge tool
+  // (see buildAppleNotesCreateNoteSequence): deterministic single mutation, no
+  // fragile UI dance, so 'observe-before-act' is intentionally not a smoke case.
   assert(
-    ['observe-before-act', 'research-before-guess', 'approval-before-side-effect', 'verified-proof']
+    ['research-before-guess', 'approval-before-side-effect', 'verified-proof']
       .every((smokeCase) => notesRecipe?.smokeCases.includes(smokeCase)),
     'notes recipe: declares required smoke cases',
   );
   const notesSequence = notesRecipe ? buildAppleNotesCreateNoteSequence(notesRecipe) : [];
   const notesKinds = notesSequence.map((step) => step.kind);
-  const newNoteIndex = notesSequence.findIndex((step) => step.kind === 'semantic_click' && step.targetLabel === 'New Note');
-  const pasteIndex = notesSequence.findIndex((step) => step.kind === 'paste_text' && step.text === 'hell ya fuckin right bitch');
-  const editorObserveIndex = notesSequence.findIndex((step, index) => index > newNoteIndex && step.kind === 'a11y_tree');
   assert(notesSequence.length > 1, 'notes sequence: recipe expands to deterministic desktop steps');
   assert(!notesKinds.includes('file_write_text'), 'notes sequence: never emits local-file-write-text');
-  assert(notesKinds[0] === 'launch_app' && notesKinds[3] === 'a11y_tree' && newNoteIndex > 3, 'notes sequence: observes before creating note');
-  assert(newNoteIndex > 0, 'notes sequence: uses named New Note control');
-  assert(editorObserveIndex > newNoteIndex && pasteIndex > editorObserveIndex, 'notes sequence: observes editor before inserting body');
+  assert(
+    notesKinds[0] === 'notes_create'
+      && notesSequence[0].appQuery === 'Notes'
+      && notesSequence[0].text === 'hell ya fuckin right bitch',
+    'notes sequence: one-shot AppleScript notes_create carries the note body',
+  );
+  assert(
+    !notesKinds.includes('semantic_click') && !notesKinds.includes('paste_text'),
+    'notes sequence: no fragile New Note click / editor paste dance',
+  );
   assert(notesKinds[notesKinds.length - 1] === 'screen_state', 'notes sequence: ends with proof screenshot');
 
   // ─── Observe-before-act helpers (Phase 2) ─────────────────────────
@@ -398,6 +414,47 @@ function main() {
   assert(partialStatus.os_accessibility === 'partial', 'e1: partial desktop_control → os_accessibility partial (not ready)');
   assert(partialStatus.browser_dom_cdp === 'ready', 'e1: ready browser_automation → browser rung ready');
   assert(!('vendor_script_or_plugin_api' in partialStatus), 'e1: surfaces without audit signal stay unknown');
+
+  // ─── 2.5: model substitution visibility at the runtime entry ───────
+  // executeComputerTaskWithAgent computes `modelResolution` from the user's
+  // selected model with these exact helpers: text-only planner/validator
+  // steps keep args.model (executeAgentRun is always called with it
+  // unchanged); only the native screenshot/action loop pins Sonnet, and
+  // only THAT substitution surfaces a notice.
+  const runtimeKept = resolveComputerTaskLoopModel('claude-sonnet-4-6');
+  assert(
+    getModelCapabilityFlags('claude-sonnet-4-6').computerUse && !runtimeKept.substituted,
+    '2.5: computerUse:true model → no substitution, no notice',
+  );
+  assert(
+    formatComputerTaskModelResolutionNotice(runtimeKept) === '',
+    '2.5: kept model formats to an empty notice',
+  );
+  const runtimeSwapped = resolveComputerTaskLoopModel('openrouter/deepseek/deepseek-chat');
+  assert(
+    !getModelCapabilityFlags('openrouter/deepseek/deepseek-chat').computerUse
+      && runtimeSwapped.substituted
+      && runtimeSwapped.reason === 'computer_use_requires_sonnet',
+    '2.5: computerUse:false model → visible substitution with typed reason',
+  );
+  assert(
+    runtimeSwapped.resolvedModel === COMPUTER_USE_PINNED_LOOP_MODEL,
+    '2.5: substitution resolves to the pinned Sonnet loop model',
+  );
+  assert(
+    formatComputerTaskModelResolutionNotice(runtimeSwapped)
+      === 'Screen loop needs computer-use, so it runs on claude-sonnet-4-6; your pick (deepseek-chat) still plans and verifies.',
+    '2.5: notice is the one compact user-facing line',
+  );
+  assert(
+    !resolveComputerTaskLoopModel(undefined).substituted
+      && resolveComputerTaskLoopModel(undefined).resolvedModel === COMPUTER_USE_PINNED_LOOP_MODEL,
+    '2.5: no selected model → plain default pin, never a notice',
+  );
+  assert(
+    resolveComputerTaskLoopModel('some-brand-new-model').substituted,
+    '2.5: unknown model ids fail closed → pinned loop model + visible substitution',
+  );
 
   if (failures > 0) {
     console.error(`\n${failures} computer-task-runtime smoke-test failure(s)`);

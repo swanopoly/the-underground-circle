@@ -204,6 +204,65 @@ async function main(): Promise<void> {
   assert(!roster.some(item => item.id === staleUnselectedSubagent.id), 'stale unselected subagent should be hidden');
   assert(roster.every((item, index) => item.deskIndex === index), 'desk indexes should match final roster order');
 
+  // ─── Bridge-aware status reconcile (O2, P38) ───────────────────────────────
+  // Fail-visible: a dead connection DEMOTES stale active/building + annotates;
+  // fresh activity keeps status but still notes; never upgrades, never hides.
+  const { reconcileAgentStatusWithConnection, BRIDGE_RECONCILE_STALE_MS } = await import('../src/lib/officeAgents');
+  const T0 = Date.parse('2026-06-10T12:00:00.000Z');
+  const staleIso = new Date(T0 - BRIDGE_RECONCILE_STALE_MS - 5_000).toISOString();
+  const freshIso = new Date(T0 - 2_000).toISOString();
+
+  // Direct unit behavior (fixed clock)
+  const demoted = reconcileAgentStatusWithConnection(
+    { status: 'active', lastActive: staleIso, connectionId: 'c1' }, 'disconnected', T0,
+  );
+  assert(demoted.status === 'offline', 'stale active + disconnected bridge should demote to offline');
+  assert(demoted.statusNote === 'bridge offline — status stale', 'demotion should carry the fail-visible note');
+  const freshKept = reconcileAgentStatusWithConnection(
+    { status: 'building', lastActive: freshIso, connectionId: 'c1' }, 'error', T0,
+  );
+  assert(freshKept.status === 'building', 'fresh activity should keep its status despite a disagreeing bridge');
+  assert(freshKept.statusNote === 'bridge disconnected', 'fresh-but-disagreeing should still note the bridge');
+  const connectedOk = reconcileAgentStatusWithConnection(
+    { status: 'active', lastActive: staleIso, connectionId: 'c1' }, 'connected', T0,
+  );
+  assert(connectedOk.status === 'active' && !connectedOk.statusNote, 'connected bridge should leave status untouched');
+  const idleUntouched = reconcileAgentStatusWithConnection(
+    { status: 'idle', lastActive: staleIso, connectionId: 'c1' }, 'disconnected', T0,
+  );
+  assert(idleUntouched.status === 'idle' && !idleUntouched.statusNote, 'idle is not misleading — untouched');
+  const offlineNeverUpgraded = reconcileAgentStatusWithConnection(
+    { status: 'offline', lastActive: freshIso, connectionId: 'c1' }, 'connected', T0,
+  );
+  assert(offlineNeverUpgraded.status === 'offline', 'reconcile never upgrades a status');
+  const noConn = reconcileAgentStatusWithConnection(
+    { status: 'active', lastActive: staleIso, connectionId: '' }, 'disconnected', T0,
+  );
+  assert(noConn.status === 'active' && !noConn.statusNote, 'agents without a connection are untouched');
+
+  // Roster-level: dead codex bridge demotes its stale "active" main visibly.
+  const staleRealIso = new Date(Date.now() - BRIDGE_RECONCILE_STALE_MS - 60_000).toISOString();
+  const deadBridgeAgent = agent({
+    id: 'codex-dead-bridge', name: 'Codex Dead', providerType: 'codex',
+    status: 'active', runtimeKind: 'main', lastActive: staleRealIso,
+  });
+  const reconciledRoster = buildOfficeRoster({
+    agents: [deadBridgeAgent],
+    currentUserId: 'user-1',
+    connections: [connection('codex', { status: 'disconnected' })],
+  });
+  const reconciledRow = reconciledRoster.find(item => item.id === 'codex-dead-bridge');
+  assert(!!reconciledRow, 'reconciled agent should stay in the roster (never hidden)');
+  assert(reconciledRow?.status === 'offline', 'roster should show the demoted status');
+  assert(reconciledRow?.statusNote === 'bridge offline — status stale', 'roster row should carry the status note');
+  const healthyRoster = buildOfficeRoster({
+    agents: [deadBridgeAgent],
+    currentUserId: 'user-1',
+    connections: [connection('codex', { status: 'connected' })],
+  });
+  const healthyRow = healthyRoster.find(item => item.id === 'codex-dead-bridge');
+  assert(healthyRow?.status === 'active' && !healthyRow?.statusNote, 'connected bridge leaves the roster row untouched');
+
   console.log('office-roster-grouping smoke passed');
 }
 

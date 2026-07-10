@@ -131,3 +131,105 @@ export function appendStuckBreaker(
   if (!verdict.isRepeat) return content;
   return `${content}${stuckBreakerReminder(current.tool, verdict.priorFailures, verdict.lastReason)}`;
 }
+
+// ─── Progress-based loop exit (not iteration-cap based) ──────────────────────
+//
+// Raising the iteration cap just makes a runaway loop more expensive. The real
+// exit is PROGRESS-based: if the model keeps emitting the SAME tool with the
+// SAME input and it keeps FAILING, stop — don't retry. `detectStuckRepeat`
+// above augments a *single* repeated call's feedback; the helpers below let the
+// loop take a HARD terminal decision when it sees ~3 identical failing calls in
+// a row across recent rounds.
+
+/** Max chars of the stable JSON we hash over, so a pathological giant input can
+ *  neither blow up memory nor let two huge-but-different inputs collide only
+ *  because they share a long identical prefix. */
+export const TOOL_INPUT_HASH_MAX_CHARS = 2048;
+
+/**
+ * Stable, bounded hash of a tool input for repeat detection. Object keys are
+ * sorted (so `{a,b}` and `{b,a}` collide), the JSON is length-bounded, and the
+ * result is a short fixed-length string. Deterministic and side-effect free.
+ *
+ * This is intentionally the SAME canonicalization `toolCallSignature` uses (so
+ * the two agree on "the same input"), just without the tool-name prefix and
+ * folded to a compact digest suitable for a bounded recent-call ring.
+ */
+export function hashToolInput(input: unknown): string {
+  let json: string;
+  try {
+    json = JSON.stringify(input ?? null, (_k, v) =>
+      v && typeof v === 'object' && !Array.isArray(v)
+        ? Object.keys(v).sort().reduce((acc, k) => { (acc as any)[k] = (v as any)[k]; return acc; }, {} as Record<string, unknown>)
+        : v,
+    );
+  } catch {
+    json = String(input);
+  }
+  if (typeof json !== 'string') json = String(json);
+  const bounded = json.length > TOOL_INPUT_HASH_MAX_CHARS ? json.slice(0, TOOL_INPUT_HASH_MAX_CHARS) : json;
+  // FNV-1a 32-bit over the bounded canonical JSON → stable short digest. We
+  // prefix the length so a truncated-prefix collision is astronomically
+  // unlikely (differing lengths never collide on the length component).
+  let h = 0x811c9dc5;
+  for (let i = 0; i < bounded.length; i++) {
+    h ^= bounded.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  const digest = (h >>> 0).toString(16).padStart(8, '0');
+  return `${bounded.length.toString(16)}:${digest}`;
+}
+
+/** One entry in the loop's bounded recent-call ring. */
+export interface RecentToolCall {
+  name: string;
+  inputHash: string;
+  ok: boolean;
+}
+
+export interface RepeatedFailureVerdict {
+  stuck: boolean;
+  reason: string;
+}
+
+/**
+ * PROGRESS-based stop signal. Fires when the last `threshold` (default 3) calls
+ * are ALL:
+ *   • the SAME tool name, AND
+ *   • the SAME input hash, AND
+ *   • failed (`ok === false`).
+ * i.e. the loop is re-sampling an identical action that keeps failing → stop or
+ * replan, do NOT run it again.
+ *
+ * Deterministic and conservative — it must NOT fire on:
+ *   • fewer than `threshold` calls,
+ *   • repeated DIFFERENT calls (different name OR different input),
+ *   • any SUCCESS in the window (a mix of ok/fail is not "stuck"),
+ *   • the same failing signature interleaved with other calls (the LAST
+ *     `threshold` must be contiguous and identical).
+ * Only the most recent `threshold` calls are inspected, so an old failure
+ * followed by real progress never trips it.
+ */
+export function detectRepeatedToolFailure(
+  recentCalls: ReadonlyArray<RecentToolCall> | null | undefined,
+  opts: { threshold?: number } = {},
+): RepeatedFailureVerdict {
+  const list = Array.isArray(recentCalls) ? recentCalls : [];
+  const threshold = Math.max(2, Math.floor(opts.threshold ?? 3));
+  if (list.length < threshold) return { stuck: false, reason: '' };
+  const window = list.slice(-threshold);
+  const [first, ...rest] = window;
+  if (!first) return { stuck: false, reason: '' };
+  // All in the window must be the same failing (name+hash) signature.
+  if (first.ok) return { stuck: false, reason: '' };
+  for (const call of rest) {
+    if (call.ok) return { stuck: false, reason: '' };
+    if (call.name !== first.name || call.inputHash !== first.inputHash) {
+      return { stuck: false, reason: '' };
+    }
+  }
+  return {
+    stuck: true,
+    reason: `repeated identical failing call — ${first.name} x${threshold}`,
+  };
+}

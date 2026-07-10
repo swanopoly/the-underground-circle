@@ -5,6 +5,14 @@ import type { ChatAutomationPlanPreview, ChatAutomationPreviewTone } from '../..
 type Props = {
   preview: ChatAutomationPlanPreview;
   accentColor: string;
+  /**
+   * P22: display-only Route label. `preview.routeLabel` is the forced
+   * computer-task path's hardcoded 'browser' for desktop/app tasks (and the
+   * preview smoke locks that value), so callers pass a surface-accurate label
+   * derived from the handoff metadata for DISPLAY only — executor selection
+   * still keys off the unchanged routeId.
+   */
+  routeLabelOverride?: string | null;
 };
 
 function toneColor(tone: ChatAutomationPreviewTone, accentColor: string): string {
@@ -24,8 +32,9 @@ function compactList(values: string[], limit: number): string[] {
   return values.map((value) => String(value || '').trim()).filter(Boolean).slice(0, limit);
 }
 
-export default function ChatAutomationPlanCard({ preview, accentColor }: Props) {
+export default function ChatAutomationPlanCard({ preview, accentColor, routeLabelOverride }: Props) {
   const riskColor = toneColor(preview.riskTone, accentColor);
+  const routeLabel = String(routeLabelOverride || '').trim() || preview.routeLabel;
   const evidence = compactList(preview.evidence, 3);
   const recovery = compactList(preview.recovery, 2);
   const tools = compactList(preview.tools, 4);
@@ -69,7 +78,7 @@ export default function ChatAutomationPlanCard({ preview, accentColor }: Props) 
       <View style={styles.metaGrid}>
         <View style={styles.metaItem}>
           <Text style={styles.metaLabel}>Route</Text>
-          <Text style={styles.metaValue} numberOfLines={1}>{preview.routeLabel}</Text>
+          <Text style={styles.metaValue} numberOfLines={1}>{routeLabel}</Text>
         </View>
         <View style={styles.metaItem}>
           <Text style={styles.metaLabel}>Risk</Text>

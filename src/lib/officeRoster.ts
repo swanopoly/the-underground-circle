@@ -1,7 +1,7 @@
 import type { CircleOfficeAgent } from './circleOffice';
 import { PROVIDER_META, type ProviderType, type AgentConnection } from './connectionManager';
 import { getAgentIdentityKey, type AgentIdentity } from './agentIdentity';
-import { DEFAULT_AGENT, HUGGINGSWAN_AGENT, type OfficeAgent } from './officeAgents';
+import { DEFAULT_AGENT, HUGGINGSWAN_AGENT, reconcileAgentStatusWithConnection, type OfficeAgent } from './officeAgents';
 // HUGGINGSWAN_AGENT kept in import so isHuggingSwan() can compare ids; do not
 // re-pin it as a roster slot.
 void HUGGINGSWAN_AGENT;
@@ -175,7 +175,25 @@ export function buildOfficeRoster(opts: BuildOfficeRosterOptions): OfficeAgent[]
   const identities = opts.identities || new Map<string, AgentIdentity>();
   const now = Date.now();
 
-  const liveAgents = opts.agents.filter(agent => !isBlackSwan(agent));
+  // O2 (P38): reconcile session-derived status with each agent's OWN
+  // connection state, BEFORE grouping/scoring, so a dead bridge can't leave an
+  // agent reading Active/Building for up to an hour. Fail-visible: only
+  // demotes + annotates (statusNote); agents without a connection untouched.
+  const connStatusById = new Map<string, AgentConnection['status']>();
+  for (const conn of opts.connections || []) connStatusById.set(conn.id, conn.status);
+  const reconciledAgents = connStatusById.size === 0
+    ? opts.agents
+    : opts.agents.map((agent) => {
+        const reconciled = reconcileAgentStatusWithConnection(
+          agent,
+          agent.connectionId ? connStatusById.get(agent.connectionId) ?? null : null,
+          now,
+        );
+        if (reconciled.status === agent.status && !reconciled.statusNote) return agent;
+        return { ...agent, status: reconciled.status, statusNote: reconciled.statusNote };
+      });
+
+  const liveAgents = reconciledAgents.filter(agent => !isBlackSwan(agent));
   const byProvider = new Map<ProviderType, OfficeAgent[]>();
   for (const agent of liveAgents) {
     const list = byProvider.get(agent.providerType) || [];
@@ -229,7 +247,7 @@ export function buildOfficeRoster(opts: BuildOfficeRosterOptions): OfficeAgent[]
     extras.push(...providerExtras);
   }
 
-  const blackSwan = opts.agents.find(isBlackSwan) || DEFAULT_AGENT;
+  const blackSwan = reconciledAgents.find(isBlackSwan) || DEFAULT_AGENT;
 
   // HuggingSwan is no longer pinned as its own roster slot — it lives as
   // OpenSwan's swan companion now. We still strip any HuggingSwan records

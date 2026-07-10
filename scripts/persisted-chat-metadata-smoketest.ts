@@ -9,7 +9,9 @@
 
 import {
   BOT_META_MARKER,
+  bestOfNMetadata,
   formatPersistedChatBotMessage,
+  readPersistedBestOfNRace,
   readPersistedChatBotMetadata,
   stripPersistedChatBotPrefix,
 } from '../src/lib/persistedChatMetadata';
@@ -385,6 +387,62 @@ assert(!!openswanMetadata?.taskPlan, 'OpenSwan task plan is persisted');
 assert((openswanMetadata?.toolEvents?.length || 0) === 1, 'OpenSwan tool events are persisted');
 assert((openswanMetadata?.verificationResults?.length || 0) === 1, 'OpenSwan verification results are persisted');
 assert((openswanMetadata?.recoveryOptions?.length || 0) === 1, 'recovery options are persisted');
+
+// Best-of-N race metadata: builder clamps oversized input, the field
+// round-trips through format/read, and it survives the byte-cap tiers so
+// every candidate stays one tap to adopt after reload.
+const oversizedRace = {
+  task: 'Compare our deploy strategies and recommend one. '.repeat(8), // > 160 chars
+  winnerIndex: 1,
+  judged: true,
+  candidates: [
+    { model: 'model-a', ok: true, score: 6, note: 'thin', durationMs: 120, text: 'Alpha answer: blue/green.' },
+    { model: 'model-b', ok: true, score: 9.5, note: 'complete note '.repeat(20), durationMs: 90, text: 'winner text '.repeat(200) }, // note > 120, text > 1500
+    { model: 'model-c', ok: false, score: null, note: 'rate limited (429)', durationMs: 30, text: '' },
+    { model: 'model-d', ok: true, score: 4, note: '', durationMs: 200, text: 'Delta answer.' },
+    { model: 'model-e', ok: true, score: 3, note: '', durationMs: 210, text: 'Echo answer.' },
+    { model: 'model-f', ok: true, score: 2, note: '', durationMs: 220, text: 'Foxtrot answer.' },
+  ],
+};
+const builtRace = bestOfNMetadata(oversizedRace);
+assert(!!builtRace, 'best-of-n builder accepts a race summary');
+assert((builtRace?.candidates.length || 0) === 4, 'best-of-n candidates clamped to 4');
+assert((builtRace?.task.length || 0) <= 160, 'best-of-n task clamped to 160');
+assert((builtRace?.candidates[1]?.note.length || 0) <= 120, 'best-of-n candidate note clamped to 120');
+assert((builtRace?.candidates[1]?.text.length || 0) <= 1500, 'best-of-n candidate text clamped to 1500');
+assert(builtRace?.winnerIndex === 1 && builtRace?.judged === true, 'best-of-n winner index and judged flag preserved');
+assert(builtRace?.candidates[1]?.score === 9.5, 'best-of-n judge scores preserved');
+assert(builtRace?.candidates[2]?.ok === false && builtRace?.candidates[2]?.score === null, 'failed candidate keeps ok:false and null score');
+assert(bestOfNMetadata(null) === null, 'best-of-n builder rejects null input');
+assert(bestOfNMetadata('junk') === null, 'best-of-n builder rejects non-object input');
+assert(bestOfNMetadata({ task: 'x', winnerIndex: null, judged: false, candidates: [] }) === null, 'best-of-n builder rejects empty candidate lists');
+
+const bestOfNMessage = formatPersistedChatBotMessage(
+  'OpenSwan',
+  'Race complete — model-b wins on completeness and evidence.',
+  { bestOfN: builtRace },
+);
+assert(bestOfNMessage.length <= 9000, 'best-of-n message stays under DB content cap');
+const bestOfNRow = readPersistedChatBotMetadata(bestOfNMessage);
+const roundTrippedRace = readPersistedBestOfNRace(bestOfNRow);
+assert((roundTrippedRace?.candidates.length || 0) === 4, 'best-of-n round-trip keeps all candidates');
+assert(roundTrippedRace?.winnerIndex === 1 && roundTrippedRace?.judged === true, 'best-of-n round-trip keeps winner/judged');
+assert(!!roundTrippedRace?.candidates[1]?.text.includes('winner text'), 'best-of-n round-trip keeps adoptable candidate text');
+assert((roundTrippedRace?.candidates[1]?.text.length || 0) <= 1500, 'best-of-n reader re-clamps candidate text');
+assert(readPersistedBestOfNRace(null) === null, 'best-of-n reader tolerates null metadata');
+assert(readPersistedBestOfNRace({}) === null, 'best-of-n reader tolerates metadata without a race');
+
+// Like computerFindings, the race must ride the byte-cap tiers: a big plan
+// forces compact/minimal compaction, and the race survives it intact.
+const raceWithBigPlanMessage = formatPersistedChatBotMessage(
+  'OpenSwan',
+  'Race complete. '.repeat(20),
+  { browserPlans: [hugePlan as any], bestOfN: builtRace },
+);
+assert(raceWithBigPlanMessage.length <= 9000, 'best-of-n + oversized plan message stays under DB content cap');
+const raceWithBigPlanRace = readPersistedBestOfNRace(readPersistedChatBotMetadata(raceWithBigPlanMessage));
+assert((raceWithBigPlanRace?.candidates.length || 0) === 4, 'best-of-n survives byte-cap compaction tiers');
+assert(raceWithBigPlanRace?.winnerIndex === 1, 'best-of-n winner survives byte-cap compaction tiers');
 
 if (failures > 0) {
   console.error(`\n${failures} persisted-chat metadata smoke-test failure(s)`);

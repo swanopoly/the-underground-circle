@@ -347,6 +347,10 @@ export async function executeAgentRun(
     routeAnalysis.route.intent,
     connectedProviders,
     routeAnalysis.route.complexity,
+    undefined,
+    // P27: raw message activates the BlackSwan reliability guard on the
+    // EXECUTION model — the hard subset of the grounded lane escalates to frontier.
+    prompt,
   );
   const activeTaskKind =
     modePolicy.key === 'build' || modePolicy.key === 'execute'

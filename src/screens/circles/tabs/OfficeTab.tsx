@@ -28,6 +28,9 @@ import {
 import { validateOfficeLayout } from '../../../lib/officeValidation';
 import { getBridgeUrl, getBridgeEnvironment } from '../../../lib/bridgeEnvironment';
 import ConnectAllBridgesPanel, { isConnectPanelDismissed } from '../../../components/office/ConnectAllBridgesPanel';
+import OfficeBridgeReadinessStrip from '../../../components/office/OfficeBridgeReadinessStrip';
+import OfficeLaneHealthStrip from '../../../components/office/OfficeLaneHealthStrip';
+import type { OfficeBridgeReadinessSnapshot as OfficeBridgeReadinessSnapshotModel } from '../../../lib/officeBridgeReadiness';
 import { useCustomThemes, customThemeToOfficeTheme, CUSTOM_THEME_PREFIX, CustomThemeRecord } from '../../../services/customThemes';
 import { enrichAgentsWithCache, enrichSessionsWithCache, takeSnapshot, loadSessionTags as loadCachedTags } from '../../../lib/sessionCache';
 import { restoreAllAgents, recordAgentActivity, renameAgent as renameAgentIdentity, updateAgentIdentity, getAgentIdentityByAgent, getAgentIdentityKey, applyIdentityToAgent } from '../../../lib/agentIdentity';
@@ -57,6 +60,8 @@ import {
 import { storage } from '../../../lib/storage';
 import { loadTrendingContent } from '../../../lib/trendingContent';
 import AgentQuickConnect from "../../../components/AgentQuickConnect";
+import SuggestedTaskChips from "../../../components/SuggestedTaskChips";
+import { getEmptyStateSuggestions, type EmptyStateSuggestionAction } from '../../../lib/emptyStateSuggestions';
 import {
   SessionTag, loadSessionTags, addSessionTag, removeSessionTag,
 } from '../../../lib/sessionTags';
@@ -69,23 +74,35 @@ import {
   OfficeBuildingNowCard,
   OfficeTokensCard,
   OfficeAgentLiveOpsLines,
+  OfficeAgentAccountabilityLine,
   OfficeBuildingBadge,
   officeBoardHasContent,
   officeTrackerHasContent,
 } from '../../../components/office/OfficeOpsBoardCards';
 // officeOpsBoard is a pure model module (zero runtime imports) — safe to
 // import statically for render-time helpers; data fetching stays lazy (D6).
-import { buildAgentLiveOps } from '../../../lib/officeOpsBoard';
+import { buildAgentLiveOps, formatAccountabilityCounts } from '../../../lib/officeOpsBoard';
 import type {
+  OfficeAgentAccountability as OfficeAgentAccountabilityModel,
   OfficeBuildingBoard,
   OfficeRunNode,
   OfficeTokenTrackerCard as OfficeTokenTrackerCardModel,
 } from '../../../lib/officeOpsBoard';
 import type { AgentRun } from '../../../lib/agentRunSystem';
 import type { ClaudeUsageSummary, ClaudeUsageByModel } from '../../../lib/claudeUsage';
-import OfficeActionPanel from '../../../components/OfficeActionPanel';
 import AgentActivityFeed from '../../../components/AgentActivityFeed';
 import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
+import ChatAttentionStrip from '../../../components/ChatAttentionStrip';
+import StandingGrantsPanel from '../../../components/StandingGrantsPanel';
+import ComputerTaskSchedulesPanel from '../../../components/ComputerTaskSchedulesPanel';
+import RunHistoryDrawer from '../../../components/chat/RunHistoryDrawer';
+import {
+  buildChatAttentionState,
+  resolveApprovalExpiresAt,
+  type ChatAttentionAction,
+  type ChatAttentionItem,
+} from '../../../lib/chatAttentionQueue';
+import { showAlert } from '../../../lib/alert';
 import type { ComputerTaskChecklistCard } from '../../../lib/computerTaskState';
 import { useAgentApprovals, useAgentControl } from '../../../services/hitlService';
 import {
@@ -129,7 +146,7 @@ import {
   invokeAllAgents,
   invokeSelectedAgents,
 } from '../../../lib/agentInvocation';
-import { getCircleSessionMemoryMode } from '../../../lib/agentRunSystem';
+import { getCircleSessionMemoryMode, getActiveRuns } from '../../../lib/agentRunSystem';
 import { buildOfficeRoster } from '../../../lib/officeRoster';
 import { useUserApiKeys } from '../../../lib/llmProviders';
 import { useOfficeSurfaceState } from './office/useOfficeSurfaceState';
@@ -272,6 +289,67 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   const pendingApprovals = useAgentApprovals(circleId);
   // showControlCard removed — controls now embedded in AgentPanel
 
+  // Circle-wide "Needs you" strip (plan §4a/§5b) — same chatAttentionQueue
+  // owner as chat: summary line with counts + soonest-expiry countdown, rows
+  // for expired approvals the live banner below cannot show, and runs stuck
+  // in waiting_approval/paused with how long they have been blocked. Pending
+  // approvals keep their approve/reject buttons in HitlApprovalBanner; the
+  // status line still counts them so the summary stays truthful.
+  const [dismissedOfficeAttentionIds, setDismissedOfficeAttentionIds] = useState<Set<string>>(new Set());
+  const [, setOfficeAttentionTick] = useState(0);
+  const [officeBlockedRuns, setOfficeBlockedRuns] = useState<AgentRun[]>([]);
+  // open_run deep-link (plan §6b): blocked-run attention items open the same
+  // run drawer chat uses instead of pointing at the board with an alert.
+  const [showOfficeRunDetail, setShowOfficeRunDetail] = useState(false);
+  useEffect(() => {
+    if (!circleId) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const runs = await getActiveRuns(circleId);
+        if (!cancelled) {
+          setOfficeBlockedRuns(runs.filter(
+            (run) => run.status === 'waiting_approval' || run.status === 'paused',
+          ));
+        }
+      } catch { /* queue is a summary — a failed poll just shows stale data */ }
+    };
+    void load();
+    const timer = setInterval(() => { void load(); }, 60_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [circleId]);
+  const officeAttention = buildChatAttentionState({
+    approvals: pendingApprovals,
+    blockedRuns: officeBlockedRuns,
+  }, { dismissedIds: dismissedOfficeAttentionIds });
+  const officeAttentionItems = officeAttention.items.filter((item) =>
+    item.kind !== 'approval_pending'
+      && item.kind !== 'approval_expiring',
+  );
+  const officeAttentionActive = officeAttention.statusLine !== null;
+  useEffect(() => {
+    if (!officeAttentionActive) return;
+    const timer = setInterval(() => setOfficeAttentionTick((tick) => tick + 1), 30_000);
+    return () => clearInterval(timer);
+  }, [officeAttentionActive]);
+  const handleOfficeAttentionAction = (item: ChatAttentionItem, action: ChatAttentionAction) => {
+    if (action.kind === 'dismiss') {
+      setDismissedOfficeAttentionIds((prev) => new Set(prev).add(item.id));
+      return;
+    }
+    if (action.kind === 'refile_approval') {
+      // Office has no composer — re-asking happens where the request lives.
+      showAlert(
+        'Approval expired',
+        'Resend the original request from the Chat tab and a fresh approval will be filed automatically.',
+      );
+      return;
+    }
+    if (action.kind === 'open_run') {
+      setShowOfficeRunDetail(true);
+    }
+  };
+
   // D6: active computer-task card from the persisted record (main thread) —
   // Office is the away-from-chat surface, so a task paused on a question or
   // approval must be visible here too. Light poll; storage read is cheap.
@@ -296,6 +374,25 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // Claude usage (summary + by-model, 7d) refreshes at most every 60s.
   const [opsBoard, setOpsBoard] = useState<OfficeBuildingBoard | null>(null);
   const [opsTokenTracker, setOpsTokenTracker] = useState<OfficeTokenTrackerCardModel | null>(null);
+  // O1 (P38): per-agent 24h accountability (last outcome + counts + cost),
+  // keyed by the same lowercased agent-name seam as opsRunNodesByAgent.
+  const [opsAccountability, setOpsAccountability] = useState<Map<string, OfficeAgentAccountabilityModel> | null>(null);
+  // O5 (P39): main-view bridge readiness (warn/danger strip). Shares the
+  // probe→snapshot owner with the Whiteboard (officeBridgeReadinessProbe).
+  const [bridgeReadinessStrip, setBridgeReadinessStrip] = useState<OfficeBridgeReadinessSnapshotModel | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const { runOfficeBridgeReadinessProbe } = await import('../../../lib/officeBridgeReadinessProbe');
+        const snapshot = await runOfficeBridgeReadinessProbe();
+        if (!cancelled) setBridgeReadinessStrip(snapshot);
+      } catch { /* dashboard extra — never break Office */ }
+    };
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, 60_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
   const opsLiveRunsRef = useRef<AgentRun[]>([]);
   const opsUsageCacheRef = useRef<{
     summary?: ClaudeUsageSummary;
@@ -331,14 +428,18 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
     const reloadRuns = async () => {
       try {
-        const [{ listCircleLiveRuns }, { buildOfficeBuildingBoard }] = await Promise.all([
+        const [{ listCircleLiveRuns }, { buildOfficeBuildingBoard, buildOfficeAgentAccountabilityIndex }] = await Promise.all([
           import('../../../lib/agentRunSystem'),
           import('../../../lib/officeOpsBoard'),
         ]);
-        const runs = await listCircleLiveRuns(circleId);
+        // 24h finished window (O1 accountability). The building board
+        // self-filters recentlyFinished to its 10-minute window, so widening
+        // the fetch only feeds the per-agent accountability index.
+        const runs = await listCircleLiveRuns(circleId, { recentFinishedMs: 24 * 60 * 60 * 1000, limit: 200 });
         if (cancelled) return;
         opsLiveRunsRef.current = runs;
         setOpsBoard(buildOfficeBuildingBoard(runs, { nowMs: Date.now() }));
+        setOpsAccountability(buildOfficeAgentAccountabilityIndex(runs, { nowMs: Date.now() }));
         void rebuildTracker(); // live-burn line tracks the fresh runs
       } catch { /* dashboard extra — never break Office */ }
     };
@@ -3781,8 +3882,38 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
   return (
     <View style={styles.container}>
-      {/* HITL Approval Banner */}
-      <HitlApprovalBanner approvals={pendingApprovals} circleId={circleId} />
+      {/* Circle-wide "Needs you" summary (plan §4a) */}
+      <ChatAttentionStrip
+        state={officeAttention}
+        items={officeAttentionItems}
+        onAction={handleOfficeAttentionAction}
+        accentColor={accentColor}
+      />
+
+      {/* HITL Approval Banner — expired rows are excluded (the strip above
+          declares them expired; live APPROVE on a dead window is a trap). */}
+      <HitlApprovalBanner
+        approvals={pendingApprovals.filter((approval) => {
+          const expiresAt = resolveApprovalExpiresAt(approval.requested_at, approval.timeout_seconds);
+          return expiresAt === null || expiresAt > Date.now();
+        })}
+        circleId={circleId}
+      />
+
+      {/* Standing "always allow" grants — review + revoke (plan §4d) */}
+      <StandingGrantsPanel accentColor={accentColor} userId={currentUserId} />
+
+      {/* Recurring watches — list / pause / delete (plan §6a) */}
+      <ComputerTaskSchedulesPanel circleId={circleId} accentColor={accentColor} />
+
+      {/* Run detail drawer for open_run attention items (plan §6b) */}
+      <RunHistoryDrawer
+        visible={showOfficeRunDetail}
+        circleId={circleId}
+        currentUserId={currentUserId}
+        title="Circle Runs"
+        onClose={() => setShowOfficeRunDetail(false)}
+      />
 
       {/* D6: active computer task — phase, needs-you, stage progress */}
       {computerTaskCard?.active ? (
@@ -3836,6 +3967,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         />
       )}
 
+      {/* O5 (P39): fail-visible bridge readiness on the main view — warns when
+          the core proxy or all execution bridges are down; silent when healthy
+          (the connect panel's "✓ Connected" chip owns the happy state). */}
+      <OfficeBridgeReadinessStrip snapshot={bridgeReadinessStrip} />
+      {/* X7 tail (P53): per-lane chat quality — warn/danger-only, silent when
+          healthy; self-polls the session lane-health registry (P48). */}
+      <OfficeLaneHealthStrip />
       <OfficeConnectBridgesSection circleId={circleId} />
 
       {/* Marquee ticker removed — too noisy for the Office view */}
@@ -4029,7 +4167,32 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                     );
                   }
                   return (
-                    <AgentQuickConnect circleId={circleId} onOpenWizard={() => setShowSetupWizard(true)} compact />
+                    <>
+                      <AgentQuickConnect circleId={circleId} onOpenWizard={() => setShowSetupWizard(true)} compact />
+                      {/* Empty-state next-action chips. "Deploy an agent"
+                          (office:deploy-agent handler token) opens the setup
+                          wizard in-surface; /apps and /screen are chat
+                          commands, so those pick navigate to Chat via the
+                          existing uc:switch-tab event (visual guidance — no
+                          cross-surface composer-seed plumbing exists). */}
+                      <View style={{ marginTop: 20, width: '100%' }}>
+                        <SuggestedTaskChips
+                          suggestions={getEmptyStateSuggestions('office')}
+                          onPick={(action: EmptyStateSuggestionAction) => {
+                            if (action.kind === 'seed_command' && action.value === 'office:deploy-agent') {
+                              setShowSetupWizard(true);
+                              return;
+                            }
+                            // /apps + /screen live in Chat — land the user there.
+                            if (Platform.OS === 'web' && typeof window !== 'undefined') {
+                              try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: 'CHAT' } })); } catch {}
+                            }
+                          }}
+                          accentColor={accentColor}
+                          nativeID="section-office-empty-suggestions"
+                        />
+                      </View>
+                    </>
                   );
                 })()}
               </View>
@@ -4096,6 +4259,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                         Date.now(),
                       )}
                       accentColor={agent.color || accentColor}
+                    />
+                    {/* O1/O2 (P38): last finished outcome + 24h counts/cost,
+                        plus the fail-visible bridge status note when set. */}
+                    <OfficeAgentAccountabilityLine
+                      entry={opsAccountability?.get(agent.name.trim().toLowerCase())}
+                      statusNote={agent.statusNote}
                     />
                   </Pressable>
                 );
@@ -4377,6 +4546,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                       }]} />
                       <Text style={[styles.quickName, selectedAgent?.id === agent.id && { color: agent.color }]}>{agent.name}</Text>
                       <Text style={styles.quickCost}>${(agent.costTotal || agent.costToday).toFixed(2)}</Text>
+                      {/* O1 (P38): 24h finished-run counts, tone by last outcome. */}
+                      {(() => {
+                        const acct = opsAccountability?.get(agent.name.trim().toLowerCase());
+                        const counts = formatAccountabilityCounts(acct);
+                        if (!counts) return null;
+                        return (
+                          <Text style={[styles.quickCost, { color: acct?.tone === 'danger' ? '#ef4444' : '#22c55e' }]}>
+                            {counts}
+                          </Text>
+                        );
+                      })()}
                     </Pressable>
                   ))}
                 </ScrollView>
@@ -4478,20 +4658,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
             <Text style={pmStyles.label}>Agent Type</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={pmStyles.providerRow}>
-              {[
-                { key: 'openswan',      icon: '🦞', label: 'OpenSwan' },
-                { key: 'claude-code',   icon: '🤖', label: 'Claude Code' },
-                { key: 'codex',         icon: '🧠', label: 'Codex' },
-                { key: 'cursor',        icon: '🖱️', label: 'Cursor' },
-                { key: 'gemini',        icon: '♊', label: 'Gemini' },
-                { key: 'opencode',      icon: 'OC', label: 'OpenCode' },
-                { key: 'aider',         icon: 'AI', label: 'Aider' },
-                { key: 'cline',         icon: 'CL', label: 'Cline' },
-                { key: 'windsurf',      icon: 'WS', label: 'Windsurf' },
-                { key: 'continue',      icon: 'CN', label: 'Continue' },
-                { key: 'amp',           icon: 'AM', label: 'Amp' },
-                { key: 'generic-agent', icon: '⚡', label: 'Other' },
-              ].map(p => (
+              {/* O7 (P39): icon/label come from PROVIDER_META (single source —
+                  this array drifted: 🦞 vs 🐾 etc.). Curated agent-type ORDER
+                  stays local; 'generic-agent' keeps the friendlier "Other". */}
+              {([
+                'openswan', 'claude-code', 'codex', 'cursor', 'gemini', 'opencode',
+                'aider', 'cline', 'windsurf', 'continue', 'amp', 'generic-agent',
+              ] as const).map((key) => ({
+                key,
+                icon: PROVIDER_META[key]?.icon || '⚡',
+                label: key === 'generic-agent' ? 'Other' : (PROVIDER_META[key]?.label || key),
+              })).map(p => (
                 <Pressable
                   key={p.key}
                   style={[pmStyles.providerChip, publishProvider === p.key && pmStyles.providerChipActive]}

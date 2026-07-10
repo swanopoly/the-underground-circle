@@ -1,6 +1,6 @@
 ---
 name: browser-form-submission
-description: Fill and submit a web form (login, checkout, booking, CMS post, account change) reliably using semantic locators, with credentials kept in the vault, human-verification gates respected, and the submit gated behind approval. Use for "log into / book / order / submit / update <site>" browser tasks.
+description: Fill and submit a web form (login, checkout, booking, CMS post, account change) reliably using semantic locators, with credentials kept in the vault, human-verification gates respected, and the submit gated behind approval. Use for "log into / book / order / submit / update [site]" browser tasks.
 version: 1.0.0
 tags: [browser, web, form, automation, credentials, observe-act-verify, approval]
 ---

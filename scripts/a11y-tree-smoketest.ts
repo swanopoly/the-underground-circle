@@ -365,8 +365,14 @@ function main() {
       /export function fenceUntrustedObservationText\(/.test(runtimeSource),
       'E6: runtime exports the observation fence helper',
     );
+    // Convention-based match (P12): the runtime hardened its regex to
+    // tolerate whitespace inside embedded tags (`<\s*(\/?)\s*untrusted_quoted\s*>`),
+    // which broke the old byte-exact source grep. Assert the CONVENTION —
+    // a replace targeting untrusted_quoted that rewrites to the shared
+    // `[$1untrusted_quoted-tag-removed]` marker — not the exact bytes.
     assert(
-      runtimeSource.includes("replace(/<(\\/?)untrusted_quoted>/gi, '[$1untrusted_quoted-tag-removed]')"),
+      runtimeSource.includes('[$1untrusted_quoted-tag-removed]')
+        && /replace\(\/<.*untrusted_quoted.*\/gi,/.test(runtimeSource),
       'E6: fence helper neutralizes embedded fence tags (mcpToolBridge convention)',
     );
     const caseStart = runtimeSource.lastIndexOf("case 'desktop.read_a11y_tree': {");

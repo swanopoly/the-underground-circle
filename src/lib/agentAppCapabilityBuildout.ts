@@ -1,3 +1,4 @@
+import { buildAppAutomationDocPromptLine } from './appAutomationDocsIndex';
 import {
   buildAppAutomationControlSurfacePlan,
   buildAppAutomationResearchPromptBlock,
@@ -759,6 +760,7 @@ export function buildAgentAppCapabilityBuildoutPolicy(input: AgentAppCapabilityB
     'Task: build or propose the missing app-control capability needed so chat/SwanBot can complete a user request in an unfamiliar desktop/native app.',
     `Original user task: ${task}`,
     appName ? `Target app: ${appName}` : 'Target app: infer from the task and state your confidence.',
+    buildAppAutomationDocPromptLine(task, appName) || '',
     `Capability gap: ${capabilityGap}`,
     desiredOutcome ? `Desired outcome: ${desiredOutcome}` : '',
     currentPlanSummary ? `Current planner/runtime summary: ${currentPlanSummary}` : '',

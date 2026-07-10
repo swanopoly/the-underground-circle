@@ -88,6 +88,31 @@ export interface AgentFailureRecoveryInput {
   userId?: string;
 }
 
+/**
+ * Sentinels around instructional/advisory text inside planSummary
+ * (suggested verification checks, guardrail reminders). Advisory wording
+ * like "human verification … requires user action" SELF-TRIGGERS the
+ * failure taxonomy — found live 2026-07-02: a 429 rate-limit classified
+ * as human_verification_required because a fail-closed check line
+ * mentioned those words. Callers wrap advisory blocks with these markers
+ * (chatFailureRecovery does); classification strips the blocks while the
+ * recovery prompt keeps them verbatim.
+ */
+export const RECOVERY_ADVISORY_BEGIN = '─── recovery advisories (instructional — not failure evidence) ───';
+export const RECOVERY_ADVISORY_END = '─── end recovery advisories ───';
+
+function stripRecoveryAdvisories(text: string): string {
+  let out = text;
+  for (;;) {
+    const start = out.indexOf(RECOVERY_ADVISORY_BEGIN);
+    if (start === -1) break;
+    const end = out.indexOf(RECOVERY_ADVISORY_END, start);
+    if (end === -1) return out.slice(0, start);
+    out = out.slice(0, start) + out.slice(end + RECOVERY_ADVISORY_END.length);
+  }
+  return out;
+}
+
 export interface AgentFailureRecoveryPolicy {
   assessment: AgentFailureAssessment;
   action: AgentFailureRecoveryAction;
@@ -448,13 +473,13 @@ function formatRunbookForPrompt(runbook: AgentFailureRecoveryRunbook): string[] 
 }
 
 export function buildAgentFailureRecoveryPolicy(input: AgentFailureRecoveryInput): AgentFailureRecoveryPolicy {
-  const failureText = [
+  const failureText = stripRecoveryAdvisories([
     input.failureMessage,
     input.failureStack,
     input.planSummary,
     input.groundingSummary,
     input.preflightSummary,
-  ].filter(Boolean).join('\n\n');
+  ].filter(Boolean).join('\n\n'));
   const assessment = classifyAgentFailure(failureText);
   const action = chooseRecoveryAction(assessment);
   const autoFixAllowed = canAutoFix(action, assessment);

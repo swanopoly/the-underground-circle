@@ -8,6 +8,12 @@ import { runOpenSwanSessionTurn, type OpenSwanToolEvent } from './openswanSessio
 import { resolveSessionCodingProfile } from './chatSessionProfile';
 import type { OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import type { SwanBotStructuredArtifact, SwanBotContext } from './swanbot';
+import {
+  buildMissionTaskReceiptText,
+  buildProofOriginDetail,
+  extractProofOriginThreadId,
+} from './chatProofReceipts';
+import { persistChatMessage } from './chatService';
 
 interface DispatchResult {
   success: boolean;
@@ -35,11 +41,22 @@ export async function dispatchTaskToAgent(opts: {
   circleId: string;
   agentName: string;
   userId?: string;
+  /**
+   * Originating chat thread for the receipt loop. When omitted, the
+   * dispatcher resolves it from the mission's chat-origin proof stamp
+   * (see `missionChatCommands.stampMissionChatOrigin`), so missions
+   * created from chat get receipts no matter which surface dispatches.
+   */
+  originThreadId?: string | null;
 }): Promise<DispatchResult> {
   const { taskId, taskTitle, taskDescription, missionId, missionTitle, circleId, agentName, userId } = opts;
 
   // Mark task as in progress
   await updateMissionTask(taskId, { status: 'in_progress' });
+
+  const originThreadId = opts.originThreadId !== undefined
+    ? opts.originThreadId
+    : await findMissionOriginThreadId(missionId);
 
   try {
     // Build the prompt for BlackSwan
@@ -106,8 +123,30 @@ export async function dispatchTaskToAgent(opts: {
         verification: summarizeVerification(structured.verificationResults || []),
         tool_events: summarizeToolEvents(structured.toolEvents || []),
         response_preview: responseText.substring(0, 500),
+        ...(originThreadId ? buildProofOriginDetail(originThreadId) : {}),
       },
     });
+
+    // Receipt loop (Phase 3c): post a compact receipt back to the chat
+    // thread the mission came from. Fire-and-forget — a failed receipt
+    // never fails the dispatch.
+    if (originThreadId) {
+      try {
+        await persistChatMessage({
+          circleId,
+          userId: user?.id || userId || '',
+          content: buildMissionTaskReceiptText({
+            taskTitle,
+            missionTitle,
+            agentName,
+            completed,
+            resultPreview: responseText.split('\n').find((line) => line.trim()) || null,
+          }),
+          isBot: true,
+          threadId: originThreadId,
+        });
+      } catch { /* receipt is best-effort */ }
+    }
 
     return {
       success: true,
@@ -123,6 +162,28 @@ export async function dispatchTaskToAgent(opts: {
     await updateMissionTask(taskId, { status: 'pending' });
     return { success: false, response: '', error: err.message || 'Agent execution failed' };
   }
+}
+
+/**
+ * Resolve the chat thread a mission originated from, via the `manual`
+ * proof row `missionChatCommands` stamps at creation. Null for missions
+ * created outside chat — the receipt loop simply stays off for those.
+ */
+async function findMissionOriginThreadId(missionId: string): Promise<string | null> {
+  try {
+    const { data } = await supabase
+      .from('proof_of_work')
+      .select('detail')
+      .eq('mission_id', missionId)
+      .eq('pow_type', 'manual')
+      .order('created_at', { ascending: true })
+      .limit(5);
+    for (const row of data || []) {
+      const threadId = extractProofOriginThreadId((row as { detail?: unknown }).detail);
+      if (threadId) return threadId;
+    }
+  } catch { /* lookup is best-effort */ }
+  return null;
 }
 
 function buildTaskPrompt(taskTitle: string, taskDescription: string | undefined, missionTitle: string): string {

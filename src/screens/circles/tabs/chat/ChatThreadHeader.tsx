@@ -61,6 +61,14 @@ interface Props {
   onOpenControlPanel?: () => void;
   onOpenRunHistory?: () => void;
   resolvedAutoModel?: string | null;
+  /** WHY Auto picked that model — one short clause shown next to the id
+   *  (P11 transparency: Cursor shows the model, we show the reason). */
+  autoModelReason?: string | null;
+  /**
+   * Open another thread in the chat surface (plan §4b) — used by the
+   * lineage chip to jump to the parent this thread continues.
+   */
+  onOpenThread?: (threadId: string) => void;
 }
 
 interface CircleMemberOption {
@@ -86,6 +94,8 @@ export default function ChatThreadHeader({
   onOpenControlPanel,
   onOpenRunHistory,
   resolvedAutoModel,
+  autoModelReason,
+  onOpenThread,
 }: Props) {
   const [thread, setThread] = useState<CircleChatThread | null>(null);
   const [members, setMembers] = useState<CircleChatThreadMember[]>([]);
@@ -165,6 +175,18 @@ export default function ChatThreadHeader({
         )}
         <View style={styles.metaRow}>
           <Text style={[styles.badge, { color: visibilityTone, borderColor: visibilityTone }]}>{visibilityLabel}</Text>
+          {thread.parent_thread_id ? (
+            /* Plan §4b: lineage was tracked in the DB but invisible — a
+               compressed/forked thread now says so and can jump back. */
+            <Pressable
+              onPress={onOpenThread ? () => onOpenThread(thread.parent_thread_id!) : undefined}
+              disabled={!onOpenThread}
+            >
+              <Text style={[styles.badge, { color: '#38bdf8', borderColor: '#38bdf8' }]}>
+                ↳ CONTINUES EARLIER THREAD{onOpenThread ? ' · OPEN' : ''}
+              </Text>
+            </Pressable>
+          ) : null}
           {openswanGatewayNotice ? (
             <View style={styles.gatewayNoticeWrap}>
               <Text style={styles.gatewayNotice} numberOfLines={1}>
@@ -225,6 +247,11 @@ export default function ChatThreadHeader({
                     <Text style={[styles.serviceBtnTag, { color: '#f59e0b' }]}>Auto</Text>
                     <Text style={[styles.serviceBtnSep]}>→</Text>
                     <Text style={[styles.serviceBtnTag, { color: '#94a3b8' }]}>{shortModelLabel(resolvedAutoModel)}</Text>
+                    {autoModelReason ? (
+                      <Text style={[styles.serviceBtnTag, { color: '#64748b' }]} numberOfLines={1}>
+                        · {autoModelReason}
+                      </Text>
+                    ) : null}
                     <Text style={styles.serviceBtnCaret}>▾</Text>
                   </>
                 ) : (

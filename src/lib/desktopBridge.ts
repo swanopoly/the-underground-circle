@@ -28,6 +28,56 @@ import {
 import { getBridgeUrl } from './bridgeEnvironment';
 import { normalizeDesktopFileSearchQuery } from './fileSearchQuery';
 import { sanitizeUntrustedForModel } from './untrustedContent';
+import {
+  describeCadInstallGuidance,
+  isAllowedOpenScadExtraArg,
+  OPENSCAD_OUTPUT_EXTENSIONS,
+  type CadEngine,
+} from './cadCodeExecutor';
+import {
+  describeDesignExportInstallGuidance,
+  INKSCAPE_OUTPUT_EXTENSIONS,
+  validateDesignExportOptions,
+  type DesignExportEngine,
+  type DesignExportOptions,
+} from './designCliExecutor';
+import {
+  validatePhotoshopApplyAdjustmentLayerParams,
+  validatePhotoshopApplySelectionOrMaskParams,
+  validatePhotoshopResizeCanvasOrImageParams,
+  validatePhotoshopManageLayersParams,
+  validatePhotoshopTransformLayerParams,
+  validatePhotoshopConvertColorModeParams,
+  type PhotoshopAdjustmentLayerKind,
+  type PhotoshopCanvasAnchor,
+  type PhotoshopColorMode,
+  type PhotoshopLayerReorderPosition,
+  type PhotoshopManageLayerAction,
+  type PhotoshopResizeOp,
+  type PhotoshopSelectionBoundsPx,
+  type PhotoshopSelectionMaskMode,
+  type PhotoshopTransformOp,
+} from './photoshopExtendScriptAdapters';
+
+export type {
+  PhotoshopAdjustmentLayerKind,
+  PhotoshopCanvasAnchor,
+  PhotoshopColorMode,
+  PhotoshopLayerReorderPosition,
+  PhotoshopManageLayerAction,
+  PhotoshopResizeOp,
+  PhotoshopSelectionBoundsPx,
+  PhotoshopSelectionMaskMode,
+  PhotoshopTransformOp,
+} from './photoshopExtendScriptAdapters';
+
+import {
+  validateIllustratorDocumentStatusParams,
+  validateIllustratorExportProofParams,
+  type IllustratorExportProofFormat,
+} from './illustratorExtendScriptAdapters';
+
+export type { IllustratorExportProofFormat } from './illustratorExtendScriptAdapters';
 
 export type { DesktopBridgeError, DesktopResult, DesktopHealth } from './desktopBridgeProtocol';
 
@@ -610,6 +660,286 @@ function inferConvertImageGrantRoots(source: string): string[] {
     return [value];
   }
   return ['~/Desktop', '~/Downloads', '~/Documents', '~/Pictures'];
+}
+
+// ─── Headless code-CAD compilation (/desktop/cad_compile) ─────────────────
+
+export type CadCompileOutputInfo = { path: string; bytes: number; exists: boolean };
+
+/**
+ * Structured compile diagnostics. Present on success AND on ok:false
+ * failures where the compile actually ran (non-zero exit, timeout, missing
+ * output) or the engine was missing — so the agent loop can read stderr,
+ * fix the generated code, or surface the install hint.
+ */
+export type CadCompileData = {
+  engine: string;
+  binaryPath: string;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationMs: number;
+  stdoutTail: string;
+  stderrTail: string;
+  output: CadCompileOutputInfo;
+  installHint: string | null;
+};
+
+function normalizeCadCompileData(engine: CadEngine, body: unknown): CadCompileData {
+  const d = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+  const output = (d.output && typeof d.output === 'object' ? d.output : {}) as Record<string, unknown>;
+  const exitCode = Number(d.exitCode);
+  return {
+    engine: String(d.engine || engine).slice(0, 40),
+    binaryPath: String(d.binaryPath || '').slice(0, 300),
+    exitCode: Number.isFinite(exitCode) ? exitCode : null,
+    timedOut: d.timedOut === true,
+    durationMs: Number.isFinite(Number(d.durationMs)) ? Number(d.durationMs) : 0,
+    stdoutTail: String(d.stdoutTail || '').slice(0, 2000),
+    stderrTail: String(d.stderrTail || '').slice(0, 2000),
+    output: {
+      path: String(output.path || '').slice(0, 1024),
+      bytes: Number.isFinite(Number(output.bytes)) ? Number(output.bytes) : 0,
+      exists: output.exists === true,
+    },
+    installHint: typeof d.installHint === 'string' ? d.installHint.slice(0, 200) : null,
+  };
+}
+
+/**
+ * Compile code-CAD locally and deterministically via the bridge's
+ * `/desktop/cad_compile` endpoint — no GUI, no dialogs, execFile argv only.
+ *
+ *   - engine 'openscad': sourcePath is a .scad program, outputPath one of
+ *     .stl/.off/.amf/.3mf/.png/.svg/.dxf; `extraArgs` accepts ONLY
+ *     -Dname=<number|true|false>, --render, --imgsize=W,H (allowlist
+ *     enforced here AND server-side — LOCKSTEP with cadCodeExecutor.ts and
+ *     scripts/claude-bridge.js).
+ *   - engine 'freecadcmd': sourcePath is a generated .py script (build it
+ *     with buildFreeCadPythonScript); no extraArgs; the script writes its
+ *     own outputs and the bridge verifies outputPath exists AFTERWARD.
+ *   - engine 'blender': sourcePath is a generated .py bpy script (build it
+ *     with buildBlenderPythonScript); no extraArgs; the bridge runs it via
+ *     `--background --factory-startup --python` and verifies outputPath
+ *     exists AFTERWARD (mesh conversion + Workbench render previews).
+ *
+ * Failure results carry `data` diagnostics (exitCode/stderrTail/output),
+ * and `engine_not_installed` failures include a plain-language install
+ * hint in the error text. Mutating (writes outputPath) — run it behind the
+ * same approval gates as other local file writes.
+ */
+export async function compileCadCode(args: {
+  engine: CadEngine;
+  sourcePath: string;
+  outputPath: string;
+  extraArgs?: string[];
+  timeoutMs?: number;
+}): Promise<DesktopResult<CadCompileData>> {
+  const engine = args?.engine;
+  if (engine !== 'openscad' && engine !== 'freecadcmd' && engine !== 'blender') {
+    return { ok: false, error: 'engine must be "openscad", "freecadcmd", or "blender"', errorCode: 'invalid_input' };
+  }
+  const source = validateDesktopPath(typeof args?.sourcePath === 'string' ? args.sourcePath : '');
+  if (!source.ok) return { ok: false, error: `sourcePath: ${source.error}`, errorCode: 'invalid_input' };
+  const output = validateDesktopPath(typeof args?.outputPath === 'string' ? args.outputPath : '');
+  if (!output.ok) return { ok: false, error: `outputPath: ${output.error}`, errorCode: 'invalid_input' };
+
+  // LOCKSTEP extension/extraArgs preflight — mirrors /desktop/cad_compile in
+  // scripts/claude-bridge.js so we fail fast with the same contract.
+  const extraArgs = Array.isArray(args?.extraArgs) ? args.extraArgs.map((a) => String(a)) : [];
+  if (engine === 'openscad') {
+    if (!/\.scad$/i.test(source.path)) {
+      return { ok: false, error: 'openscad sourcePath must end in .scad', errorCode: 'invalid_input' };
+    }
+    const outputExtRegex = new RegExp(`\\.(${OPENSCAD_OUTPUT_EXTENSIONS.join('|')})$`, 'i');
+    if (!outputExtRegex.test(output.path)) {
+      return { ok: false, error: `openscad outputPath must end in one of: ${OPENSCAD_OUTPUT_EXTENSIONS.map((e) => `.${e}`).join(', ')}`, errorCode: 'invalid_input' };
+    }
+    if (extraArgs.length > 8) {
+      return { ok: false, error: 'too many extraArgs (max 8)', errorCode: 'invalid_input' };
+    }
+    for (const arg of extraArgs) {
+      if (!isAllowedOpenScadExtraArg(arg)) {
+        return { ok: false, error: `extraArgs item not allowed: "${arg.slice(0, 80)}" — allowed: -Dname=<number|true|false>, --render, --imgsize=W,H`, errorCode: 'invalid_input' };
+      }
+    }
+  } else {
+    // freecadcmd AND blender both consume a generated python script and
+    // accept no extraArgs (LOCKSTEP with /desktop/cad_compile in the bridge).
+    if (!/\.py$/i.test(source.path)) {
+      return { ok: false, error: `${engine} sourcePath must end in .py (the generated ${engine === 'blender' ? 'Blender bpy' : 'FreeCAD'} script)`, errorCode: 'invalid_input' };
+    }
+    if (extraArgs.length > 0) {
+      return { ok: false, error: `${engine} accepts no extraArgs — the generated script carries its own IO`, errorCode: 'invalid_input' };
+    }
+  }
+
+  // One write-scoped grant covering both paths: the bridge checks source
+  // (read), output (write), and output's parent (write); grant roots
+  // normalize file paths to their parent folders server-side.
+  const grantHeaders = await ensureLocalFileGrantHeaders(
+    [source.path, output.path],
+    'write',
+    `Compile CAD (${engine}) ${source.path.split('/').pop() || source.path}`,
+  );
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<CadCompileData>(grantHeaders);
+
+  const r = await callBridge('POST', '/desktop/cad_compile', {
+    engine,
+    sourcePath: source.path,
+    outputPath: output.path,
+    extraArgs,
+    ...(typeof args?.timeoutMs === 'number' ? { timeoutMs: args.timeoutMs } : {}),
+  }, { headers: grantHeaders.data, attachBodyOnError: true });
+
+  if (!r.ok) {
+    const body = r.data && typeof r.data === 'object' ? (r.data as Record<string, unknown>) : null;
+    const isEngineMissing = r.error === 'engine_not_installed' || body?.error === 'engine_not_installed';
+    return {
+      ok: false,
+      error: isEngineMissing ? `engine_not_installed — ${describeCadInstallGuidance(engine)}` : r.error,
+      errorCode: r.errorCode,
+      recoveryHint: r.recoveryHint,
+      ...(body ? { data: normalizeCadCompileData(engine, body) } : {}),
+    };
+  }
+  return { ok: true, data: normalizeCadCompileData(engine, r.data) };
+}
+
+// ─── Headless design export (/desktop/design_export) ──────────────────────
+
+export type DesignExportOutputInfo = { path: string; bytes: number; exists: boolean };
+
+/**
+ * Structured export diagnostics. Present on success AND on ok:false
+ * failures where the export actually ran (non-zero exit, timeout, missing
+ * output) or the engine was missing — so the agent loop can read stderr,
+ * fix the source, or surface the install hint. Same shape as CadCompileData.
+ */
+export type DesignExportData = {
+  engine: string;
+  binaryPath: string;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationMs: number;
+  stdoutTail: string;
+  stderrTail: string;
+  output: DesignExportOutputInfo;
+  installHint: string | null;
+};
+
+function normalizeDesignExportData(engine: DesignExportEngine, body: unknown): DesignExportData {
+  const d = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+  const output = (d.output && typeof d.output === 'object' ? d.output : {}) as Record<string, unknown>;
+  const exitCode = Number(d.exitCode);
+  return {
+    engine: String(d.engine || engine).slice(0, 40),
+    binaryPath: String(d.binaryPath || '').slice(0, 300),
+    exitCode: Number.isFinite(exitCode) ? exitCode : null,
+    timedOut: d.timedOut === true,
+    durationMs: Number.isFinite(Number(d.durationMs)) ? Number(d.durationMs) : 0,
+    stdoutTail: String(d.stdoutTail || '').slice(0, 2000),
+    stderrTail: String(d.stderrTail || '').slice(0, 2000),
+    output: {
+      path: String(output.path || '').slice(0, 1024),
+      bytes: Number.isFinite(Number(output.bytes)) ? Number(output.bytes) : 0,
+      exists: output.exists === true,
+    },
+    installHint: typeof d.installHint === 'string' ? d.installHint.slice(0, 200) : null,
+  };
+}
+
+/**
+ * Export a design file locally and deterministically via the bridge's
+ * `/desktop/design_export` endpoint — no GUI, no dialogs, execFile argv
+ * only (same executor class as compileCadCode).
+ *
+ *   - engine 'inkscape': sourcePath is an .svg, outputPath one of
+ *     .png/.pdf/.eps; `options` accepts ONLY widthPx/heightPx (integers
+ *     16..16384; they size the PNG raster) and pdfVersion ('1.4'..'1.7',
+ *     emitted only for .pdf outputs) — allowlist enforced here AND
+ *     server-side (LOCKSTEP with designCliExecutor.ts and
+ *     scripts/claude-bridge.js).
+ *   - engine 'sketchtool': sourcePath is a .sketch document, outputPath a
+ *     .png; v1 runs `sketchtool export preview` (ONE document-preview
+ *     image — artboard-set export is a follow-up lane); `options` accepts
+ *     ONLY format ('png') and scale (1|2|3 → --max-size 2048×scale).
+ *     sketchtool writes its own `preview.png` into the output folder; the
+ *     bridge renames the FRESH preview onto outputPath and verifies it.
+ *
+ * Failure results carry `data` diagnostics (exitCode/stderrTail/output),
+ * and `engine_not_installed` failures include a plain-language install
+ * hint in the error text. Mutating (writes outputPath) — run it behind the
+ * same approval gates as other local file writes.
+ */
+export async function designExport(args: {
+  engine: DesignExportEngine;
+  sourcePath: string;
+  outputPath: string;
+  options?: DesignExportOptions;
+  timeoutMs?: number;
+}): Promise<DesktopResult<DesignExportData>> {
+  const engine = args?.engine;
+  if (engine !== 'inkscape' && engine !== 'sketchtool') {
+    return { ok: false, error: 'engine must be "inkscape" or "sketchtool"', errorCode: 'invalid_input' };
+  }
+  const source = validateDesktopPath(typeof args?.sourcePath === 'string' ? args.sourcePath : '');
+  if (!source.ok) return { ok: false, error: `sourcePath: ${source.error}`, errorCode: 'invalid_input' };
+  const output = validateDesktopPath(typeof args?.outputPath === 'string' ? args.outputPath : '');
+  if (!output.ok) return { ok: false, error: `outputPath: ${output.error}`, errorCode: 'invalid_input' };
+
+  // LOCKSTEP extension/options preflight — mirrors /desktop/design_export
+  // in scripts/claude-bridge.js so we fail fast with the same contract.
+  if (engine === 'inkscape') {
+    if (!/\.svg$/i.test(source.path)) {
+      return { ok: false, error: 'inkscape sourcePath must end in .svg', errorCode: 'invalid_input' };
+    }
+    const outputExtRegex = new RegExp(`\\.(${INKSCAPE_OUTPUT_EXTENSIONS.join('|')})$`, 'i');
+    if (!outputExtRegex.test(output.path)) {
+      return { ok: false, error: `inkscape outputPath must end in one of: ${INKSCAPE_OUTPUT_EXTENSIONS.map((e) => `.${e}`).join(', ')}`, errorCode: 'invalid_input' };
+    }
+  } else {
+    if (!/\.sketch$/i.test(source.path)) {
+      return { ok: false, error: 'sketchtool sourcePath must end in .sketch', errorCode: 'invalid_input' };
+    }
+    if (!/\.png$/i.test(output.path)) {
+      return { ok: false, error: 'sketchtool outputPath must end in .png (document preview export)', errorCode: 'invalid_input' };
+    }
+  }
+  const optionsValidated = validateDesignExportOptions(engine, args?.options);
+  if (!optionsValidated.ok) {
+    return { ok: false, error: optionsValidated.error, errorCode: 'invalid_input' };
+  }
+
+  // One write-scoped grant covering both paths: the bridge checks source
+  // (read), output (write), and output's parent (write); grant roots
+  // normalize file paths to their parent folders server-side.
+  const grantHeaders = await ensureLocalFileGrantHeaders(
+    [source.path, output.path],
+    'write',
+    `Design export (${engine}) ${source.path.split('/').pop() || source.path}`,
+  );
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<DesignExportData>(grantHeaders);
+
+  const r = await callBridge('POST', '/desktop/design_export', {
+    engine,
+    sourcePath: source.path,
+    outputPath: output.path,
+    options: optionsValidated.options,
+    ...(typeof args?.timeoutMs === 'number' ? { timeoutMs: args.timeoutMs } : {}),
+  }, { headers: grantHeaders.data, attachBodyOnError: true });
+
+  if (!r.ok) {
+    const body = r.data && typeof r.data === 'object' ? (r.data as Record<string, unknown>) : null;
+    const isEngineMissing = r.error === 'engine_not_installed' || body?.error === 'engine_not_installed';
+    return {
+      ok: false,
+      error: isEngineMissing ? `engine_not_installed — ${describeDesignExportInstallGuidance(engine)}` : r.error,
+      errorCode: r.errorCode,
+      recoveryHint: r.recoveryHint,
+      ...(body ? { data: normalizeDesignExportData(engine, body) } : {}),
+    };
+  }
+  return { ok: true, data: normalizeDesignExportData(engine, r.data) };
 }
 
 export type DesktopFileEntry = {
@@ -1495,6 +1825,19 @@ export function isEmptyA11yTreePayload(payload: unknown): boolean {
  *  was re-read since the index was issued (`index_stale`). */
 const lastA11yIndexGenerationByPid = new Map<number, number>();
 
+/** Record the bridge's index-map generation for a pid (bounded map) —
+ *  shared by readA11yTree and observeApp so `elementIndex` actions after
+ *  EITHER read style can detect staleness. */
+function recordA11yIndexGeneration(pid: number, indexGeneration: number | undefined): void {
+  if (!(pid > 0) || !indexGeneration) return;
+  lastA11yIndexGenerationByPid.set(pid, indexGeneration);
+  // Bounded: this map only needs the handful of apps in a session.
+  if (lastA11yIndexGenerationByPid.size > 16) {
+    const firstKey = lastA11yIndexGenerationByPid.keys().next().value;
+    if (typeof firstKey === 'number') lastA11yIndexGenerationByPid.delete(firstKey);
+  }
+}
+
 export async function readA11yTree(args: {
   appName?: string;
   maxDepth?: number;
@@ -1551,14 +1894,7 @@ export async function readA11yTree(args: {
   }
   const pid = Number(d.pid || 0);
   const indexGeneration = Number(d.index_generation || 0) || undefined;
-  if (pid > 0 && indexGeneration) {
-    lastA11yIndexGenerationByPid.set(pid, indexGeneration);
-    // Bounded: this map only needs the handful of apps in a session.
-    if (lastA11yIndexGenerationByPid.size > 16) {
-      const firstKey = lastA11yIndexGenerationByPid.keys().next().value;
-      if (typeof firstKey === 'number') lastA11yIndexGenerationByPid.delete(firstKey);
-    }
-  }
+  recordA11yIndexGeneration(pid, indexGeneration);
   return {
     ok: true,
     data: {
@@ -1574,6 +1910,84 @@ export async function readA11yTree(args: {
         sliceMarker: typeof d.slice_marker === 'string' ? d.slice_marker : null,
       } : {}),
       ...(indexGeneration ? { indexGeneration } : {}),
+    },
+  };
+}
+
+// ─── One-round-trip app observation ──────────────────────────────────────
+
+export interface ObserveAppData {
+  /** Resolved app/process name (requested name when not running). */
+  app: string;
+  appRunning: boolean;
+  /** True when the target app is the frontmost application. */
+  frontmost: boolean;
+  frontmostApp: string | null;
+  windowCount: number;
+  /** ≤8 titles, each ≤160 chars. UNTRUSTED app-controlled text — fence
+   *  before rendering into model-visible output. */
+  windowTitles: string[];
+  /** Same pruned/SoM-indexed node shape as readA11yTree; null when the
+   *  app is not running or the tree read degraded (helper missing / AX
+   *  trust) — the window-state half still lands. */
+  tree: A11yNode | null;
+  budget_used: number;
+  /** E2 slice marker when the bridge returned a pruned targeting slice
+   *  (present only on sliced reads; null when the bridge had no marker). */
+  sliceMarker?: string | null;
+}
+
+/**
+ * Examine an app's screen in ONE bridge round trip (`/desktop/observe_app`):
+ * running check + frontmost + window count/titles + the same pruned,
+ * SoM-indexed a11y tree `readA11yTree` returns — instead of three calls
+ * (running-apps, window_state, a11y_tree). `appName` empty → frontmost
+ * app. A non-running app is a SUCCESSFUL observation
+ * (`{ appRunning: false, tree: null }`), not an error. Feed the result
+ * (plus a `snapshotA11ySummary` of `tree`) to `buildAppScreenNextStep`
+ * in src/lib/appScreenNextStep.ts to decide launch/focus/dialog/
+ * screenshot next steps deterministically.
+ */
+export async function observeApp(args: {
+  appName?: string;
+  maxDepth?: number;
+  maxNodes?: number;
+  /** E2 — label/value the caller wants to act on; triggers the bridge's
+   *  pruned 'interactive' targeting slice, same as readA11yTree. */
+  target?: string;
+} = {}): Promise<DesktopResult<ObserveAppData>> {
+  const body: Record<string, unknown> = {};
+  const appName = typeof args.appName === 'string' ? args.appName.trim().slice(0, 120) : '';
+  if (appName) body.appName = appName;
+  if (typeof args.maxDepth === 'number') body.maxDepth = args.maxDepth;
+  if (typeof args.maxNodes === 'number') body.maxNodes = args.maxNodes;
+  if (args.target && args.target.trim()) body.target = args.target.trim().slice(0, 200);
+  const r = await callBridge('POST', '/desktop/observe_app', body);
+  if (!r.ok) return r as DesktopResult<ObserveAppData>;
+  const d = r.data as any;
+  // Mirror readA11yTree: remember the bridge's index-map generation so
+  // clickElement/setElementValue `elementIndex` calls made after an
+  // observe read can detect `index_stale`.
+  recordA11yIndexGeneration(Number(d?.pid || 0), Number(d?.index_generation || 0) || undefined);
+  return {
+    ok: true,
+    data: {
+      app: String(d?.app || appName || ''),
+      appRunning: d?.appRunning === true,
+      frontmost: d?.frontmost === true,
+      frontmostApp: d?.frontmostApp ? String(d.frontmostApp).slice(0, 160) : null,
+      windowCount: Math.max(0, Number(d?.windowCount || 0)),
+      windowTitles: Array.isArray(d?.windowTitles)
+        ? d.windowTitles
+            .slice(0, 8)
+            .map((title: unknown) => String(title ?? '').slice(0, 160))
+            .filter(Boolean)
+        : [],
+      tree: d?.tree && typeof d.tree === 'object' ? (d.tree as A11yNode) : null,
+      budget_used: Number(d?.budget_used || 0),
+      ...(d?.slice === 'interactive'
+        ? { sliceMarker: typeof d.slice_marker === 'string' ? d.slice_marker : null }
+        : {}),
     },
   };
 }
@@ -3207,13 +3621,544 @@ export async function photoshopExportProof(args: {
   };
 }
 
+// ─── Photoshop ExtendScript mutation adapters ──────────────────────────────
+//
+// Deterministic Photoshop mutations executed via AppleScript `do javascript`.
+// Validation lives in `src/lib/photoshopExtendScriptAdapters.ts` (shared with
+// the bridge's LOCKSTEP duplicate). All three verify the target document
+// bridge-side and fail closed ('document_mismatch'), never save the document
+// (saving stays a separate approval-gated step), and never delete pixels.
+
+export type PhotoshopApplyAdjustmentLayerResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  targetDocumentName: string | null;
+  kind: PhotoshopAdjustmentLayerKind;
+  layerName: string | null;
+  createdLayerName: string | null;
+  layerCountBefore: number;
+  layerCountAfter: number;
+  error: string | null;
+};
+
+export type PhotoshopApplySelectionOrMaskResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  targetDocumentName: string | null;
+  layerName: string | null;
+  mode: PhotoshopSelectionMaskMode;
+  selectionBounds: PhotoshopSelectionBoundsPx | null;
+  maskApplied: boolean;
+  error: string | null;
+};
+
+export type PhotoshopResizeCanvasOrImageResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  targetDocumentName: string | null;
+  op: PhotoshopResizeOp;
+  anchor: PhotoshopCanvasAnchor | null;
+  widthPxBefore: number;
+  heightPxBefore: number;
+  widthPxAfter: number;
+  heightPxAfter: number;
+  error: string | null;
+};
+
+export async function photoshopApplyAdjustmentLayer(args: {
+  appName?: string;
+  targetDocumentName?: string | null;
+  layerName?: string | null;
+  kind: PhotoshopAdjustmentLayerKind;
+  preserveExisting?: boolean;
+}): Promise<DesktopResult<PhotoshopApplyAdjustmentLayerResult>> {
+  const validated = validatePhotoshopApplyAdjustmentLayerParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/photoshop_apply_adjustment_layer', {
+    appName: params.appName,
+    targetDocumentName: params.targetDocumentName || undefined,
+    layerName: params.layerName || undefined,
+    kind: params.kind,
+    preserveExisting: params.preserveExisting,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopApplyAdjustmentLayerResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      targetDocumentName: d?.targetDocumentName ? String(d.targetDocumentName) : (params.targetDocumentName || null),
+      kind: params.kind,
+      layerName: d?.layerName ? String(d.layerName) : (params.layerName || null),
+      createdLayerName: d?.createdLayerName ? String(d.createdLayerName) : null,
+      layerCountBefore: toNumber(d?.layerCountBefore),
+      layerCountAfter: toNumber(d?.layerCountAfter),
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export async function photoshopApplySelectionOrMask(args: {
+  appName?: string;
+  targetDocumentName?: string | null;
+  layerName?: string | null;
+  mode: PhotoshopSelectionMaskMode;
+}): Promise<DesktopResult<PhotoshopApplySelectionOrMaskResult>> {
+  const validated = validatePhotoshopApplySelectionOrMaskParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/photoshop_apply_selection_or_mask', {
+    appName: params.appName,
+    targetDocumentName: params.targetDocumentName || undefined,
+    layerName: params.layerName || undefined,
+    mode: params.mode,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopApplySelectionOrMaskResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const rawBounds = d?.selectionBounds;
+  const selectionBounds: PhotoshopSelectionBoundsPx | null = rawBounds && typeof rawBounds === 'object'
+    ? {
+        left: toNumber(rawBounds.left),
+        top: toNumber(rawBounds.top),
+        right: toNumber(rawBounds.right),
+        bottom: toNumber(rawBounds.bottom),
+      }
+    : null;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      targetDocumentName: d?.targetDocumentName ? String(d.targetDocumentName) : (params.targetDocumentName || null),
+      layerName: d?.layerName ? String(d.layerName) : (params.layerName || null),
+      mode: params.mode,
+      selectionBounds,
+      maskApplied: d?.maskApplied === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export async function photoshopResizeCanvasOrImage(args: {
+  appName?: string;
+  targetDocumentName?: string | null;
+  op: PhotoshopResizeOp;
+  widthPx?: number | null;
+  heightPx?: number | null;
+  anchor?: PhotoshopCanvasAnchor | null;
+}): Promise<DesktopResult<PhotoshopResizeCanvasOrImageResult>> {
+  const validated = validatePhotoshopResizeCanvasOrImageParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/photoshop_resize_canvas_or_image', {
+    appName: params.appName,
+    targetDocumentName: params.targetDocumentName || undefined,
+    op: params.op,
+    widthPx: params.widthPx == null ? undefined : params.widthPx,
+    heightPx: params.heightPx == null ? undefined : params.heightPx,
+    anchor: params.op === 'canvas_resize' ? params.anchor : undefined,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopResizeCanvasOrImageResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      targetDocumentName: d?.targetDocumentName ? String(d.targetDocumentName) : (params.targetDocumentName || null),
+      op: params.op,
+      anchor: params.op === 'canvas_resize' ? params.anchor : null,
+      widthPxBefore: toNumber(d?.widthPxBefore),
+      heightPxBefore: toNumber(d?.heightPxBefore),
+      widthPxAfter: toNumber(d?.widthPxAfter),
+      heightPxAfter: toNumber(d?.heightPxAfter),
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type PhotoshopManageLayersResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  targetDocumentName: string | null;
+  action: PhotoshopManageLayerAction;
+  layerName: string | null;
+  newName: string | null;
+  position: PhotoshopLayerReorderPosition | null;
+  referenceLayerName: string | null;
+  resultLayerName: string | null;
+  layerCountBefore: number;
+  layerCountAfter: number;
+  layerIndexBefore: number;
+  layerIndexAfter: number;
+  error: string | null;
+};
+
+/**
+ * Rename, duplicate, reorder, or group ONE exact-named layer. Organizational
+ * only: there is no delete/merge/flatten action, ambiguous layer names fail
+ * closed ('layer_ambiguous'), and the document is never saved.
+ */
+export async function photoshopManageLayers(args: {
+  appName?: string;
+  targetDocumentName?: string | null;
+  action: PhotoshopManageLayerAction;
+  layerName: string;
+  newName?: string | null;
+  position?: PhotoshopLayerReorderPosition | null;
+  referenceLayerName?: string | null;
+}): Promise<DesktopResult<PhotoshopManageLayersResult>> {
+  const validated = validatePhotoshopManageLayersParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/photoshop_manage_layers', {
+    appName: params.appName,
+    targetDocumentName: params.targetDocumentName || undefined,
+    action: params.action,
+    layerName: params.layerName,
+    newName: params.newName || undefined,
+    position: params.position || undefined,
+    referenceLayerName: params.referenceLayerName || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopManageLayersResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      targetDocumentName: d?.targetDocumentName ? String(d.targetDocumentName) : (params.targetDocumentName || null),
+      action: params.action,
+      layerName: d?.layerName ? String(d.layerName) : (params.layerName || null),
+      newName: params.newName || null,
+      position: params.action === 'reorder' && params.position ? (params.position as PhotoshopLayerReorderPosition) : null,
+      referenceLayerName: params.referenceLayerName || null,
+      resultLayerName: d?.resultLayerName ? String(d.resultLayerName) : null,
+      layerCountBefore: toNumber(d?.layerCountBefore),
+      layerCountAfter: toNumber(d?.layerCountAfter),
+      layerIndexBefore: toNumber(d?.layerIndexBefore),
+      layerIndexAfter: toNumber(d?.layerIndexAfter),
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type PhotoshopTransformLayerResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  targetDocumentName: string | null;
+  layerName: string | null;
+  op: PhotoshopTransformOp;
+  boundsBefore: PhotoshopSelectionBoundsPx | null;
+  boundsAfter: PhotoshopSelectionBoundsPx | null;
+  error: string | null;
+};
+
+/**
+ * Move (relative px), scale (uniform percent), or rotate (degrees) ONE
+ * exact-named layer around its center. Background layers fail closed with
+ * 'background_layer_locked' and locked layers with 'layer_locked'; the
+ * receipt carries before/after pixel bounds as proof.
+ */
+export async function photoshopTransformLayer(args: {
+  appName?: string;
+  targetDocumentName?: string | null;
+  layerName: string;
+  op: PhotoshopTransformOp;
+  deltaX?: number | null;
+  deltaY?: number | null;
+  scalePercent?: number | null;
+  rotateDegrees?: number | null;
+}): Promise<DesktopResult<PhotoshopTransformLayerResult>> {
+  const validated = validatePhotoshopTransformLayerParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/photoshop_transform_layer', {
+    appName: params.appName,
+    targetDocumentName: params.targetDocumentName || undefined,
+    layerName: params.layerName,
+    op: params.op,
+    deltaX: params.deltaX == null ? undefined : params.deltaX,
+    deltaY: params.deltaY == null ? undefined : params.deltaY,
+    scalePercent: params.scalePercent == null ? undefined : params.scalePercent,
+    rotateDegrees: params.rotateDegrees == null ? undefined : params.rotateDegrees,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopTransformLayerResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const toBounds = (raw: unknown): PhotoshopSelectionBoundsPx | null => raw && typeof raw === 'object'
+    ? {
+        left: toNumber((raw as any).left),
+        top: toNumber((raw as any).top),
+        right: toNumber((raw as any).right),
+        bottom: toNumber((raw as any).bottom),
+      }
+    : null;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      targetDocumentName: d?.targetDocumentName ? String(d.targetDocumentName) : (params.targetDocumentName || null),
+      layerName: d?.layerName ? String(d.layerName) : (params.layerName || null),
+      op: params.op,
+      boundsBefore: toBounds(d?.boundsBefore),
+      boundsAfter: toBounds(d?.boundsAfter),
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type PhotoshopConvertColorModeResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  targetDocumentName: string | null;
+  mode: PhotoshopColorMode;
+  modeBefore: string | null;
+  modeAfter: string | null;
+  converted: boolean;
+  error: string | null;
+};
+
+/**
+ * Convert the document color mode (rgb / cmyk / grayscale) via
+ * doc.changeMode. Reports an honest no-op (converted:false) when the document
+ * is already in the requested mode. NOTE: CMYK/Grayscale conversion discards
+ * color data in the working copy — reversible only until save, and this tool
+ * NEVER saves (saving stays a separate approval-gated step).
+ */
+export async function photoshopConvertColorMode(args: {
+  appName?: string;
+  targetDocumentName?: string | null;
+  mode: PhotoshopColorMode;
+}): Promise<DesktopResult<PhotoshopConvertColorModeResult>> {
+  const validated = validatePhotoshopConvertColorModeParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/photoshop_convert_color_mode', {
+    appName: params.appName,
+    targetDocumentName: params.targetDocumentName || undefined,
+    mode: params.mode,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopConvertColorModeResult>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      targetDocumentName: d?.targetDocumentName ? String(d.targetDocumentName) : (params.targetDocumentName || null),
+      mode: params.mode,
+      modeBefore: d?.modeBefore ? String(d.modeBefore) : null,
+      modeAfter: d?.modeAfter ? String(d.modeAfter) : null,
+      converted: d?.converted === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+// ─── Illustrator ExtendScript base pair ─────────────────────────────────────
+//
+// Same ExtendScript-via-AppleScript mechanism as the Photoshop tools.
+// Validation lives in `src/lib/illustratorExtendScriptAdapters.ts` (shared
+// with the bridge's LOCKSTEP duplicate). document_status is READ-ONLY;
+// export_proof writes ONLY the export outputPath and never saves/closes/
+// re-associates the source document (which is also why the format enum is
+// png|svg — Illustrator can only write PDF via a source-document save-as).
+
+export type IllustratorDocumentSummary = {
+  name: string;
+  path: string | null;
+  modified: boolean;
+  saved: boolean;
+  widthPt: number;
+  heightPt: number;
+  artboardCount: number;
+  layerCount: number;
+  selectionCount: number;
+};
+
+export type IllustratorDocumentStatus = {
+  appName: string | null;
+  appRunning: boolean;
+  status: string;
+  documentCount: number;
+  activeDocumentName: string | null;
+  activeDocumentPath: string | null;
+  widthPt: number;
+  heightPt: number;
+  artboardCount: number;
+  layerCount: number;
+  selectionCount: number;
+  expectedDocumentName: string | null;
+  documents: IllustratorDocumentSummary[];
+  error: string | null;
+};
+
+export type IllustratorExportProofResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  outputPath: string;
+  outputFileName: string | null;
+  format: string;
+  scalePercent: number | null;
+  fileExists: boolean;
+  sizeBytes: number;
+  docModified: boolean;
+  docSaved: boolean;
+  error: string | null;
+};
+
+/** READ-ONLY Illustrator observation — documents, artboards, layers, selection. */
+export async function illustratorDocumentStatus(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+} = {}): Promise<DesktopResult<IllustratorDocumentStatus>> {
+  const validated = validateIllustratorDocumentStatusParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/illustrator_document_status', {
+    appName: params.appName,
+    expectedDocumentName: params.expectedDocumentName || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<IllustratorDocumentStatus>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const documents = Array.isArray(d?.documents)
+    ? d.documents.slice(0, 12).map((doc: any) => ({
+        name: doc?.name ? String(doc.name) : '',
+        path: doc?.path ? String(doc.path) : null,
+        modified: doc?.modified === true,
+        saved: doc?.saved === true,
+        widthPt: toNumber(doc?.widthPt),
+        heightPt: toNumber(doc?.heightPt),
+        artboardCount: toNumber(doc?.artboardCount),
+        layerCount: toNumber(doc?.layerCount),
+        selectionCount: toNumber(doc?.selectionCount),
+      })).filter((doc: IllustratorDocumentSummary) => !!doc.name)
+    : [];
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      status: d?.status ? String(d.status) : 'unknown',
+      documentCount: toNumber(d?.documentCount),
+      activeDocumentName: d?.activeDocumentName ? String(d.activeDocumentName) : null,
+      activeDocumentPath: d?.activeDocumentPath ? String(d.activeDocumentPath) : null,
+      widthPt: toNumber(d?.widthPt),
+      heightPt: toNumber(d?.heightPt),
+      artboardCount: toNumber(d?.artboardCount),
+      layerCount: toNumber(d?.layerCount),
+      selectionCount: toNumber(d?.selectionCount),
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (params.expectedDocumentName || null),
+      documents,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+/**
+ * Export a PNG/SVG proof of the guarded Illustrator document to a NEW file.
+ * Mutating (writes outputPath) — approval-gated like other local file
+ * writes. The SOURCE document is never saved/closed/re-associated.
+ */
+export async function illustratorExportProof(args: {
+  appName?: string;
+  outputPath: string;
+  format?: IllustratorExportProofFormat;
+  scalePercent?: number;
+  expectedDocumentName?: string | null;
+}): Promise<DesktopResult<IllustratorExportProofResult>> {
+  const validated = validateIllustratorExportProofParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const outputPathResult = validateDesktopPath(params.outputPath);
+  if (!outputPathResult.ok) return { ok: false, error: outputPathResult.error, errorCode: 'invalid_input' };
+  const grantHeaders = await ensureLocalFileGrantHeaders([outputPathResult.path], 'write', `Export Illustrator proof to ${outputPathResult.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<IllustratorExportProofResult>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/illustrator_export_proof', {
+    appName: params.appName,
+    outputPath: outputPathResult.path,
+    format: params.format,
+    scalePercent: params.scalePercent == null ? undefined : params.scalePercent,
+    expectedDocumentName: params.expectedDocumentName || undefined,
+  }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<IllustratorExportProofResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (params.expectedDocumentName || null),
+      outputPath: d?.outputPath ? String(d.outputPath) : outputPathResult.path,
+      outputFileName: d?.outputFileName ? String(d.outputFileName) : null,
+      format: d?.format ? String(d.format) : params.format,
+      scalePercent: d?.scalePercent == null ? params.scalePercent : toNumber(d.scalePercent),
+      fileExists: d?.fileExists === true,
+      sizeBytes: toNumber(d?.sizeBytes),
+      docModified: d?.docModified === true,
+      docSaved: d?.docSaved === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
 // ─── Internals ────────────────────────────────────────────────────────────
 
 async function callBridge(
   method: 'GET' | 'POST',
   pathname: string,
   body?: Record<string, unknown>,
-  options?: { headers?: Record<string, string> },
+  options?: {
+    headers?: Record<string, string>;
+    /**
+     * When true, an HTTP-200 `ok:false` body is attached as `data` on the
+     * failure result so callers can read structured diagnostics (e.g.
+     * cad_compile's stderrTail/exitCode). Default off — existing callers
+     * keep the lean failure shape.
+     */
+    attachBodyOnError?: boolean;
+  },
 ): Promise<DesktopResult> {
   let token = readToken();
   // Auto-pair on first call — the bridge binds to localhost so a same-
@@ -3251,6 +4196,7 @@ async function callBridge(
         error: json.error || `bridge returned ok:false`,
         errorCode: explicitCode || mapBodyErrorToCode(json.error),
         recoveryHint: typeof json.recoveryHint === 'string' ? json.recoveryHint : undefined,
+        ...(options?.attachBodyOnError ? { data: json } : {}),
       };
     }
     return { ok: true, data: json };
@@ -3301,6 +4247,15 @@ const EXPLICIT_BRIDGE_BODY_CODES = new Set<DesktopBridgeError>([
   'index_stale' as DesktopBridgeError,
   'no_indexed_tree' as DesktopBridgeError,
   'region_out_of_bounds' as DesktopBridgeError,
+  // /desktop/cad_compile bridge-issued codes (same rideshare posture).
+  'engine_not_installed' as DesktopBridgeError,
+  'cad_compile_failed' as DesktopBridgeError,
+  'cad_compile_timeout' as DesktopBridgeError,
+  'output_not_created' as DesktopBridgeError,
+  // /desktop/design_export bridge-issued codes — engine_not_installed and
+  // output_not_created above are shared with cad_compile.
+  'design_export_failed' as DesktopBridgeError,
+  'design_export_timeout' as DesktopBridgeError,
 ]);
 
 function normalizeExplicitBridgeBodyCode(value: unknown): DesktopBridgeError | null {

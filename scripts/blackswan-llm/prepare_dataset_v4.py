@@ -18,19 +18,26 @@ SYNTHETIC_FILE = DATA_DIR / "blackswan_synthetic.jsonl"
 MULTITURN_FILE = DATA_DIR / "blackswan_multiturn.jsonl"
 PUBLIC_FILE = DATA_DIR / "public_curated_v4.jsonl"
 APP_FILE = DATA_DIR / "app_data.jsonl"
+TOOL_TRACES_FILE = DATA_DIR / "tool_traces_sharegpt.jsonl"
 TRAIN_FILE = DATA_DIR / "train_v4.jsonl"
 EVAL_FILE = DATA_DIR / "eval_v4.jsonl"
 STATS_FILE = DATA_DIR / "stats_v4.json"
 
-# Oversample factor for app-derived examples. Last training run had
-# the app at 0.34% of the mix (142 of 41,990), which is why the model
-# barely showed any app personality beyond what the system prompt
-# leaked at inference. Repeating each app example N times biases the
-# loss toward the app voice + the killer-feature behaviors (mission
-# planning, proof-of-work summaries, GitHub shipping recaps) without
-# requiring 5K hand-written examples. Dedup runs after this so there's
-# a ceiling on amplification — true near-duplicates still get pruned.
+# Oversample factor for app-derived examples. The app examples are
+# deduped once with the full corpus, split into train/eval, and only
+# then repeated in the train shard. This gives the model a real app
+# signal without leaking repeated examples into eval.
 APP_OVERSAMPLE = 12
+
+# Oversample factor for harness tool-trace conversations (Composer-pattern
+# v6 SFT source from convert_tool_traces.py; see
+# docs/BLACKSWAN_COMPOSER_PATTERN.md). Deliberately modest — 2x, not the
+# 12x app factor — because the traces are highly templated <tool_call>
+# turns: they should teach the tool vocabulary as a complement to the
+# conversational app voice, and heavier repetition risks format overfitting
+# and letting one narrow shape dominate the mix.
+TOOL_TRACE_OVERSAMPLE = 2
+TOOL_TRACE_SOURCE = "tool_traces"
 
 # ─── PII patterns ────────────────────────────────────────────────────────────
 
@@ -111,18 +118,17 @@ def text_fingerprint(text):
 
 def deduplicate(conversations, threshold=0.9):
     seen_fingerprints = set()
-    seen_texts = []
+    seen_items = []
     unique = []
     for conv in conversations:
         text = extract_text(conv)
         fp = text_fingerprint(text)
         if fp in seen_fingerprints:
             continue
+        words_a = set(text.lower().split())
         is_dup = False
-        check_against = seen_texts[-200:] if len(seen_texts) > 200 else seen_texts
-        for prev_text in check_against:
-            words_a = set(text.lower().split())
-            words_b = set(prev_text.lower().split())
+        check_against = seen_items[-200:] if len(seen_items) > 200 else seen_items
+        for _prev_text, words_b in check_against:
             if words_a and words_b:
                 jaccard = len(words_a & words_b) / len(words_a | words_b)
                 if jaccard > threshold:
@@ -130,7 +136,7 @@ def deduplicate(conversations, threshold=0.9):
                     break
         if not is_dup:
             seen_fingerprints.add(fp)
-            seen_texts.append(text)
+            seen_items.append((text, words_a))
             unique.append(conv)
     return unique
 
@@ -145,6 +151,59 @@ def split_dataset(conversations, eval_ratio=0.05):
     return shuffled[eval_count:], shuffled[:eval_count]
 
 
+def is_tool_trace_example(conv_obj):
+    return (conv_obj.get("metadata") or {}).get("source") == TOOL_TRACE_SOURCE
+
+
+def is_app_example(conv_obj):
+    # Tool traces carry their own, smaller oversample factor below — keep
+    # them out of the 12x app bucket.
+    source = (conv_obj.get("metadata") or {}).get("source")
+    return bool(source) and source != TOOL_TRACE_SOURCE
+
+
+def source_counts(dataset):
+    return dict(Counter(
+        (item.get("metadata") or {}).get("source", "public_or_unlabeled")
+        for item in dataset
+    ))
+
+
+def oversample_train_app(train):
+    import random
+    app_examples = [item for item in train if is_app_example(item)]
+    if not app_examples or APP_OVERSAMPLE <= 1:
+        return train, {"app_train_unique": len(app_examples), "app_train_after_oversample": len(app_examples)}
+    expanded = list(train) + (app_examples * (APP_OVERSAMPLE - 1))
+    random.seed(42)
+    random.shuffle(expanded)
+    return expanded, {
+        "app_train_unique": len(app_examples),
+        "app_train_after_oversample": len(app_examples) * APP_OVERSAMPLE,
+        "app_train_extra_repeats": len(app_examples) * (APP_OVERSAMPLE - 1),
+    }
+
+
+def oversample_train_tool_traces(train):
+    """Same train-shard-only repeat as oversample_train_app, at the modest
+    TOOL_TRACE_OVERSAMPLE factor (see the constant's comment for why 2x)."""
+    import random
+    trace_examples = [item for item in train if is_tool_trace_example(item)]
+    if not trace_examples or TOOL_TRACE_OVERSAMPLE <= 1:
+        return train, {
+            "tool_trace_train_unique": len(trace_examples),
+            "tool_trace_train_after_oversample": len(trace_examples),
+        }
+    expanded = list(train) + (trace_examples * (TOOL_TRACE_OVERSAMPLE - 1))
+    random.seed(42)
+    random.shuffle(expanded)
+    return expanded, {
+        "tool_trace_train_unique": len(trace_examples),
+        "tool_trace_train_after_oversample": len(trace_examples) * TOOL_TRACE_OVERSAMPLE,
+        "tool_trace_train_extra_repeats": len(trace_examples) * (TOOL_TRACE_OVERSAMPLE - 1),
+    }
+
+
 def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     stats = {"sources": {}, "quality_filters": Counter(), "dedup": {}, "final": {}}
@@ -154,23 +213,22 @@ def main():
     multiturn = load_jsonl(MULTITURN_FILE)
     public = load_jsonl(PUBLIC_FILE)
     app = load_jsonl(APP_FILE)
-    # Oversample app data so the loss gets a meaningful signal from
-    # how Underground Circle actually talks. Dedup later prunes
-    # exact duplicates so this isn't unbounded amplification.
-    app_oversampled = app * APP_OVERSAMPLE if app else []
+    tool_traces = load_jsonl(TOOL_TRACES_FILE)
     print(
         f"Loaded: {len(real)} real, {len(synthetic)} synthetic, "
         f"{len(multiturn)} multiturn, {len(public)} public_v4, "
-        f"{len(app)} app (oversampled {APP_OVERSAMPLE}x → {len(app_oversampled)})"
+        f"{len(app)} app (train oversample factor {APP_OVERSAMPLE}x after dedup), "
+        f"{len(tool_traces)} tool_traces (train oversample factor {TOOL_TRACE_OVERSAMPLE}x after dedup)"
     )
     stats["sources"] = {
         "real": len(real), "synthetic": len(synthetic),
         "multiturn": len(multiturn), "public_v4": len(public),
         "app_unique": len(app), "app_oversample": APP_OVERSAMPLE,
-        "app_after_oversample": len(app_oversampled),
+        "tool_traces_unique": len(tool_traces),
+        "tool_trace_oversample": TOOL_TRACE_OVERSAMPLE,
     }
 
-    all_convs = real + synthetic + multiturn + public + app_oversampled
+    all_convs = real + synthetic + multiturn + public + app + tool_traces
     print(f"Total raw: {len(all_convs)}")
 
     # Step 1: PII cleaning
@@ -201,7 +259,21 @@ def main():
     # Step 4: Train/eval split
     print("Step 4: Train/eval split (95/5)...")
     train, eval_set = split_dataset(unique)
+    app_eval_unique = sum(1 for item in eval_set if is_app_example(item))
+    tool_trace_eval_unique = sum(1 for item in eval_set if is_tool_trace_example(item))
+    train, oversample_stats = oversample_train_app(train)
+    train, tool_trace_oversample_stats = oversample_train_tool_traces(train)
     print(f"  Train: {len(train)}, Eval: {len(eval_set)}")
+    print(
+        f"  App train examples: {oversample_stats.get('app_train_unique', 0)} unique "
+        f"→ {oversample_stats.get('app_train_after_oversample', 0)} after oversample; "
+        f"eval app unique: {app_eval_unique}"
+    )
+    print(
+        f"  Tool-trace train examples: {tool_trace_oversample_stats.get('tool_trace_train_unique', 0)} unique "
+        f"→ {tool_trace_oversample_stats.get('tool_trace_train_after_oversample', 0)} after oversample; "
+        f"eval tool-trace unique: {tool_trace_eval_unique}"
+    )
 
     # Write outputs
     with open(TRAIN_FILE, "w") as f:
@@ -219,9 +291,16 @@ def main():
 
     stats["final"] = {
         "train_count": len(train), "eval_count": len(eval_set),
-        "total": len(unique),
+        "unique_total": len(unique),
+        "written_total": len(train) + len(eval_set),
         "avg_turns_train": round(avg_turns(train), 1),
         "avg_chars_train": round(avg_length(train), 0),
+        **oversample_stats,
+        **tool_trace_oversample_stats,
+        "app_eval_unique": app_eval_unique,
+        "tool_trace_eval_unique": tool_trace_eval_unique,
+        "train_source_counts": source_counts(train),
+        "eval_source_counts": source_counts(eval_set),
     }
     with open(STATS_FILE, "w") as f:
         json.dump(stats, f, indent=2)
@@ -229,7 +308,7 @@ def main():
     print(f"\nOutputs:")
     print(f"  {TRAIN_FILE} ({len(train)} examples)")
     print(f"  {EVAL_FILE} ({len(eval_set)} examples)")
-    print(f"\nDone! {len(unique)} total examples ready for v4 training.")
+    print(f"\nDone! {len(train) + len(eval_set)} written examples ready for v4 training ({len(unique)} unique before train oversample).")
 
 
 if __name__ == "__main__":

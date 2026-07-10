@@ -86,6 +86,14 @@ export interface ComputerUseResult {
   currentUrl?: string;
   backendSessionId?: string;
   backendLiveUrl?: string;
+  /**
+   * Set when executePlan halted at the first unapproved step instead of
+   * finishing. The plan is resumable: approve the referenced action in the
+   * Computer Use panel and resume — completed steps are skipped on re-run.
+   * Consumers that ignore this field still see `success: false` with the
+   * pause message (terminal-pending, never a silent partial run).
+   */
+  pendingApproval?: { index: number; actionId: string; description: string };
 }
 
 export interface ComputerUsePlanSummary {
@@ -1013,8 +1021,27 @@ export async function executePlan(
     }
 
     if (action.status !== 'approved' && !checkPermission(session, action)) {
-      results.push({ ...action, status: action.blockedReason ? 'rejected' : 'pending' });
-      continue;
+      // HALT at the first unapproved step — never skip past it. Skipping and
+      // continuing could mutate external state on partial inputs (e.g. click
+      // a submit button whose credential fills were skipped). Later steps are
+      // returned untouched so the session stays resumable after approval.
+      const halted: BrowserAction = { ...action, status: action.blockedReason ? 'rejected' : 'pending' };
+      results.push(halted);
+      results.push(...session.actions.slice(i + 1));
+      return {
+        success: false,
+        message: action.blockedReason
+          ? `Stopped at step ${i + 1}: ${action.blockedReason}`
+          : `Paused at step ${i + 1} (${action.description || action.type}) — this step needs approval before it can run. Approve it in the Computer Use panel and resume; later steps were not executed.`,
+        screenshotUrl: lastScreenshot ? `data:image/png;base64,${lastScreenshot}` : undefined,
+        actions: results,
+        currentUrl: session.currentUrl,
+        backendSessionId: session.backendSessionId,
+        backendLiveUrl: session.backendLiveUrl,
+        pendingApproval: action.blockedReason
+          ? undefined
+          : { index: i, actionId: action.id, description: action.description },
+      };
     }
 
     const result = await executeAction(action, session);
@@ -1076,7 +1103,18 @@ export async function describeComputerUsePlan(opts: {
   planningContext?: string | null;
   computerAppPreflight?: ComputerAppPreflight | null;
   computerAppGroundingTrace?: ComputerAppGroundingTrace | null;
+  /**
+   * WI-1: route-derived approval signal. When the caller (ChatTab's
+   * `browser_runtime` branch) has already decided this run auto-starts with
+   * no permission dialog, it passes `false` so the plan summary and the
+   * downstream browser plan card do not falsely advertise "requires
+   * approval". Defaults to `true` when omitted so every legacy call site and
+   * every route without an explicit signal keeps the pre-existing behavior —
+   * nothing regresses.
+   */
+  requiresApproval?: boolean;
 }): Promise<ComputerUsePlanSummary> {
+  const requiresApproval = opts.requiresApproval ?? true;
   const task = opts.task.trim();
   const intent = analyzeBrowserTask(task);
   const computerAppGroundingTrace = opts.computerAppGroundingTrace || buildComputerAppGroundingTrace({
@@ -1133,7 +1171,9 @@ export async function describeComputerUsePlan(opts: {
       `${index + 1}. ${action.type.toUpperCase()}${action.target ? ` ${action.target}` : ''} — ${action.description}`),
     actions.length > 8 ? `...and ${actions.length - 8} more action(s)` : '',
     `Completion: ${intent.completionCriteria.join(' | ')}`,
-    'This plan requires user approval before live browser execution.',
+    requiresApproval
+      ? 'This plan requires user approval before live browser execution.'
+      : 'This plan auto-starts (zero-tap browser run); the mid-run payment floor still confirms before any pay/book submission.',
   ].filter(Boolean).join('\n');
 
   return {
@@ -1145,7 +1185,7 @@ export async function describeComputerUsePlan(opts: {
     backendDetails: session.backendDetails,
     backendPreference,
     actions,
-    requiresApproval: true,
+    requiresApproval,
     summaryText,
     recommendedPermission: intent.suggestedPermission,
     computerAppPreflight: opts.computerAppPreflight || null,

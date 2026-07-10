@@ -4,11 +4,12 @@ import { looksLikeLocalComputerAwarenessRequest } from './localComputerAwareness
 export type ChatTerminalTransportPath =
   | 'specialized_agent_run'
   | 'stream_plain_chat'
-  // Phase 2 seam (DEFAULT OFF): stream the turn plainly AND carry a tiny pinned
-  // core + `tools.search` so the model can signal mid-turn that it needs a
-  // capability. On that signal the caller upgrades THIS turn into the batch
-  // OpenSwan tool loop. While the STREAM_ESCALATE_ON_TOOL_USE flag is OFF this
-  // path is never produced and `stream_plain_chat` is returned unchanged.
+  // Phase 2 seam (DEFAULT ON since 2026-07-01): stream the turn plainly AND
+  // carry a tiny pinned core + `tools.search` so the model can signal mid-turn
+  // that it needs a capability. On that signal the caller upgrades THIS turn
+  // into the batch OpenSwan tool loop. When the STREAM_ESCALATE_ON_TOOL_USE
+  // seam is opted out this path is never produced and `stream_plain_chat` is
+  // returned unchanged.
   | 'stream_then_escalate'
   | 'batch_openswan';
 
@@ -40,8 +41,8 @@ export type ChatTerminalTransportPolicyInput = {
   looksLikeActionRequest?: boolean;
   canStreamAnthropic?: boolean;
   /**
-   * Phase 2 seam override (DEFAULT OFF). When omitted, the live
-   * `STREAM_ESCALATE_ON_TOOL_USE_FLAG` flag decides. Pass an explicit boolean
+   * Phase 2 seam override (the seam itself is DEFAULT ON). When omitted, the
+   * live `STREAM_ESCALATE_ON_TOOL_USE_FLAG` flag decides. Pass an explicit boolean
    * to force the decision deterministically (used by smoke tests and any caller
    * that already resolved the flag). When the effective value is `false`, the
    * simple-streamable turn returns the legacy `stream_plain_chat` decision
@@ -65,7 +66,7 @@ export function looksLikeTerminalActionRequest(message: string): boolean {
   return ACTION_INTENT_RE.test(message) || looksLikeLocalComputerAwarenessRequest(message);
 }
 
-// ─── Phase 2: stream-by-default → escalate-on-tool-use (DEFAULT OFF) ─────────
+// ─── Phase 2: stream-by-default → escalate-on-tool-use (DEFAULT ON) ──────────
 //
 // AI-models-first: a normal chat turn should stream plainly and fast. The plain
 // streaming turn carries only a tiny pinned core + `tools.search`, so the moment
@@ -73,23 +74,35 @@ export function looksLikeTerminalActionRequest(message: string): boolean {
 // tool-use intent). On that signal the caller upgrades THAT turn into the batch
 // OpenSwan tool loop ("then it activates swanbot/openswan").
 //
-// This is not runtime-proven yet, so it ships DARK behind a DEFAULT-OFF flag and
-// is instantly revertible. While OFF, `chooseChatTerminalTransport` is
-// byte-for-byte the legacy decision: the simple-streamable branch keeps
-// returning `stream_plain_chat`/`simple_streamable_plain_chat` and no
-// `stream_then_escalate` decision is ever produced. The flag follows the same
-// idiom as the OpenSwan typed-core / tools-first flags (localStorage opt-in;
-// native has no localStorage → try/catch leaves the default OFF).
+// LIVE and DEFAULT ON since 2026-07-01 (user enabled), instantly revertible:
+//   - web: set the localStorage key to '0' / 'false' / 'off';
+//   - native (no localStorage): call `setStreamEscalateOnToolUseOverride(false)`
+//     at startup — the runtime override is checked BEFORE storage.
+// When opted out, `chooseChatTerminalTransport` is byte-for-byte the legacy
+// decision: the simple-streamable branch returns
+// `stream_plain_chat`/`simple_streamable_plain_chat` and no
+// `stream_then_escalate` decision is ever produced.
 export const STREAM_ESCALATE_ON_TOOL_USE_FLAG = 'uc_stream_escalate_on_tool_use';
 
+// Runtime override so surfaces without localStorage (native) can opt out of the
+// seam. `null` = no override (fall through to storage, then the ON default);
+// `true`/`false` force the seam on/off for this JS runtime. Not persisted — a
+// caller that wants a durable native opt-out must re-apply it at startup.
+let streamEscalateOnToolUseOverride: boolean | null = null;
+
+export function setStreamEscalateOnToolUseOverride(value: boolean | null): void {
+  streamEscalateOnToolUseOverride = value;
+}
+
 export function isStreamEscalateOnToolUseEnabled(): boolean {
-  // Default-ON as of 2026-07-01 (user enabled). Explicit opt-out via the
-  // localStorage key set to '0'/'false'/'off'; anything else (incl. unset) is ON.
+  // Precedence: runtime override (native opt-out path) → localStorage opt-out
+  // ('0'/'false'/'off') → default ON (as of 2026-07-01, user enabled).
+  if (streamEscalateOnToolUseOverride !== null) return streamEscalateOnToolUseOverride;
   try {
     const store = (globalThis as { localStorage?: { getItem?: (k: string) => string | null } }).localStorage;
     const value = store?.getItem?.(STREAM_ESCALATE_ON_TOOL_USE_FLAG);
     if (value === '0' || value === 'false' || value === 'off') return false;
-  } catch { /* storage unavailable (native) → default ON */ }
+  } catch { /* storage unavailable (native) → default ON unless overridden */ }
   return true;
 }
 
@@ -129,12 +142,12 @@ export function chooseChatTerminalTransport(
     return { path: 'batch_openswan', reason: 'stream_unavailable', canStream: false };
   }
 
-  // Simple, streamable, non-action chat. DEFAULT path is the legacy plain
-  // stream (no tool catalog). Only when the Phase 2 flag is explicitly ON does
-  // this same turn become escalation-capable: it still streams (`canStream:
-  // true`) but carries a tiny pinned core + `tools.search` so a tool_use signal
-  // can upgrade THIS turn into the batch OpenSwan tool loop. OFF ⇒ byte-for-byte
-  // the previous `stream_plain_chat` / `simple_streamable_plain_chat` decision.
+  // Simple, streamable, non-action chat. With the Phase 2 seam ON (the default
+  // since 2026-07-01) this turn is escalation-capable: it still streams
+  // (`canStream: true`) but carries a tiny pinned core + `tools.search` so a
+  // tool_use signal can upgrade THIS turn into the batch OpenSwan tool loop.
+  // Opted out ⇒ byte-for-byte the legacy `stream_plain_chat` /
+  // `simple_streamable_plain_chat` decision.
   const escalateOnToolUse = input.streamEscalateOnToolUse ?? isStreamEscalateOnToolUseEnabled();
   if (escalateOnToolUse) {
     return { path: 'stream_then_escalate', reason: 'stream_escalate_on_tool_use', canStream: true };

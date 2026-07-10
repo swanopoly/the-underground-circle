@@ -206,18 +206,43 @@ async function main() {
   // ═══════════════════════════════════════════════════════════════════════════
   section('Journey 1: browser purchase with floor + stop-condition constraint');
 
-  const MSG1 = 'go to acme.com and buy the basic plan, and stop if it asks for a captcha';
+  // WI-2: a browser purchase is zero-tap at the ROUTE level by default (its
+  // single commit is confirmed mid-run at the payment floor). To exercise the
+  // route-level approval junction below, J1 uses a purchase that ALSO carries
+  // an explicit "ask me before you buy" constraint — that user constraint (not
+  // the pay floor) is what forces route-level approval now. The pay floor is
+  // still stamped for per-step (mid-run) enforcement. The zero-tap default is
+  // proven separately in J1b.
+  const MSG1 = 'go to acme.com and buy the basic plan, but ask me before you buy, and stop if it asks for a captcha';
   const route1 = mustRoute(MSG1);
 
   // Route junction
   assert(route1.kind === 'browser', 'J1 route classifies as browser', route1.kind);
   assert(route1.executionKind === 'run_computer_task', 'J1 route executionKind is run_computer_task');
-  assert(route1.alwaysConfirmFloor?.includes('pay'), 'J1 floor detects "buy" as pay category', route1.alwaysConfirmFloor);
-  assert(route1.approvalRequired === true, 'J1 floor forces approvalRequired');
-  assert(/always-confirm/i.test(route1.approvalReason || ''), 'J1 approval reason names the always-confirm policy', route1.approvalReason);
+  assert(route1.alwaysConfirmFloor?.includes('pay'), 'J1 floor detects "buy" as pay category (stamped for mid-run enforcement)', route1.alwaysConfirmFloor);
+  assert(route1.approvalRequired === true, 'J1 explicit ask-before constraint forces route-level approvalRequired');
+  assert(/asked to be checked with before|always-confirm/i.test(route1.approvalReason || ''), 'J1 approval reason names the ask-before/floor policy', route1.approvalReason);
+  assert(route1.userConstraints?.approvalBefore.includes('pay'), 'J1 ask-before constraint parsed (pay)', route1.userConstraints);
   assert(route1.userConstraints?.stopConditions.includes('captcha'), 'J1 stop-condition constraint parsed (captcha)', route1.userConstraints);
   assert((route1.userConstraints?.sourcePhrases.length || 0) > 0 && (route1.userConstraints?.sourcePhrases.length || 0) <= 6,
     'J1 constraint source phrases bounded (1..6)', route1.userConstraints?.sourcePhrases);
+
+  // J1b (WI-2) — the zero-tap default: a browser purchase WITHOUT an explicit
+  // ask-before constraint routes to the browser with NO route-level approval;
+  // the pay floor is still stamped for mid-run per-step enforcement. This is
+  // the core "book me a hotel / buy the plan" zero-friction behavior.
+  {
+    const zeroTap = mustRoute('go to acme.com and buy the basic plan');
+    assert(zeroTap.kind === 'browser', 'J1b zero-tap browser purchase routes to browser', zeroTap.kind);
+    assert(zeroTap.approvalRequired === false, 'J1b browser purchase is zero-tap at the route level (no up-front approval)', zeroTap.approvalRequired);
+    assert(zeroTap.alwaysConfirmFloor?.includes('pay'), 'J1b pay floor stays stamped for mid-run per-step enforcement', zeroTap.alwaysConfirmFloor);
+    // A URL-less hotel booking phrasing (WI-6) routes to browser zero-tap with
+    // an EMPTY route floor ("book" is not a route-level pay verb).
+    const hotel = mustRoute('book me a hotel in chicago');
+    assert(hotel.kind === 'browser', 'J1b URL-less hotel booking routes to browser', hotel.kind);
+    assert(hotel.approvalRequired === false, 'J1b URL-less hotel booking is zero-tap', hotel.approvalRequired);
+    assert((hotel.alwaysConfirmFloor || []).length === 0, 'J1b hotel booking route floor is empty ("book" is not a route pay verb)', hotel.alwaysConfirmFloor);
+  }
 
   // Route → evidence contract junction (derived by the route builder itself)
   const contract1 = route1.evidenceContract!;
@@ -291,7 +316,8 @@ async function main() {
   const persistedNotice1 = buildChatComputerRequestUserNotice(persisted1);
   assert(JSON.stringify(persistedNotice1) === JSON.stringify(notice1), 'J1 round-trip: notice re-derived from the persisted route matches');
   assert(formatAlwaysConfirmFloorPromptLine(persisted1.alwaysConfirmFloor) === floorLine1, 'J1 round-trip: floor line survives persistence');
-  assert(persisted1.notes.length <= 9 && persisted1.recommendedTools.length <= 28 && persisted1.completionProof.length <= 12,
+  // notes bound matches the router's own cap (chatComputerRequestRouter.ts notes .slice(0, 10))
+  assert(persisted1.notes.length <= 10 && persisted1.recommendedTools.length <= 28 && persisted1.completionProof.length <= 12,
     'J1 round-trip: bounded route fields stay bounded', { notes: persisted1.notes.length, tools: persisted1.recommendedTools.length, proof: persisted1.completionProof.length });
   collectRecommended('J1 route', MSG1, route1.recommendedTools);
 
@@ -490,14 +516,18 @@ async function main() {
   });
   assert(floorScopeAttempt.ok === false, 'J4 floor category (pay) is rejected at scope creation');
 
-  // Positive control: full non-floor coverage downgrades approval.
+  // WI-2: a browser upload/side-effect route is now zero-tap at the route
+  // level (external side effects defer to the mid-run payment floor), so the
+  // baseline no longer requires approval. A matching standing grant is still
+  // recorded (stamped) so the user can see/revoke it later even though it no
+  // longer flips an approval decision for browser routes.
   const MSG_UPLOAD = 'go to acme.com and upload the report.pdf to the client portal';
   const baselineUpload = mustRoute(MSG_UPLOAD);
-  assert(baselineUpload.approvalRequired === true && !baselineUpload.stickyScopeApplied,
-    'J4 baseline upload requires approval with no sticky stamp', { approval: baselineUpload.approvalRequired, sticky: baselineUpload.stickyScopeApplied });
+  assert(baselineUpload.approvalRequired === false && !baselineUpload.stickyScopeApplied,
+    'J4 baseline browser upload is zero-tap (WI-2) with no sticky stamp when no scope is present', { approval: baselineUpload.approvalRequired, sticky: baselineUpload.stickyScopeApplied });
   const stickyUpload = mustRoute(MSG_UPLOAD, { stickyScopes: [scope] });
   assert(stickyUpload.approvalRequired === false && stickyUpload.stickyScopeApplied?.scopeKey === 'acme.com',
-    'J4 covered upload downgrades approval via the standing grant', { approval: stickyUpload.approvalRequired, sticky: stickyUpload.stickyScopeApplied });
+    'J4 covered upload stays zero-tap and still records the standing grant', { approval: stickyUpload.approvalRequired, sticky: stickyUpload.stickyScopeApplied });
   assert(stickyUpload.stickyScopeApplied?.categories.includes('upload'), 'J4 sticky stamp records the auto-approved category', stickyUpload.stickyScopeApplied);
   const stickyNoticeLine = formatStickyScopeAppliedNotice({ scopeKey: 'acme.com' });
   assert(stickyUpload.notes.some((note) => note.includes(stickyNoticeLine)), 'J4 route notes carry the standing-grant notice', stickyUpload.notes);
@@ -539,18 +569,25 @@ async function main() {
   const constrainedRoute = mustRoute(MSG_CONSTRAINED, { stickyScopes: [scope] });
   assert(constrainedRoute.userConstraints?.forbidden.includes('submit'), 'J4 constrained route parses forbidden(submit)', constrainedRoute.userConstraints);
   assert(!constrainedRoute.stickyScopeApplied, 'J4 sticky downgrade does not fire when an uncovered constraint category is present', constrainedRoute.stickyScopeApplied);
-  assert(constrainedRoute.approvalRequired === true, 'J4 constrained route keeps approval required');
+  // WI-2: the route is zero-tap (browser external side effect deferred); the
+  // forbidden(submit) constraint is still enforced as a HARD per-step block
+  // below via constraintBlocksToolCall, not as a route-level approval.
+  assert(constrainedRoute.approvalRequired === false, 'J4 constrained browser route is zero-tap; forbidden(submit) enforced per-step (WI-2)');
   const constrainedBlock = buildChatComputerRequestRoutePromptBlock(MSG_CONSTRAINED)!;
   assert(constrainedBlock.includes('User constraint (HARD): never perform submit'), 'J4 prompt block carries the hard forbidden(submit) rule');
   const constrainedPreview = buildChatComputerTaskPlanPreview(constrainedRoute);
   assert(constrainedPreview.constraints.some((line) => line.includes("Won't: submit")), 'J4 plan preview shows the user-facing constraint copy', constrainedPreview.constraints);
 
-  // Floor interplay: a pay action keeps approval even with a matching scope.
+  // Floor interplay (WI-2): a browser pay route stamps the pay floor for
+  // per-step (mid-run) enforcement but is zero-tap at the route level — the
+  // single pay confirmation fires mid-run at the payment floor, not up front.
+  // A sticky scope still never covers a floor category (the pay floor cannot be
+  // granted, verified at scope creation above).
   const MSG_FLOOR = 'go to acme.com, download the receipt and pay the outstanding invoice';
   const floorRoute = mustRoute(MSG_FLOOR, { stickyScopes: [scope] });
-  assert(floorRoute.alwaysConfirmFloor?.includes('pay'), 'J4 floor route detects pay', floorRoute.alwaysConfirmFloor);
-  assert(floorRoute.approvalRequired === true && !floorRoute.stickyScopeApplied,
-    'J4 floor route: sticky scope never downgrades a floor task', { approval: floorRoute.approvalRequired, sticky: floorRoute.stickyScopeApplied });
+  assert(floorRoute.alwaysConfirmFloor?.includes('pay'), 'J4 floor route stamps pay for mid-run per-step enforcement', floorRoute.alwaysConfirmFloor);
+  assert(floorRoute.approvalRequired === false && !floorRoute.stickyScopeApplied,
+    'J4 browser pay route is zero-tap at route level; pay confirmed mid-run at the payment floor (WI-2)', { approval: floorRoute.approvalRequired, sticky: floorRoute.stickyScopeApplied });
 
   // constraintBlocksToolCall verdicts — the R11 enforcement junction.
   const constraints4 = constrainedRoute.userConstraints!;

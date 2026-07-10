@@ -2,6 +2,8 @@ import {
   buildAgentFailureRecoveryPolicy,
   summarizeAgentFailureRecoveryPolicy,
   startConnectedAgentFailureRecovery,
+  RECOVERY_ADVISORY_BEGIN,
+  RECOVERY_ADVISORY_END,
   type AgentFailureRecoveryInput,
   type AgentFailureRecoveryRunbook,
   type AgentFailureRecoveryStartResult,
@@ -951,16 +953,22 @@ export function buildChatFailureRecoveryInput(input: ChatFailureRecoveryInput): 
   const fingerprint = buildChatFailureRecoveryFingerprint(input);
   const verificationPlan = buildChatFailureRecoveryVerificationPlan(input);
   const evidenceRecovery = resolveEvidenceRecovery(input);
+  // Facts stay bare; instructional/advisory wording is sentinel-wrapped so
+  // the policy's classifier strips it (guardrail lines like "human
+  // verification … requires user action" self-trigger the taxonomy and
+  // turned a 429 rate-limit into human_verification_required). The full
+  // block still reaches the recovery agent's prompt verbatim.
   const contextLines = [
     input.planSummary ? clean(input.planSummary, 2_000) : '',
-    input.checkpointRecovery ? formatComputerTaskCheckpointRecoveryForPrompt(input.checkpointRecovery) : '',
-    evidenceRecovery ? formatComputerTaskEvidenceRecoveryForPrompt(evidenceRecovery) : '',
     input.selectedModel ? `Selected chat model: ${input.selectedModel}` : '',
     input.activePluginIds && input.activePluginIds.length > 0
       ? `Active plugins: ${input.activePluginIds.slice(0, 12).join(', ')}`
       : '',
-    `Recovery fingerprint: ${fingerprint}`,
     input.repeatCount && input.repeatCount > 1 ? `Recent repeat count: ${input.repeatCount}` : '',
+    RECOVERY_ADVISORY_BEGIN,
+    input.checkpointRecovery ? formatComputerTaskCheckpointRecoveryForPrompt(input.checkpointRecovery) : '',
+    evidenceRecovery ? formatComputerTaskEvidenceRecoveryForPrompt(evidenceRecovery) : '',
+    `Recovery fingerprint: ${fingerprint}`,
     input.suppressConnectedHandoff
       ? `Connected recovery handoff suppressed: ${clean(input.suppressionReason || 'recent duplicate failure', 400)}`
       : '',
@@ -968,6 +976,7 @@ export function buildChatFailureRecoveryInput(input: ChatFailureRecoveryInput): 
     ...verificationPlan.commands.map((command) => `- ${command}`),
     'Suggested verification checks:',
     ...verificationPlan.checks.map((check) => `- ${check}`),
+    RECOVERY_ADVISORY_END,
   ].filter(Boolean).join('\n');
 
   return {

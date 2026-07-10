@@ -1,10 +1,21 @@
 import { buildAgenticCodingPrompt, detectAgenticCodingProfile, type AgenticCodingProfile, type AgenticCodingSurface } from './agenticCodingProfile';
+import { getChatPromptLaneSpec } from './chatPromptAssembly';
 import { addArtifact, addStep, createRun, mergeRunMetadata, type ArtifactKind, type RunSurface, updateRunStatus } from './agentRunSystem';
 import { buildOpenSwanExecutionStream, type OpenSwanExecutionContract } from './openswanExecution';
 import { buildOpenSwanMemoryRecommendations, captureOpenSwanOutcomeMemory, recordArchiveDerivedMemorySuccess, recordArchiveDerivedMemoryWeakSignal, type OpenSwanMemoryRecommendation, type PromptMemoryReference } from './memoryService';
 import { buildOpenSwanObservedEvalSummary } from './openswanObservedEvals';
 import { extractBrowserPlansFromToolActions } from './openswanRuntimeToolLoop';
 import { buildOpenSwanTaskPlan, type OpenSwanTaskPlan } from './openswanTaskPlanner';
+import {
+  drainOpenSwanSteeringNotes,
+  registerOpenSwanSteeringScope,
+  unregisterOpenSwanSteeringScope,
+} from './openswanSteering';
+import {
+  buildBlackSwanGroundingBlock,
+  isBlackSwanModel,
+  resolveOpenSwanToolLoopModel,
+} from './blackswanRouting';
 import {
   buildOpenSwanToolBrief,
   getOpenSwanToolPolicy,
@@ -52,7 +63,7 @@ import { OPENSWAN_RUNTIME_PLAN_VERSION } from './openswanRuntimePlan';
 import type { ConnectedProviderSet } from './serviceProfileSouls';
 import { buildUserTaskPipelinePromptBlock } from './userTaskPipelines';
 import { buildComputerAppTaskStrategyPromptBlock } from './computerAppTaskStrategy';
-import { buildChatComputerRequestRoutePromptBlock } from './chatComputerRequestRouter';
+import { buildChatComputerRequestRoutePromptBlock, resolveChatComputerConstraintInputs } from './chatComputerRequestRouter';
 import { buildComputerAppGroundingPromptBlock } from './computerAppGrounding';
 import { buildComputerAppExecutionReceiptPromptBlock } from './computerAppExecutionReceipts';
 import { buildDesignAppAutomationPromptBlock } from './designAppAutomation';
@@ -74,6 +85,7 @@ import {
   stripDesignAppRuntimeCaptureMetadata,
 } from './designAppRuntimeManifest';
 import { persistAgentRunLedgerPreview, persistRuntimeToolActions } from './agentRunLedgerPersistence';
+import { buildRouteDecisionRecordFromRuntime, buildRouteDecisionTelemetryPayload } from './routeDecisionTelemetry';
 
 export type OpenSwanRunStage =
   | 'booting'
@@ -479,27 +491,29 @@ function isOpenSwanTypedCoreEnabled(): boolean {
   return true;
 }
 
-// ─── T2: progressive tool disclosure (DEFAULT OFF) ──────────────────────────
+// ─── T2→P25: progressive tool disclosure (DEFAULT ON) ───────────────────────
 
 const OPENSWAN_TOOLS_FIRST_FLAG = 'uc_openswan_tools_first';
 
 /**
- * T2 opt-in switch — ships DARK (default OFF). Mirrors the typed-core flag's
- * idiom but inverted: legacy full-catalog disclosure is the default, and the
- * flag must be explicitly turned ON to enable progressive (pinned-core +
- * `tools.search`) disclosure. While OFF, runTypedCoreToolLoop is byte-for-byte
- * the legacy full-catalog path.
- * Web: `localStorage.setItem('uc_openswan_tools_first', '1')` enables it for the
- * next turn; remove the key (or any non-truthy value) to revert. Native has no
- * localStorage — the try/catch leaves the default OFF.
+ * P25 cutover: progressive (pinned-core + `tools.search`) disclosure is the
+ * DEFAULT — the ~160-tool full catalog is 3-5x past the documented tool-
+ * selection degradation threshold, and deferred loading measurably RAISES
+ * accuracy while cutting prompt tokens (see
+ * docs/CHAT_AGENT_ARCHITECTURE_IMPROVEMENT_PLAN.md item 1; search-ranking
+ * quality gate hardened in P24). Explicit opt-out reverts to the legacy
+ * full-catalog path: `localStorage.setItem('uc_openswan_tools_first', '0')`
+ * (or 'false'/'off'). Native has no localStorage — default ON. Setup
+ * failures in the progressive path fall back to the full catalog per turn
+ * (see runTypedCoreToolLoop).
  */
 function isOpenSwanToolsFirstEnabled(): boolean {
   try {
     const store = (globalThis as { localStorage?: { getItem?: (k: string) => string | null } }).localStorage;
     const value = store?.getItem?.(OPENSWAN_TOOLS_FIRST_FLAG);
-    if (value === '1' || value === 'true' || value === 'on') return true;
-  } catch { /* storage unavailable (native) → default OFF */ }
-  return false;
+    if (value === '0' || value === 'false' || value === 'off') return false;
+  } catch { /* storage unavailable (native) → default ON */ }
+  return true;
 }
 
 /**
@@ -541,6 +555,19 @@ async function runTypedCoreToolLoop(args: {
   toolApprovalGate?: LegacyToolApprovalGate;
   onStage?: (stage: OpenSwanRunStage, label: string) => void;
 }): Promise<LegacyToolLoopResult> {
+  // BlackSwan collaboration split (P8 — the CLAUDE.md contract, previously
+  // unwired on this path): the typed loop always carries runtime tools and
+  // BlackSwan cannot reliably drive native tool calling, so the loop runs
+  // on the tool executor while BlackSwan stays in the prompt as the
+  // app-grounding voice. Non-BlackSwan models pass through unchanged.
+  const loopModel = resolveOpenSwanToolLoopModel(args.model, args.allowedToolNames);
+  const blackswanGroundingBlock = isBlackSwanModel(args.model)
+    ? buildBlackSwanGroundingBlock({
+        model: args.model,
+        source: args.surface === 'room_chat' ? 'room_chat' : 'openswan',
+      })
+    : '';
+
   const toolCtx: OpenSwanRuntimeToolContext = {
     circleId: args.circleId,
     userId: args.userId,
@@ -549,6 +576,12 @@ async function runTypedCoreToolLoop(args: {
     activeSoulKey: args.activeSoulKey,
     activePluginIds: args.activePluginIds,
     surface: args.surface,
+    // Session-path parity with chat preflight (swanbot.ts): parse the turn's
+    // "never do X" constraints from the SAME source the chat loop uses so the
+    // runtime dispatch backstop (constraintBlocksToolCall in
+    // openswanToolRuntime) enforces them on this path too. Without this the
+    // backstop read `context.userConstraints ?? null` is always null here.
+    userConstraints: resolveChatComputerConstraintInputs(args.userMessage).userConstraints,
   };
   // T2 progressive disclosure (DEFAULT OFF). While OFF this is the exact
   // legacy path: advertise the full allowed-names catalog up front and apply
@@ -563,9 +596,21 @@ async function runTypedCoreToolLoop(args: {
     | ((ctx: { session: Record<string, unknown>; iteration: number }) => AgentToolDefinition[])
     | undefined;
   if (toolsFirstEnabled) {
-    const progressive = getProgressiveOpenSwanTools(args.surface, toolCtx);
-    bridgeTools = progressive.tools;
-    resolveAdditionalTools = progressive.resolveAdditionalTools;
+    try {
+      const progressive = getProgressiveOpenSwanTools(args.surface, toolCtx, { mode: args.mode });
+      bridgeTools = progressive.tools;
+      resolveAdditionalTools = progressive.resolveAdditionalTools;
+    } catch {
+      // P25 fail-safe: a progressive-setup failure must never cost the turn —
+      // fall back to the legacy full-catalog path for this turn only.
+      bridgeTools = getOpenSwanToolsForSurface(args.surface, toolCtx, {
+        allowedToolNames: args.allowedToolNames as OpenSwanRuntimeToolName[],
+        mode: args.mode,
+      });
+      if (bridgeTools.length === 0) {
+        return { response: '', toolEvents: [] };
+      }
+    }
   } else {
     bridgeTools = getOpenSwanToolsForSurface(args.surface, toolCtx, {
       allowedToolNames: args.allowedToolNames as OpenSwanRuntimeToolName[],
@@ -583,6 +628,13 @@ async function runTypedCoreToolLoop(args: {
   const usageAcc = createLoopUsageAccumulator();
   let routing: LegacyToolLoopResult['routing'];
   let edgeFailed = false;
+  // Route-decision telemetry (silent-mis-classification defense): emit ONCE
+  // per run, at the first loop event, so a lane flip or low-confidence spike
+  // is visible in the run event stream (see routeDecisionTelemetry.ts). The
+  // full ChatAutomationPlan does not reach this far downstream — only the
+  // resolved loop model + the surface/mode lane are known here — so we use the
+  // runtime-primitive adapter rather than fabricate a plan.
+  let emittedRouteDecision = false;
 
   // Wrap each bridge handler so its result carries the legacy dispatch
   // metadata/status side channel (R14) and the legacy in-loop nudges,
@@ -683,7 +735,7 @@ async function runTypedCoreToolLoop(args: {
         userMessage: args.userMessage,
         circleId: args.circleId,
         userId: args.userId,
-        model: args.model,
+        model: loopModel,
         systemPrompt: args.systemPrompt,
         tools: toAnthropicToolShapes(tools),
         messages,
@@ -727,11 +779,23 @@ async function runTypedCoreToolLoop(args: {
   const runResult = await runAgent({
     initialMessages: buildSnapshotAwareInitialMessages({
       userMessage: args.userMessage,
-      snapshotContextMessage: args.snapshotContextMessage,
+      // BlackSwan grounding rides the volatile context message (same slot
+      // as the circle snapshot) so the frozen/cached system prompt is
+      // untouched (R15/O7 cache discipline).
+      snapshotContextMessage: [blackswanGroundingBlock, args.snapshotContextMessage || '']
+        .filter(Boolean)
+        .join('\n\n---\n\n') || null,
     }),
     tools: assembledTools,
     provider,
     maxIterations: maxRounds,
+    // Mid-run steering (P7b): the UI pushes notes onto the thread-scoped
+    // in-memory bus (openswanSteering); the core drains them at iteration
+    // boundaries. Notes arrive pre-framed as guidance-only — approval gates
+    // are untouched. Scope registration happens at the turn call site.
+    steering: args.threadId
+      ? { drain: () => drainOpenSwanSteeringNotes(args.threadId!) }
+      : undefined,
     // The legacy loop only parallelized all-read-only, ungated rounds;
     // until the T8 policy provider is flipped on, dispatch sequentially
     // (safe superset of legacy ordering, incl. approval prompts).
@@ -741,6 +805,76 @@ async function runTypedCoreToolLoop(args: {
       : undefined,
     onRoundComplete,
     onEvent: (event) => {
+      // Flywheel telemetry (P11 fix): the agent_run_events adapter
+      // (agentRunPersistence.createPersistedRun) was never wired to this
+      // live loop — the table sat EMPTY in production, so the BlackSwan
+      // tool-trace exporter had nothing to read. Persist the three trace
+      // kinds here, fire-and-forget; payload shapes are in LOCKSTEP with
+      // scripts/blackswan-llm/export_tool_traces.py (pairing by
+      // tool_use_id) and agentRunPersistence's documented shapes.
+      if (args.runId) {
+        try {
+          // Route-decision telemetry, emitted exactly once per run at the
+          // first event (fire-and-forget, same discipline as the trace
+          // inserts below). `loopModel` is the resolved executor model and
+          // `args.surface`/`args.mode` are the lane facts known at this seam;
+          // confidence is unknown here (no plan) → band 'unknown', which is
+          // honest. This makes silent route mis-classification observable.
+          if (!emittedRouteDecision) {
+            emittedRouteDecision = true;
+            const routeRecord = buildRouteDecisionRecordFromRuntime({
+              lane: args.mode ? `${args.surface}:${args.mode}` : args.surface,
+              executionKind: 'run_openswan',
+              model: loopModel,
+              confidence: null,
+              source: 'openswan_session_runtime',
+              note: `allowed tools: ${args.allowedToolNames.length}`,
+            });
+            void supabase.from('agent_run_events').insert({
+              run_id: args.runId,
+              kind: 'route_decision',
+              payload: buildRouteDecisionTelemetryPayload(routeRecord),
+            }).then(() => {}, () => {});
+          }
+          if (event.kind === 'tool_call_start') {
+            void supabase.from('agent_run_events').insert({
+              run_id: args.runId,
+              kind: 'tool_call_start',
+              payload: {
+                iteration: event.iteration,
+                tool: event.toolName,
+                tool_use_id: event.toolUseId,
+                input: event.input,
+              },
+            }).then(() => {}, () => {});
+          } else if (event.kind === 'tool_call_result') {
+            const traceResult = event.result as { ok?: boolean; error?: string } | undefined;
+            void supabase.from('agent_run_events').insert({
+              run_id: args.runId,
+              kind: 'tool_call_result',
+              payload: {
+                iteration: event.iteration,
+                tool: event.toolName,
+                tool_use_id: event.toolUseId,
+                ok: traceResult?.ok === true,
+                duration_ms: event.durationMs,
+                ...(traceResult && traceResult.ok !== true && traceResult.error
+                  ? { error: String(traceResult.error).slice(0, 500) }
+                  : {}),
+              },
+            }).then(() => {}, () => {});
+          } else if (event.kind === 'final_response') {
+            void supabase.from('agent_run_events').insert({
+              run_id: args.runId,
+              kind: 'final_response',
+              payload: {
+                iteration: event.iteration,
+                text: String(event.text || '').slice(0, 1500),
+              },
+            }).then(() => {}, () => {});
+          }
+        } catch { /* telemetry must never break the loop */ }
+      }
       if (event.kind === 'tool_call_start') {
         pendingToolInputs.set(event.toolUseId, event.input);
       } else if (event.kind === 'tool_call_result') {
@@ -785,7 +919,7 @@ async function runTypedCoreToolLoop(args: {
           message: args.userMessage,
           circleId: args.circleId,
           userId: args.userId,
-          model: args.model,
+          model: loopModel,
           tools: [],
           tool_messages: runResult.messages.map((m) => ({ role: m.role, content: m.content })),
           system_override: args.systemPrompt,
@@ -811,16 +945,24 @@ type OpenSwanUsageLike = {
   input_tokens?: number;
   output_tokens?: number;
   total_tokens?: number;
+  // GAP-2: cache read vs creation split (present on the typed-loop usage from
+  // finalizeLoopUsage; absent on legacy/delegated usage shapes).
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
 } | null | undefined;
 
 type OpenSwanTokenTotals = {
   input: number;
   output: number;
   cached: number;
+  // GAP-2: preserve the read/creation split for run metadata. `cached` stays
+  // the aggregate for the existing cached_tokens column.
+  cacheRead: number;
+  cacheCreation: number;
 };
 
 function emptyOpenSwanTokenTotals(): OpenSwanTokenTotals {
-  return { input: 0, output: 0, cached: 0 };
+  return { input: 0, output: 0, cached: 0, cacheRead: 0, cacheCreation: 0 };
 }
 
 function addOpenSwanUsageTotals(target: OpenSwanTokenTotals, usage: OpenSwanUsageLike): void {
@@ -833,6 +975,8 @@ function addOpenSwanUsageTotals(target: OpenSwanTokenTotals, usage: OpenSwanUsag
   target.input += input;
   target.output += output;
   target.cached += total == null ? 0 : Math.max(0, total - input - output);
+  target.cacheRead += Math.max(0, Math.floor(usage.cache_read_tokens || 0));
+  target.cacheCreation += Math.max(0, Math.floor(usage.cache_creation_tokens || 0));
 }
 
 export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise<OpenSwanTurnResult> {
@@ -891,6 +1035,10 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     runtimeRoute.intent,
     connectedProviders,
     runtimeRoute.complexity,
+    undefined,
+    // P27: raw message activates the BlackSwan reliability guard on the
+    // EXECUTION model — the hard subset of the grounded lane escalates to frontier.
+    cleanMessage,
   );
   const toolBrief = buildOpenSwanToolBrief(
     opts.surface === 'main_chat' ? 'main_chat' : 'room_chat',
@@ -1398,7 +1546,14 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       const systemPrompt = await buildStreamableSystemPrompt({
         circleId: opts.context.circleId!,
         userId: opts.context.userId,
-        currentMessage: prompt,
+        // X1 (P44): the assembler sees the USER'S message, not the block
+        // ladder — routing complexity, retrieval/skills queries, and the
+        // collaboration seam all right-size to real intent instead of ladder
+        // text. The ladder stays the tool loop's userMessage below.
+        currentMessage: cleanMessage,
+        // The v2 lane's turns always warrant at least the moderate context
+        // stack (memory/wisdom/missions) even for a short message.
+        complexityFloor: 'moderate',
         model: resolvedModel || opts.context.model,
         userName: opts.context.userName,
         modeKey: opts.mode || 'talk',
@@ -1409,10 +1564,20 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         // Avoid double-injection: typed-core carries the snapshot as a
         // user-role message, so the v1 dynamic-tail block is suppressed.
         omitCircleContextSnapshot: typedCoreEnabled,
+        // X1 single-recall: hand the assembler THIS turn's already-resolved
+        // stores so it emits the fenced memory sections (incl. the P43
+        // memory_user_notes section) without a second recall round-trip.
+        memoryStores: memoryBundle,
+        // X1 ladder dedupe: this lane carries the computer/design/pipeline
+        // blocks in the user-message ladder above, so the assembler omits its
+        // message-derived copies of exactly those sections (typed debt list).
+        omitSections: getChatPromptLaneSpec('openswan_v2').duplicateSectionDebt,
         chatHistory: [
           opts.context.chatHistory || '',
           delegationSummary ? `## Specialist Sub-Agent Results\n${delegationSummary}` : '',
-          memoryBundle.combined ? `## Memory Context\n${memoryBundle.combined}` : '',
+          // P43 retired the interim userNotes injection that lived here —
+          // notes now arrive exactly once on every lane via the assembler's
+          // fenced memory_user_notes section (from memoryStores above).
         ].filter(Boolean).join('\n\n'),
       });
 
@@ -1424,6 +1589,12 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       // message if they've moved on — see buildResumeContextBlock.
       const resumeBlock = buildResumeContextBlock(findPendingResumeCheckpoint(transcript.events));
       const systemPromptWithResume = resumeBlock ? `${systemPrompt}\n\n${resumeBlock}` : systemPrompt;
+
+      // Mid-run steering scope (P7b): active for the duration of the typed
+      // loop so ChatTab's steering bar can push notes to THIS turn only.
+      // Thread-scoped; registration clears stale notes from a prior turn.
+      const steeringScopeKey = typedCoreEnabled ? (opts.chatSessionId || null) : null;
+      if (steeringScopeKey) registerOpenSwanSteeringScope(steeringScopeKey);
 
       // O1 cutover: the typed agentExecutionCore loop is the default; the
       // legacy executeToolUseLoop stays callable behind the manual revert
@@ -1464,6 +1635,11 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
             maxToolRounds: toolRoundBudget,
             toolApprovalGate: opts.onToolApproval,
           });
+      // Steering scope closes with the loop. A thrown loop skips this line,
+      // which is safe: the bar hides when the run state clears, pushes to a
+      // stale scope are bounded (queue cap 5), and the next turn's register
+      // clears them before its loop starts.
+      if (steeringScopeKey) unregisterOpenSwanSteeringScope(steeringScopeKey);
 
       const designManifestLedgerActions = buildDesignAppRuntimeManifestLedgerActions({
         task: cleanMessage,
@@ -1781,6 +1957,8 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       finalUsageTotals.input += delegatedUsageTotals.input;
       finalUsageTotals.output += delegatedUsageTotals.output;
       finalUsageTotals.cached += delegatedUsageTotals.cached;
+      finalUsageTotals.cacheRead += delegatedUsageTotals.cacheRead;
+      finalUsageTotals.cacheCreation += delegatedUsageTotals.cacheCreation;
       await updateRunStatus(run.id, 'completed', {
         current_step_index: finalStepIndex,
         total_steps: finalTotalSteps,
@@ -1788,6 +1966,18 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         output_tokens: finalUsageTotals.output,
         cached_tokens: finalUsageTotals.cached,
       });
+      // GAP-2: agent_runs has no read/creation columns, so the cache split (the
+      // read:creation ratio that proves the P26 breakpoints work) rides the
+      // metadata JSON blob. Use mergeRunMetadata — updateRunStatus's `metadata`
+      // is a whole-column replace and would clobber the run metadata
+      // accumulated across the run. Bounded ints; only written when the loop
+      // reported cache activity so runs with no caching stay clean.
+      if (finalUsageTotals.cacheRead > 0 || finalUsageTotals.cacheCreation > 0) {
+        await mergeRunMetadata(run.id, {
+          cache_read_tokens: finalUsageTotals.cacheRead,
+          cache_creation_tokens: finalUsageTotals.cacheCreation,
+        });
+      }
 
       memoryRecommendations = buildOpenSwanMemoryRecommendations({
         taskKind: taskPlan.kind,

@@ -32,7 +32,7 @@ class ExportError(RuntimeError):
     pass
 
 
-def fetch_table(table_name, select="*", order=None, limit=50000):
+def fetch_table(table_name, select="*", order=None, limit=50000, optional=False):
     """Paginated fetch from Supabase REST API."""
     all_rows = []
     offset = 0
@@ -49,6 +49,9 @@ def fetch_table(table_name, select="*", order=None, limit=50000):
         except requests.RequestException as exc:
             raise ExportError(f"{table_name} request failed: {exc}") from exc
         if resp.status_code != 200:
+            if optional and resp.status_code == 404:
+                print(f"  optional source missing ({resp.status_code}); skipping.", end=" ")
+                return []
             raise ExportError(f"{table_name} returned {resp.status_code}: {resp.text[:300]}")
 
         rows = resp.json()
@@ -126,9 +129,10 @@ TABLES = {
     "session_tags": {
         "select": "id,circle_id,session_id,tag,category,created_at",
         "order": "created_at.asc",
+        "optional": True,
     },
     "goals": {
-        "select": "id,user_id,circle_id,title,description,status,target_date,created_at",
+        "select": "id,circle_id,name,description,status,assigned_agent_ids,target_count,created_by,created_at,updated_at,auto_task_count,auto_task_frequency,last_auto_task_at",
         "order": "created_at.asc",
     },
     "circle_office_agents": {

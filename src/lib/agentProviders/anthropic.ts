@@ -155,6 +155,8 @@ function toolsToAnthropic(tools: AgentToolDefinition[]) {
     name: t.name,
     description: t.description,
     input_schema: t.input_schema,
+    // X4 (P47): forward curated input_examples when present (GA, no header).
+    ...(t.input_examples ? { input_examples: t.input_examples } : {}),
   }));
 }
 

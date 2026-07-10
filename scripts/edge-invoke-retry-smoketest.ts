@@ -42,6 +42,15 @@ assert.equal(isRetryableEdgeFailure({ hasData: false }), true);
 // A deterministic named error with no transient signal → do not retry.
 assert.equal(isRetryableEdgeFailure({ hasData: false, errorName: 'FunctionsHttpError', errorMessage: 'bad request: missing field' }), false);
 
+// The canonical retryable set, pinned explicitly (429/500/502/503/504/529 →
+// retry; 400/401/403/404/422 → do not). 529 (Anthropic overloaded) must be in.
+for (const status of [429, 500, 502, 503, 504, 529]) {
+  assert.equal(isRetryableEdgeFailure({ hasData: false, status }), true, `retryable set includes ${status}`);
+}
+for (const status of [400, 401, 403, 404, 422]) {
+  assert.equal(isRetryableEdgeFailure({ hasData: false, status }), false, `retryable set excludes ${status}`);
+}
+
 // Bounded exponential backoff (deterministic with a fixed jitter source).
 const zero = () => 0;
 assert.equal(edgeRetryBackoffMs(0, zero), 250);
@@ -51,6 +60,20 @@ assert.equal(edgeRetryBackoffMs(10, zero), 2000, 'backoff is capped');
 const hi = edgeRetryBackoffMs(0, () => 0.99);
 assert(hi >= 250 && hi <= 250 + 150, 'jitter stays within bound');
 
-assert(EDGE_INVOKE_RETRIES >= 1 && EDGE_INVOKE_RETRIES <= 4, 'retry count is sane');
+// Backoff is monotonic non-decreasing across attempts then plateaus at the cap
+// (base component grows 250→500→1000→2000→2000 with a fixed rng).
+const baseSeq = [0, 1, 2, 3, 4, 10].map((a) => edgeRetryBackoffMs(a, zero));
+for (let i = 1; i < baseSeq.length; i += 1) {
+  assert(baseSeq[i] >= baseSeq[i - 1], `backoff non-decreasing at step ${i} (${baseSeq[i - 1]}→${baseSeq[i]})`);
+}
+assert.equal(baseSeq[baseSeq.length - 1], 2000, 'backoff plateaus at the 2000ms cap');
+// Every sampled delay sits within [base, base+jitterMax] regardless of rng.
+for (const a of [0, 1, 2, 5]) {
+  const lo = edgeRetryBackoffMs(a, () => 0);
+  const anyR = edgeRetryBackoffMs(a, () => Math.random());
+  assert(anyR >= lo && anyR <= lo + 150, `attempt ${a}: sampled delay within [${lo}, ${lo + 150}]`);
+}
+
+assert(EDGE_INVOKE_RETRIES >= 1 && EDGE_INVOKE_RETRIES <= 4, 'retry count is sane (max-attempts cap)');
 
 console.log('All edge invoke retry smoke cases passed.');

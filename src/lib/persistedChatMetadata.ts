@@ -1,5 +1,6 @@
 import type { ChatCommandDecision } from './chatCommandRegistry';
 import type { AgentPlanDraft } from './agentPlanMode';
+import type { ChatOutcomeVerdict, ChatUserSignal } from './chatOutcomeSignals';
 import type { BrowserPlanCardData, BrowserPlanEvent, BrowserSessionRecord } from './computerUse';
 import type { ChatAutomationPlanPreview } from './chatAutomationPlanPreview';
 import type {
@@ -53,6 +54,62 @@ export type PersistedChatRecoveryReliabilitySummary = {
   verificationCommands?: string[];
 };
 
+// WI-4: bounded option-card findings persisted with a completed browser run so
+// "book option 2" (WI-5) has durable, structured options to resolve against
+// after the transient live card is gone. Kept tiny (<=10 items, per-field
+// clamps) so it round-trips inside MAX_PERSISTED_BOT_MESSAGE_CHARS.
+export type PersistedComputerFinding = {
+  title: string;
+  url?: string;
+  price?: string;
+  rating?: string;
+  notes?: string;
+};
+
+export type PersistedComputerFindings = {
+  runId?: string | null;
+  sessionId?: string | null;
+  items: PersistedComputerFinding[];
+};
+
+// Per-field clamps (chars) and item cap. Mirrors the edge Finding shape
+// (index.ts:1261) but bounded for persistence.
+const COMPUTER_FINDINGS_MAX_ITEMS = 10;
+const COMPUTER_FINDING_TITLE_MAX = 140;
+const COMPUTER_FINDING_URL_MAX = 240;
+const COMPUTER_FINDING_PRICE_MAX = 40;
+const COMPUTER_FINDING_RATING_MAX = 40;
+const COMPUTER_FINDING_NOTES_MAX = 200;
+const COMPUTER_FINDINGS_ID_MAX = 80;
+
+// Best-of-N race summary persisted with the reply message so every candidate
+// stays one tap to adopt after reload (the interactive answer to Cursor's
+// read-the-worktree-diff adoption flow). Mirrors the computerFindings
+// pattern: tiny bounded shape (<=4 candidates, per-field clamps) so it
+// round-trips inside MAX_PERSISTED_BOT_MESSAGE_CHARS.
+export type PersistedBestOfNRace = {
+  task: string;
+  winnerIndex: number | null;
+  judged: boolean;
+  candidates: Array<{
+    model: string;
+    ok: boolean;
+    score: number | null;
+    note: string;
+    durationMs: number;
+    text: string;
+  }>;
+};
+
+// Per-field clamps (chars) and candidate cap. Mirrors BestOfNRaceSummary from
+// bestOfNRace.ts (no import — this module stays standalone, like the edge
+// Finding mirror above) but bounded for persistence: text stays adopt-sized.
+const BEST_OF_N_MAX_CANDIDATES = 4;
+const BEST_OF_N_TASK_MAX = 160;
+const BEST_OF_N_MODEL_MAX = 80;
+const BEST_OF_N_NOTE_MAX = 120;
+const BEST_OF_N_TEXT_MAX = 1500;
+
 export type PersistedChatBotMetadata = {
   localMessageId?: string;
   source?: {
@@ -89,7 +146,249 @@ export type PersistedChatBotMetadata = {
   };
   observedEval?: OpenSwanObservedEvalSummary | null;
   routing?: SwanBotStructuredResponse['routing'] | null;
+  computerFindings?: PersistedComputerFindings | null;
+  bestOfN?: PersistedBestOfNRace | null;
+  // Flywheel signal (Cursor-Tab precedent): the machine-derived outcome
+  // verdict plus the user's accept/reject/edit-resend/steer reaction, kept as
+  // tiny enums (+ short lane/model ids) so it becomes BlackSwan training
+  // signal with no free-text/PII. See chatOutcomeSignals.ts. It is so small it
+  // rides the 'minimal' persistence tier and is dropped only in 'tiny'.
+  outcomeSignal?: PersistedOutcomeSignal | null;
 };
+
+export type PersistedOutcomeSignal = {
+  verdict: ChatOutcomeVerdict;
+  signal?: ChatUserSignal;
+  lane?: string;
+  model?: string;
+};
+
+// Enum/id whitelists so a persisted row (untrusted after round-trip) can only
+// carry known-small values. Kept local — this module stays standalone rather
+// than importing the chatOutcomeSignals runtime, mirroring the edge Finding /
+// bestOfN mirror pattern above.
+const OUTCOME_VERDICTS = ['completed', 'partial', 'blocked', 'failed', 'unknown'] as const;
+const OUTCOME_SIGNALS = ['accept', 'reject', 'edit_resend', 'steer', 'retry', 'abandon'] as const;
+const OUTCOME_LANE_MAX = 48;
+const OUTCOME_MODEL_MAX = 80;
+
+// Internal compaction reused by every persistence tier so the field is always
+// bounded identically (mirrors compactComputerFindings). Hard id clamps keep
+// the byte cost predictable; unknown verdicts collapse to 'unknown' and
+// unknown signals drop. Returns undefined when there is no usable signal.
+function compactOutcomeSignal(
+  signal?: PersistedOutcomeSignal | null,
+): PersistedOutcomeSignal | undefined {
+  if (!signal || typeof signal !== 'object' || Array.isArray(signal)) return undefined;
+  const raw = signal as Record<string, unknown>;
+  const verdict = (OUTCOME_VERDICTS as readonly string[]).includes(raw.verdict as string)
+    ? (raw.verdict as ChatOutcomeVerdict)
+    : 'unknown';
+  const userSignal = (OUTCOME_SIGNALS as readonly string[]).includes(raw.signal as string)
+    ? (raw.signal as ChatUserSignal)
+    : undefined;
+  const lane = typeof raw.lane === 'string' && raw.lane.trim()
+    ? raw.lane.trim().slice(0, OUTCOME_LANE_MAX)
+    : undefined;
+  const model = typeof raw.model === 'string' && raw.model.trim()
+    ? raw.model.trim().slice(0, OUTCOME_MODEL_MAX)
+    : undefined;
+  // Nothing worth persisting: no explicit verdict AND no reaction/ids.
+  const hasVerdict = (OUTCOME_VERDICTS as readonly string[]).includes(raw.verdict as string);
+  if (!hasVerdict && !userSignal && !lane && !model) return undefined;
+  const compacted: PersistedOutcomeSignal = { verdict };
+  if (userSignal) compacted.signal = userSignal;
+  if (lane) compacted.lane = lane;
+  if (model) compacted.model = model;
+  return compacted;
+}
+
+// Reader — pull the flywheel signal back off a persisted bot message (e.g. to
+// re-stamp a user reaction, or aggregate for the dashboard). Re-clamps
+// defensively since the row content is untrusted after a round-trip.
+export function readPersistedOutcomeSignal(
+  metadata: Record<string, unknown> | null | undefined,
+): PersistedOutcomeSignal | null {
+  const raw = metadata?.outcomeSignal;
+  if (!raw || typeof raw !== 'object') return null;
+  return compactOutcomeSignal(raw as PersistedOutcomeSignal) ?? null;
+}
+
+// WI-4 builder — turn raw run findings into the bounded persisted shape.
+// Hard clamp with no verbose "[truncated]" suffix — findings fields are short
+// and must have predictable byte cost so 10 items always fit the message cap.
+function clampFindingText(value: string, maxChars: number): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  return `${trimmed.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`;
+}
+
+// `findings` accepts the edge Finding-ish objects (title required; url/price/
+// rating/notes optional; extra keys ignored). Returns undefined when there is
+// nothing worth persisting so callers can spread it conditionally.
+export function computerFindingsMetadata(
+  findings: ReadonlyArray<{
+    title?: unknown;
+    url?: unknown;
+    price?: unknown;
+    rating?: unknown;
+    notes?: unknown;
+  } | null | undefined> | null | undefined,
+  ids: { runId?: string | null; sessionId?: string | null },
+): PersistedComputerFindings | undefined {
+  const items: PersistedComputerFinding[] = [];
+  if (Array.isArray(findings)) {
+    for (const raw of findings) {
+      if (!raw || typeof raw !== 'object') continue;
+      const title = typeof raw.title === 'string' ? raw.title.trim() : '';
+      if (!title) continue;
+      const item: PersistedComputerFinding = {
+        title: clampFindingText(title, COMPUTER_FINDING_TITLE_MAX),
+      };
+      if (typeof raw.url === 'string' && raw.url.trim()) {
+        item.url = clampFindingText(raw.url.trim(), COMPUTER_FINDING_URL_MAX);
+      }
+      if (typeof raw.price === 'string' && raw.price.trim()) {
+        item.price = clampFindingText(raw.price.trim(), COMPUTER_FINDING_PRICE_MAX);
+      }
+      if (typeof raw.rating === 'string' && raw.rating.trim()) {
+        item.rating = clampFindingText(raw.rating.trim(), COMPUTER_FINDING_RATING_MAX);
+      }
+      if (typeof raw.notes === 'string' && raw.notes.trim()) {
+        item.notes = clampFindingText(raw.notes.trim(), COMPUTER_FINDING_NOTES_MAX);
+      }
+      items.push(item);
+      if (items.length >= COMPUTER_FINDINGS_MAX_ITEMS) break;
+    }
+  }
+  const runId = typeof ids.runId === 'string' && ids.runId
+    ? clampFindingText(ids.runId, COMPUTER_FINDINGS_ID_MAX)
+    : null;
+  const sessionId = typeof ids.sessionId === 'string' && ids.sessionId
+    ? clampFindingText(ids.sessionId, COMPUTER_FINDINGS_ID_MAX)
+    : null;
+  if (items.length === 0 && !runId && !sessionId) return undefined;
+  return { runId, sessionId, items };
+}
+
+// WI-4 reader — pull the findings back off a persisted bot message so WI-5 can
+// match "book option 2" against durable options. Re-clamps defensively (the row
+// content is untrusted after a round-trip).
+export function readPersistedComputerFindings(
+  metadata: PersistedChatBotMetadata | null | undefined,
+): PersistedComputerFindings | null {
+  const raw = metadata?.computerFindings;
+  if (!raw || typeof raw !== 'object') return null;
+  const compacted = compactComputerFindings(raw);
+  return compacted ?? null;
+}
+
+// Internal compaction reused by every persistence tier so the field is always
+// bounded identically no matter which tier survives the byte cap.
+function compactComputerFindings(
+  findings?: PersistedComputerFindings | null,
+): PersistedComputerFindings | undefined {
+  if (!findings || typeof findings !== 'object') return undefined;
+  const items: PersistedComputerFinding[] = [];
+  const rawItems = Array.isArray(findings.items) ? findings.items : [];
+  for (const raw of rawItems) {
+    if (!raw || typeof raw !== 'object') continue;
+    const title = typeof raw.title === 'string' ? raw.title.trim() : '';
+    if (!title) continue;
+    const item: PersistedComputerFinding = {
+      title: clampFindingText(title, COMPUTER_FINDING_TITLE_MAX),
+    };
+    if (typeof raw.url === 'string' && raw.url.trim()) {
+      item.url = clampFindingText(raw.url.trim(), COMPUTER_FINDING_URL_MAX);
+    }
+    if (typeof raw.price === 'string' && raw.price.trim()) {
+      item.price = clampFindingText(raw.price.trim(), COMPUTER_FINDING_PRICE_MAX);
+    }
+    if (typeof raw.rating === 'string' && raw.rating.trim()) {
+      item.rating = clampFindingText(raw.rating.trim(), COMPUTER_FINDING_RATING_MAX);
+    }
+    if (typeof raw.notes === 'string' && raw.notes.trim()) {
+      item.notes = clampFindingText(raw.notes.trim(), COMPUTER_FINDING_NOTES_MAX);
+    }
+    items.push(item);
+    if (items.length >= COMPUTER_FINDINGS_MAX_ITEMS) break;
+  }
+  const runId = typeof findings.runId === 'string' && findings.runId
+    ? clampFindingText(findings.runId, COMPUTER_FINDINGS_ID_MAX)
+    : null;
+  const sessionId = typeof findings.sessionId === 'string' && findings.sessionId
+    ? clampFindingText(findings.sessionId, COMPUTER_FINDINGS_ID_MAX)
+    : null;
+  if (items.length === 0 && !runId && !sessionId) return undefined;
+  return { runId, sessionId, items };
+}
+
+// Best-of-N builder — validate + clamp a race summary (`summarizeBestOfNRace`
+// output from bestOfNRace.ts, or anything shaped like it) into the bounded
+// persisted shape: <=4 candidates, task <=160, note <=120, text <=1500, so
+// persisted rows stay bounded. Returns null when there are no usable
+// candidates so callers can attach it conditionally.
+export function bestOfNMetadata(summary: unknown): PersistedBestOfNRace | null {
+  return compactBestOfNRace(summary) ?? null;
+}
+
+// Best-of-N reader — pull the race back off a persisted bot message so the
+// adopt card can offer every candidate after reload. Re-clamps defensively
+// (the row content is untrusted after a round-trip).
+export function readPersistedBestOfNRace(
+  metadata: Record<string, unknown> | null | undefined,
+): PersistedBestOfNRace | null {
+  const raw = metadata?.bestOfN;
+  if (!raw || typeof raw !== 'object') return null;
+  return compactBestOfNRace(raw) ?? null;
+}
+
+// Internal compaction reused by every persistence tier so the field is always
+// bounded identically no matter which tier survives the byte cap (mirrors
+// compactComputerFindings).
+function compactBestOfNRace(race: unknown): PersistedBestOfNRace | undefined {
+  if (!race || typeof race !== 'object' || Array.isArray(race)) return undefined;
+  const raw = race as Record<string, unknown>;
+  const rawCandidates = Array.isArray(raw.candidates) ? raw.candidates : [];
+  const candidates: PersistedBestOfNRace['candidates'] = [];
+  // Original index -> kept index, so winnerIndex survives dropped junk entries.
+  const keptIndexByOriginal = new Map<number, number>();
+  for (let index = 0; index < rawCandidates.length; index += 1) {
+    if (candidates.length >= BEST_OF_N_MAX_CANDIDATES) break;
+    const entry = rawCandidates[index];
+    if (!entry || typeof entry !== 'object') continue;
+    const candidate = entry as Record<string, unknown>;
+    const model = typeof candidate.model === 'string' ? candidate.model.trim() : '';
+    if (!model) continue;
+    keptIndexByOriginal.set(index, candidates.length);
+    candidates.push({
+      model: clampFindingText(model, BEST_OF_N_MODEL_MAX),
+      ok: candidate.ok === true,
+      score: typeof candidate.score === 'number' && Number.isFinite(candidate.score)
+        ? candidate.score
+        : null,
+      note: typeof candidate.note === 'string'
+        ? clampFindingText(candidate.note, BEST_OF_N_NOTE_MAX)
+        : '',
+      durationMs: typeof candidate.durationMs === 'number' && Number.isFinite(candidate.durationMs)
+        ? Math.max(0, Math.round(candidate.durationMs))
+        : 0,
+      text: typeof candidate.text === 'string'
+        ? clampFindingText(candidate.text, BEST_OF_N_TEXT_MAX)
+        : '',
+    });
+  }
+  if (candidates.length === 0) return undefined;
+  const task = typeof raw.task === 'string' ? clampFindingText(raw.task, BEST_OF_N_TASK_MAX) : '';
+  // Winner must map to a kept, successful candidate — anything else is null
+  // (adopt-card star + adopt button stay coherent on untrusted rows).
+  let winnerIndex: number | null = null;
+  if (typeof raw.winnerIndex === 'number' && Number.isInteger(raw.winnerIndex)) {
+    const kept = keptIndexByOriginal.get(raw.winnerIndex);
+    if (kept !== undefined && candidates[kept].ok) winnerIndex = kept;
+  }
+  return { task, winnerIndex, judged: raw.judged === true, candidates };
+}
 
 function normalizeChatAgentName(value: string | null | undefined): string {
   const trimmed = value?.trim();
@@ -354,7 +653,12 @@ function hasPersistedMetadata(metadata?: PersistedChatBotMetadata): boolean {
     !!metadata.chatAutomationPlanPreview ||
     !!metadata.modeOutcomeSummary?.headline ||
     !!metadata.observedEval ||
-    !!metadata.routing
+    !!metadata.routing ||
+    (metadata.computerFindings?.items?.length || 0) > 0 ||
+    !!metadata.computerFindings?.runId ||
+    !!metadata.computerFindings?.sessionId ||
+    (metadata.bestOfN?.candidates?.length || 0) > 0 ||
+    !!compactOutcomeSignal(metadata.outcomeSignal)
   );
 }
 
@@ -946,6 +1250,9 @@ function compactPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
     modeOutcomeSummary: metadata.modeOutcomeSummary,
     observedEval: metadata.observedEval,
     routing: metadata.routing,
+    computerFindings: compactComputerFindings(metadata.computerFindings),
+    bestOfN: compactBestOfNRace(metadata.bestOfN),
+    outcomeSignal: compactOutcomeSignal(metadata.outcomeSignal),
   };
 }
 
@@ -1046,6 +1353,16 @@ function minimalPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
       verification: (metadata.observedEval as any).verification,
     } as any : metadata.observedEval,
     routing: metadata.routing,
+    // Findings are the anchor for "book option 2"; keep them intact at the
+    // minimal tier (already tightly bounded) so the follow-up seam survives.
+    computerFindings: compactComputerFindings(metadata.computerFindings),
+    // Same deal for the best-of-N race: it is the anchor for one-tap adopt
+    // and already tightly bounded, so it rides through the minimal tier too.
+    bestOfN: compactBestOfNRace(metadata.bestOfN),
+    // Flywheel signal is a handful of enum bytes — the whole point is that it
+    // is durable training data, so it rides the minimal tier and is dropped
+    // only in the narrative-only 'tiny' fallback below.
+    outcomeSignal: compactOutcomeSignal(metadata.outcomeSignal),
   };
 }
 
@@ -1091,6 +1408,9 @@ export function formatPersistedChatBotMessage(
         recoveryReliability: compactRecoveryReliability(metadata.recoveryReliability),
         computerHandoff: compactComputerHandoff(metadata.computerHandoff),
         chatAutomationPlanPreview: compactChatAutomationPlanPreview(metadata.chatAutomationPlanPreview),
+        computerFindings: compactComputerFindings(metadata.computerFindings),
+        bestOfN: compactBestOfNRace(metadata.bestOfN),
+        outcomeSignal: compactOutcomeSignal(metadata.outcomeSignal),
       }
     : undefined;
 
@@ -1107,12 +1427,16 @@ export function formatPersistedChatBotMessage(
     normalizedMetadata,
     compactPersistedMetadata(normalizedMetadata),
     minimalPersistedMetadata(normalizedMetadata),
+    // 'tiny' tier: narrative + tiny handoff only. Drop the flywheel signal
+    // here — it is telemetry, and at this tier we are already trimming to fit
+    // the byte cap, so the visible answer wins over the training signal.
     tinyHandoff
-      ? { ...minimalPersistedMetadata(normalizedMetadata), computerHandoff: tinyHandoff }
+      ? { ...minimalPersistedMetadata(normalizedMetadata), computerHandoff: tinyHandoff, outcomeSignal: undefined }
       : undefined,
     tinyHandoff
       ? {
           ...minimalPersistedMetadata(normalizedMetadata),
+          outcomeSignal: undefined,
           computerHandoff: {
             ...tinyHandoff,
             designObjectManifest: null,
@@ -1121,14 +1445,32 @@ export function formatPersistedChatBotMessage(
           },
         }
       : undefined,
-    undefined,
   ];
 
   for (const candidate of candidates) {
-    const message = candidate && hasPersistedMetadata(candidate)
-      ? `${base}${BOT_META_MARKER}${JSON.stringify(candidate)}`
-      : base;
+    if (!candidate || !hasPersistedMetadata(candidate)) continue;
+    const message = `${base}${BOT_META_MARKER}${JSON.stringify(candidate)}`;
     if (message.length <= MAX_PERSISTED_BOT_MESSAGE_CHARS) return message;
+  }
+
+  // WI-4/WI-5 last-ditch: nothing above fit with metadata attached, but the
+  // findings are the anchor for "book option 2" and must survive. Persist ONLY
+  // the findings (+ ids), trimming the visible body if needed to make room, so
+  // the follow-up seam never loses its durable options.
+  const findingsOnly = normalizedMetadata?.computerFindings;
+  if (findingsOnly && hasPersistedMetadata({ computerFindings: findingsOnly })) {
+    const findingsMeta: PersistedChatBotMetadata = {
+      localMessageId: normalizedMetadata?.localMessageId,
+      source: normalizedMetadata?.source,
+      computerFindings: findingsOnly,
+    };
+    const suffix = `${BOT_META_MARKER}${JSON.stringify(findingsMeta)}`;
+    const bodyBudget = MAX_PERSISTED_BOT_MESSAGE_CHARS - suffix.length;
+    if (bodyBudget > 0) {
+      const trimmedBase = base.length <= bodyBudget ? base : truncateText(base, bodyBudget);
+      const message = `${trimmedBase}${suffix}`;
+      if (message.length <= MAX_PERSISTED_BOT_MESSAGE_CHARS) return message;
+    }
   }
 
   return truncateText(base, MAX_PERSISTED_BOT_MESSAGE_CHARS);

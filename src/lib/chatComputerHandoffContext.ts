@@ -42,6 +42,7 @@ import {
   type StickyScopeAppliedSummary,
 } from './computerGrantGate';
 import type { ComputerTaskEvidenceContract } from './computerTaskEvidenceContract';
+import { getModelCapabilityFlags, normalizeModelId } from './modelCapabilities';
 
 export type ChatComputerSurfaceKind = 'browser' | 'desktop' | 'local_files' | 'computer';
 
@@ -667,4 +668,87 @@ export function formatChatComputerHandoffForMessage(
 
   const lines = problemLines(context, Boolean(options.includeTechnicalPaths));
   return lines.length ? `\n\n**Needs attention**\n${lines.join('\n')}` : '';
+}
+
+// ─── Model substitution visibility (2.5) ────────────────────────────────────
+//
+// The native screenshot/action computer-use loop requires a Sonnet-class
+// model, so `supabase/functions/computer-use-agent/index.ts` pins
+// `claude-sonnet-4-6` when the requested model can't drive it (that pin —
+// `resolveComputerUseModel` — is the owner and stays unchanged). These
+// helpers make that substitution VISIBLE instead of silent: a deterministic
+// client-side mirror of the edge coercion (the edge also emits a typed
+// `model_resolved` SSE event with the same shape) plus the one compact
+// user-facing notice line. Text-only planner/validator steps always keep the
+// user's selected model — only the native loop pins Sonnet.
+
+/** The Sonnet model the native computer-use loop pins when the requested
+ *  model cannot drive it. Keep in lockstep with DEFAULT_AGENT_MODEL in
+ *  supabase/functions/computer-use-agent/index.ts. */
+export const COMPUTER_USE_PINNED_LOOP_MODEL = 'claude-sonnet-4-6';
+
+/** Matches the `model_resolved` SSE event payload from the edge loop
+ *  (plus the derived `substituted` convenience flag). */
+export interface ComputerTaskModelResolution {
+  /** The model the user/caller asked for ('' when none was requested). */
+  requestedModel: string;
+  /** The model the native screenshot/action loop actually runs on. */
+  resolvedModel: string;
+  /** True only when a requested model was swapped for the Sonnet pin. */
+  substituted: boolean;
+  reason: 'computer_use_requires_sonnet' | null;
+}
+
+/**
+ * Deterministic mirror of the edge loop's model coercion. Capability flags
+ * own the decision (unknown ids fail closed to computerUse:false → pin);
+ * the sonnet-family regex is exact parity with the edge's
+ * `resolveComputerUseModel`, so legacy sonnet ids the flags table does not
+ * list never produce a false substitution notice. No requested model is a
+ * plain default, not a substitution.
+ */
+export function resolveComputerTaskLoopModel(model?: string | null): ComputerTaskModelResolution {
+  const requestedModel = String(model || '').trim();
+  if (!requestedModel) {
+    return {
+      requestedModel: '',
+      resolvedModel: COMPUTER_USE_PINNED_LOOP_MODEL,
+      substituted: false,
+      reason: null,
+    };
+  }
+  const normalized = requestedModel.startsWith('anthropic/')
+    ? requestedModel.slice('anthropic/'.length)
+    : requestedModel;
+  const canDriveNativeLoop = getModelCapabilityFlags(requestedModel).computerUse
+    || /^claude-.*sonnet/i.test(normalized);
+  if (canDriveNativeLoop) {
+    return { requestedModel, resolvedModel: normalized, substituted: false, reason: null };
+  }
+  return {
+    requestedModel,
+    resolvedModel: COMPUTER_USE_PINNED_LOOP_MODEL,
+    substituted: true,
+    reason: 'computer_use_requires_sonnet',
+  };
+}
+
+/** Bounded display name for a model id: provider prefixes stripped, short. */
+function shortModelName(modelId: string): string {
+  const normalized = normalizeModelId(modelId) || String(modelId || '').trim().toLowerCase();
+  return (normalized || 'default model').slice(0, 48);
+}
+
+/**
+ * The one compact user-facing line for a model substitution. Empty string
+ * when nothing was substituted (computer-use-capable models never get a
+ * notice), so callers can `filter(Boolean)` it into existing notice lists.
+ * Phase 2b wording: says WHY the swap happened and that the user's pick
+ * still participates — the terse "(X plans/verifies)" read as a bug.
+ */
+export function formatComputerTaskModelResolutionNotice(
+  resolution: Pick<ComputerTaskModelResolution, 'requestedModel' | 'resolvedModel' | 'substituted'>,
+): string {
+  if (!resolution.substituted) return '';
+  return `Screen loop needs computer-use, so it runs on ${shortModelName(resolution.resolvedModel)}; your pick (${shortModelName(resolution.requestedModel)}) still plans and verifies.`;
 }

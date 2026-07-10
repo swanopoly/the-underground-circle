@@ -242,6 +242,61 @@ export const INTEGRATION_DEFINITIONS: Record<string, IntegrationDefinition> = {
       'Write, delete, publish, billing, and customer-impacting calls must route through approval before execution.',
     ],
   },
+  // ── Team messaging (outbound via incoming webhooks) ──
+  // These providers previously only "tracked the connection" and could not
+  // post anything. The `incoming_webhook_url` secret lets an agent post a
+  // completion summary / approval request / alert to the team's channel
+  // through the guarded, approval-gated `messaging.notify` tool +
+  // `messaging-notify` edge function (server-side secret injection, private-
+  // host block, no secret leak — mirrors the custom_api.request pattern).
+  slack: {
+    provider: 'slack',
+    label: 'Slack',
+    description: 'Post agent completion summaries, approval requests, and alerts to a Slack channel via an incoming webhook. Approval-gated and server-side only — the webhook URL never reaches the model or the browser.',
+    capabilityFlags: ['messaging', 'post_channel_message', 'team_notifications', 'agent_tool'],
+    requiredSecretKeys: ['incoming_webhook_url'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'workspaceName', label: 'Workspace Name', placeholder: 'Acme HQ', required: false },
+      { key: 'defaultChannel', label: 'Default Channel', placeholder: '#team-updates', required: false },
+    ],
+    validationHints: [
+      'Paste a Slack Incoming Webhook URL (Slack → Apps → Incoming Webhooks → Add to a channel). It looks like https://hooks.slack.com/services/T…/B…/….',
+      'The webhook is stored as a secret and injected server-side; posting a message is approval-gated as an external side effect.',
+    ],
+  },
+  discord: {
+    provider: 'discord',
+    label: 'Discord',
+    description: 'Post agent completion summaries, approval requests, and alerts to a Discord channel via a channel webhook. Approval-gated and server-side only — the webhook URL never reaches the model or the browser.',
+    capabilityFlags: ['messaging', 'post_channel_message', 'team_notifications', 'agent_tool'],
+    requiredSecretKeys: ['incoming_webhook_url'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'serverName', label: 'Server Name', placeholder: 'Acme Guild', required: false },
+      { key: 'defaultChannel', label: 'Default Channel', placeholder: '#alerts', required: false },
+    ],
+    validationHints: [
+      'Paste a Discord Webhook URL (Server Settings → Integrations → Webhooks → New Webhook → Copy Webhook URL). It looks like https://discord.com/api/webhooks/…/….',
+      'The webhook is stored as a secret and injected server-side; posting a message is approval-gated as an external side effect.',
+    ],
+  },
+  teams: {
+    provider: 'teams',
+    label: 'Microsoft Teams',
+    description: 'Post agent completion summaries, approval requests, and alerts to a Microsoft Teams channel via an incoming webhook. Approval-gated and server-side only — the webhook URL never reaches the model or the browser.',
+    capabilityFlags: ['messaging', 'post_channel_message', 'team_notifications', 'agent_tool'],
+    requiredSecretKeys: ['incoming_webhook_url'],
+    optionalSecretKeys: [],
+    metadataFields: [
+      { key: 'teamName', label: 'Team Name', placeholder: 'Engineering', required: false },
+      { key: 'defaultChannel', label: 'Default Channel', placeholder: 'Deploys', required: false },
+    ],
+    validationHints: [
+      'Paste a Teams Incoming Webhook URL (channel → … → Connectors → Incoming Webhook → Configure). It looks like https://<tenant>.webhook.office.com/webhookb2/….',
+      'The webhook is stored as a secret and injected server-side; posting a message is approval-gated as an external side effect.',
+    ],
+  },
   apify: {
     provider: 'apify',
     label: 'Apify',

@@ -86,6 +86,13 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | WordPress/Dealer Inspire admin automation | `src/lib/wpAdmin.ts`, `src/lib/computerAppTaskStrategy.ts`, `src/lib/chatComputerRequestRouter.ts`, `src/lib/userTaskPipelines.ts`, `src/lib/wordpressAdminSourceIntelligence.ts` |
 | Design creative AI | `src/lib/designAppCreativeAi.ts` |
 | Design execution pipeline | `src/lib/designAppExecutionPipeline.ts` |
+| Photoshop ExtendScript adapters | `src/lib/photoshopExtendScriptAdapters.ts` (LOCKSTEP: `scripts/claude-bridge.js`) |
+| Local CAD execution | `src/lib/cadCodeExecutor.ts`, `src/lib/cadFileInspector.ts`, `desktop.cad_compile` |
+| A11y action verification diff | `src/lib/a11yTreeDiff.ts` |
+| Illustrator ExtendScript adapters | `src/lib/illustratorExtendScriptAdapters.ts` (LOCKSTEP: `scripts/claude-bridge.js`) |
+| Per-app automation profiles | `docs/apps/*.md` + `src/lib/appAutomationDocsIndex.ts` (status lockstep smoke) |
+| App reachability (live ladder) | `src/lib/appReachability.ts`, `src/lib/appReachabilityProbe.ts`, tool `desktop.app_reachability`, `/apps` command |
+| App screen observe/next-step | `src/lib/appScreenNextStep.ts`, tool `desktop.observe_app` (one-round-trip observe + Δ diff + suggestion) |
 | Marketplace prompt context | `src/lib/marketplaceIntegrationContext.ts` |
 
 Rule: new routing behavior goes into the relevant owner above. Do not extend

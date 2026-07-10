@@ -13,6 +13,7 @@ Steps:
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -25,17 +26,76 @@ from huggingface_hub import HfApi
 SCRIPT_DIR = Path(__file__).parent
 MODELS_DIR = SCRIPT_DIR / "models" / "v5"
 LORA_DIR = MODELS_DIR / "lora_v2"
-FUSED_DIR = MODELS_DIR / "fused_v2"
+FUSED_DIR = MODELS_DIR / "fused"
 UPLOAD_DIR = MODELS_DIR / "hf_upload_v2"
 BASE_MODEL = "mlx-community/Qwen3.5-4B-4bit"
 HF_REPO = "cswan801/BlackSwan-v5"
+
+
+def fused_weight_files():
+    """Return the current MLX fused safetensor shards, preferring the index."""
+    index_path = FUSED_DIR / "model.safetensors.index.json"
+    if index_path.exists():
+        with open(index_path) as f:
+            index = json.load(f)
+        shard_names = sorted(set(index.get("weight_map", {}).values()))
+        files = [FUSED_DIR / name for name in shard_names]
+        missing = [str(path) for path in files if not path.exists()]
+        if missing:
+            raise FileNotFoundError(f"Fused shard(s) missing: {', '.join(missing)}")
+        return files
+
+    single = FUSED_DIR / "model.safetensors"
+    if single.exists():
+        return [single]
+
+    raise FileNotFoundError(f"No fused model weights found in {FUSED_DIR}")
+
+
+def load_fused_tensors():
+    """Load all fused MLX tensors from one file or the current shard index."""
+    tensors = {}
+    files = fused_weight_files()
+    for sf_file in files:
+        print(f"  Loading fused shard {sf_file.name}...")
+        shard = st.load_file(str(sf_file))
+        overlap = set(tensors).intersection(shard)
+        if overlap:
+            raise ValueError(f"Duplicate tensor(s) across fused shards: {sorted(overlap)[:5]}")
+        tensors.update(shard)
+    print(f"  Loaded {len(tensors)} fused tensors from {len(files)} file(s)")
+    return tensors
+
+
+def mlx_to_hf_name(mlx_name):
+    """Map MLX fused tensor names back to the original HF Qwen3.5 layout."""
+    if mlx_name.startswith("language_model.model."):
+        return "model.language_model." + mlx_name[len("language_model.model."):]
+    if mlx_name.startswith("language_model."):
+        return "model." + mlx_name
+    return mlx_name
 
 
 def step1_fuse_lora():
     """Fuse LoRA adapters with base model using mlx_lm."""
     print("\n=== Step 1: Fuse LoRA with base model ===")
     
-    if FUSED_DIR.exists() and (FUSED_DIR / "model.safetensors").exists():
+    if FUSED_DIR.exists():
+        try:
+            files = fused_weight_files()
+        except FileNotFoundError:
+            files = []
+        if files:
+            print(f"  Fused model already exists at {FUSED_DIR}, skipping...")
+            return
+
+    if FUSED_DIR.exists() and not any(FUSED_DIR.iterdir()):
+        FUSED_DIR.rmdir()
+    elif FUSED_DIR.exists():
+        print(f"  Removing incomplete fused output at {FUSED_DIR}")
+        shutil.rmtree(FUSED_DIR)
+
+    if FUSED_DIR.exists() and fused_weight_files():
         print(f"  Fused model already exists at {FUSED_DIR}, skipping...")
         return
     
@@ -45,13 +105,17 @@ def step1_fuse_lora():
         "--model", BASE_MODEL,
         "--adapter-path", str(LORA_DIR),
         "--save-path", str(FUSED_DIR),
-        "--de-quantize",
+        "--dequantize",
     ]
     print(f"  Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"  STDERR: {result.stderr}")
-        raise RuntimeError(f"Fusion failed with exit code {result.returncode}")
+        try:
+            fused_weight_files()
+        except FileNotFoundError:
+            raise RuntimeError(f"Fusion failed with exit code {result.returncode}")
+        print("  mlx_lm fuse reported a model-card error after writing weights; continuing.")
     print(f"  Fused model saved to {FUSED_DIR}")
 
 
@@ -59,13 +123,13 @@ def step2_convert_to_hf():
     """Convert MLX fused weights to HF format with proper tensor names."""
     print("\n=== Step 2: Convert to HF format ===")
     
+    if UPLOAD_DIR.exists():
+        shutil.rmtree(UPLOAD_DIR)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     
     # Load fused MLX model
-    fused_path = FUSED_DIR / "model.safetensors"
-    print(f"  Loading fused model from {fused_path}...")
-    mlx_tensors = st.load_file(str(fused_path))
-    print(f"  Loaded {len(mlx_tensors)} tensors")
+    print(f"  Loading fused model from {FUSED_DIR}...")
+    mlx_tensors = load_fused_tensors()
     
     # Download original Qwen3.5-4B for reference (vision encoder + MTP head)
     from huggingface_hub import snapshot_download
@@ -89,11 +153,8 @@ def step2_convert_to_hf():
     # First, add our fused text model weights with name remapping
     for mlx_name, tensor in mlx_tensors.items():
         # MLX: language_model.model.layers.0.self_attn.q_proj.weight
-        # HF:  model.language_model.model.layers.0.self_attn.q_proj.weight
-        if mlx_name.startswith("language_model."):
-            hf_name = "model." + mlx_name
-        else:
-            hf_name = mlx_name
+        # HF:  model.language_model.layers.0.self_attn.q_proj.weight
+        hf_name = mlx_to_hf_name(mlx_name)
         
         # Convert to torch tensor (bfloat16)
         # MLX tensors loaded by safetensors.torch are already torch tensors

@@ -87,6 +87,19 @@ function inferTaskRisk(task: string): {
   };
 }
 
+/**
+ * WI-2: does the task require entering credentials / logging in on a website?
+ * The login/credential floor is never auto-satisfied — a credentialed
+ * website-admin flow (e.g. WordPress admin) keeps its up-front approval grant
+ * even after browser-runtime side effects are downgraded to zero-tap. Also
+ * treats explicit CMS/admin-panel phrasing as credential-gated since those are
+ * login-walled surfaces. Guest-checkout browse/book flows never match here.
+ */
+function taskInvolvesCredentialFloor(task: string): boolean {
+  const normalized = String(task || '').toLowerCase();
+  return /\b(log ?in|log ?into|sign ?in|sign ?into|authenticate|enter (?:my )?(?:password|credentials?|login)|my account|admin\s*(?:panel|dashboard|area)?|wp[-\s]?admin|wp[-\s]?login|wordpress\s+admin|dashboard\s+(?:for|of)|cms)\b/.test(normalized);
+}
+
 function pushGrant(
   target: Map<ComputerTaskGrantId, ComputerTaskGrant>,
   grant: ComputerTaskGrant,
@@ -132,12 +145,21 @@ export function buildComputerTaskGrantPlan(args: {
 
   if (args.preview.kind === 'browser_task' || needsBrowserAutomation) {
     if (risk.hasActionIntent || risk.hasWriteIntent) {
+      // WI-2: browser-runtime side effects (navigate/fill/click/extract on a
+      // public website) no longer stand up a pre-run approval grant — the
+      // single commit confirmation fires mid-run at the payment floor
+      // enforced in the edge tool loop. The credential/login floor stays:
+      // when the task involves login/sign-in/credential entry, keep the grant
+      // gated so a credentialed website-admin flow still asks up front.
+      const involvesCredentialFloor = taskInvolvesCredentialFloor(args.task);
       pushGrant(grants, {
         id: 'browser_side_effect',
         label: 'Browser side effects',
         level: 'action',
-        approvalRequired: true,
-        reason: 'The task may submit forms, click through flows, log in, or make changes on websites.',
+        approvalRequired: involvesCredentialFloor,
+        reason: involvesCredentialFloor
+          ? 'The task may log in or enter credentials on a website — the login/credential floor requires explicit approval.'
+          : 'The task may submit forms, click through flows, or make changes on websites; the single commit is confirmed mid-run at the payment floor.',
       });
     }
   }

@@ -2311,11 +2311,14 @@ const server = http.createServer(async (req, res) => {
       platform: process.platform,
       supported: process.platform === 'darwin',
       tools: process.platform === 'darwin'
-        ? ['launch', 'focus', 'type', 'keys', 'running_apps', 'installed_apps', 'app_installed', 'browser_tabs', 'window_state', 'clipboard', 'clipboard_write', 'clipboard_clear',
+        ? ['launch', 'focus', 'type', 'keys', 'running_apps', 'installed_apps', 'app_installed', 'browser_tabs', 'window_state', 'observe_app', 'clipboard', 'clipboard_write', 'clipboard_clear',
            'file_list', 'file_read', 'file_search', 'file_stat', 'file_write', 'file_rename', 'file_write_text', 'file_copy', 'file_trash', 'file_mkdir', 'shortcuts_list', 'shortcuts_run', 'window_manage', 'mouse_move', 'mouse_click', 'mouse_down', 'mouse_up', 'mouse_drag', 'mouse_scroll',
-           'paste_text', 'notes_create', 'applescript', 'convert_image',
+           'paste_text', 'notes_create', 'applescript', 'convert_image', 'cad_compile', 'design_export',
            'menu_click', 'indesign_find_change', 'indesign_batch_find_change', 'indesign_document_status', 'indesign_text_inventory', 'indesign_set_layer_state', 'indesign_update_text_layer', 'indesign_batch_update_text_layers', 'indesign_relink_asset', 'indesign_export_proof', 'indesign_package_document',
            'photoshop_document_status', 'photoshop_layer_inventory', 'photoshop_set_layer_state', 'photoshop_update_text_layer', 'photoshop_place_asset', 'photoshop_export_proof',
+           'photoshop_apply_adjustment_layer', 'photoshop_apply_selection_or_mask', 'photoshop_resize_canvas_or_image',
+           'photoshop_manage_layers', 'photoshop_transform_layer', 'photoshop_convert_color_mode',
+           'illustrator_document_status', 'illustrator_export_proof',
            'screenshot', 'wait_for_app', 'open_url', 'open_path', 'stage_attachment', 'stage_attachment_manifest', 'click_at', 'screen_size',
            ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper')) ? ['a11y_tree', 'click_element', 'set_element_value'] : [])]
         : [],
@@ -5009,6 +5012,1167 @@ end tell`;
       return;
     }
 
+    // ── Photoshop ExtendScript mutation adapters ─────────────────────
+    //
+    // LOCKSTEP(src/lib/photoshopExtendScriptAdapters.ts): validation
+    // (enums, ranges, name bounds, error strings) and receipt shapes for
+    // the Photoshop mutation endpoints below are duplicated from the pure module (the
+    // bridge is a standalone Node script and cannot import TS). The pure
+    // module is the smoke-tested source of truth — keep both in step.
+    //
+    // Shared contract: mutations verify the target document first (fail
+    // closed with error 'document_mismatch'), NEVER save the document
+    // (saving stays a separate approval-gated step), and never delete
+    // pixels — "remove background" is a selection or reveal-selection
+    // layer mask only.
+    if (url === '/desktop/photoshop_apply_adjustment_layer' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        const targetDocumentName = String(parsed?.targetDocumentName || parsed?.expectedDocumentName || '').trim();
+        const layerName = String(parsed?.layerName || '').trim();
+        const kind = String(parsed?.kind || '').trim();
+        const preserveExisting = parsed?.preserveExisting === undefined ? true : parsed?.preserveExisting;
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (targetDocumentName.length > 260 || /[\x00]/.test(targetDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'targetDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        if (layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'layerName must be <= 160 chars and cannot contain control chars.' }));
+          return;
+        }
+        if (!PHOTOSHOP_ADJUSTMENT_LAYER_KINDS.includes(kind)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'kind must be one of levels, curves, hue_saturation, brightness_contrast, black_white.' }));
+          return;
+        }
+        if (typeof preserveExisting !== 'boolean') {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'preserveExisting must be a boolean.' }));
+          return;
+        }
+        const built = buildPhotoshopApplyAdjustmentLayerScript({ appName, targetDocumentName, layerName, kind, preserveExisting });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop adjustment layer failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: result?.ok === true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            targetDocumentName: targetDocumentName || null,
+            kind,
+            preserveExisting,
+            layerName: layerName || null,
+            createdLayerName: result?.createdLayerName ? String(result.createdLayerName).slice(0, 260) : null,
+            layerCountBefore: Number.isFinite(Number(result?.layerCountBefore)) ? Number(result.layerCountBefore) : 0,
+            layerCountAfter: Number.isFinite(Number(result?.layerCountAfter)) ? Number(result.layerCountAfter) : 0,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/photoshop_apply_selection_or_mask' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        const targetDocumentName = String(parsed?.targetDocumentName || parsed?.expectedDocumentName || '').trim();
+        const layerName = String(parsed?.layerName || '').trim();
+        const mode = String(parsed?.mode || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (targetDocumentName.length > 260 || /[\x00]/.test(targetDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'targetDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        if (layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'layerName must be <= 160 chars and cannot contain control chars.' }));
+          return;
+        }
+        if (!PHOTOSHOP_SELECTION_MASK_MODES.includes(mode)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'mode must be select_only or mask_layer.' }));
+          return;
+        }
+        const built = buildPhotoshopApplySelectionOrMaskScript({ appName, targetDocumentName, layerName, mode });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop selection/mask failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const rawBounds = result?.selectionBounds;
+          const selectionBounds = rawBounds && typeof rawBounds === 'object'
+            ? {
+                left: Number.isFinite(Number(rawBounds.left)) ? Number(rawBounds.left) : 0,
+                top: Number.isFinite(Number(rawBounds.top)) ? Number(rawBounds.top) : 0,
+                right: Number.isFinite(Number(rawBounds.right)) ? Number(rawBounds.right) : 0,
+                bottom: Number.isFinite(Number(rawBounds.bottom)) ? Number(rawBounds.bottom) : 0,
+              }
+            : null;
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: result?.ok === true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            targetDocumentName: targetDocumentName || null,
+            layerName: result?.layerName ? String(result.layerName).slice(0, 260) : (layerName || null),
+            mode,
+            selectionBounds,
+            maskApplied: result?.maskApplied === true,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/photoshop_resize_canvas_or_image' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        const targetDocumentName = String(parsed?.targetDocumentName || parsed?.expectedDocumentName || '').trim();
+        const op = String(parsed?.op || '').trim();
+        const rawWidthPx = parsed?.widthPx;
+        const rawHeightPx = parsed?.heightPx;
+        const rawAnchor = parsed?.anchor == null ? '' : String(parsed.anchor).trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (targetDocumentName.length > 260 || /[\x00]/.test(targetDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'targetDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        if (!PHOTOSHOP_RESIZE_OPS.includes(op)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'op must be image_resize, canvas_resize, or crop_to_selection.' }));
+          return;
+        }
+        const validDimension = (value) => value === undefined || value === null
+          || (typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= 1 && value <= PHOTOSHOP_MAX_PIXEL_DIMENSION);
+        if (!validDimension(rawWidthPx)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `widthPx must be a finite integer between 1 and ${PHOTOSHOP_MAX_PIXEL_DIMENSION}.` }));
+          return;
+        }
+        if (!validDimension(rawHeightPx)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `heightPx must be a finite integer between 1 and ${PHOTOSHOP_MAX_PIXEL_DIMENSION}.` }));
+          return;
+        }
+        const widthPx = rawWidthPx == null ? null : rawWidthPx;
+        const heightPx = rawHeightPx == null ? null : rawHeightPx;
+        if (rawAnchor && !PHOTOSHOP_CANVAS_ANCHORS.includes(rawAnchor)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'anchor must be one of top_left, top_center, top_right, middle_left, middle_center, middle_right, bottom_left, bottom_center, bottom_right.' }));
+          return;
+        }
+        if (op === 'crop_to_selection' && (widthPx != null || heightPx != null)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'crop_to_selection does not accept widthPx or heightPx.' }));
+          return;
+        }
+        if (op !== 'crop_to_selection' && widthPx == null && heightPx == null) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `${op} requires widthPx and/or heightPx.` }));
+          return;
+        }
+        if (rawAnchor && op !== 'canvas_resize') {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'anchor is only valid for canvas_resize.' }));
+          return;
+        }
+        const anchor = rawAnchor || 'middle_center';
+        const built = buildPhotoshopResizeCanvasOrImageScript({ appName, targetDocumentName, op, widthPx, heightPx, anchor });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop resize failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: result?.ok === true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            targetDocumentName: targetDocumentName || null,
+            op,
+            anchor: op === 'canvas_resize' ? anchor : null,
+            widthPxBefore: Number.isFinite(Number(result?.widthPxBefore)) ? Number(result.widthPxBefore) : 0,
+            heightPxBefore: Number.isFinite(Number(result?.heightPxBefore)) ? Number(result.heightPxBefore) : 0,
+            widthPxAfter: Number.isFinite(Number(result?.widthPxAfter)) ? Number(result.widthPxAfter) : 0,
+            heightPxAfter: Number.isFinite(Number(result?.heightPxAfter)) ? Number(result.heightPxAfter) : 0,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    // rename/duplicate/reorder/group ONLY — there is no delete, merge, or
+    // flatten action, and the emitted JSX never contains a destructive
+    // layer call (smoke-asserted in the pure module).
+    if (url === '/desktop/photoshop_manage_layers' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        const targetDocumentName = String(parsed?.targetDocumentName || parsed?.expectedDocumentName || '').trim();
+        const action = String(parsed?.action || '').trim();
+        const layerName = String(parsed?.layerName || '').trim();
+        const newName = String(parsed?.newName || '').trim();
+        const position = parsed?.position == null ? '' : String(parsed.position).trim();
+        const referenceLayerName = String(parsed?.referenceLayerName || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (targetDocumentName.length > 260 || /[\x00]/.test(targetDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'targetDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        if (!PHOTOSHOP_MANAGE_LAYER_ACTIONS.includes(action)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'action must be one of rename, duplicate, reorder, group.' }));
+          return;
+        }
+        if (!layerName) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'layerName is required (exact layer name).' }));
+          return;
+        }
+        if (layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'layerName must be <= 160 chars and cannot contain control chars.' }));
+          return;
+        }
+        if (newName.length > 160 || /[\x00-\x1f]/.test(newName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'newName must be <= 160 chars and cannot contain control chars.' }));
+          return;
+        }
+        if (position && !PHOTOSHOP_LAYER_REORDER_POSITIONS.includes(position)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'position must be one of top, bottom, above, below.' }));
+          return;
+        }
+        if (referenceLayerName.length > 160 || /[\x00-\x1f]/.test(referenceLayerName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'referenceLayerName must be <= 160 chars and cannot contain control chars.' }));
+          return;
+        }
+        if (action === 'rename' && !newName) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'rename requires newName.' }));
+          return;
+        }
+        if (action !== 'reorder' && position) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'position is only valid for reorder.' }));
+          return;
+        }
+        if (action === 'reorder') {
+          if (newName) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'newName is only valid for rename, duplicate, or group.' }));
+            return;
+          }
+          if (!position) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'reorder requires position (top, bottom, above, or below).' }));
+            return;
+          }
+          if ((position === 'above' || position === 'below') && !referenceLayerName) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'position above/below requires referenceLayerName.' }));
+            return;
+          }
+          if ((position === 'top' || position === 'bottom') && referenceLayerName) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'referenceLayerName is only valid for position above or below.' }));
+            return;
+          }
+        } else if (referenceLayerName) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'referenceLayerName is only valid for reorder above/below.' }));
+          return;
+        }
+        if (referenceLayerName && referenceLayerName === layerName) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'referenceLayerName must differ from layerName.' }));
+          return;
+        }
+        const built = buildPhotoshopManageLayersScript({ appName, targetDocumentName, action, layerName, newName, position, referenceLayerName });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop manage layers failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: result?.ok === true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            targetDocumentName: targetDocumentName || null,
+            action,
+            layerName: layerName || null,
+            newName: newName || null,
+            position: action === 'reorder' ? (position || null) : null,
+            referenceLayerName: referenceLayerName || null,
+            resultLayerName: result?.resultLayerName ? String(result.resultLayerName).slice(0, 260) : null,
+            layerCountBefore: Number.isFinite(Number(result?.layerCountBefore)) ? Number(result.layerCountBefore) : 0,
+            layerCountAfter: Number.isFinite(Number(result?.layerCountAfter)) ? Number(result.layerCountAfter) : 0,
+            layerIndexBefore: Number.isFinite(Number(result?.layerIndexBefore)) ? Number(result.layerIndexBefore) : 0,
+            layerIndexAfter: Number.isFinite(Number(result?.layerIndexAfter)) ? Number(result.layerIndexAfter) : 0,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/photoshop_transform_layer' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        const targetDocumentName = String(parsed?.targetDocumentName || parsed?.expectedDocumentName || '').trim();
+        const layerName = String(parsed?.layerName || '').trim();
+        const op = String(parsed?.op || '').trim();
+        const rawDeltaX = parsed?.deltaX;
+        const rawDeltaY = parsed?.deltaY;
+        const rawScalePercent = parsed?.scalePercent;
+        const rawRotateDegrees = parsed?.rotateDegrees;
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (targetDocumentName.length > 260 || /[\x00]/.test(targetDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'targetDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        if (!layerName) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'layerName is required (exact layer name).' }));
+          return;
+        }
+        if (layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'layerName must be <= 160 chars and cannot contain control chars.' }));
+          return;
+        }
+        if (!PHOTOSHOP_TRANSFORM_OPS.includes(op)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'op must be move, scale, or rotate.' }));
+          return;
+        }
+        const validDelta = (value) => value === undefined || value === null
+          || (typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= -PHOTOSHOP_MAX_TRANSLATE_PX && value <= PHOTOSHOP_MAX_TRANSLATE_PX);
+        if (!validDelta(rawDeltaX)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `deltaX must be a finite integer between -${PHOTOSHOP_MAX_TRANSLATE_PX} and ${PHOTOSHOP_MAX_TRANSLATE_PX}.` }));
+          return;
+        }
+        if (!validDelta(rawDeltaY)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `deltaY must be a finite integer between -${PHOTOSHOP_MAX_TRANSLATE_PX} and ${PHOTOSHOP_MAX_TRANSLATE_PX}.` }));
+          return;
+        }
+        const validRange = (value, min, max) => value === undefined || value === null
+          || (typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max);
+        if (!validRange(rawScalePercent, PHOTOSHOP_MIN_SCALE_PERCENT, PHOTOSHOP_MAX_SCALE_PERCENT)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `scalePercent must be a finite number between ${PHOTOSHOP_MIN_SCALE_PERCENT} and ${PHOTOSHOP_MAX_SCALE_PERCENT}.` }));
+          return;
+        }
+        if (!validRange(rawRotateDegrees, -PHOTOSHOP_MAX_ROTATE_DEGREES, PHOTOSHOP_MAX_ROTATE_DEGREES)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `rotateDegrees must be a finite number between -${PHOTOSHOP_MAX_ROTATE_DEGREES} and ${PHOTOSHOP_MAX_ROTATE_DEGREES}.` }));
+          return;
+        }
+        const deltaX = rawDeltaX == null ? null : rawDeltaX;
+        const deltaY = rawDeltaY == null ? null : rawDeltaY;
+        const scalePercent = rawScalePercent == null ? null : rawScalePercent;
+        const rotateDegrees = rawRotateDegrees == null ? null : rawRotateDegrees;
+        if (op === 'move' && deltaX == null && deltaY == null) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'move requires deltaX and/or deltaY.' }));
+          return;
+        }
+        if (op !== 'move' && (deltaX != null || deltaY != null)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'deltaX/deltaY are only valid for move.' }));
+          return;
+        }
+        if (op === 'scale' && scalePercent == null) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'scale requires scalePercent.' }));
+          return;
+        }
+        if (op !== 'scale' && scalePercent != null) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'scalePercent is only valid for scale.' }));
+          return;
+        }
+        if (op === 'rotate' && rotateDegrees == null) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'rotate requires rotateDegrees.' }));
+          return;
+        }
+        if (op !== 'rotate' && rotateDegrees != null) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'rotateDegrees is only valid for rotate.' }));
+          return;
+        }
+        const built = buildPhotoshopTransformLayerScript({ appName, targetDocumentName, layerName, op, deltaX, deltaY, scalePercent, rotateDegrees });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop transform layer failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const toBounds = (raw) => raw && typeof raw === 'object'
+            ? {
+                left: Number.isFinite(Number(raw.left)) ? Number(raw.left) : 0,
+                top: Number.isFinite(Number(raw.top)) ? Number(raw.top) : 0,
+                right: Number.isFinite(Number(raw.right)) ? Number(raw.right) : 0,
+                bottom: Number.isFinite(Number(raw.bottom)) ? Number(raw.bottom) : 0,
+              }
+            : null;
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: result?.ok === true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            targetDocumentName: targetDocumentName || null,
+            layerName: result?.layerName ? String(result.layerName).slice(0, 260) : (layerName || null),
+            op,
+            boundsBefore: toBounds(result?.boundsBefore),
+            boundsAfter: toBounds(result?.boundsAfter),
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    // CMYK/Grayscale conversion discards color data in the UNSAVED working
+    // copy — reversible only until save, and the built script never saves
+    // (saving stays a separate approval-gated step). Already-in-mode
+    // documents report an honest converted:false no-op.
+    if (url === '/desktop/photoshop_convert_color_mode' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        const targetDocumentName = String(parsed?.targetDocumentName || parsed?.expectedDocumentName || '').trim();
+        const mode = String(parsed?.mode || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (targetDocumentName.length > 260 || /[\x00]/.test(targetDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'targetDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        if (!PHOTOSHOP_COLOR_MODES.includes(mode)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'mode must be rgb, cmyk, or grayscale.' }));
+          return;
+        }
+        const built = buildPhotoshopConvertColorModeScript({ appName, targetDocumentName, mode });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop convert color mode failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: result?.ok === true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            targetDocumentName: targetDocumentName || null,
+            mode,
+            modeBefore: result?.modeBefore ? String(result.modeBefore).slice(0, 260) : null,
+            modeAfter: result?.modeAfter ? String(result.modeAfter).slice(0, 260) : null,
+            converted: result?.converted === true,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    // ── /desktop/cad_compile — headless code-CAD compilation ─────────
+    //
+    // Deterministic, GUI-free CAD execution for the engineering/CAD
+    // runbooks (src/lib/engineeringCadOperationRunbooks.ts): OpenSCAD
+    // compiles a .scad program straight to STL/OFF/AMF/3MF/PNG/SVG/DXF;
+    // FreeCAD's `freecadcmd` runs a generated Python script (built by
+    // src/lib/cadCodeExecutor.ts) that does its own document IO and
+    // writes the output file itself — we verify the output AFTER.
+    // Blender runs a generated bpy Python script the same way
+    // (`--background --factory-startup --python <script>`) for mesh
+    // format conversion (STL/OBJ/PLY/glTF/GLB) and Workbench-engine
+    // render previews — script-owned IO, output verified AFTER.
+    //
+    // Safety posture:
+    //   - binaries resolve from FIXED absolute candidate paths — never
+    //     $PATH, never a client-supplied binary path;
+    //   - spawned via execFile argv (no shell string ever sees input);
+    //   - both paths go through validateDesktopPathServer +
+    //     expandDesktopPath + local-file grant checks (source read,
+    //     output + parent write);
+    //   - extraArgs are a strict allowlist (OpenSCAD only):
+    //     -Dname=<number|true|false>, --render, --imgsize=W,H.
+    //     LOCKSTEP: `isAllowedCadCompileExtraArg` below mirrors
+    //     OPENSCAD_DEFINE_ARG_REGEX / OPENSCAD_IMGSIZE_ARG_REGEX in
+    //     src/lib/cadCodeExecutor.ts (bridge is plain JS, cannot import
+    //     the TS module) — keep both in step.
+    //   - response bounded: 2000-char stdout/stderr tails, stat-derived
+    //     output info; compile diagnostics ride back at HTTP 200 with
+    //     ok:false so the agent loop can read stderr and fix the code.
+    if (url === '/desktop/cad_compile' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 16 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const engine = String(parsed?.engine || '').trim();
+        if (engine !== 'openscad' && engine !== 'freecadcmd' && engine !== 'blender') {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'engine must be "openscad", "freecadcmd", or "blender".' }));
+          return;
+        }
+        const sourceValidated = validateDesktopPathServer(String(parsed?.sourcePath || ''));
+        if (!sourceValidated.ok) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `sourcePath: ${sourceValidated.error}` }));
+          return;
+        }
+        const outputValidated = validateDesktopPathServer(String(parsed?.outputPath || ''));
+        if (!outputValidated.ok) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `outputPath: ${outputValidated.error}` }));
+          return;
+        }
+        const sourcePath = expandDesktopPath(sourceValidated.path);
+        const outputPath = expandDesktopPath(outputValidated.path);
+        // Argv items must be unambiguous file paths — a leading '-' would
+        // read as an option flag to the CAD binary.
+        if (!path.isAbsolute(sourcePath) || !path.isAbsolute(outputPath)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'sourcePath and outputPath must resolve to absolute paths.' }));
+          return;
+        }
+        if (path.resolve(outputPath) === path.resolve(sourcePath)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'outputPath must differ from sourcePath.' }));
+          return;
+        }
+        // Extension contracts. LOCKSTEP: mirrors OPENSCAD_OUTPUT_EXTENSIONS
+        // in src/lib/cadCodeExecutor.ts and compileCadCode in
+        // src/lib/desktopBridge.ts.
+        if (engine === 'openscad') {
+          if (!/\.scad$/i.test(sourcePath)) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'openscad sourcePath must end in .scad.' }));
+            return;
+          }
+          if (!/\.(stl|off|amf|3mf|png|svg|dxf)$/i.test(outputPath)) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'openscad outputPath must end in .stl, .off, .amf, .3mf, .png, .svg, or .dxf.' }));
+            return;
+          }
+        } else if (!/\.py$/i.test(sourcePath)) {
+          // freecadcmd AND blender both consume a generated python script.
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `${engine} sourcePath must end in .py (the generated ${engine === 'blender' ? 'Blender bpy' : 'FreeCAD'} script).` }));
+          return;
+        }
+        const rawExtraArgs = Array.isArray(parsed?.extraArgs) ? parsed.extraArgs : [];
+        // Script-driven engines (freecadcmd, blender) accept NO extraArgs —
+        // the generated script carries its own IO; the argv stays fixed.
+        if (engine !== 'openscad' && rawExtraArgs.length > 0) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `${engine} accepts no extraArgs — the generated script carries its own IO.` }));
+          return;
+        }
+        if (rawExtraArgs.length > 8) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'too many extraArgs (max 8).' }));
+          return;
+        }
+        const extraArgs = [];
+        for (const rawArg of rawExtraArgs) {
+          const arg = typeof rawArg === 'string' ? rawArg : '';
+          if (!isAllowedCadCompileExtraArg(arg)) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `extraArgs item not allowed: "${String(rawArg).slice(0, 80)}". Allowed: -Dname=<number|true|false>, --render, --imgsize=W,H.` }));
+            return;
+          }
+          extraArgs.push(arg);
+        }
+        const sourceGrant = requireLocalFileAccessGrant(req, parsedUrl, sourcePath, 'read');
+        if (!sourceGrant.ok) { res.writeHead(sourceGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: sourceGrant.error })); return; }
+        const outputGrant = requireLocalFileAccessGrant(req, parsedUrl, outputPath, 'write');
+        if (!outputGrant.ok) { res.writeHead(outputGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: outputGrant.error })); return; }
+        const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, path.dirname(outputPath), 'write');
+        if (!parentGrant.ok) { res.writeHead(parentGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: parentGrant.error })); return; }
+        let sourceStat = null;
+        try { sourceStat = fs.statSync(sourcePath); } catch {}
+        if (!sourceStat || !sourceStat.isFile()) {
+          res.writeHead(404, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'sourcePath does not exist or is not a file.', errorCode: 'path_not_found' }));
+          return;
+        }
+        let parentStat = null;
+        try { parentStat = fs.statSync(path.dirname(outputPath)); } catch {}
+        if (!parentStat || !parentStat.isDirectory()) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'outputPath parent folder does not exist.' }));
+          return;
+        }
+        const binaryPath = resolveCadEngineBinary(engine);
+        if (!binaryPath) {
+          // HTTP 200 so the structured body (installHint) reaches clients
+          // that read ok:false bodies; the code rides in error + errorCode.
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'engine_not_installed',
+            errorCode: 'engine_not_installed',
+            engine,
+            installHint: engine === 'openscad'
+              ? 'brew install --cask openscad'
+              : (engine === 'blender' ? 'brew install --cask blender' : 'brew install --cask freecad'),
+          }));
+          return;
+        }
+        const timeoutMs = clampInt(parsed?.timeoutMs, 60000, 5000, 120000);
+        // Fixed argv per engine — no client-shaped flags ever join it.
+        // Blender: --background (no GUI), --factory-startup (no user
+        // prefs/addons influence the run), --python <generated script>.
+        const argv = engine === 'openscad'
+          ? ['-o', outputPath, sourcePath, ...extraArgs]
+          : engine === 'blender'
+            ? ['--background', '--factory-startup', '--python', sourcePath]
+            : [sourcePath];
+        const startedAt = Date.now();
+        execFile(binaryPath, argv, { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, cwd: path.dirname(sourcePath) }, (err, stdout, stderr) => {
+          const durationMs = Date.now() - startedAt;
+          const timedOut = !!(err && (err.killed || err.signal));
+          const exitCode = err ? (typeof err.code === 'number' ? err.code : null) : 0;
+          let outStat = null;
+          try {
+            const stat = fs.statSync(outputPath);
+            if (stat.isFile()) outStat = stat;
+          } catch {}
+          const succeeded = !err && !!outStat;
+          const failureCode = timedOut
+            ? 'cad_compile_timeout'
+            : (!err && !outStat ? 'output_not_created' : 'cad_compile_failed');
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: succeeded,
+            ...(succeeded ? {} : { error: failureCode, errorCode: failureCode }),
+            engine,
+            binaryPath,
+            exitCode,
+            timedOut,
+            durationMs,
+            stdoutTail: String(stdout || '').slice(-2000),
+            stderrTail: String(stderr || '').slice(-2000),
+            output: { path: outputPath, bytes: outStat ? outStat.size : 0, exists: !!outStat },
+          }));
+        });
+      });
+      return;
+    }
+
+    // ── /desktop/design_export — headless design-file export ─────────
+    //
+    // Deterministic, GUI-free design exports following the cad_compile
+    // executor class (fulfills the headless-CLI buildout contract in
+    // docs/apps/inkscape.md and docs/apps/sketch.md):
+    //   - inkscape renders an .svg source to .png/.pdf/.eps via
+    //     `--export-filename <out> <in.svg>` (Inkscape 1.x headless CLI;
+    //     optional --export-width/--export-height 16..16384 for the PNG
+    //     raster, optional --export-pdf-version pin for .pdf outputs);
+    //   - sketchtool exports the DOCUMENT PREVIEW image of a .sketch file
+    //     (`sketchtool export preview` — v1 single image; artboard-set
+    //     export is a follow-up lane). sketchtool writes its OWN file name
+    //     (preview.png) into --output, so we export into the validated
+    //     output parent folder and rename the FRESH preview to the
+    //     requested outputPath afterward (stale previews never count).
+    //
+    // Safety posture mirrors /desktop/cad_compile exactly:
+    //   - binaries resolve from FIXED absolute candidate paths — never
+    //     $PATH, never a client-supplied binary path;
+    //   - spawned via execFile argv (no shell string ever sees input);
+    //   - both paths go through validateDesktopPathServer +
+    //     expandDesktopPath + local-file grant checks (source read,
+    //     output + parent write);
+    //   - options are a strict per-engine allowlist. LOCKSTEP:
+    //     `validateDesignExportOptionsServer` below mirrors
+    //     validateDesignExportOptions in src/lib/designCliExecutor.ts
+    //     (bridge is plain JS, cannot import the TS module) — keep both
+    //     in step.
+    //   - response bounded: 2000-char stdout/stderr tails, stat-derived
+    //     output info; export diagnostics ride back at HTTP 200 with
+    //     ok:false so the agent loop can read stderr and recover.
+    if (url === '/desktop/design_export' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 16 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const engine = String(parsed?.engine || '').trim();
+        if (engine !== 'inkscape' && engine !== 'sketchtool') {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'engine must be "inkscape" or "sketchtool".' }));
+          return;
+        }
+        const sourceValidated = validateDesktopPathServer(String(parsed?.sourcePath || ''));
+        if (!sourceValidated.ok) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `sourcePath: ${sourceValidated.error}` }));
+          return;
+        }
+        const outputValidated = validateDesktopPathServer(String(parsed?.outputPath || ''));
+        if (!outputValidated.ok) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `outputPath: ${outputValidated.error}` }));
+          return;
+        }
+        const sourcePath = expandDesktopPath(sourceValidated.path);
+        const outputPath = expandDesktopPath(outputValidated.path);
+        // Argv items must be unambiguous file paths — a leading '-' would
+        // read as an option flag to the export binary.
+        if (!path.isAbsolute(sourcePath) || !path.isAbsolute(outputPath)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'sourcePath and outputPath must resolve to absolute paths.' }));
+          return;
+        }
+        if (path.resolve(outputPath) === path.resolve(sourcePath)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'outputPath must differ from sourcePath.' }));
+          return;
+        }
+        // Extension contracts. LOCKSTEP: mirrors INKSCAPE_*/SKETCHTOOL_*
+        // extension sets in src/lib/designCliExecutor.ts and designExport
+        // in src/lib/desktopBridge.ts.
+        if (engine === 'inkscape') {
+          if (!/\.svg$/i.test(sourcePath)) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'inkscape sourcePath must end in .svg.' }));
+            return;
+          }
+          if (!/\.(png|pdf|eps)$/i.test(outputPath)) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'inkscape outputPath must end in .png, .pdf, or .eps.' }));
+            return;
+          }
+        } else {
+          if (!/\.sketch$/i.test(sourcePath)) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'sketchtool sourcePath must end in .sketch.' }));
+            return;
+          }
+          if (!/\.png$/i.test(outputPath)) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: 'sketchtool outputPath must end in .png (document preview export).' }));
+            return;
+          }
+        }
+        const optionsValidated = validateDesignExportOptionsServer(engine, parsed?.options);
+        if (!optionsValidated.ok) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: optionsValidated.error }));
+          return;
+        }
+        const options = optionsValidated.options;
+        const sourceGrant = requireLocalFileAccessGrant(req, parsedUrl, sourcePath, 'read');
+        if (!sourceGrant.ok) { res.writeHead(sourceGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: sourceGrant.error })); return; }
+        const outputGrant = requireLocalFileAccessGrant(req, parsedUrl, outputPath, 'write');
+        if (!outputGrant.ok) { res.writeHead(outputGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: outputGrant.error })); return; }
+        const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, path.dirname(outputPath), 'write');
+        if (!parentGrant.ok) { res.writeHead(parentGrant.status, CORS); res.end(JSON.stringify({ ok: false, error: parentGrant.error })); return; }
+        let sourceStat = null;
+        try { sourceStat = fs.statSync(sourcePath); } catch {}
+        if (!sourceStat || !sourceStat.isFile()) {
+          res.writeHead(404, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'sourcePath does not exist or is not a file.', errorCode: 'path_not_found' }));
+          return;
+        }
+        let parentStat = null;
+        try { parentStat = fs.statSync(path.dirname(outputPath)); } catch {}
+        if (!parentStat || !parentStat.isDirectory()) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'outputPath parent folder does not exist.' }));
+          return;
+        }
+        const binaryPath = resolveDesignEngineBinary(engine);
+        if (!binaryPath) {
+          // HTTP 200 so the structured body (installHint) reaches clients
+          // that read ok:false bodies; the code rides in error + errorCode.
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'engine_not_installed',
+            errorCode: 'engine_not_installed',
+            engine,
+            installHint: engine === 'inkscape'
+              ? 'brew install --cask inkscape'
+              : 'Install Sketch from sketch.com',
+          }));
+          return;
+        }
+        const timeoutMs = clampInt(parsed?.timeoutMs, 60000, 5000, 120000);
+        const outputDir = path.dirname(outputPath);
+        // Fixed argv per engine — only allowlist-validated option VALUES
+        // ever join it, and always as their own argv tokens.
+        //   inkscape: --export-filename infers the type from the output
+        //   extension (Inkscape 1.x); width/height size the PNG raster;
+        //   --export-pdf-version is only meaningful for .pdf outputs.
+        //   sketchtool: `export preview` names its own file (preview.png)
+        //   inside --output; --overwriting=YES keeps reruns deterministic;
+        //   preview has no --scales multiplier, so scale maps to the real
+        //   control --max-size (default longest edge 2048px → 2048×scale).
+        const argv = engine === 'inkscape'
+          ? [
+              '--export-filename', outputPath,
+              ...(options.widthPx ? ['--export-width', String(options.widthPx)] : []),
+              ...(options.heightPx ? ['--export-height', String(options.heightPx)] : []),
+              ...(options.pdfVersion && /\.pdf$/i.test(outputPath) ? ['--export-pdf-version', options.pdfVersion] : []),
+              sourcePath,
+            ]
+          : [
+              'export', 'preview', sourcePath,
+              '--output=' + outputDir,
+              '--overwriting=YES',
+              ...(options.scale && options.scale > 1 ? ['--max-size=' + String(2048 * options.scale)] : []),
+            ];
+        const startedAt = Date.now();
+        execFile(binaryPath, argv, { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, cwd: path.dirname(sourcePath) }, (err, stdout, stderr) => {
+          const durationMs = Date.now() - startedAt;
+          const timedOut = !!(err && (err.killed || err.signal));
+          const exitCode = err ? (typeof err.code === 'number' ? err.code : null) : 0;
+          // sketchtool preview lane: move the file sketchtool created onto
+          // the requested outputPath — but only a FRESH preview (2s clock
+          // slop); a stale preview.png from an earlier run must never
+          // masquerade as proof of this run.
+          if (engine === 'sketchtool' && !err) {
+            const previewPath = path.join(outputDir, 'preview.png');
+            if (path.resolve(previewPath) !== path.resolve(outputPath)) {
+              try {
+                const previewStat = fs.statSync(previewPath);
+                if (previewStat.isFile() && previewStat.mtimeMs >= startedAt - 2000) {
+                  fs.renameSync(previewPath, outputPath);
+                }
+              } catch {}
+            }
+          }
+          let outStat = null;
+          try {
+            const stat = fs.statSync(outputPath);
+            // inkscape writes outputPath itself (trust exit code +
+            // existence, exactly like cad_compile); sketchtool outputs are
+            // additionally freshness-gated because the engine names its own
+            // file — a preexisting stale outputPath must not count.
+            if (stat.isFile() && (engine !== 'sketchtool' || stat.mtimeMs >= startedAt - 2000)) outStat = stat;
+          } catch {}
+          const succeeded = !err && !!outStat;
+          const failureCode = timedOut
+            ? 'design_export_timeout'
+            : (!err && !outStat ? 'output_not_created' : 'design_export_failed');
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: succeeded,
+            ...(succeeded ? {} : { error: failureCode, errorCode: failureCode }),
+            engine,
+            binaryPath,
+            exitCode,
+            timedOut,
+            durationMs,
+            stdoutTail: String(stdout || '').slice(-2000),
+            stderrTail: String(stderr || '').slice(-2000),
+            output: { path: outputPath, bytes: outStat ? outStat.size : 0, exists: !!outStat },
+          }));
+        });
+      });
+      return;
+    }
+
+    // ── Illustrator ExtendScript base pair ───────────────────────────
+    //
+    // LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): validation
+    // (app-name pattern, name bounds, the png|svg format enum, the
+    // 50..400 scale range, error strings) and the JSX builders for the
+    // two endpoints below are duplicated from the pure module (the
+    // bridge is a standalone Node script and cannot import TS). The pure
+    // module is the smoke-tested source of truth — keep both in step.
+    //
+    // Shared contract: document_status is READ-ONLY (never activates,
+    // saves, or mutates anything); export_proof verifies the target
+    // document first (fail closed with 'document_mismatch'), writes ONLY
+    // the export outputPath via doc.exportFile, and NEVER saves/closes/
+    // re-associates the source document. PDF is excluded by design:
+    // Illustrator has no PDF ExportType — PDF only exists as a source-
+    // document save-as, which would re-associate the open document.
+    if (url === '/desktop/illustrator_document_status' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Illustrator').trim() || 'Illustrator';
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        const built = buildIllustratorDocumentStatusScript({ appName, expectedDocumentName });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Illustrator app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 12000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator document status failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const toNumber = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
+          const documents = Array.isArray(result?.documents)
+            ? result.documents.slice(0, 12).map((doc) => ({
+                name: doc?.name ? String(doc.name).slice(0, 260) : '',
+                path: doc?.path ? String(doc.path).slice(0, 1024) : null,
+                modified: doc?.modified === true,
+                saved: doc?.saved === true,
+                widthPt: toNumber(doc?.widthPt),
+                heightPt: toNumber(doc?.heightPt),
+                artboardCount: toNumber(doc?.artboardCount),
+                layerCount: toNumber(doc?.layerCount),
+                selectionCount: toNumber(doc?.selectionCount),
+              })).filter((doc) => doc.name)
+            : [];
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            status: result?.status ? String(result.status).slice(0, 80) : 'unknown',
+            documentCount: toNumber(result?.documentCount),
+            activeDocumentName: result?.activeDocumentName ? String(result.activeDocumentName).slice(0, 260) : null,
+            activeDocumentPath: result?.activeDocumentPath ? String(result.activeDocumentPath).slice(0, 1024) : null,
+            widthPt: toNumber(result?.widthPt),
+            heightPt: toNumber(result?.heightPt),
+            artboardCount: toNumber(result?.artboardCount),
+            layerCount: toNumber(result?.layerCount),
+            selectionCount: toNumber(result?.selectionCount),
+            expectedDocumentName: expectedDocumentName || null,
+            documents,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    if (url === '/desktop/illustrator_export_proof' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 16 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Illustrator').trim() || 'Illustrator';
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        const rawOutputPath = String(parsed?.outputPath || '').trim();
+        const rawFormat = String(parsed?.format || '').trim().toLowerCase();
+        const rawScalePercent = parsed?.scalePercent;
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        const outputValidated = validateDesktopPathServer(rawOutputPath);
+        if (!outputValidated.ok) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `outputPath: ${outputValidated.error}` }));
+          return;
+        }
+        const outputPath = expandDesktopPath(outputValidated.path);
+        const extensionMatch = /\.([A-Za-z0-9]{1,12})$/.exec(outputPath);
+        const extension = extensionMatch ? extensionMatch[1].toLowerCase() : '';
+        if (!ILLUSTRATOR_EXPORT_PROOF_FORMATS.includes(extension)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'outputPath must end in .png or .svg (.pdf is unsupported: Illustrator can only write PDF by re-associating/saving the source document).' }));
+          return;
+        }
+        if (rawFormat && !ILLUSTRATOR_EXPORT_PROOF_FORMATS.includes(rawFormat)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'format must be png or svg (PDF is unsupported: Illustrator can only write PDF by re-associating/saving the source document).' }));
+          return;
+        }
+        if (rawFormat && rawFormat !== extension) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'outputPath extension must match format (png|svg).' }));
+          return;
+        }
+        const format = rawFormat || extension;
+        const validScale = (value) => value === undefined || value === null
+          || (typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value)
+            && value >= ILLUSTRATOR_MIN_SCALE_PERCENT && value <= ILLUSTRATOR_MAX_SCALE_PERCENT);
+        if (!validScale(rawScalePercent)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `scalePercent must be a finite integer between ${ILLUSTRATOR_MIN_SCALE_PERCENT} and ${ILLUSTRATOR_MAX_SCALE_PERCENT}.` }));
+          return;
+        }
+        if (rawScalePercent != null && format !== 'png') {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'scalePercent is only valid for png exports.' }));
+          return;
+        }
+        const scalePercent = format === 'png' ? (rawScalePercent == null ? 100 : rawScalePercent) : null;
+        const outputGrant = requireLocalFileAccessGrant(req, parsedUrl, outputPath, 'write');
+        if (!outputGrant.ok) {
+          res.writeHead(outputGrant.status, CORS);
+          res.end(JSON.stringify({ ok: false, error: outputGrant.error }));
+          return;
+        }
+        const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, path.dirname(outputPath), 'write');
+        if (!parentGrant.ok) {
+          res.writeHead(parentGrant.status, CORS);
+          res.end(JSON.stringify({ ok: false, error: parentGrant.error }));
+          return;
+        }
+        const built = buildIllustratorExportProofScript({ appName, outputPath, format, scalePercent, expectedDocumentName });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Illustrator app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 25000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator proof export failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          // Fail closed: the export only counts when the JSX reported ok
+          // AND the output file actually exists on disk afterward.
+          let fileExists = false;
+          let sizeBytes = 0;
+          try {
+            const stat = fs.statSync(outputPath);
+            fileExists = stat.isFile();
+            sizeBytes = stat.size;
+          } catch {}
+          const jsxOk = result?.ok === true;
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: jsxOk && fileExists,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            outputPath,
+            outputFileName: path.basename(outputPath).slice(0, 260),
+            format,
+            scalePercent,
+            fileExists,
+            sizeBytes,
+            docModified: result?.docModified === true,
+            docSaved: result?.docSaved === true,
+            error: result?.error
+              ? String(result.error).slice(0, 500)
+              : (jsxOk && !fileExists ? 'output_not_created' : null),
+          }));
+        });
+      });
+      return;
+    }
+
     // ── Phase 1c: screenshot + wait_for_app ──────────────────────────
     //
     // `/desktop/screenshot` — capture the full screen (or an app's
@@ -5324,75 +6488,164 @@ end tell`;
     // is NOT enough because TCC identifies by code-signed executable.
     if (url === '/desktop/a11y_tree' && req.method === 'GET') {
       const parsed = new URL(req.url, 'http://localhost');
-      const appName = parsed.searchParams.get('app') || '';
-      const maxDepth = Math.max(1, Math.min(10, Number(parsed.searchParams.get('max_depth') || 6)));
-      const maxNodes = Math.max(20, Math.min(400, Number(parsed.searchParams.get('max_nodes') || 150)));
-      // E2 — pruned targeting slices: `target` is the label the caller is
-      // trying to act on; `slice` selects 'interactive' (pruned) vs 'full'.
-      // Default is 'interactive' WHEN a target is present, otherwise the
-      // legacy full tree — no-target reads are unchanged.
-      const targetParam = String(parsed.searchParams.get('target') || '').trim().slice(0, 200);
-      const sliceParamRaw = String(parsed.searchParams.get('slice') || '').trim().toLowerCase();
-      const sliceMode = sliceParamRaw === 'full'
-        ? 'full'
-        : sliceParamRaw === 'interactive'
-          ? 'interactive'
-          : (targetParam ? 'interactive' : 'full');
-      const helperPath = path.join(__dirname, 'bin', 'uc-ax-helper');
-      if (!fs.existsSync(helperPath)) {
-        res.writeHead(503, CORS);
-        res.end(JSON.stringify({ ok: false, error: 'uc-ax-helper not compiled. Run `npm run build:ax-helper` or restart the bridge.' }));
-        return;
-      }
-      const args = [
-        'tree',
-        ...(appName ? ['--app', appName] : ['--frontmost']),
-        '--max-depth', String(maxDepth),
-        '--max-nodes', String(maxNodes),
-      ];
-      execFile(helperPath, args, { timeout: 8000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-        if (err && !stdout) {
+      // The whole tree pipeline (helper spawn → parse → optional E2
+      // targeting slice → SoM indexes + per-pid index memory) lives in
+      // collectA11yTreeForApp so /desktop/observe_app composes the
+      // IDENTICAL payload. Behavior here is unchanged.
+      collectA11yTreeForApp({
+        appName: parsed.searchParams.get('app') || '',
+        maxDepth: parsed.searchParams.get('max_depth'),
+        maxNodes: parsed.searchParams.get('max_nodes'),
+        target: parsed.searchParams.get('target'),
+        slice: parsed.searchParams.get('slice'),
+      }, (result) => {
+        if (result.kind === 'helper_missing') {
+          res.writeHead(503, CORS);
+          res.end(JSON.stringify({ ok: false, error: result.error }));
+          return;
+        }
+        if (result.kind === 'helper_failed') {
           res.writeHead(500, CORS);
-          res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'helper failed').toString().slice(0, 500) }));
+          res.end(JSON.stringify({ ok: false, error: result.error }));
           return;
         }
-        // Helper emits a single JSON line on stdout. Parse it so we can
-        // slice + index; if it isn't parseable (or is an error payload),
-        // forward verbatim exactly as before.
-        const raw = stdout.toString().trim();
-        let payload = null;
-        try { payload = JSON.parse(raw); } catch { payload = null; }
-        if (!payload || payload.ok === false || !payload.tree || typeof payload.tree !== 'object') {
+        if (result.kind === 'raw') {
+          // Unparseable / helper-error payload — forward verbatim,
+          // exactly as this endpoint always has.
           res.writeHead(200, CORS);
-          res.end(raw);
+          res.end(result.raw);
           return;
-        }
-        if (sliceMode === 'interactive') {
-          const sliced = sliceA11yTreeForTarget(payload.tree, targetParam, A11Y_SLICE_MAX_NODES);
-          payload.tree = sliced.tree;
-          payload.slice = 'interactive';
-          payload.target = targetParam || null;
-          payload.total_nodes = sliced.totalNodes;
-          payload.sliced_nodes = sliced.keptNodes;
-          payload.slice_marker = sliced.marker;
-        }
-        // E2 — SoM indexes: number every returned node ([#1], [#2], …)
-        // and remember index → dotted-path for this pid so click/set-value
-        // can act on `elementIndex` against the LAST tree read.
-        const indexed = assignA11yNodeIndexes(payload.tree);
-        const generation = ++a11yIndexGenerationCounter;
-        payload.index_generation = generation;
-        const pidNum = Number(payload.pid || 0);
-        if (pidNum > 0) {
-          rememberA11yIndexMap(pidNum, {
-            app: String(payload.app || appName || ''),
-            generation,
-            indexToPath: indexed.indexToPath,
-            at: Date.now(),
-          });
         }
         res.writeHead(200, CORS);
-        res.end(JSON.stringify(payload));
+        res.end(JSON.stringify(result.payload));
+      });
+      return;
+    }
+
+    // `/desktop/observe_app` — "examine the app screen" in ONE round trip.
+    // POST { appName?, maxDepth?, maxNodes?, target? } — appName empty →
+    // frontmost app. Composes what /desktop/window_state and
+    // /desktop/a11y_tree gather separately: one System Events pass for
+    // frontmost app + resolved target process (exact name first, contains
+    // fallback — same matching family as /desktop/wait_for_app) + window
+    // count + first 8 window titles, then the identical pruned/indexed
+    // a11y tree via collectA11yTreeForApp. Target app not running is VALID
+    // observation data ({ ok:true, appRunning:false, tree:null }), not an
+    // error. A tree failure (helper missing / AX trust) degrades to
+    // tree:null + a11yError so the window-state half still lands — the
+    // next-step advisor escalates to screenshot from there.
+    if (url === '/desktop/observe_app' && req.method === 'POST') {
+      readJsonBody(req, 4096, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appNameRaw = String(parsed?.appName || '').trim();
+        if (appNameRaw && (appNameRaw.length > 120 || !/^[A-Za-z0-9 .\-_()]+$/.test(appNameRaw))) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName. Letters, numbers, spaces, . - _ ( ) only, max 120 chars.' }));
+          return;
+        }
+        const script = `
+tell application "System Events"
+  set frontApp to ""
+  try
+    set frontApp to name of first application process whose frontmost is true
+  end try
+  set targetName to "${escapeAppleScriptString(appNameRaw)}"
+  if targetName is "" then set targetName to frontApp
+  set procName to ""
+  set winCount to 0
+  set titlesText to ""
+  if targetName is not "" then
+    set targetProc to missing value
+    try
+      set targetProc to first application process whose background only is false and name is targetName
+    on error
+      try
+        set targetProc to first application process whose background only is false and name contains targetName
+      end try
+    end try
+    if targetProc is not missing value then
+      set procName to name of targetProc
+      tell targetProc
+        set winCount to count of windows
+        set emitted to 0
+        repeat with w in windows
+          if emitted > 7 then exit repeat
+          try
+            set titlesText to titlesText & (name of w as text) & linefeed
+            set emitted to emitted + 1
+          end try
+        end repeat
+      end tell
+    end if
+  end if
+  return frontApp & linefeed & procName & linefeed & (winCount as text) & linefeed & titlesText
+end tell
+`;
+        exec(`osascript -e ${shellSingleQuote(script)}`, { timeout: 6000, maxBuffer: 256 * 1024 }, (err, stdout) => {
+          if (err) {
+            res.writeHead(500, CORS);
+            res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+            return;
+          }
+          const lines = String(stdout || '').split(/\r?\n/);
+          const frontmostApp = (lines[0] || '').trim().slice(0, 160);
+          const resolvedProc = (lines[1] || '').trim().slice(0, 160);
+          const windowCount = Math.max(0, Number((lines[2] || '').trim()) || 0);
+          const windowTitles = lines.slice(3)
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .slice(0, 8)
+            .map((title) => title.slice(0, 160));
+          const appRunning = !!resolvedProc;
+          const base = {
+            ok: true,
+            app: resolvedProc || appNameRaw || frontmostApp,
+            appRunning,
+            frontmost: appRunning && !!frontmostApp && resolvedProc.toLowerCase() === frontmostApp.toLowerCase(),
+            frontmostApp: frontmostApp || null,
+            windowCount: appRunning ? windowCount : 0,
+            windowTitles: appRunning ? windowTitles : [],
+          };
+          if (!appRunning) {
+            // Absence IS the observation — the advisor turns this into a
+            // launch_app step; a 4xx here would read as a tool failure.
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({ ...base, tree: null, budget_used: 0 }));
+            return;
+          }
+          collectA11yTreeForApp({
+            appName: resolvedProc,
+            maxDepth: parsed?.maxDepth,
+            maxNodes: parsed?.maxNodes,
+            target: parsed?.target,
+          }, (result) => {
+            if (result.kind === 'payload') {
+              const payload = result.payload;
+              res.writeHead(200, CORS);
+              // Tree fields (pid, budget_used, tree, slice/target/…,
+              // index_generation) keep the exact /desktop/a11y_tree shape
+              // so clients reuse the same types.
+              res.end(JSON.stringify({
+                ...base,
+                ...payload,
+                ok: true,
+                app: String(payload.app || base.app),
+                budget_used: Number(payload.budget_used || 0),
+              }));
+              return;
+            }
+            let a11yError;
+            if (result.kind === 'raw') {
+              let rawPayload = null;
+              try { rawPayload = JSON.parse(result.raw); } catch { rawPayload = null; }
+              a11yError = String((rawPayload && rawPayload.error) || result.raw || 'a11y tree unavailable').slice(0, 300);
+            } else {
+              a11yError = String(result.error || 'a11y tree unavailable').slice(0, 300);
+            }
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({ ...base, tree: null, budget_used: 0, a11yError }));
+          });
+        });
       });
       return;
     }
@@ -5827,6 +7080,93 @@ function resolveA11yElementIndexFromEntry(entry, pid, elementIndex, indexGenerat
   return { ok: true, path: resolvedPath };
 }
 /* UC_SMOKE_EXTRACT_END resolveA11yElementIndexFromEntry */
+
+// ── Shared a11y-tree collection (/desktop/a11y_tree + /desktop/observe_app) ─
+//
+// The EXACT tree pipeline `/desktop/a11y_tree` has always run — Swift
+// helper spawn, JSON parse, optional E2 interactive targeting slice, SoM
+// node indexes + per-pid index-map memory — extracted so
+// `/desktop/observe_app` composes the identical tree payload into its
+// one-round-trip observation without duplicating the pipeline.
+//
+// opts: { appName?, maxDepth?, maxNodes?, target?, slice? } — raw values
+// (query-param strings or JSON body fields); normalization/clamping
+// happens HERE so both callers stay in lockstep.
+//
+// cb receives exactly one of:
+//   { kind: 'helper_missing', error }  — helper not compiled (a11y_tree → 503)
+//   { kind: 'helper_failed',  error }  — helper died with no stdout (→ 500)
+//   { kind: 'raw', raw }               — stdout unparseable or helper-emitted
+//                                        error payload (a11y_tree forwards verbatim)
+//   { kind: 'payload', payload }       — parsed + sliced + indexed payload object
+function collectA11yTreeForApp(opts, cb) {
+  const appName = String((opts && opts.appName) || '');
+  const maxDepth = Math.max(1, Math.min(10, Number((opts && opts.maxDepth) || 6)));
+  const maxNodes = Math.max(20, Math.min(400, Number((opts && opts.maxNodes) || 150)));
+  // E2 — pruned targeting slices: `target` is the label the caller is
+  // trying to act on; `slice` selects 'interactive' (pruned) vs 'full'.
+  // Default is 'interactive' WHEN a target is present, otherwise the
+  // legacy full tree — no-target reads are unchanged.
+  const targetParam = String((opts && opts.target) || '').trim().slice(0, 200);
+  const sliceParamRaw = String((opts && opts.slice) || '').trim().toLowerCase();
+  const sliceMode = sliceParamRaw === 'full'
+    ? 'full'
+    : sliceParamRaw === 'interactive'
+      ? 'interactive'
+      : (targetParam ? 'interactive' : 'full');
+  const helperPath = path.join(__dirname, 'bin', 'uc-ax-helper');
+  if (!fs.existsSync(helperPath)) {
+    cb({ kind: 'helper_missing', error: 'uc-ax-helper not compiled. Run `npm run build:ax-helper` or restart the bridge.' });
+    return;
+  }
+  const args = [
+    'tree',
+    ...(appName ? ['--app', appName] : ['--frontmost']),
+    '--max-depth', String(maxDepth),
+    '--max-nodes', String(maxNodes),
+  ];
+  execFile(helperPath, args, { timeout: 8000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+    if (err && !stdout) {
+      cb({ kind: 'helper_failed', error: (stderr || err.message || 'helper failed').toString().slice(0, 500) });
+      return;
+    }
+    // Helper emits a single JSON line on stdout. Parse it so we can
+    // slice + index; if it isn't parseable (or is an error payload),
+    // hand the raw text back for verbatim forwarding.
+    const raw = stdout.toString().trim();
+    let payload = null;
+    try { payload = JSON.parse(raw); } catch { payload = null; }
+    if (!payload || payload.ok === false || !payload.tree || typeof payload.tree !== 'object') {
+      cb({ kind: 'raw', raw });
+      return;
+    }
+    if (sliceMode === 'interactive') {
+      const sliced = sliceA11yTreeForTarget(payload.tree, targetParam, A11Y_SLICE_MAX_NODES);
+      payload.tree = sliced.tree;
+      payload.slice = 'interactive';
+      payload.target = targetParam || null;
+      payload.total_nodes = sliced.totalNodes;
+      payload.sliced_nodes = sliced.keptNodes;
+      payload.slice_marker = sliced.marker;
+    }
+    // E2 — SoM indexes: number every returned node ([#1], [#2], …)
+    // and remember index → dotted-path for this pid so click/set-value
+    // can act on `elementIndex` against the LAST tree read.
+    const indexed = assignA11yNodeIndexes(payload.tree);
+    const generation = ++a11yIndexGenerationCounter;
+    payload.index_generation = generation;
+    const pidNum = Number(payload.pid || 0);
+    if (pidNum > 0) {
+      rememberA11yIndexMap(pidNum, {
+        app: String(payload.app || appName || ''),
+        generation,
+        indexToPath: indexed.indexToPath,
+        at: Date.now(),
+      });
+    }
+    cb({ kind: 'payload', payload });
+  });
+}
 
 // ── E3: region-zoom screenshot helpers ──────────────────────────────────
 
@@ -6366,6 +7706,138 @@ function validateDesktopPathServer(raw) {
   if (/[\x00-\x1f]/.test(trimmed)) return { ok: false, error: 'path contains control characters' };
   if (/[`$;|&><\n]/.test(trimmed)) return { ok: false, error: 'path contains shell metacharacter' };
   return { ok: true, path: trimmed };
+}
+
+// ── CAD compile helpers (/desktop/cad_compile) ─────────────────────────
+//
+// FIXED binary candidate paths — deliberately NOT a $PATH search and never
+// a client-supplied location, so a poisoned PATH or crafted request cannot
+// swap in another executable. First existing candidate wins.
+const CAD_ENGINE_BINARIES = {
+  openscad: [
+    '/Applications/OpenSCAD.app/Contents/MacOS/OpenSCAD',
+    '/opt/homebrew/bin/openscad',
+    '/usr/local/bin/openscad',
+  ],
+  freecadcmd: [
+    '/Applications/FreeCAD.app/Contents/Resources/bin/freecadcmd',
+    '/opt/homebrew/bin/freecadcmd',
+    '/usr/local/bin/freecadcmd',
+  ],
+  blender: [
+    '/Applications/Blender.app/Contents/MacOS/Blender',
+    '/opt/homebrew/bin/blender',
+    '/usr/local/bin/blender',
+  ],
+};
+
+function resolveCadEngineBinary(engine) {
+  const candidates = CAD_ENGINE_BINARIES[engine] || [];
+  for (const candidate of candidates) {
+    try {
+      const stat = fs.statSync(candidate);
+      if (stat.isFile()) return candidate;
+    } catch {}
+  }
+  return null;
+}
+
+// LOCKSTEP(src/lib/cadCodeExecutor.ts): mirrors OPENSCAD_DEFINE_ARG_REGEX,
+// OPENSCAD_IMGSIZE_ARG_REGEX, and isAllowedOpenScadExtraArg (incl. the
+// 16..8192 imgsize bounds and 120-char cap). The pure TS module is the
+// smoke-tested source of truth — keep both in step.
+const CAD_OPENSCAD_DEFINE_ARG_REGEX = /^-D[A-Za-z_][A-Za-z0-9_]{0,63}=(?:-?\d{1,12}(?:\.\d{1,12})?|true|false)$/;
+const CAD_OPENSCAD_IMGSIZE_ARG_REGEX = /^--imgsize=(\d{2,5}),(\d{2,5})$/;
+
+function isAllowedCadCompileExtraArg(arg) {
+  if (typeof arg !== 'string' || arg.length === 0 || arg.length > 120) return false;
+  if (arg === '--render') return true;
+  const imgsize = CAD_OPENSCAD_IMGSIZE_ARG_REGEX.exec(arg);
+  if (imgsize) {
+    const width = Number(imgsize[1]);
+    const height = Number(imgsize[2]);
+    return width >= 16 && width <= 8192 && height >= 16 && height <= 8192;
+  }
+  return CAD_OPENSCAD_DEFINE_ARG_REGEX.test(arg);
+}
+
+// ── Design export helpers (/desktop/design_export) ─────────────────────
+//
+// Same FIXED-binary-candidates posture as CAD_ENGINE_BINARIES above —
+// deliberately NOT a $PATH search and never a client-supplied location.
+// sketchtool ships INSIDE the Sketch app bundle only (no standalone brew
+// binary), so both of its candidates live under /Applications/Sketch.app.
+const DESIGN_ENGINE_BINARIES = {
+  inkscape: [
+    '/Applications/Inkscape.app/Contents/MacOS/inkscape',
+    '/opt/homebrew/bin/inkscape',
+    '/usr/local/bin/inkscape',
+  ],
+  sketchtool: [
+    '/Applications/Sketch.app/Contents/MacOS/sketchtool',
+    '/Applications/Sketch.app/Contents/Resources/sketchtool/bin/sketchtool',
+  ],
+};
+
+function resolveDesignEngineBinary(engine) {
+  const candidates = DESIGN_ENGINE_BINARIES[engine] || [];
+  for (const candidate of candidates) {
+    try {
+      const stat = fs.statSync(candidate);
+      if (stat.isFile()) return candidate;
+    } catch {}
+  }
+  return null;
+}
+
+// LOCKSTEP(src/lib/designCliExecutor.ts): mirrors
+// validateDesignExportOptions — per-engine key allowlist, strict NUMBER
+// dimensions (integers 16..16384, no string coercion), the 1.4..1.7 PDF
+// version enum, PNG-only preview format, and the 1|2|3 preview scale.
+// The pure TS module is the smoke-tested source of truth — keep in step.
+function validateDesignExportOptionsServer(engine, raw) {
+  if (raw === undefined || raw === null) return { ok: true, options: {} };
+  if (typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, error: 'options must be an object.' };
+  const allowedKeys = engine === 'inkscape' ? ['widthPx', 'heightPx', 'pdfVersion'] : ['format', 'scale'];
+  for (const key of Object.keys(raw)) {
+    if (!allowedKeys.includes(key)) {
+      return { ok: false, error: `options.${key} is not allowed for engine "${engine}". Allowed: ${allowedKeys.join(', ')}.` };
+    }
+  }
+  const options = {};
+  if (engine === 'inkscape') {
+    for (const key of ['widthPx', 'heightPx']) {
+      const value = raw[key];
+      if (value === undefined || value === null) continue;
+      if (typeof value !== 'number' || !Number.isInteger(value) || value < 16 || value > 16384) {
+        return { ok: false, error: `options.${key} must be an integer 16..16384.` };
+      }
+      options[key] = value;
+    }
+    const pdfVersion = raw.pdfVersion;
+    if (pdfVersion !== undefined && pdfVersion !== null) {
+      if (typeof pdfVersion !== 'string' || !['1.4', '1.5', '1.6', '1.7'].includes(pdfVersion)) {
+        return { ok: false, error: 'options.pdfVersion must be one of: 1.4, 1.5, 1.6, 1.7.' };
+      }
+      options.pdfVersion = pdfVersion;
+    }
+    return { ok: true, options };
+  }
+  const format = raw.format;
+  if (format !== undefined && format !== null) {
+    if (format !== 'png') {
+      return { ok: false, error: 'options.format must be "png" — sketchtool preview export is PNG-only.' };
+    }
+    options.format = 'png';
+  }
+  const scale = raw.scale;
+  if (scale !== undefined && scale !== null) {
+    if (typeof scale !== 'number' || ![1, 2, 3].includes(scale)) {
+      return { ok: false, error: 'options.scale must be one of: 1, 2, 3.' };
+    }
+    options.scale = scale;
+  }
+  return { ok: true, options };
 }
 
 function expandDesktopPath(raw) {
@@ -9768,6 +11240,8 @@ end if
   };
 }
 
+// LOCKSTEP(src/lib/photoshopExtendScriptAdapters.ts): photoshopExtendScriptJsxPrelude
+// is a byte-identical, smoke-tested copy of this prelude — keep both in step.
 function photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath }) {
   return `
 var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
@@ -10043,6 +11517,87 @@ function photoshopNotRunningJson(targetName, kind) {
       docModified: false,
       docSaved: false,
       matches: [],
+      error: 'Photoshop is not running.',
+    });
+  }
+  if (kind === 'adjustment_layer') {
+    return JSON.stringify({
+      ok: false,
+      appRunning: false,
+      appName: targetName,
+      documentName: null,
+      kind: '',
+      createdLayerName: null,
+      layerCountBefore: 0,
+      layerCountAfter: 0,
+      error: 'Photoshop is not running.',
+    });
+  }
+  if (kind === 'selection_mask') {
+    return JSON.stringify({
+      ok: false,
+      appRunning: false,
+      appName: targetName,
+      documentName: null,
+      layerName: null,
+      mode: '',
+      selectionBounds: null,
+      maskApplied: false,
+      error: 'Photoshop is not running.',
+    });
+  }
+  if (kind === 'resize') {
+    return JSON.stringify({
+      ok: false,
+      appRunning: false,
+      appName: targetName,
+      documentName: null,
+      op: '',
+      widthPxBefore: 0,
+      heightPxBefore: 0,
+      widthPxAfter: 0,
+      heightPxAfter: 0,
+      error: 'Photoshop is not running.',
+    });
+  }
+  if (kind === 'manage_layers') {
+    return JSON.stringify({
+      ok: false,
+      appRunning: false,
+      appName: targetName,
+      documentName: null,
+      action: '',
+      layerName: null,
+      resultLayerName: null,
+      layerCountBefore: 0,
+      layerCountAfter: 0,
+      layerIndexBefore: 0,
+      layerIndexAfter: 0,
+      error: 'Photoshop is not running.',
+    });
+  }
+  if (kind === 'transform_layer') {
+    return JSON.stringify({
+      ok: false,
+      appRunning: false,
+      appName: targetName,
+      documentName: null,
+      layerName: null,
+      op: '',
+      boundsBefore: null,
+      boundsAfter: null,
+      error: 'Photoshop is not running.',
+    });
+  }
+  if (kind === 'convert_color_mode') {
+    return JSON.stringify({
+      ok: false,
+      appRunning: false,
+      appName: targetName,
+      documentName: null,
+      modeBefore: null,
+      modeAfter: null,
+      converted: false,
       error: 'Photoshop is not running.',
     });
   }
@@ -10692,6 +12247,1355 @@ ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
 }());
 `;
   return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'status'));
+}
+
+// ── Photoshop ExtendScript mutation adapters ─────────────────────────────
+//
+// LOCKSTEP(src/lib/photoshopExtendScriptAdapters.ts): everything from here
+// to the end of buildPhotoshopConvertColorModeScript duplicates the pure
+// module (enum lists, ActionManager ids, and the six JSX bodies). The pure
+// module is the smoke-tested source of truth — keep both sides in step.
+
+const PHOTOSHOP_ADJUSTMENT_LAYER_KINDS = ['levels', 'curves', 'hue_saturation', 'brightness_contrast', 'black_white'];
+// Photoshop quirk: the brightness/contrast class stringID is "brightnessEvent"
+// (charID 'BrgC'), not "brightnessContrast".
+const PHOTOSHOP_ADJUSTMENT_KIND_EVENT_IDS = {
+  levels: 'levels',
+  curves: 'curves',
+  hue_saturation: 'hueSaturation',
+  brightness_contrast: 'brightnessEvent',
+  black_white: 'blackAndWhite',
+};
+const PHOTOSHOP_SELECTION_MASK_MODES = ['select_only', 'mask_layer'];
+const PHOTOSHOP_RESIZE_OPS = ['image_resize', 'canvas_resize', 'crop_to_selection'];
+const PHOTOSHOP_CANVAS_ANCHORS = [
+  'top_left', 'top_center', 'top_right',
+  'middle_left', 'middle_center', 'middle_right',
+  'bottom_left', 'bottom_center', 'bottom_right',
+];
+const PHOTOSHOP_CANVAS_ANCHOR_POSITIONS = {
+  top_left: 'TOPLEFT',
+  top_center: 'TOPCENTER',
+  top_right: 'TOPRIGHT',
+  middle_left: 'MIDDLELEFT',
+  middle_center: 'MIDDLECENTER',
+  middle_right: 'MIDDLERIGHT',
+  bottom_left: 'BOTTOMLEFT',
+  bottom_center: 'BOTTOMCENTER',
+  bottom_right: 'BOTTOMRIGHT',
+};
+const PHOTOSHOP_MAX_PIXEL_DIMENSION = 30000;
+
+// LOCKSTEP(src/lib/photoshopExtendScriptAdapters.ts): photoshopFindLayerByExactNameJsx
+function photoshopFindLayerByExactNameJsx() {
+  return `
+  function findLayerByExactName(parent, targetLayerName) {
+    var layers;
+    try { layers = parent.layers; } catch (_) { return null; }
+    for (var i = 0; i < collectionLength(layers); i += 1) {
+      var layer = layers[i];
+      var currentName = "";
+      try { currentName = String(layer.name || ""); } catch (_) {}
+      if (currentName === targetLayerName) return layer;
+      var typename = "";
+      try { typename = String(layer.typename || ""); } catch (_) {}
+      if (/LayerSet/i.test(typename)) {
+        var nested = findLayerByExactName(layer, targetLayerName);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  }
+`;
+}
+
+// LOCKSTEP(src/lib/photoshopExtendScriptAdapters.ts): photoshopApplyAdjustmentLayerJsxBody —
+// keep this JSX body byte-identical with the pure module's copy.
+function photoshopApplyAdjustmentLayerJsxBody({ layerName, kind, kindEventId, preserveExisting }) {
+  return `
+  var layerName = ${JSON.stringify(String(layerName ?? ''))};
+  var kind = ${JSON.stringify(String(kind ?? ''))};
+  var kindEventId = ${JSON.stringify(String(kindEventId ?? ''))};
+  var preserveExisting = ${preserveExisting === false ? 'false' : 'true'};
+
+  function stringifyAdjustmentResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"kind\\":" + jsonString(value.kind),
+      "\\"createdLayerName\\":" + jsonNullableString(value.createdLayerName),
+      "\\"layerCountBefore\\":" + jsonNumber(value.layerCountBefore),
+      "\\"layerCountAfter\\":" + jsonNumber(value.layerCountAfter),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+${photoshopFindLayerByExactNameJsx()}
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Photoshop"),
+    documentName: null,
+    kind: kind,
+    createdLayerName: null,
+    layerCountBefore: 0,
+    layerCountAfter: 0,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyAdjustmentResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyAdjustmentResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+  result.layerCountBefore = getLayerStats(doc).layerCount;
+
+  var anchorLayer = layerName ? findLayerByExactName(doc, layerName) : null;
+  try {
+    if (anchorLayer) doc.activeLayer = anchorLayer;
+    else if (collectionLength(doc.layers) > 0) doc.activeLayer = doc.layers[0];
+  } catch (_) {}
+
+  // preserveExisting contract: this adapter is additive-only. It creates ONE
+  // new adjustment layer above the anchor (or at the top) and never edits,
+  // moves, merges, or removes existing layers on any path.
+  try {
+    var makeDescriptor = new ActionDescriptor();
+    var adjustmentRef = new ActionReference();
+    adjustmentRef.putClass(stringIDToTypeID("adjustmentLayer"));
+    makeDescriptor.putReference(stringIDToTypeID("null"), adjustmentRef);
+    var usingDescriptor = new ActionDescriptor();
+    usingDescriptor.putClass(stringIDToTypeID("type"), stringIDToTypeID(kindEventId));
+    makeDescriptor.putObject(stringIDToTypeID("using"), stringIDToTypeID("adjustmentLayer"), usingDescriptor);
+    executeAction(stringIDToTypeID("make"), makeDescriptor, DialogModes.NO);
+    try { result.createdLayerName = String(doc.activeLayer.name || ""); } catch (_) {}
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  result.layerCountAfter = getLayerStats(doc).layerCount;
+  if (result.ok && result.layerCountAfter <= result.layerCountBefore) {
+    result.ok = false;
+    result.error = "adjustment_layer_not_created";
+  }
+  return stringifyAdjustmentResult(result);
+`;
+}
+
+function buildPhotoshopApplyAdjustmentLayerScript({ appName, targetDocumentName, layerName, kind, preserveExisting }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName: targetDocumentName, sourceDocumentPath: '' })}
+${photoshopApplyAdjustmentLayerJsxBody({
+    layerName,
+    kind,
+    kindEventId: PHOTOSHOP_ADJUSTMENT_KIND_EVENT_IDS[kind],
+    preserveExisting,
+  })}
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'adjustment_layer'));
+}
+
+// LOCKSTEP(src/lib/photoshopExtendScriptAdapters.ts): photoshopApplySelectionOrMaskJsxBody —
+// keep this JSX body byte-identical with the pure module's copy. The mode
+// branch is resolved at build time so the emitted script contains ONLY the
+// non-destructive path it was asked for; there is no pixel-deleting mode.
+function photoshopApplySelectionOrMaskJsxBody({ layerName, mode }) {
+  const head = `
+  var layerName = ${JSON.stringify(String(layerName ?? ''))};
+  var mode = ${JSON.stringify(String(mode ?? ''))};
+
+  function stringifySelectionResult(value) {
+    var boundsJson = "null";
+    if (value.selectionBounds) {
+      boundsJson = "{" + [
+        "\\"left\\":" + jsonNumber(value.selectionBounds.left),
+        "\\"top\\":" + jsonNumber(value.selectionBounds.top),
+        "\\"right\\":" + jsonNumber(value.selectionBounds.right),
+        "\\"bottom\\":" + jsonNumber(value.selectionBounds.bottom)
+      ].join(",") + "}";
+    }
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"layerName\\":" + jsonNullableString(value.layerName),
+      "\\"mode\\":" + jsonString(value.mode),
+      "\\"selectionBounds\\":" + boundsJson,
+      "\\"maskApplied\\":" + jsonBoolean(value.maskApplied),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+${photoshopFindLayerByExactNameJsx()}
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Photoshop"),
+    documentName: null,
+    layerName: null,
+    mode: mode,
+    selectionBounds: null,
+    maskApplied: false,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifySelectionResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifySelectionResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  if (layerName) {
+    var targetLayer = findLayerByExactName(doc, layerName);
+    if (!targetLayer) {
+      result.error = "layer_not_found";
+      return stringifySelectionResult(result);
+    }
+    try { doc.activeLayer = targetLayer; } catch (_) {}
+  }
+  try { result.layerName = String(doc.activeLayer.name || ""); } catch (_) {}
+
+  // Select Subject (stable ExtendScript event since Photoshop 2020).
+  try {
+    var selectSubjectDescriptor = new ActionDescriptor();
+    selectSubjectDescriptor.putBoolean(stringIDToTypeID("sampleAllLayers"), false);
+    executeAction(stringIDToTypeID("autoCutout"), selectSubjectDescriptor, DialogModes.NO);
+  } catch (err) {
+    result.error = "select_subject_failed: " + String(err && err.message ? err.message : err);
+    return stringifySelectionResult(result);
+  }
+  if (!hasActiveSelection(doc)) {
+    result.error = "selection_empty";
+    return stringifySelectionResult(result);
+  }
+  try {
+    var selectionBounds = doc.selection.bounds;
+    result.selectionBounds = {
+      left: unitPx(selectionBounds[0]),
+      top: unitPx(selectionBounds[1]),
+      right: unitPx(selectionBounds[2]),
+      bottom: unitPx(selectionBounds[3])
+    };
+  } catch (_) {}
+`;
+  if (mode === 'select_only') {
+    return `${head}
+  // select_only: leave the subject selection active and report its bounds.
+  result.ok = true;
+  return stringifySelectionResult(result);
+`;
+  }
+  return `${head}
+  // mask_layer: apply the subject selection as a NON-destructive layer mask
+  // (make channel at mask using revealSelection). Pixels are never deleted.
+  try {
+    var maskDescriptor = new ActionDescriptor();
+    maskDescriptor.putClass(stringIDToTypeID("new"), stringIDToTypeID("channel"));
+    var maskRef = new ActionReference();
+    maskRef.putEnumerated(stringIDToTypeID("channel"), stringIDToTypeID("channel"), stringIDToTypeID("mask"));
+    maskDescriptor.putReference(stringIDToTypeID("at"), maskRef);
+    maskDescriptor.putEnumerated(stringIDToTypeID("using"), stringIDToTypeID("userMaskEnabled"), stringIDToTypeID("revealSelection"));
+    executeAction(stringIDToTypeID("make"), maskDescriptor, DialogModes.NO);
+  } catch (err) {
+    result.error = "mask_apply_failed: " + String(err && err.message ? err.message : err);
+    return stringifySelectionResult(result);
+  }
+  try { result.maskApplied = layerHasMask(doc.activeLayer); } catch (_) {}
+  if (!result.maskApplied) {
+    result.error = "mask_not_verified";
+    return stringifySelectionResult(result);
+  }
+  result.ok = true;
+  return stringifySelectionResult(result);
+`;
+}
+
+function buildPhotoshopApplySelectionOrMaskScript({ appName, targetDocumentName, layerName, mode }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName: targetDocumentName, sourceDocumentPath: '' })}
+${photoshopApplySelectionOrMaskJsxBody({ layerName, mode })}
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'selection_mask'));
+}
+
+// LOCKSTEP(src/lib/photoshopExtendScriptAdapters.ts): photoshopResizeCanvasOrImageJsxBody —
+// keep this JSX body byte-identical with the pure module's copy. The op
+// branch is resolved at build time; crop_to_selection fails closed with
+// `no_active_selection` when nothing is selected.
+function photoshopResizeCanvasOrImageJsxBody({ op, widthPx, heightPx, anchor }) {
+  const widthLiteral = widthPx == null ? 0 : Math.trunc(widthPx);
+  const heightLiteral = heightPx == null ? 0 : Math.trunc(heightPx);
+  const head = `
+  var op = ${JSON.stringify(String(op ?? ''))};
+  var widthPxParam = ${JSON.stringify(widthLiteral)};
+  var heightPxParam = ${JSON.stringify(heightLiteral)};
+
+  function stringifyResizeResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"op\\":" + jsonString(value.op),
+      "\\"widthPxBefore\\":" + jsonNumber(value.widthPxBefore),
+      "\\"heightPxBefore\\":" + jsonNumber(value.heightPxBefore),
+      "\\"widthPxAfter\\":" + jsonNumber(value.widthPxAfter),
+      "\\"heightPxAfter\\":" + jsonNumber(value.heightPxAfter),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Photoshop"),
+    documentName: null,
+    op: op,
+    widthPxBefore: 0,
+    heightPxBefore: 0,
+    widthPxAfter: 0,
+    heightPxAfter: 0,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyResizeResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyResizeResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+  try { result.widthPxBefore = unitPx(doc.width); } catch (_) {}
+  try { result.heightPxBefore = unitPx(doc.height); } catch (_) {}
+`;
+  const foot = `
+  try { result.widthPxAfter = unitPx(doc.width); } catch (_) {}
+  try { result.heightPxAfter = unitPx(doc.height); } catch (_) {}
+  return stringifyResizeResult(result);
+`;
+  if (op === 'image_resize') {
+    return `${head}
+  // image_resize: bicubic resample; when only one dimension is given the
+  // other is derived from the current aspect ratio (keep proportions).
+  var targetWidth = widthPxParam;
+  var targetHeight = heightPxParam;
+  if (targetWidth > 0 && !(targetHeight > 0) && result.widthPxBefore > 0) {
+    targetHeight = Math.max(1, Math.round(targetWidth * result.heightPxBefore / result.widthPxBefore));
+  }
+  if (targetHeight > 0 && !(targetWidth > 0) && result.heightPxBefore > 0) {
+    targetWidth = Math.max(1, Math.round(targetHeight * result.widthPxBefore / result.heightPxBefore));
+  }
+  if (!(targetWidth > 0) || !(targetHeight > 0)) {
+    result.error = "invalid_dimensions";
+    return stringifyResizeResult(result);
+  }
+  try {
+    doc.resizeImage(UnitValue(targetWidth, "px"), UnitValue(targetHeight, "px"), null, ResampleMethod.BICUBIC);
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+${foot}`;
+  }
+  if (op === 'canvas_resize') {
+    return `${head}
+  // canvas_resize: content is never scaled; a missing dimension keeps the
+  // current canvas size on that axis.
+  var anchorPosition = AnchorPosition.${PHOTOSHOP_CANVAS_ANCHOR_POSITIONS[anchor]};
+  var targetWidth = widthPxParam > 0 ? widthPxParam : result.widthPxBefore;
+  var targetHeight = heightPxParam > 0 ? heightPxParam : result.heightPxBefore;
+  if (!(targetWidth > 0) || !(targetHeight > 0)) {
+    result.error = "invalid_dimensions";
+    return stringifyResizeResult(result);
+  }
+  try {
+    doc.resizeCanvas(UnitValue(targetWidth, "px"), UnitValue(targetHeight, "px"), anchorPosition);
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+${foot}`;
+  }
+  return `${head}
+  // crop_to_selection: only crops to an existing active selection — fails
+  // closed when nothing is selected.
+  if (!hasActiveSelection(doc)) {
+    result.error = "no_active_selection";
+    return stringifyResizeResult(result);
+  }
+  try {
+    doc.crop(doc.selection.bounds);
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+${foot}`;
+}
+
+function buildPhotoshopResizeCanvasOrImageScript({ appName, targetDocumentName, op, widthPx, heightPx, anchor }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName: targetDocumentName, sourceDocumentPath: '' })}
+${photoshopResizeCanvasOrImageJsxBody({ op, widthPx, heightPx, anchor })}
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'resize'));
+}
+
+// LOCKSTEP(src/lib/photoshopExtendScriptAdapters.ts): PHOTOSHOP_* consts for
+// the manage/transform/convert adapters. manage_layers actions are
+// intentionally organizational ONLY — no delete, merge, or flatten exists.
+const PHOTOSHOP_MANAGE_LAYER_ACTIONS = ['rename', 'duplicate', 'reorder', 'group'];
+const PHOTOSHOP_LAYER_REORDER_POSITIONS = ['top', 'bottom', 'above', 'below'];
+const PHOTOSHOP_TRANSFORM_OPS = ['move', 'scale', 'rotate'];
+const PHOTOSHOP_MAX_TRANSLATE_PX = 30000;
+const PHOTOSHOP_MIN_SCALE_PERCENT = 1;
+const PHOTOSHOP_MAX_SCALE_PERCENT = 1000;
+const PHOTOSHOP_MAX_ROTATE_DEGREES = 360;
+const PHOTOSHOP_COLOR_MODES = ['rgb', 'cmyk', 'grayscale'];
+const PHOTOSHOP_COLOR_MODE_CHANGE_MODES = {
+  rgb: 'RGB',
+  cmyk: 'CMYK',
+  grayscale: 'GRAYSCALE',
+};
+
+// LOCKSTEP(src/lib/photoshopExtendScriptAdapters.ts): photoshopCollectLayersByExactNameJsx
+function photoshopCollectLayersByExactNameJsx() {
+  return `
+  function collectLayersByExactName(parent, targetLayerName, out) {
+    var layers;
+    try { layers = parent.layers; } catch (_) { return out; }
+    for (var i = 0; i < collectionLength(layers); i += 1) {
+      var layer = layers[i];
+      var currentName = "";
+      try { currentName = String(layer.name || ""); } catch (_) {}
+      if (currentName === targetLayerName) out.push(layer);
+      var typename = "";
+      try { typename = String(layer.typename || ""); } catch (_) {}
+      if (/LayerSet/i.test(typename)) collectLayersByExactName(layer, targetLayerName, out);
+    }
+    return out;
+  }
+
+  function findUniqueLayerByExactName(doc, targetLayerName, result, missingError, ambiguousError) {
+    var matches = collectLayersByExactName(doc, targetLayerName, []);
+    if (matches.length < 1) { result.error = missingError; return null; }
+    if (matches.length > 1) { result.error = ambiguousError; return null; }
+    return matches[0];
+  }
+`;
+}
+
+// LOCKSTEP(src/lib/photoshopExtendScriptAdapters.ts): photoshopManageLayersJsxBody —
+// keep this JSX body byte-identical with the pure module's copy. The action
+// branch is resolved at build time; no destructive layer call exists in any
+// branch.
+function photoshopManageLayersJsxBody({ action, layerName, newName, position, referenceLayerName }) {
+  const head = `
+  var action = ${JSON.stringify(String(action ?? ''))};
+  var layerName = ${JSON.stringify(String(layerName ?? ''))};
+  var newName = ${JSON.stringify(String(newName ?? ''))};
+  var position = ${JSON.stringify(String(position ?? ''))};
+  var referenceLayerName = ${JSON.stringify(String(referenceLayerName ?? ''))};
+
+  function stringifyManageResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"action\\":" + jsonString(value.action),
+      "\\"layerName\\":" + jsonNullableString(value.layerName),
+      "\\"resultLayerName\\":" + jsonNullableString(value.resultLayerName),
+      "\\"layerCountBefore\\":" + jsonNumber(value.layerCountBefore),
+      "\\"layerCountAfter\\":" + jsonNumber(value.layerCountAfter),
+      "\\"layerIndexBefore\\":" + jsonNumber(value.layerIndexBefore),
+      "\\"layerIndexAfter\\":" + jsonNumber(value.layerIndexAfter),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+${photoshopCollectLayersByExactNameJsx()}
+  function layerItemIndex(layer) {
+    try { return Math.round(Number(layer.itemIndex)); } catch (_) {}
+    return 0;
+  }
+
+  // manage_layers contract: rename/duplicate/reorder/group ONLY. No action in
+  // this adapter can discard or combine existing layers.
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Photoshop"),
+    documentName: null,
+    action: action,
+    layerName: layerName,
+    resultLayerName: null,
+    layerCountBefore: 0,
+    layerCountAfter: 0,
+    layerIndexBefore: 0,
+    layerIndexAfter: 0,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyManageResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyManageResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+  result.layerCountBefore = getLayerStats(doc).layerCount;
+
+  var target = findUniqueLayerByExactName(doc, layerName, result, "layer_not_found", "layer_ambiguous");
+  if (!target) return stringifyManageResult(result);
+  result.layerIndexBefore = layerItemIndex(target);
+  var resultLayer = target;
+`;
+  const foot = `
+  result.layerCountAfter = getLayerStats(doc).layerCount;
+  result.layerIndexAfter = layerItemIndex(resultLayer);
+  return stringifyManageResult(result);
+`;
+  if (action === 'rename') {
+    return `${head}
+  // rename: metadata-only change — sets the layer's .name and verifies it.
+  try {
+    target.name = newName;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+    return stringifyManageResult(result);
+  }
+  var renamedTo = "";
+  try { renamedTo = String(target.name || ""); } catch (_) {}
+  if (renamedTo !== newName) {
+    result.error = "rename_not_applied";
+    return stringifyManageResult(result);
+  }
+  result.resultLayerName = renamedTo;
+  result.ok = true;
+${foot}`;
+  }
+  if (action === 'duplicate') {
+    return `${head}
+  // duplicate: creates ONE copy above the source layer; the source layer
+  // itself is never changed.
+  try {
+    resultLayer = target.duplicate();
+    if (newName) resultLayer.name = newName;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+    return stringifyManageResult(result);
+  }
+  try { result.resultLayerName = String(resultLayer.name || ""); } catch (_) {}
+  result.ok = true;
+  result.layerCountAfter = getLayerStats(doc).layerCount;
+  result.layerIndexAfter = layerItemIndex(resultLayer);
+  if (result.layerCountAfter <= result.layerCountBefore) {
+    result.ok = false;
+    result.error = "duplicate_not_created";
+  }
+  return stringifyManageResult(result);
+`;
+  }
+  if (action === 'reorder') {
+    return `${head}
+  // reorder: repositions the layer in the stack via ElementPlacement moves;
+  // layer content is untouched.
+  try {
+    if (position === "top") {
+      target.move(doc, ElementPlacement.INSIDE);
+    } else if (position === "bottom") {
+      var bottomAnchor = doc.layers[collectionLength(doc.layers) - 1];
+      if (bottomAnchor !== target) target.move(bottomAnchor, ElementPlacement.PLACEAFTER);
+    } else {
+      var referenceLayer = findUniqueLayerByExactName(doc, referenceLayerName, result, "reference_layer_not_found", "reference_layer_ambiguous");
+      if (!referenceLayer) return stringifyManageResult(result);
+      target.move(referenceLayer, position === "above" ? ElementPlacement.PLACEBEFORE : ElementPlacement.PLACEAFTER);
+    }
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+    return stringifyManageResult(result);
+  }
+  try { result.resultLayerName = String(target.name || ""); } catch (_) {}
+  result.ok = true;
+${foot}`;
+  }
+  return `${head}
+  // group: creates ONE new empty layer set and moves the layer inside it;
+  // no other layer is touched.
+  var groupSet = null;
+  try {
+    groupSet = doc.layerSets.add();
+    if (newName) groupSet.name = newName;
+    target.move(groupSet, ElementPlacement.INSIDE);
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+    return stringifyManageResult(result);
+  }
+  resultLayer = groupSet;
+  try { result.resultLayerName = String(groupSet.name || ""); } catch (_) {}
+  result.ok = true;
+  result.layerCountAfter = getLayerStats(doc).layerCount;
+  result.layerIndexAfter = layerItemIndex(resultLayer);
+  if (result.layerCountAfter <= result.layerCountBefore) {
+    result.ok = false;
+    result.error = "group_not_created";
+  }
+  return stringifyManageResult(result);
+`;
+}
+
+function buildPhotoshopManageLayersScript({ appName, targetDocumentName, action, layerName, newName, position, referenceLayerName }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName: targetDocumentName, sourceDocumentPath: '' })}
+${photoshopManageLayersJsxBody({ action, layerName, newName, position, referenceLayerName })}
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'manage_layers'));
+}
+
+// LOCKSTEP(src/lib/photoshopExtendScriptAdapters.ts): photoshopTransformLayerJsxBody —
+// keep this JSX body byte-identical with the pure module's copy. The op branch
+// is resolved at build time; background layers ('background_layer_locked') and
+// locked layers ('layer_locked') fail closed before any mutation.
+function photoshopTransformLayerJsxBody({ layerName, op, deltaX, deltaY, scalePercent, rotateDegrees }) {
+  const deltaXLiteral = deltaX == null ? 0 : Math.trunc(deltaX);
+  const deltaYLiteral = deltaY == null ? 0 : Math.trunc(deltaY);
+  const scalePercentLiteral = scalePercent == null ? 100 : Number(scalePercent);
+  const rotateDegreesLiteral = rotateDegrees == null ? 0 : Number(rotateDegrees);
+  const head = `
+  var layerName = ${JSON.stringify(String(layerName ?? ''))};
+  var op = ${JSON.stringify(String(op ?? ''))};
+  var deltaXParam = ${JSON.stringify(deltaXLiteral)};
+  var deltaYParam = ${JSON.stringify(deltaYLiteral)};
+  var scalePercentParam = ${JSON.stringify(scalePercentLiteral)};
+  var rotateDegreesParam = ${JSON.stringify(rotateDegreesLiteral)};
+
+  function stringifyTransformResult(value) {
+    function boundsJson(bounds) {
+      if (!bounds) return "null";
+      return "{" + [
+        "\\"left\\":" + jsonNumber(bounds.left),
+        "\\"top\\":" + jsonNumber(bounds.top),
+        "\\"right\\":" + jsonNumber(bounds.right),
+        "\\"bottom\\":" + jsonNumber(bounds.bottom)
+      ].join(",") + "}";
+    }
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"layerName\\":" + jsonNullableString(value.layerName),
+      "\\"op\\":" + jsonString(value.op),
+      "\\"boundsBefore\\":" + boundsJson(value.boundsBefore),
+      "\\"boundsAfter\\":" + boundsJson(value.boundsAfter),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+${photoshopCollectLayersByExactNameJsx()}
+  function layerBoundsObject(layer) {
+    var bounds = layerBounds(layer);
+    if (bounds.length !== 4) return null;
+    return { left: bounds[0], top: bounds[1], right: bounds[2], bottom: bounds[3] };
+  }
+
+  function isBackgroundLayer(layer) {
+    try { return layer.isBackgroundLayer === true; } catch (_) { return false; }
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Photoshop"),
+    documentName: null,
+    layerName: layerName,
+    op: op,
+    boundsBefore: null,
+    boundsAfter: null,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyTransformResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyTransformResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  var target = findUniqueLayerByExactName(doc, layerName, result, "layer_not_found", "layer_ambiguous");
+  if (!target) return stringifyTransformResult(result);
+  if (isBackgroundLayer(target)) {
+    result.error = "background_layer_locked";
+    return stringifyTransformResult(result);
+  }
+  if (layerLocked(target)) {
+    result.error = "layer_locked";
+    return stringifyTransformResult(result);
+  }
+  try { doc.activeLayer = target; } catch (_) {}
+  result.boundsBefore = layerBoundsObject(target);
+`;
+  const foot = `
+  result.boundsAfter = layerBoundsObject(target);
+  return stringifyTransformResult(result);
+`;
+  if (op === 'move') {
+    return `${head}
+  // move: relative pixel translation of the layer; content is not resampled.
+  try {
+    target.translate(UnitValue(deltaXParam, "px"), UnitValue(deltaYParam, "px"));
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+${foot}`;
+  }
+  if (op === 'scale') {
+    return `${head}
+  // scale: uniform percentage resize anchored on the layer center.
+  try {
+    target.resize(scalePercentParam, scalePercentParam, AnchorPosition.MIDDLECENTER);
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+${foot}`;
+  }
+  return `${head}
+  // rotate: rotation anchored on the layer center.
+  try {
+    target.rotate(rotateDegreesParam, AnchorPosition.MIDDLECENTER);
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+${foot}`;
+}
+
+function buildPhotoshopTransformLayerScript({ appName, targetDocumentName, layerName, op, deltaX, deltaY, scalePercent, rotateDegrees }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName: targetDocumentName, sourceDocumentPath: '' })}
+${photoshopTransformLayerJsxBody({ layerName, op, deltaX, deltaY, scalePercent, rotateDegrees })}
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'transform_layer'));
+}
+
+// LOCKSTEP(src/lib/photoshopExtendScriptAdapters.ts): photoshopConvertColorModeJsxBody —
+// keep this JSX body byte-identical with the pure module's copy. Reports an
+// honest no-op (converted:false, ok:true) when the document is already in the
+// requested mode, and verifies the resulting mode before claiming success.
+// CMYK/Grayscale conversion discards color data in the UNSAVED working copy
+// only — reversible until save, and the script never saves.
+function photoshopConvertColorModeJsxBody({ mode, changeModeConstant }) {
+  return `
+  var mode = ${JSON.stringify(String(mode ?? ''))};
+
+  function stringifyConvertResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"modeBefore\\":" + jsonNullableString(value.modeBefore),
+      "\\"modeAfter\\":" + jsonNullableString(value.modeAfter),
+      "\\"converted\\":" + jsonBoolean(value.converted),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  function documentModeToken(value) {
+    var text = "";
+    try { text = String(value.mode || ""); } catch (_) {}
+    return text.replace(/^DocumentMode\\./, "").toLowerCase();
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Photoshop"),
+    documentName: null,
+    modeBefore: null,
+    modeAfter: null,
+    converted: false,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyConvertResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyConvertResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+  result.modeBefore = documentModeToken(doc);
+
+  if (result.modeBefore === mode) {
+    // Honest no-op: the document is already in the requested mode.
+    result.modeAfter = result.modeBefore;
+    result.converted = false;
+    result.ok = true;
+    return stringifyConvertResult(result);
+  }
+
+  // changeMode discards color data when narrowing (e.g. to grayscale). The
+  // change lives only in the unsaved working copy — this script NEVER saves,
+  // so it stays reversible until the separate approval-gated save step.
+  var previousDialogs = null;
+  try { previousDialogs = app.displayDialogs; app.displayDialogs = DialogModes.NO; } catch (_) {}
+  try {
+    doc.changeMode(ChangeMode.${changeModeConstant});
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  try { if (previousDialogs !== null) app.displayDialogs = previousDialogs; } catch (_) {}
+  result.modeAfter = documentModeToken(doc);
+  if (result.error) return stringifyConvertResult(result);
+  if (result.modeAfter !== mode) {
+    result.error = "mode_not_converted";
+    return stringifyConvertResult(result);
+  }
+  result.converted = true;
+  result.ok = true;
+  return stringifyConvertResult(result);
+`;
+}
+
+function buildPhotoshopConvertColorModeScript({ appName, targetDocumentName, mode }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName: targetDocumentName, sourceDocumentPath: '' })}
+${photoshopConvertColorModeJsxBody({ mode, changeModeConstant: PHOTOSHOP_COLOR_MODE_CHANGE_MODES[mode] })}
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'convert_color_mode'));
+}
+
+// ── Illustrator ExtendScript base pair (script builders) ─────────────────
+//
+// Same mechanism as the Photoshop tools above: ExtendScript delivered via
+// AppleScript `do javascript` against the resolved RUNNING app by name.
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): the prelude and the
+// two JSX bodies below are byte-identical, smoke-tested duplicates of the
+// pure module (the bridge cannot import TS) — keep both sides in step.
+
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): ILLUSTRATOR_* consts
+const ILLUSTRATOR_EXPORT_PROOF_FORMATS = ['png', 'svg'];
+const ILLUSTRATOR_MIN_SCALE_PERCENT = 50;
+const ILLUSTRATOR_MAX_SCALE_PERCENT = 400;
+const ILLUSTRATOR_DEFAULT_SCALE_PERCENT = 100;
+
+const runningIllustratorResolveCache = new Map();
+
+function getRunningIllustratorAppRows() {
+  if (process.platform !== 'darwin') return [];
+  const script = `
+tell application "System Events"
+  set out to ""
+  repeat with p in (application processes whose background only is false)
+    set pname to name of p as text
+    if pname contains "Illustrator" then
+      set out to out & pname & tab & ((frontmost of p) as text) & linefeed
+    end if
+  end repeat
+  return out
+end tell
+`;
+  try {
+    return execFileSync('osascript', ['-e', script], { encoding: 'utf8', timeout: 3000 })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [name, frontmost] = line.split(/\t/);
+        return {
+          name: String(name || '').trim(),
+          frontmost: /^true$/i.test(String(frontmost || '').trim()),
+        };
+      })
+      .filter((row) => row.name);
+  } catch {
+    return [];
+  }
+}
+
+function getRunningIllustratorDocumentCount(appName) {
+  const script = `
+tell application "${escapeAppleScriptString(appName)}"
+  return (count documents) as text
+end tell
+`;
+  try {
+    const raw = execFileSync('osascript', ['-e', script], { encoding: 'utf8', timeout: 3000 }).trim();
+    const count = Number(raw);
+    return Number.isFinite(count) ? count : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function resolveIllustratorMacApp(appName) {
+  if (process.platform !== 'darwin') return null;
+  const query = String(appName || 'Illustrator').trim() || 'Illustrator';
+  if (!/illustrator/i.test(query)) return null;
+  const cacheKey = normalizeMacAppName(query);
+  const cached = runningIllustratorResolveCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  let best = null;
+  for (const row of getRunningIllustratorAppRows()) {
+    const score = scoreMacAppCandidate(query, row.name);
+    if (score < 70) continue;
+    const documentCount = getRunningIllustratorDocumentCount(row.name);
+    const versionRank = macAppVersionRank(row.name);
+    const rank = (documentCount > 0 ? 100000 : 0) + (row.frontmost ? 10000 : 0) + score + versionRank;
+    if (!best || rank > best.rank) best = { ...row, score, documentCount, versionRank, rank };
+  }
+
+  const installed = best ? resolveInstalledMacApp(best.name) : null;
+  const value = best
+    ? {
+        name: best.name,
+        appPath: installed?.appPath || null,
+        score: best.score,
+        versionRank: best.versionRank,
+        running: true,
+        frontmost: best.frontmost,
+        documentCount: best.documentCount,
+      }
+    : null;
+  runningIllustratorResolveCache.set(cacheKey, { value, expiresAt: Date.now() + 10_000 });
+  return value;
+}
+
+function resolveIllustratorScriptTarget(appName) {
+  const resolved = resolveIllustratorMacApp(appName || 'Illustrator') ||
+    resolveInstalledMacApp(appName || 'Illustrator') ||
+    resolveInstalledMacApp('Adobe Illustrator') ||
+    resolveInstalledMacApp('Illustrator');
+  const targetName = resolved?.name || String(appName || 'Illustrator').trim();
+  if (!targetName || !/illustrator/i.test(targetName)) return null;
+  return targetName;
+}
+
+function buildIllustratorAppleScript(targetName, jsx, notRunning) {
+  return {
+    appName: targetName,
+    script: `
+if application "${escapeAppleScriptString(targetName)}" is running then
+  tell application "${escapeAppleScriptString(targetName)}"
+    set _ucResult to do javascript "${escapeAppleScriptString(jsx)}"
+  end tell
+  return _ucResult
+else
+  return ${JSON.stringify(notRunning)}
+end if
+`,
+  };
+}
+
+function illustratorNotRunningJson(targetName, kind) {
+  if (kind === 'export_proof') {
+    return JSON.stringify({
+      ok: false,
+      appRunning: false,
+      appName: targetName,
+      documentName: null,
+      outputFileName: null,
+      format: '',
+      scalePercent: null,
+      docModified: false,
+      docSaved: false,
+      error: 'Illustrator is not running.',
+    });
+  }
+  return JSON.stringify({
+    appRunning: false,
+    appName: targetName,
+    status: 'not_running',
+    documentCount: 0,
+    activeDocumentName: null,
+    activeDocumentPath: null,
+    widthPt: 0,
+    heightPt: 0,
+    artboardCount: 0,
+    layerCount: 0,
+    selectionCount: 0,
+    documents: [],
+    error: null,
+  });
+}
+
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts):
+// illustratorExtendScriptJsxPrelude is a byte-identical, smoke-tested copy
+// of this prelude — keep both in step.
+function illustratorJsxPrelude({ expectedDocumentName }) {
+  return `
+var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+
+function normalizeDocName(value) {
+  return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
+}
+
+function documentPath(value) {
+  try { return value.fullName.fsName; } catch (_) { return ""; }
+}
+
+function collectionLength(value) {
+  try { return value ? value.length : 0; } catch (_) { return 0; }
+}
+
+function roundPt(value) {
+  var parsed = Number(value);
+  return isFinite(parsed) ? Math.round(parsed * 100) / 100 : 0;
+}
+
+function documentMatches(value) {
+  if (!value) return false;
+  var docName = String(value.name || "");
+  if (expectedDocumentName && normalizeDocName(docName) === normalizeDocName(expectedDocumentName)) return true;
+  return !expectedDocumentName;
+}
+
+function findTargetDocument() {
+  try {
+    for (var i = 0; i < app.documents.length; i += 1) {
+      if (documentMatches(app.documents[i])) return app.documents[i];
+    }
+  } catch (_) {}
+  if (!expectedDocumentName && collectionLength(app.documents) > 0) {
+    try { return app.activeDocument; } catch (_) {}
+  }
+  return null;
+}
+
+function jsonEscape(value) {
+  return String(value === undefined || value === null ? "" : value)
+    .replace(/\\\\/g, "\\\\\\\\")
+    .replace(/"/g, "\\\\\\"")
+    .replace(/\\r/g, "\\\\r")
+    .replace(/\\n/g, "\\\\n")
+    .replace(/\\t/g, "\\\\t");
+}
+
+function jsonString(value) { return "\\"" + jsonEscape(value) + "\\""; }
+function jsonNullableString(value) { return value === undefined || value === null || value === "" ? "null" : jsonString(value); }
+function jsonNumber(value) { var parsed = Number(value); return isFinite(parsed) ? String(parsed) : "0"; }
+function jsonBoolean(value) { return value === true ? "true" : "false"; }
+function jsonArray(values) { return "[" + values.join(",") + "]"; }
+
+function documentSaved(doc) {
+  try { return doc.saved === true; } catch (_) { return false; }
+}
+
+function artboardWidthPt(doc) {
+  try {
+    var rect = doc.artboards[0].artboardRect;
+    return roundPt(Number(rect[2]) - Number(rect[0]));
+  } catch (_) {}
+  try { return roundPt(doc.width); } catch (_) {}
+  return 0;
+}
+
+function artboardHeightPt(doc) {
+  try {
+    var rect = doc.artboards[0].artboardRect;
+    return roundPt(Number(rect[1]) - Number(rect[3]));
+  } catch (_) {}
+  try { return roundPt(doc.height); } catch (_) {}
+  return 0;
+}
+
+function documentArtboardCount(doc) {
+  try { return collectionLength(doc.artboards); } catch (_) { return 0; }
+}
+
+function documentLayerCount(doc) {
+  try { return collectionLength(doc.layers); } catch (_) { return 0; }
+}
+
+function documentSelectionCount(doc) {
+  try {
+    var sel = doc.selection;
+    if (!sel) return 0;
+    return Number(sel.length) || 0;
+  } catch (_) { return 0; }
+}
+`;
+}
+
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts):
+// illustratorDocumentStatusJsxBody — keep byte-identical. READ-ONLY: never
+// assigns app.activeDocument, never saves, never exports.
+function illustratorDocumentStatusJsxBody() {
+  return `
+  function documentSummaryJson(doc) {
+    return "{" + [
+      "\\"name\\":" + jsonString(doc.name),
+      "\\"path\\":" + jsonNullableString(doc.path),
+      "\\"modified\\":" + jsonBoolean(doc.modified),
+      "\\"saved\\":" + jsonBoolean(doc.saved),
+      "\\"widthPt\\":" + jsonNumber(doc.widthPt),
+      "\\"heightPt\\":" + jsonNumber(doc.heightPt),
+      "\\"artboardCount\\":" + jsonNumber(doc.artboardCount),
+      "\\"layerCount\\":" + jsonNumber(doc.layerCount),
+      "\\"selectionCount\\":" + jsonNumber(doc.selectionCount)
+    ].join(",") + "}";
+  }
+
+  function makeDocumentSummary(doc) {
+    var saved = documentSaved(doc);
+    return {
+      name: String(doc && doc.name ? doc.name : ""),
+      path: documentPath(doc),
+      modified: !saved,
+      saved: saved,
+      widthPt: artboardWidthPt(doc),
+      heightPt: artboardHeightPt(doc),
+      artboardCount: documentArtboardCount(doc),
+      layerCount: documentLayerCount(doc),
+      selectionCount: documentSelectionCount(doc)
+    };
+  }
+
+  function stringifyIllustratorStatus(value) {
+    var docs = [];
+    try {
+      for (var i = 0; i < value.documents.length; i += 1) docs.push(documentSummaryJson(value.documents[i]));
+    } catch (_) {}
+    return "{" + [
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"status\\":" + jsonString(value.status),
+      "\\"documentCount\\":" + jsonNumber(value.documentCount),
+      "\\"activeDocumentName\\":" + jsonNullableString(value.activeDocumentName),
+      "\\"activeDocumentPath\\":" + jsonNullableString(value.activeDocumentPath),
+      "\\"widthPt\\":" + jsonNumber(value.widthPt),
+      "\\"heightPt\\":" + jsonNumber(value.heightPt),
+      "\\"artboardCount\\":" + jsonNumber(value.artboardCount),
+      "\\"layerCount\\":" + jsonNumber(value.layerCount),
+      "\\"selectionCount\\":" + jsonNumber(value.selectionCount),
+      "\\"documents\\":" + jsonArray(docs),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  // READ-ONLY observation: never activates, saves, exports, or mutates any
+  // document or app state — it only reads collections and reports.
+  var out = {
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    status: "unknown",
+    documentCount: collectionLength(app.documents),
+    activeDocumentName: null,
+    activeDocumentPath: null,
+    widthPt: 0,
+    heightPt: 0,
+    artboardCount: 0,
+    layerCount: 0,
+    selectionCount: 0,
+    documents: [],
+    error: null
+  };
+
+  try {
+    var maxDocs = Math.min(collectionLength(app.documents), 12);
+    for (var docIndex = 0; docIndex < maxDocs; docIndex += 1) out.documents.push(makeDocumentSummary(app.documents[docIndex]));
+  } catch (_) {}
+
+  if (out.documentCount < 1) {
+    out.status = "no_document";
+    return stringifyIllustratorStatus(out);
+  }
+
+  var doc = findTargetDocument();
+  if (!doc) {
+    out.status = "document_mismatch";
+    try { out.activeDocumentName = String(app.activeDocument.name || ""); } catch (_) {}
+    out.error = "Expected Illustrator document is not open.";
+    return stringifyIllustratorStatus(out);
+  }
+
+  out.activeDocumentName = String(doc.name || "");
+  out.activeDocumentPath = documentPath(doc);
+  out.widthPt = artboardWidthPt(doc);
+  out.heightPt = artboardHeightPt(doc);
+  out.artboardCount = documentArtboardCount(doc);
+  out.layerCount = documentLayerCount(doc);
+  out.selectionCount = documentSelectionCount(doc);
+  out.status = "ready";
+  return stringifyIllustratorStatus(out);
+`;
+}
+
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts):
+// illustratorExportProofJsxBody — keep byte-identical. The format branch is
+// resolved at build time; there is no branch that writes the source doc.
+function illustratorExportProofJsxBody({ outputPath, format, scalePercent }) {
+  const scaleLiteral = format === 'png'
+    ? String(Math.trunc(scalePercent == null ? ILLUSTRATOR_DEFAULT_SCALE_PERCENT : scalePercent))
+    : 'null';
+  const head = `
+  var outputPath = ${JSON.stringify(String(outputPath ?? ''))};
+  var format = ${JSON.stringify(String(format ?? ''))};
+
+  function stringifyExportResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"outputFileName\\":" + jsonNullableString(value.outputFileName),
+      "\\"format\\":" + jsonString(value.format),
+      "\\"scalePercent\\":" + (value.scalePercent === null ? "null" : jsonNumber(value.scalePercent)),
+      "\\"docModified\\":" + jsonBoolean(value.docModified),
+      "\\"docSaved\\":" + jsonBoolean(value.docSaved),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    documentName: null,
+    outputFileName: String(outputPath).split("/").pop() || null,
+    format: format,
+    scalePercent: ${scaleLiteral},
+    docModified: false,
+    docSaved: false,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyExportResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyExportResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  // Never-touch-the-source contract: the ONLY write below is doc.exportFile
+  // to outputPath. The source document is never written, closed, or
+  // re-associated with another file on any path through this script.
+`;
+  const foot = `
+  try { result.docModified = doc.saved !== true; } catch (_) {}
+  try { result.docSaved = doc.saved === true; } catch (_) {}
+  return stringifyExportResult(result);
+`;
+  if (format === 'png') {
+    return `${head}
+  try {
+    var outFile = new File(outputPath);
+    var pngOptions = new ExportOptionsPNG24();
+    pngOptions.horizontalScale = ${scaleLiteral};
+    pngOptions.verticalScale = ${scaleLiteral};
+    pngOptions.antiAliasing = true;
+    pngOptions.transparency = true;
+    pngOptions.artBoardClipping = true;
+    doc.exportFile(outFile, ExportType.PNG24, pngOptions);
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+${foot}`;
+  }
+  return `${head}
+  try {
+    var outFile = new File(outputPath);
+    var svgOptions = new ExportOptionsSVG();
+    svgOptions.embedRasterImages = true;
+    doc.exportFile(outFile, ExportType.SVG, svgOptions);
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+${foot}`;
+}
+
+function buildIllustratorDocumentStatusScript({ appName, expectedDocumentName }) {
+  const targetName = resolveIllustratorScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${illustratorJsxPrelude({ expectedDocumentName })}
+${illustratorDocumentStatusJsxBody()}
+}());
+`;
+  return buildIllustratorAppleScript(targetName, jsx, illustratorNotRunningJson(targetName, 'status'));
+}
+
+function buildIllustratorExportProofScript({ appName, outputPath, format, scalePercent, expectedDocumentName }) {
+  const targetName = resolveIllustratorScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${illustratorJsxPrelude({ expectedDocumentName })}
+${illustratorExportProofJsxBody({ outputPath, format, scalePercent })}
+}());
+`;
+  return buildIllustratorAppleScript(targetName, jsx, illustratorNotRunningJson(targetName, 'export_proof'));
 }
 
 function getOrCreateDesktopToken() {

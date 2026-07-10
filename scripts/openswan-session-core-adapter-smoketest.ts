@@ -409,8 +409,18 @@ async function main() {
   accumulateLoopUsage(acc, undefined);
   assertEqual(
     finalizeLoopUsage(acc),
-    { input_tokens: 150, output_tokens: 50, total_tokens: 610 },
-    'usage sums across turns; total includes cache tokens (cached = total - in - out)',
+    // GAP-2: read vs creation carried separately (400 read + 10 creation) so
+    // the cache-discipline ratio survives; total_tokens still folds the
+    // aggregate (cached = total - in - out) for back-compat. Key order must
+    // match finalizeLoopUsage's return (assertEqual is JSON.stringify-based).
+    {
+      input_tokens: 150,
+      output_tokens: 50,
+      total_tokens: 610,
+      cache_read_tokens: 400,
+      cache_creation_tokens: 10,
+    },
+    'usage sums across turns; read/creation split preserved; total includes cache tokens',
   );
 
   // ── 8. End-to-end: runAgent + adapter wiring ──────────────────────────────
@@ -492,7 +502,13 @@ async function main() {
     status: 'passed',
     metadata: { toolPolicy: { approvalMode: 'auto' }, approvalRequest: null },
   }], 'e2e: toolEvents match the legacy dispatch shape exactly');
-  assertEqual(loopResult.usage, { input_tokens: 22, output_tokens: 6, total_tokens: 28 }, 'e2e: usage aggregated');
+  assertEqual(
+    loopResult.usage,
+    // GAP-2 widened shape: this mock reports no cache tokens, so the split
+    // fields are 0 and total_tokens still equals input+output.
+    { input_tokens: 22, output_tokens: 6, total_tokens: 28, cache_read_tokens: 0, cache_creation_tokens: 0 },
+    'e2e: usage aggregated (read/creation split present, 0 here)',
+  );
   assert(loopResult.incomplete === undefined, 'e2e: clean finish not flagged incomplete');
   assertEqual(gateCalls, [{ name: 'tasks.list', input: { status: 'open' } }],
     'e2e: gate saw the exact legacy payload shape');

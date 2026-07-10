@@ -32,7 +32,8 @@ import type {
   ApprovalGate,
   ChatTransportContext,
 } from './runChatAutomationPlan';
-import { resolveAutoApproveDecision } from './chatAutoApproveSettings';
+import { resolveAutoApproveDecision, type AutoApproveDecision } from './chatAutoApproveSettings';
+import { detectAlwaysConfirmFloorCategories, type ChatComputerConstraintCategory } from './chatComputerRequestRouter';
 
 export type CreateApprovalGateOptions = {
   /** Session key stored on the approval row. Defaults to default::blackswan. */
@@ -51,6 +52,47 @@ export type CreateApprovalGateOptions = {
    */
   describe?: (plan: ChatAutomationPlan, ctx: ChatTransportContext) => string;
 };
+
+/**
+ * Destructive floor for the `'auto'` waiver — the same always-confirm
+ * category list as `computerGrantGate.STICKY_FLOOR_CATEGORIES`
+ * (pay / delete / login / grant), detected with the router's canonical
+ * verb anchors so the two policies can never drift. Returns the first
+ * matching floor category, or null when the plan carries no floor intent.
+ */
+export function destructiveFloorCategoryForPlan(
+  plan: ChatAutomationPlan,
+): ChatComputerConstraintCategory | null {
+  const intent = plan.intent;
+  let intentText = '';
+  if (intent.kind === 'slash_command' || intent.kind === 'natural_command') intentText = intent.commandText;
+  else if (intent.kind === 'quick_action') intentText = intent.actionText;
+  else if (intent.kind === 'direct_chat') intentText = intent.message;
+  else {
+    try { intentText = JSON.stringify(intent.intent).slice(0, 400); } catch { intentText = ''; }
+  }
+  const text = [plan.execution.commandText || '', intentText].filter(Boolean).join('\n');
+  const categories = detectAlwaysConfirmFloorCategories(text);
+  return categories.length > 0 ? categories[0] : null;
+}
+
+/**
+ * Pure policy for the per-category `'auto'` waiver:
+ *   - 'pass'             → 'auto' waives the proposal, plan runs immediately
+ *   - 'confirm_required' → 'auto' hit the destructive floor; the gate MUST
+ *                          route through the normal proposal/confirm flow
+ *                          even if the planner marked approval not required
+ *   - 'default'          → not 'auto'; existing behavior applies
+ * The floor mirrors `computerGrantGate` (pay/delete/login/grant): no
+ * auto-approve setting can waive those, in any autonomy mode.
+ */
+export function resolveAutoApproveWaiver(
+  decision: AutoApproveDecision,
+  plan: ChatAutomationPlan,
+): 'pass' | 'confirm_required' | 'default' {
+  if (decision !== 'auto') return 'default';
+  return destructiveFloorCategoryForPlan(plan) ? 'confirm_required' : 'pass';
+}
 
 export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): ApprovalGate {
   const sessionKey = opts.sessionKey ?? 'default::blackswan';
@@ -79,11 +121,15 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
         },
       };
     }
-    if (category && decision === 'auto') {
+    // 'auto' cannot waive the destructive floor (pay/delete/login/grant) —
+    // those plans fall through to the confirm/proposal flow below even when
+    // the planner marked approval not required.
+    const waiver = category ? resolveAutoApproveWaiver(decision, plan) : 'default';
+    if (waiver === 'pass') {
       return { pass: true };
     }
 
-    if (!plan.approval.required) {
+    if (!plan.approval.required && waiver !== 'confirm_required') {
       return { pass: true };
     }
     const actionType = planActionType(plan);
@@ -94,7 +140,7 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
     // circle. If found, branch by status.
     const { data: existing, error: lookupError } = await supabase
       .from('agent_approvals')
-      .select('id, status, resolved_at')
+      .select('id, status, resolved_at, requested_at, timeout_seconds')
       .eq('circle_id', ctx.circleId)
       .eq('action_type', actionType)
       .contains('payload', { idempotencyKey: idemKey })
@@ -116,21 +162,49 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
     }
 
     const top = existing && existing.length > 0 ? existing[0] : null;
+    let previousExpired = false;
     if (top) {
       const status = String(top.status || '');
       if (status === 'approved' || status === 'auto_approved') {
-        return { pass: true };
+        // Silent-reuse fix: the idempotency key matches near-identical
+        // requests, so tell the user an earlier approval is covering this
+        // run instead of passing without a word.
+        const shortId = String(top.id).slice(0, 8);
+        return {
+          pass: true,
+          approvalId: top.id,
+          notice: status === 'auto_approved'
+            ? `Covered by auto-approval \`${shortId}\` for this action. Change the category in approval settings if this shouldn't run automatically.`
+            : `Covered by the approval \`${shortId}\` you already granted for this action — not asking again. Reject that approval if this shouldn't be covered.`,
+        };
       }
       if (status === 'pending') {
-        return {
-          pass: false,
-          deferred: {
-            approvalId: top.id,
-            message: `Waiting on approval \`${String(top.id).slice(0, 8)}\` for ${actionType}.`,
-            category: 'pending',
-            retryable: false,
-          },
-        };
+        const expiresAt = resolveApprovalRowExpiresAt(top.requested_at, top.timeout_seconds);
+        if (expiresAt !== null && expiresAt <= Date.now()) {
+          // Nothing sweeps timed-out rows to `expired`, so without this a
+          // stale proposal deferred every retry forever ("Waiting on
+          // approval…" against a dead card). Flip it best-effort and fall
+          // through to file a fresh proposal.
+          previousExpired = true;
+          try {
+            await supabase
+              .from('agent_approvals')
+              .update({ status: 'expired', resolved_at: new Date().toISOString() })
+              .eq('id', top.id)
+              .eq('status', 'pending');
+          } catch { /* best-effort — the fresh proposal below is what matters */ }
+        } else {
+          return {
+            pass: false,
+            deferred: {
+              approvalId: top.id,
+              message: `Waiting on approval \`${String(top.id).slice(0, 8)}\` for ${actionType}.`,
+              category: 'pending',
+              retryable: false,
+              expiresAt,
+            },
+          };
+        }
       }
       if (status === 'rejected') {
         return {
@@ -144,7 +218,9 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
         };
       }
       if (status === 'expired') {
-        // Fall through and file a fresh proposal below.
+        // Fall through and file a fresh proposal below — but say so, since
+        // "your approval quietly died" was the old (bad) experience.
+        previousExpired = true;
       }
     }
 
@@ -191,19 +267,38 @@ export function createHitlApprovalGate(opts: CreateApprovalGateOptions = {}): Ap
       };
     }
 
+    const filedPrefix = previousExpired
+      ? `Your earlier approval for ${actionType} expired before anyone decided. Filed a fresh approval \`${inserted!.id.slice(0, 8)}\``
+      : `Filed approval \`${inserted!.id.slice(0, 8)}\` for ${actionType}`;
     return {
       pass: false,
       deferred: {
         approvalId: inserted!.id,
-        message: `Filed approval \`${inserted!.id.slice(0, 8)}\` for ${actionType} — a circle member must approve before it runs.`,
+        message: `${filedPrefix} — a circle member must approve before it runs.`,
         category: 'filed',
         retryable: false,
+        // requested_at is stamped server-side ≈ now; close enough for a UI countdown.
+        expiresAt: Date.now() + timeoutSeconds * 1000,
       },
     };
   };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Epoch ms when a proposal row auto-expires, tolerating the loosely-typed
+ * row we get back from the jsonb-filtered select. Mirrors
+ * `chatAttentionQueue.resolveApprovalExpiresAt` (kept local because this
+ * file imports Supabase and the attention module must stay pure).
+ */
+function resolveApprovalRowExpiresAt(requestedAt: unknown, timeoutSeconds: unknown): number | null {
+  const requested = Date.parse(String(requestedAt ?? ''));
+  if (!Number.isFinite(requested)) return null;
+  const timeout = Number(timeoutSeconds);
+  if (!Number.isFinite(timeout) || timeout <= 0) return null;
+  return requested + timeout * 1000;
+}
 
 /**
  * Deterministic action_type for an approval row. Used for both dedupe

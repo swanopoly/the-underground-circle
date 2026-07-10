@@ -29,6 +29,14 @@ export interface CircleChatThread {
   archived: boolean;
   created_at: string;
   updated_at: string;
+  /**
+   * Lineage (20260508_chat_threads_lineage.sql) — present in the DB since
+   * compression forks, but dropped from this interface until Phase 4b of
+   * docs/CHAT_UX_INTEGRATION_UPGRADE_PLAN.md made lineage visible in the
+   * thread header. `select('*')` already returns them.
+   */
+  parent_thread_id?: string | null;
+  lineage_root_id?: string | null;
 }
 
 export interface CircleChatThreadMember {

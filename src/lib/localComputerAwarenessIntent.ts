@@ -169,7 +169,7 @@ const BARE_FIND_TEXT_RE = /^\s*(?:please\s+)?(?:find|search)(?:\s+for)?\s+([\s\S
 const BARE_BROWSER_SEARCH_RE = /^\s*(?:please\s+)?(?:search|google)\s+(?:(?:the\s+)?(?:web|internet|google)\s+)?(?:for\s+)?([\s\S]{1,2000}?)\s*[.!?]?\s*$/i;
 const BARE_REPLACE_ALL_TEXT_RE = /^\s*(?:please\s+)?(?:replace|overwrite)(?:\s+(?:all|the|current)\s+(?:text|content|contents|document|field|selection|selected\s+text))?\s+(?:with|to)\s+([\s\S]{1,20000}?)\s*[.!?]?\s*$/i;
 const BARE_CLEAR_TEXT_RE = /^\s*(?:please\s+)?(?:clear|empty|erase)\s+(?:the\s+)?(?:text|content|contents|document|field|current\s+field|selection|selected\s+text)\s*[.!?]?\s*$/i;
-const BARE_SAVE_AS_NAMED_FILE_RE = /^\s*(?:please\s+)?(?:save)(?:\s+(?:it|this|the\s+)?(?:current\s+)?(?:image|photo|picture|document|file|project|work))?\s+as\s+["'`]?([^"'`\n\r]{1,240}\.[a-z0-9]{1,12})["'`]?\s*[.!?]?\s*$/i;
+const BARE_SAVE_AS_NAMED_FILE_RE = /^\s*(?:please\s+)?(?:save)(?:\s+(?:it|this|(?:the\s+)?(?:current\s+)?(?:image|photo|picture|document|file|project|work)))?\s+as\s+["'`]?([^"'`\n\r]{1,240}\.[a-z0-9]{1,12})["'`]?\s*[.!?]?\s*$/i;
 const PHOTOSHOP_SAVE_FOR_WEB_FILE_RE = /^\s*(?:please\s+)?(?:save|export)(?:(?:\s+(?:the\s+)?(?:image|photo|picture|file|document))?)\s+(?:for\s+web|web\s+optimized|optimized\s+for\s+web)(?:\s+(?:as|to)\s+["'`]?([^"'`\n\r]{1,240}\.[a-z0-9]{1,12})["'`]?)?\s*[.!?]?\s*$/i;
 const PHOTOSHOP_EXPORT_AS_FILE_RE = /^\s*(?:please\s+)?(?:export)(?:\s+(?:the\s+)?(?:image|photo|picture|file|document))?\s+(?:as|to)\s+["'`]?([^"'`\n\r]{1,240}\.(?:png|jpg|jpeg|gif|webp|tif|tiff|psd|pdf))["'`]?\s*[.!?]?\s*$/i;
 const PHOTOSHOP_EXPORT_PROOF_RE = /^\s*(?:please\s+)?(?:export|make|create|save)\s+(?:a\s+)?(?:photoshop\s+)?(?:raster\s+)?(?:proof|preview|proof\s+image|review\s+image)\s+(?:as|to)\s+["'`]?([^"'`\n\r]{1,240}\.(?:png|jpg|jpeg))["'`]?\s*[.!?]?\s*$/i;
@@ -342,7 +342,7 @@ const APP_KEY_ACTIONS: Array<{ combo: string; reason: string; re: RegExp; appGro
   { combo: 'Ctrl+Shift+Tab', reason: 'local-previous-tab-shortcut', re: /^\s*(?:please\s+)?(?:go\s+to|switch\s+to|activate|select|previous|prev)\s+(?:the\s+)?(?:previous|prev|last)\s+tab(?:\s+(?:in|inside|on)\s+(.+?)(?:\s+(?:app|application|window))?)?\s*[.!?]?\s*$/i },
   { combo: 'Cmd+`', reason: 'local-next-window-shortcut', re: /^\s*(?:please\s+)?(?:go\s+to|switch\s+to|activate|select|next)\s+(?:the\s+)?next\s+window(?:\s+(?:in|inside|on)\s+(.+?)(?:\s+(?:app|application|window))?)?\s*[.!?]?\s*$/i },
   { combo: 'Cmd+Shift+`', reason: 'local-previous-window-shortcut', re: /^\s*(?:please\s+)?(?:go\s+to|switch\s+to|activate|select|previous|prev)\s+(?:the\s+)?(?:previous|prev|last)\s+window(?:\s+(?:in|inside|on)\s+(.+?)(?:\s+(?:app|application|window))?)?\s*[.!?]?\s*$/i },
-  { combo: 'Cmd+N', reason: 'local-new-document-shortcut', re: /^\s*(?:please\s+)?(?:(?:open|create|start|make)\s+)?(?:a\s+)?new\s+(?:document|file|window|project)(?:\s+(?:in|inside|on)\s+(.+?)(?:\s+(?:app|application|window))?)?\s*[.!?]?\s*$/i },
+  { combo: 'Cmd+N', reason: 'local-new-document-shortcut', re: /^\s*(?:please\s+)?(?:(?:open|create|start|make)\s+)?(?:a\s+)?new\s+(?:document|file|window|project|spreadsheet|worksheet|workbook|presentation|slideshow|drawing|design|canvas|layout|composition)(?:\s+(?:in|inside|on)\s+(.+?)(?:\s+(?:app|application|window))?)?\s*[.!?]?\s*$/i },
   { combo: 'Cmd+W', reason: 'local-close-window-shortcut', re: /^\s*(?:please\s+)?close\s+(?:it|this|the\s+)?(?:current\s+|active\s+|frontmost\s+)?(?:window|tab|document|file)(?:\s+(?:in|inside|on)\s+(.+?)(?:\s+(?:app|application|window))?)?\s*[.!?]?\s*$/i },
   { combo: 'Cmd+Q', reason: 'local-quit-app-shortcut', re: /^\s*(?:please\s+)?(?:quit|exit)\s+(.+?)(?:\s+(?:app|application|program))?\s*[.!?]?\s*$/i },
   { combo: 'Cmd+[', reason: 'local-browser-back-shortcut', re: /^\s*(?:please\s+)?(?:go|navigate|move)\s+back(?:\s+(?:in|inside|on)\s+(.+?)(?:\s+(?:app|application|window|browser))?)?\s*[.!?]?\s*$/i },
@@ -3811,14 +3811,25 @@ export function detectLocalComputerAwarenessIntent(message: string): LocalComput
     }
     const query = cleanFileSearchQuery(openFileFromRoot[1]);
     const extension = query.match(/\.([A-Za-z0-9]{1,12})$/)?.[1]?.toLowerCase();
-    return {
-      route: true,
-      kind: 'open_file_search_match',
-      query,
-      rootPath: normalizeFileSearchRoot(openFileFromRoot[2]),
-      extensions: extension ? [extension] : undefined,
-      reason: 'local-file-open-from-root',
-    };
+    // "open Photoshop on my computer" is a LAUNCH, not a file search: a
+    // generic-machine root (computer/mac/laptop — not a real Finder folder
+    // like Desktop/Downloads) with no file extension is app-launch phrasing.
+    // Skip the file-search branch so execution falls through to LAUNCH_APP_RE
+    // below in this same function — we never file-search for an app name.
+    // Real file opens ("open budget.psd on my desktop", "open my resume on
+    // my desktop") keep an extension or a folder root and are unaffected.
+    const rootWord = openFileFromRoot[2].toLowerCase();
+    const isGenericMachineRoot = /^(?:computer|mac|laptop)$/.test(rootWord);
+    if (!(isGenericMachineRoot && !extension)) {
+      return {
+        route: true,
+        kind: 'open_file_search_match',
+        query,
+        rootPath: normalizeFileSearchRoot(openFileFromRoot[2]),
+        extensions: extension ? [extension] : undefined,
+        reason: 'local-file-open-from-root',
+      };
+    }
   }
   const googleDriveSearch = text.match(GOOGLE_DRIVE_FILE_SEARCH_RE);
   if (googleDriveSearch?.[1]) {

@@ -30,6 +30,7 @@ import {
   type ProviderRoute,
   type RouteResolutionOptions,
 } from './crossProviderRouter';
+import { recordProviderOutcomeNow, classifyProviderError } from './providerHealthRegistry';
 import { getProviderRoutingMode, preferenceForMode } from './billingPriority';
 
 export interface UniversalInvokeRequest {
@@ -40,9 +41,11 @@ export interface UniversalInvokeRequest {
   circleId?: string;
   temperature?: number;
   maxTokens?: number;
-  /** Pass through to OpenRouter when present — server tools (e.g.
-   *  `[{type: 'openrouter:web_search'}]`) attach to the chat
-   *  request. Ignored on non-OR providers. */
+  /** Passed through to every OpenAI-compatible proxy route. Standard
+   *  function tools (`{type: 'function', function: {...}}`) reach all
+   *  chat-capable providers; OpenRouter server tools (e.g.
+   *  `[{type: 'openrouter:web_search'}]`) are only forwarded on the
+   *  openrouter route since other providers reject unknown tool types. */
   tools?: Array<Record<string, unknown>>;
   /** Optional: caller can override provider preference (e.g. when
    *  cost is paramount, push openrouter-free first). */
@@ -102,11 +105,16 @@ export async function executeRouteChain(
   for (const route of routes) {
     try {
       const result = await invokeOneRoute(route, req);
+      // P29: record success so the health registry can prefer this provider.
+      recordProviderOutcomeNow(route.provider, { ok: true });
       return { ...result, servedBy: route, fallbackChain };
     } catch (err) {
       lastError = err;
       const transient = isTransientProviderError(err);
       const reason = (err as any)?.message || String(err);
+      // P29: record the failure class so a flaky provider cools down for the
+      // next turn's PRE-selection. This does NOT suppress the error below.
+      recordProviderOutcomeNow(route.provider, { ok: false, errorClass: classifyProviderError(err) });
       fallbackChain.push({ route, reason });
       // Structural errors bubble immediately — fallback won't help.
       if (!transient) break;
@@ -116,6 +124,23 @@ export async function executeRouteChain(
   const finalErr = lastError instanceof Error ? lastError : new Error(String(lastError ?? 'unknown error'));
   finalErr.message = `All routes failed. Last error: ${finalErr.message}. Tried: ${routes.map((r) => r.label).join(' → ')}.`;
   throw finalErr;
+}
+
+/** Which of the caller's tools go to a given proxy route. OpenRouter
+ *  gets everything (it hosts server tools like `openrouter:web_search`);
+ *  every other OpenAI-compatible chat route gets only standard
+ *  function-calling tools, since non-OR providers reject unknown tool
+ *  types with a 400 instead of ignoring them. Pure — smoke-testable. */
+export function toolsForProxyRoute(
+  provider: ProviderRoute['provider'],
+  tools: Array<Record<string, unknown>> | undefined,
+): Array<Record<string, unknown>> | undefined {
+  if (!tools || tools.length === 0) return undefined;
+  if (provider === 'openrouter') return tools;
+  const functionTools = tools.filter(
+    (t) => t && (t.type === 'function' || typeof (t as { function?: unknown }).function === 'object'),
+  );
+  return functionTools.length > 0 ? functionTools : undefined;
 }
 
 /** Single-route invocation — branches on the route's `provider` to
@@ -142,6 +167,7 @@ async function invokeOneRoute(
     'github-models',
   ]);
   if (proxyProviders.has(route.provider)) {
+    const tools = toolsForProxyRoute(route.provider, req.tools);
     const result = await invokeLLMProxy({
       provider: route.provider as LLMProvider,
       model: route.modelId,
@@ -149,7 +175,7 @@ async function invokeOneRoute(
       circleId: req.circleId,
       temperature: req.temperature,
       maxTokens: req.maxTokens,
-      tools: route.provider === 'openrouter' ? req.tools : undefined,
+      tools,
     });
     return { response: result.response, usage: result.usage };
   }
@@ -167,19 +193,21 @@ async function invokeOneRoute(
   }
 
   if (route.provider === 'huggingface') {
-    // HF chat completion goes through hf-proxy edge fn. The shape
-    // differs per task — we use 'text-generation' for chat. The
-    // proxy normalizes prompt + history, so we pass the last user
-    // message as the prompt and earlier turns as conversation.
-    const last = req.messages[req.messages.length - 1];
-    const lastContent = typeof last?.content === 'string' ? last.content : '';
-    const data = await invokeHfInference('text-generation', lastContent, {
+    // HF chat completion goes through hf-proxy edge fn. Its chat task
+    // accepts an OpenAI-style `messages` array, so we forward the full
+    // conversation — system prompt and history included — instead of
+    // only the last user turn.
+    const data = await invokeHfInference('chat', { messages: req.messages }, {
       model: route.modelId,
       max_tokens: req.maxTokens || 1024,
     });
-    const text = typeof data === 'string'
-      ? data
-      : (data?.generated_text || data?.response || data?.text || JSON.stringify(data));
+    // hf-proxy wraps the OpenAI-compatible completion as `{ result, task, model }`.
+    const completion = data?.result ?? data;
+    const text = typeof completion === 'string'
+      ? completion
+      : (completion?.choices?.[0]?.message?.content
+        || completion?.generated_text || completion?.response || completion?.text
+        || JSON.stringify(completion));
     return { response: text };
   }
 
@@ -228,6 +256,10 @@ export async function invokeAnyChat(
     available,
     prefer,
     preferFree: req.preferFree,
+    // P29: health-aware PRE-selection — a provider that failed in the last
+    // ~30s is tried LAST this turn (never dropped). Fail-visible: reorders
+    // future attempts only; the surfaced error below is still surfaced.
+    healthNowMs: Date.now(),
   });
   return executeRouteChain(routes, req);
 }

@@ -17,6 +17,11 @@ import { buildChatAutomationPlan, summarisePlanForTelemetry, type ChatAutomation
 import { formatChatFailureRecoveryOptionSelection } from '../src/lib/chatFailureRecovery';
 import { reconstructClarificationAnswer } from '../src/lib/chatGapFill';
 import { extractDirectLocalImageFormatConversionTask } from '../src/lib/computerTaskPlanner';
+import { isDecisionRelevantAmbiguity, describeClarificationValue } from '../src/lib/clarificationGate';
+// C2 classify-once cutover: the legacy detector is imported ONLY to prove the
+// planner is now a superset — every phrasing the legacy router catches, the
+// planner-first path must also catch (so ChatTab can stop re-classifying).
+import { detectConversationalIntent } from '../src/lib/conversationalRouter';
 
 let failures = 0;
 const PHOTOSHOP_SCREENSHOT_RENAME_REQUEST = 'open the file Screenshot 2026-05-21 at 4.44.42\u202fPM thats on the desktop and open it in Photoshop and rename it lmao and save it as a png';
@@ -186,6 +191,86 @@ if (officeAgentPlan.intent.kind === 'conversational_action' && officeAgentPlan.i
   else fail(`conversational:office agent task targets latest user task\n    expected latest_user_task, got ${officeAgentIntent.taskTarget}`);
 } else {
   fail('conversational:office agent task carries office_agent_task intent');
+}
+
+// ─── C2 classify-once cutover: planner now catches what only legacy caught ──
+// These phrasings used to be detected ONLY by conversationalRouter's
+// detectConversationalIntent (the second classification ChatTab ran). After
+// porting the "work item" noun and the looser office-agent triggers into the
+// planner, the planner-first path routes them itself. Each case both (a) checks
+// the planner classifies it, and (b) asserts the legacy detector agreed — i.e.
+// the planner is a superset, so dropping the re-classification loses nothing.
+
+function plannerIntentType(message: string): string | null {
+  const plan = buildChatAutomationPlan({ message });
+  return plan.intent.kind === 'conversational_action' ? plan.intent.intent.type : null;
+}
+
+// (a) "work item" phrasing → create_task (planner previously returned none for these).
+for (const workItemMessage of [
+  'make a work item for reviewing the invoice',
+  'create a work item for the launch checklist',
+  'add a work item to review the landing page',
+]) {
+  const legacyType = detectConversationalIntent(workItemMessage).type;
+  if (legacyType !== 'create_task') {
+    fail(`ported create_task: legacy detector should classify "${workItemMessage}" as create_task, got ${legacyType}`);
+  } else if (plannerIntentType(workItemMessage) !== 'create_task') {
+    fail(`ported create_task: planner must now classify "${workItemMessage}" as create_task, got ${plannerIntentType(workItemMessage)}`);
+  } else {
+    pass(`ported create_task (planner superset): "${workItemMessage}"`);
+  }
+  check(
+    `ported create_task routes to mission: "${workItemMessage}"`,
+    buildChatAutomationPlan({ message: workItemMessage }),
+    { source: 'conversational_intent', kind: 'run_command_handler', routeId: 'mission' },
+  );
+}
+
+// (b) looser office-agent phrasings → office_agent_task.
+//   - "spin me up …" (planner previously only knew "spin up")
+//   - "the agent called X, add it to the latest task" (agent+called/named with
+//     no creation verb — matched by legacy's 2nd OFFICE_AGENT pattern only)
+for (const officeCase of [
+  { message: 'spin me up an agent called Scout and add it to the task we just made', agentName: 'Scout', taskTarget: 'latest_user_task' as const },
+  { message: 'the agent called Pixel Pro, add it to the latest task', agentName: 'Pixel', taskTarget: 'latest_circle_task' as const },
+  { message: 'make an agent called Nova and attach it to the latest task', agentName: 'Nova', taskTarget: 'latest_circle_task' as const },
+]) {
+  const legacyType = detectConversationalIntent(officeCase.message).type;
+  if (legacyType !== 'office_agent_task') {
+    fail(`ported office_agent_task: legacy detector should classify "${officeCase.message}" as office_agent_task, got ${legacyType}`);
+  }
+  const plan = buildChatAutomationPlan({ message: officeCase.message });
+  check(
+    `ported office_agent_task routes to mission: "${officeCase.message}"`,
+    plan,
+    { source: 'conversational_intent', kind: 'run_command_handler', routeId: 'mission' },
+  );
+  if (plan.intent.kind === 'conversational_action' && plan.intent.intent.type === 'office_agent_task') {
+    const intent = plan.intent.intent;
+    if (intent.agentName === officeCase.agentName && intent.taskTarget === officeCase.taskTarget) {
+      pass(`ported office_agent_task (planner superset): "${officeCase.message}"`);
+    } else {
+      fail(`ported office_agent_task: "${officeCase.message}" expected agent=${officeCase.agentName}/target=${officeCase.taskTarget}, got agent=${intent.agentName}/target=${intent.taskTarget}`);
+    }
+  } else {
+    fail(`ported office_agent_task: "${officeCase.message}" must carry an office_agent_task conversational intent`);
+  }
+}
+
+// Guardrail: the widened triggers must NOT capture plain chat / bare briefs.
+// (novice-persona + simple-chat-task-guardrails cover the broader matrix; this
+// is a focused anchor next to the ported cases.)
+for (const plainMessage of [
+  'Teach me Supabase RLS and make a quiz',
+  'what can this app do?',
+]) {
+  const type = plannerIntentType(plainMessage);
+  if (type === 'create_task' || type === 'office_agent_task') {
+    fail(`ported-widening guardrail: "${plainMessage}" must not be captured as ${type}`);
+  } else {
+    pass(`ported-widening guardrail: "${plainMessage}" stays out of task/office capture`);
+  }
 }
 
 check(
@@ -775,9 +860,13 @@ check(
 );
 
 check(
-  'pipeline:travel booking routes to external-side-effect OpenSwan work',
+  // WI-6: URL-less travel-booking phrasing now routes to the browser runtime
+  // (previously a dead-end run_openswan with routeId null). WI-2: the browser
+  // booking route is zero-tap — its single pay confirmation fires mid-run at
+  // the payment floor, so approvalRequired is false up front.
+  'pipeline:travel booking routes to a zero-tap browser computer task (WI-2/WI-6)',
   buildChatAutomationPlan({ message: 'Book a flight to New York next Friday under $500' }),
-  { source: 'plain_chat', kind: 'run_openswan', routeId: null, risk: 'external_side_effect', pipelineId: 'travel_booking', minConfidence: 0.7 },
+  { source: 'plain_chat', kind: 'run_computer_task', routeId: 'browser', risk: 'external_side_effect', approvalRequired: false, minConfidence: 0.7 },
 );
 
 check(
@@ -930,6 +1019,95 @@ check(
   { source: 'conversational_intent', routeId: 'hf_tools' },
 );
 
+// ─── Decision-relevance clarification gate (clarificationGate.ts) ───────────
+// The gate is the single policy chokepoint the planner consults before asking.
+// Research contract: ASK only when a missing param would change the routed
+// action/route/approval; NEVER over-ask on fully-specified input; treat
+// stylistic/reversible gaps as safe defaults. The matrix below pins both the
+// end-to-end planner behaviour and the pure gate's own decisions.
+
+function planClarifies(message: string): boolean {
+  return buildChatAutomationPlan({ message }).execution.kind === 'ask_clarification';
+}
+
+// (1) Decision-relevant empty slot → the planner ASKS. One row per gated intent.
+for (const askCase of [
+  { message: 'create a task', label: 'create_task with no subject' },
+  { message: 'add a todo', label: 'add a todo with no subject' },
+  { message: 'create a ticket', label: 'create a ticket with no subject' },
+  { message: 'generate an image', label: 'image with no subject' },
+  { message: 'make a picture', label: 'make a picture with no subject' },
+  { message: 'schedule a wordpress post', label: 'wordpress schedule with no date' },
+  { message: 'post to wordpress', label: 'wordpress publish with no subject' },
+]) {
+  if (planClarifies(askCase.message)) {
+    pass(`decision-relevance ASK: ${askCase.label}`);
+  } else {
+    fail(`decision-relevance ASK: ${askCase.label} — expected ask_clarification for "${askCase.message}"`);
+  }
+}
+
+// (2) Fully-specified action → the planner PROCEEDS (never over-asks). This is
+// the guard the brief calls out: fully-specified conversational actions that
+// used to be at risk of asking must now route through to their action plan.
+for (const goCase of [
+  { message: 'create a task to ship the newsletter friday', label: 'create_task with subject+date' },
+  { message: 'Create a task to review the invoice', label: 'create_task with subject' },
+  { message: 'make a ticket to fix the login bug on mobile', label: 'ticket with subject' },
+  { message: 'Generate an image of a neon swan over a city at night', label: 'image with rich subject' },
+  { message: 'draw a picture of a dragon guarding a castle', label: 'image with subject (draw)' },
+  { message: 'Schedule a WordPress post about launch recap for 2026-07-01', label: 'schedule with date+subject' },
+  { message: 'draft a wordpress post about our new pricing page and launch recap', label: 'publish with rich subject' },
+]) {
+  if (!planClarifies(goCase.message)) {
+    pass(`over-ask guard PROCEED: ${goCase.label}`);
+  } else {
+    fail(`over-ask guard PROCEED: ${goCase.label} — "${goCase.message}" must NOT ask`);
+  }
+}
+
+// (3) The pure gate's decision table (reason codes are stable + telemetry-safe).
+type GateRow = { input: Parameters<typeof isDecisionRelevantAmbiguity>[0]; ask: boolean; reason: string; label: string };
+for (const row of [
+  { input: { message: 'create a task', intentType: 'create_task', missingParams: ['task description'] }, ask: true, reason: 'missing_task_subject', label: 'empty task subject asks' },
+  { input: { message: 'create a task to fix login', intentType: 'create_task', missingParams: [] }, ask: false, reason: 'fully_specified', label: 'specified task proceeds' },
+  { input: { message: 'assign this to the latest task', intentType: 'office_agent_task', missingParams: ['which agent'] }, ask: true, reason: 'missing_agent_target', label: 'unnamed agent asks' },
+  { input: { message: 'post to wordpress', intentType: 'wordpress_publish', missingParams: ['post title', 'post content'] }, ask: true, reason: 'missing_publish_subject', label: 'empty publish subject asks' },
+  { input: { message: 'schedule a wordpress post', intentType: 'wordpress_schedule', missingParams: ['publish date'] }, ask: true, reason: 'missing_publish_date', label: 'missing schedule date asks' },
+  { input: { message: 'generate an image', intentType: 'generate_image', missingParams: ['image subject'] }, ask: true, reason: 'missing_image_subject', label: 'empty image subject asks' },
+  { input: { message: 'generate an image of a red barn', intentType: 'generate_image', missingParams: ['style'] }, ask: false, reason: 'gap_is_stylistic_or_reversible', label: 'stylistic-only image gap proceeds' },
+  { input: { message: 'create a task to fix login', intentType: 'create_task', missingParams: ['format'] }, ask: false, reason: 'gap_is_stylistic_or_reversible', label: 'stylistic-only task gap proceeds' },
+  { input: { message: 'do the thing', intentType: 'none', missingParams: [] }, ask: false, reason: 'no_actionable_intent', label: 'no intent proceeds' },
+  { input: { message: 'clean up the staging data now', missingParams: ['task scope'] }, ask: true, reason: 'missing_action_target', label: 'unresolved mutation target asks' },
+] as GateRow[]) {
+  const got = isDecisionRelevantAmbiguity(row.input);
+  if (got.ask === row.ask && got.reason === row.reason) {
+    pass(`gate table: ${row.label}`);
+  } else {
+    fail(`gate table: ${row.label} — expected {ask:${row.ask},reason:${row.reason}}, got {ask:${got.ask},reason:${got.reason}}`);
+  }
+}
+
+// (4) describeClarificationValue is bounded, content-free, and branch-aware.
+{
+  const asked = describeClarificationValue('missing_agent_target');
+  if (asked.length > 0 && asked.length <= 120 && /^Asked:/.test(asked)) pass('gate describe: ask rationale bounded + prefixed');
+  else fail(`gate describe: ask rationale should be a bounded "Asked:" line, got "${asked}"`);
+  const proceeded = describeClarificationValue('gap_is_stylistic_or_reversible');
+  if (proceeded.length > 0 && proceeded.length <= 120 && /^Proceeded:/.test(proceeded)) pass('gate describe: proceed rationale bounded + prefixed');
+  else fail(`gate describe: proceed rationale should be a bounded "Proceeded:" line, got "${proceeded}"`);
+}
+
+// (5) When the planner asks, its notes carry the gate rationale (observability).
+{
+  const askPlan = buildChatAutomationPlan({ message: 'create a task' });
+  if (askPlan.notes.some((note) => note.startsWith('Asked:'))) {
+    pass('gate wiring: ask_clarification plan surfaces the gate rationale in notes');
+  } else {
+    fail(`gate wiring: ask_clarification plan should note the gate rationale, got notes=${JSON.stringify(askPlan.notes)}`);
+  }
+}
+
 // ─── Summary ───────────────────────────────────────────────────────────────
 
 if (failures > 0) {
@@ -937,3 +1115,64 @@ if (failures > 0) {
   process.exit(1);
 }
 console.log('\nAll planner smoke cases passed.');
+
+// ── P23 routing regressions (found via prompt battery 2026-07-08) ───────────
+
+// Add-to-cart phrasing is web-transactional even with a bare retailer name
+// (no TLD) and no book/order/buy verb.
+check(
+  'add-to-cart with bare retailer routes to the browser runtime',
+  buildChatAutomationPlan({ message: 'go to amazon and add a phone charger to my cart' }),
+  { kind: 'run_computer_task' },
+);
+check(
+  'add-to-cart without a site still routes to the browser runtime',
+  buildChatAutomationPlan({ message: 'add a phone charger to my cart' }),
+  { kind: 'run_computer_task' },
+);
+check(
+  'bare-retailer purchase routes to the browser runtime',
+  buildChatAutomationPlan({ message: 'buy a phone charger on amazon' }),
+  { kind: 'run_computer_task' },
+);
+
+// "how do I …" setup/instruction questions are guidance, not automation.
+check(
+  'how-do-i setup question stays plain chat',
+  buildChatAutomationPlan({ message: 'how do I connect my wordpress site?' }),
+  { kind: 'run_plain_chat' },
+);
+check(
+  'how-can-i question stays plain chat',
+  buildChatAutomationPlan({ message: 'how can I add my google account?' }),
+  { kind: 'run_plain_chat' },
+);
+// Imperative phrasing (no interrogative) still routes to automation.
+{
+  const imperative = buildChatAutomationPlan({ message: 'connect to my wordpress site and list my draft posts' });
+  if (imperative.execution.kind === 'run_plain_chat') {
+    console.error('FAIL: imperative wordpress task must not be swallowed by the how-do-i guard');
+    process.exit(1);
+  }
+  console.log('pass: imperative wordpress task still routes to automation');
+}
+
+// WordPress image posting WITH attached images rides the main agent path
+// (P20 wp.upload_media directive), not wp-admin browser automation…
+check(
+  'wp image post with attachment rides the REST lane',
+  buildChatAutomationPlan({ message: 'post this image to my wordpress site', attachments: [{ type: 'image', id: 'a1' }] }),
+  { kind: 'run_openswan', approvalRequired: true },
+);
+// …but explicit wp-admin/browser wording keeps the browser route,
+// and no attachment keeps the browser fallback.
+check(
+  'wp image post with explicit wp-admin wording keeps browser automation',
+  buildChatAutomationPlan({ message: 'log in to wp-admin and post this image', attachments: [{ type: 'image', id: 'a1' }] }),
+  { kind: 'run_computer_task' },
+);
+check(
+  'wp image post without attachments keeps the browser fallback',
+  buildChatAutomationPlan({ message: 'post this image to my wordpress site' }),
+  { kind: 'run_computer_task' },
+);

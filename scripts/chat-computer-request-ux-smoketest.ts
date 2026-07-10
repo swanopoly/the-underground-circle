@@ -58,7 +58,10 @@ if (photoshopRoute) {
   pass('Photoshop notice is concise, approval-focused, and sanitized');
 }
 
-const photoshopExportRoute = routeOrFail('open the file Screenshot 2026-05-21 at 4.44.42\u202fPM thats on the desktop and open it in Photoshop and rename it lmao and save it as a png');
+// Rename-free export is the bounded low-risk shape (computerTaskPlanner
+// isLowRiskLocalImageExportTask); a rename makes it a named-output write and
+// must require approval.
+const photoshopExportRoute = routeOrFail('open the file Screenshot 2026-05-21 at 4.44.42\u202fPM thats on the desktop and open it in Photoshop and save it as a png');
 if (photoshopExportRoute) {
   const notice = buildChatComputerRequestUserNotice(photoshopExportRoute);
   expect(photoshopExportRoute.approvalRequired === false, 'Bounded Photoshop Save for Web route should not require approval');
@@ -68,6 +71,12 @@ if (photoshopExportRoute) {
   expect(!notice.primaryAction, 'Bounded Photoshop Save for Web route should not show an approval action');
   expect(formatChatComputerRequestUserNotice(notice) === '', 'Hidden bounded Photoshop route should format to an empty message');
   pass('Bounded Photoshop Save for Web routing stays quiet and approval-free');
+}
+
+const photoshopRenameExportRoute = routeOrFail('open the file Screenshot 2026-05-21 at 4.44.42\u202fPM thats on the desktop and open it in Photoshop and rename it lmao and save it as a png');
+if (photoshopRenameExportRoute) {
+  expect(photoshopRenameExportRoute.approvalRequired === true, 'Photoshop export with a rename is a named-output write and must require approval');
+  pass('Photoshop rename-export stays approval-gated');
 }
 
 const localFileRoute = routeOrFail('Search files in Downloads for invoice');

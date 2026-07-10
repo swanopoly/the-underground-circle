@@ -781,14 +781,18 @@ function photoshopRunbook(plan: DesignAppAutomationPlan, operation: DesignAppAut
           approvalRequired: true,
           evidence: ['approved target area', 'approved edit prompt/action'],
         }),
-        step('act', isGenerative ? 'Run generative/content-aware action' : 'Apply selection or mask edit', 'Use an existing bridge/action adapter if available; otherwise delegate capability buildout before coordinates.', {
-          tool: adapterGap
-            ? `${adapterGap.missingBridgeTools[0]} or agent.build_app_capability`
-            : (isGenerative ? 'agent.build_app_capability or approved Photoshop batchPlay adapter' : 'approved Photoshop selection/mask adapter'),
+        step('act', isGenerative ? 'Run generative/content-aware action' : 'Apply selection or mask edit', isGenerative
+          ? 'Use an existing bridge/action adapter if available; otherwise delegate capability buildout before coordinates.'
+          : 'Run the deterministic Select Subject / mask adapter (P15): select_only reports bounds, mask_layer applies a non-destructive reveal-selection mask. Never deletes pixels; never saves.', {
+          tool: isGenerative
+            ? (adapterGap
+              ? `${adapterGap.missingBridgeTools[0]} or agent.build_app_capability`
+              : 'agent.build_app_capability or approved Photoshop batchPlay adapter')
+            : 'desktop.photoshop_apply_selection_or_mask',
           approvalRequired: true,
-          evidence: adapterGap
+          evidence: isGenerative && adapterGap
             ? ['adapter gap contract', 'action result or buildout result', 'focused smoke cases']
-            : ['action result or buildout result'],
+            : ['selection bounds receipt', 'mask-applied verification when mode is mask_layer'],
         }),
         step('verify', 'Verify before/after layer and visual proof', 'Re-run document status and layer inventory, then capture screenshot/raster proof.', {
           tool: 'desktop.photoshop_document_status + desktop.photoshop_layer_inventory + desktop.photoshop_export_proof',
@@ -800,6 +804,44 @@ function photoshopRunbook(plan: DesignAppAutomationPlan, operation: DesignAppAut
       fallbackBuildoutTrigger: adapterGap?.buildoutTrigger || 'Build a Photoshop selection/generative action adapter with executeAsModal, source refs, and before/after proof smoke coverage.',
       adapterGap,
       userVisibleSummary: 'Localized and generative edits require target-area proof, approval, and before/after evidence.',
+      sourceRefs: sourceRefs(...source, PHOTOSHOP_BATCHPLAY_REF, ...(adapterGap?.officialSourceRefs || [])),
+    };
+  }
+
+  if (operation === 'resize_layout') {
+    // P15: deterministic geometry adapter — image resize, anchored canvas
+    // resize, or crop-to-selection. Never saves; export stays separate.
+    return {
+      appId: plan.appId,
+      appName: plan.appName,
+      operation,
+      label: operationLabel(operation),
+      risk: riskForOperation(operation),
+      controlSurface,
+      requiredInputs: ['exact target dimensions or crop intent', 'fresh document status with current dimensions'],
+      approvalBefore: ['image/canvas geometry mutation', 'save/export/write'],
+      steps: [
+        ...sharedObserve,
+        step('approve', 'Request geometry approval', 'Ask for approval with the exact op (image_resize / canvas_resize / crop_to_selection), current dimensions, and target dimensions or selection bounds.', {
+          tool: 'approvals.request',
+          approvalRequired: true,
+          evidence: ['approved op and target dimensions'],
+        }),
+        step('act', 'Apply the geometry operation', 'Run the deterministic resize/canvas/crop adapter (P15). crop_to_selection fails closed without an active selection. Never saves.', {
+          tool: 'desktop.photoshop_resize_canvas_or_image',
+          approvalRequired: true,
+          evidence: ['before/after dimensions receipt'],
+        }),
+        step('verify', 'Verify dimensions and proof', 'Re-run document status to confirm new dimensions, then capture raster proof.', {
+          tool: 'desktop.photoshop_document_status + desktop.photoshop_export_proof',
+          evidence: ['post-change dimensions', 'raster proof'],
+        }),
+      ],
+      successCriteria: ['document dimensions match the approved target', 'proof reflects the requested geometry change'],
+      failClosedConditions: ['target dimensions ambiguous', 'crop requested without an active selection', 'approval missing for geometry mutation'],
+      fallbackBuildoutTrigger: 'If a geometry case is unsupported (e.g. artboards), build a bounded adapter extension instead of blind menu clicks.',
+      adapterGap,
+      userVisibleSummary: 'Resize/canvas/crop runs through the deterministic geometry adapter with before/after dimension receipts and raster proof.',
       sourceRefs: sourceRefs(...source, PHOTOSHOP_BATCHPLAY_REF, ...(adapterGap?.officialSourceRefs || [])),
     };
   }
@@ -825,11 +867,14 @@ function photoshopRunbook(plan: DesignAppAutomationPlan, operation: DesignAppAut
           approvalRequired: true,
           evidence: ['approved adjustment target/settings'],
         }),
-        step('recover', 'Build or use adjustment adapter', 'Use existing script/action adapter if present; otherwise build a bounded Photoshop adjustment adapter before retrying.', {
-          tool: 'agent.build_app_capability',
-          evidence: adapterGap
-            ? ['adapter gap contract', 'source refs', 'focused adjustment smoke cases', 'ready-to-retry contract']
-            : ['source refs', 'focused adjustment smoke case'],
+        step('act', 'Create the adjustment layer', 'Run the deterministic adjustment-layer adapter (P15): additive only — creates a new levels/curves/hue-saturation/brightness-contrast/black-white adjustment layer, never modifies existing ones, never saves.', {
+          tool: 'desktop.photoshop_apply_adjustment_layer',
+          approvalRequired: true,
+          evidence: ['created adjustment layer name', 'layer count before/after receipt'],
+        }),
+        step('verify', 'Verify adjustment and visual proof', 'Re-run layer inventory to confirm the new adjustment layer, then capture raster proof.', {
+          tool: 'desktop.photoshop_layer_inventory + desktop.photoshop_export_proof',
+          evidence: ['post-change layer inventory', 'raster proof'],
         }),
       ],
       successCriteria: ['post-change layer inventory shows expected adjustment layer', 'visual proof reflects requested adjustment'],
@@ -837,6 +882,55 @@ function photoshopRunbook(plan: DesignAppAutomationPlan, operation: DesignAppAut
       fallbackBuildoutTrigger: adapterGap?.buildoutTrigger || 'Build a Photoshop adjustment/action adapter rather than using blind sliders or coordinates.',
       adapterGap,
       userVisibleSummary: 'Adjustment-layer work needs a deterministic adapter or explicit buildout before safe execution.',
+      sourceRefs: sourceRefs(...source, PHOTOSHOP_BATCHPLAY_REF, ...(adapterGap?.officialSourceRefs || [])),
+    };
+  }
+
+  if (operation === 'manage_layers' || operation === 'transform_layer' || operation === 'convert_color_mode') {
+    // P16: deterministic ExtendScript adapters. manage_layers covers
+    // rename/duplicate/reorder/group ONLY — delete/merge/flatten do not
+    // exist in the tool and still require explicit buildout + approval.
+    const toolByOp: Record<string, string> = {
+      manage_layers: 'desktop.photoshop_manage_layers',
+      transform_layer: 'desktop.photoshop_transform_layer',
+      convert_color_mode: 'desktop.photoshop_convert_color_mode',
+    };
+    const actDescription = operation === 'manage_layers'
+      ? 'Run the layer management adapter (rename/duplicate/reorder/group; exact-name match, fails closed on ambiguity). Delete/merge/flatten are NOT available — they stay buildout-gated destructive actions.'
+      : operation === 'transform_layer'
+      ? 'Run the layer transform adapter (move/scale/rotate on a named layer, middle-center anchored; background/locked layers fail closed).'
+      : 'Run the color mode adapter (RGB/CMYK/Grayscale document conversion; honest no-op when already in the target mode; color data loss is reversible until an approved save).';
+    return {
+      appId: plan.appId,
+      appName: plan.appName,
+      operation,
+      label: operationLabel(operation),
+      risk: riskForOperation(operation),
+      controlSurface,
+      requiredInputs: ['fresh document status', 'fresh layer inventory', operation === 'convert_color_mode' ? 'target color mode' : 'exact target layer name'],
+      approvalBefore: ['document/layer mutation', 'save/export/write'],
+      steps: [
+        ...sharedObserve,
+        step('approve', 'Request mutation approval', 'Ask for approval naming the exact layer/mode target and the operation parameters.', {
+          tool: 'approvals.request',
+          approvalRequired: true,
+          evidence: ['approved target and parameters'],
+        }),
+        step('act', 'Apply the deterministic operation', actDescription, {
+          tool: toolByOp[operation],
+          approvalRequired: true,
+          evidence: ['operation receipt (before/after counts, bounds, or modes)'],
+        }),
+        step('verify', 'Verify layer state and proof', 'Re-run layer inventory (and document status for color mode), then capture raster proof.', {
+          tool: 'desktop.photoshop_layer_inventory + desktop.photoshop_export_proof',
+          evidence: ['post-change inventory', 'raster proof'],
+        }),
+      ],
+      successCriteria: ['receipt confirms the requested change', 'post-change inventory matches the approved target', 'nothing was saved'],
+      failClosedConditions: ['target layer ambiguous or missing', 'background/locked layer for transforms', 'delete/merge/flatten requested (not supported — buildout only)', 'approval missing'],
+      fallbackBuildoutTrigger: 'Delete/merge/flatten or other destructive layer operations need a separately approved buildout — never blind menu clicks.',
+      adapterGap,
+      userVisibleSummary: 'Layer management, transforms, and color mode run through deterministic adapters with receipts; destructive layer ops stay gated.',
       sourceRefs: sourceRefs(...source, PHOTOSHOP_BATCHPLAY_REF, ...(adapterGap?.officialSourceRefs || [])),
     };
   }

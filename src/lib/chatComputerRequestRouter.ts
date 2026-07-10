@@ -356,7 +356,13 @@ export interface ChatComputerRequestRoute {
   /**
    * T7: always-confirm floor categories detected in this task. When
    * non-empty, `approvalRequired` is forced true and the prompt block carries
-   * the floor rule. Optional so routes persisted before T7 keep parsing.
+   * the floor rule — EXCEPT (WI-2) for browser routes, where the pay floor
+   * (pay/purchase/buy/checkout/charge) is stamped here for per-step
+   * enforcement via `constraintBlocksToolCall` but no longer forces route-level
+   * `approvalRequired=true`; the single commit confirmation fires mid-run at
+   * the payment floor. login/grant/delete floor categories still force route
+   * approval on every route, including browser. Optional so routes persisted
+   * before T7 keep parsing.
    */
   alwaysConfirmFloor?: ChatComputerConstraintCategory[];
   /**
@@ -622,6 +628,20 @@ const FLOOR_CATEGORY_VERBS: Partial<Record<ChatComputerConstraintCategory, RegEx
 };
 
 /**
+ * WI-2: STEP-LEVEL pay verbs. Superset of the route-level pay floor verbs that
+ * additionally counts `book`/`reserve` (and their submit forms) as a pay-class
+ * commit. This list is consumed ONLY by `constraintBlocksToolCall` — the
+ * per-step enforcement backstop — so a `submit_booking`/`confirm_reservation`
+ * tool call fires the one-time payment-floor confirmation. It is deliberately
+ * NOT wired into `detectAlwaysConfirmFloorCategories`, so a plain "book me a
+ * hotel" message does NOT stamp `pay` at route-build time (route stays
+ * zero-tap); the floor lands at the actual submission step instead. Matches the
+ * canonical pay floor category (`computerGrantGate` pay) which stays
+ * never-grantable — this only widens WHEN the confirm fires, never removes it.
+ */
+const STEP_LEVEL_PAY_VERBS = /\b(pay|paying|purchase|purchasing|buy|buying|checkout|check ?out|charge|charging|book|booking|reserve|reserving|reservation|place ?order|placeorder|complete ?(?:the )?(?:order|purchase|booking|reservation))\b/i;
+
+/**
  * Detect floor categories present in the task text. Pure and conservative
  * (verb-anchored, same posture as D3): unrelated tasks return []. Used at
  * route-build time to force `approvalRequired` and inject the floor prompt
@@ -685,7 +705,11 @@ export function constraintBlocksToolCall(
     }
   }
   for (const category of ALWAYS_CONFIRM_FLOOR) {
-    const verbs = FLOOR_CATEGORY_VERBS[category];
+    // WI-2: at the STEP (tool-call) level the pay floor also fires on
+    // book/reserve/checkout-submit calls — the final booking submission is a
+    // pay-class commit even when the route text said "book" (not a route floor
+    // verb). Other floor categories use their standard verb anchors.
+    const verbs = category === 'pay' ? STEP_LEVEL_PAY_VERBS : FLOOR_CATEGORY_VERBS[category];
     if (verbs && (verbs.test(name) || verbs.test(inputSlice))) {
       return {
         blocked: false,
@@ -797,6 +821,62 @@ function isWordPressAdminBrowserTask(message: string, strategy: ComputerAppTaskS
   ) || detectWordPressTrashPostIntent(message);
 }
 
+/**
+ * WI-6: transactional / travel-commerce web intent. Mirrors the transactional
+ * pattern in `computerUseIntent.ts` ("book|order|buy|reserve|schedule … flight|
+ * hotel|room|ticket|table|rental|appointment"), plus a browse/find variant
+ * ("find|search|look up … hotel|flight|room … on <site>") so plain discovery
+ * phrasing about bookable inventory routes to the browser. Verb-anchored and
+ * paired with a bookable-noun so ordinary chit-chat ("book club", "buy-in") and
+ * build requests ("booking page") don't over-trigger.
+ */
+const BOOKABLE_NOUN = /(flight|flights|hotel|hotels|motel|lodging|room|rooms|ticket|tickets|table|reservation|rental|rentals|car\s*rental|appointment|seat|seats|stay|cruise|tour|rid(?:e|es))/i
+  .source;
+
+// Bug #6: deliberation/modal frame directly ahead of a commerce/discovery verb
+// ("should I book…", "wondering whether to buy…", "which is better to rent…").
+// These are the user asking us to help them *decide*, not a command to launch a
+// browser run. When such a frame precedes the transactional verb we bail out of
+// `hasTransactionalWebIntent` on BOTH the imperative and discovery branches.
+// Kept conservative: it only fires when the frame word sits within a short
+// window before the verb, so genuine commands ("book me a hotel in Chicago",
+// "go to marriott.com and book a hotel", "find me hotels … on marriott.com")
+// have no deliberation frame and still return true.
+const DELIBERATION_FRAMED_COMMERCE =
+  /\b(should|shall|would|could|do|does|is\s+it\s+worth|whether\s+to|thinking\s+(?:of|about)|wondering\s+(?:if|whether)|help\s+me\s+decide|which\s+is\s+better)\b[\s\S]{0,40}?\b(book|order|buy|purchase|reserve|schedule|rent|find|search|compare)\b/i;
+
+function hasTransactionalWebIntent(message: string): boolean {
+  const text = String(message || '');
+  // Deliberation questions ("should I book a hotel or an airbnb?") are requests
+  // to help the user decide, not commands — never auto-launch a browser run.
+  if (DELIBERATION_FRAMED_COMMERCE.test(text)) {
+    return false;
+  }
+  // Imperative commerce verb + bookable noun: "book me a hotel", "reserve a table",
+  // "order 2 tickets", "buy a plane ticket".
+  if (new RegExp(`\\b(book|order|buy|purchase|reserve|reserving|schedule|rent)\\b[\\s\\S]{0,80}\\b${BOOKABLE_NOUN}\\b`, 'i').test(text)) {
+    return true;
+  }
+  // Discovery verb + bookable noun ("find me hotels …", "search for flights …").
+  if (new RegExp(`\\b(find|search|look\\s*up|show\\s*me|get\\s*me|compare)\\b[\\s\\S]{0,80}\\b${BOOKABLE_NOUN}\\b`, 'i').test(text)) {
+    return true;
+  }
+  // Add-to-cart phrasing is inherently web-transactional — "add a phone
+  // charger to my cart", "add it to the basket", "put X in my amazon cart".
+  // (P23: "go to amazon and add X to my cart" previously fell to plain chat
+  // because no commerce verb from the set above matched.)
+  if (/\b(?:add|put|throw|drop)\b[\s\S]{0,80}\b(?:in|into|to)\s+(?:my\s+|the\s+)?(?:[a-z][a-z0-9 .-]{0,24}\s+)?(?:cart|basket|bag)\b/i.test(text)) {
+    return true;
+  }
+  // Generic purchase verb + explicit site/URL ("buy a laptop stand on
+  // amazon.com", "order X from bestbuy.com"). The site anchor keeps this from
+  // over-triggering on conversational "buy" ("should I buy a house?").
+  if (/\b(buy|order|purchase)\b[\s\S]{0,80}\b(?:on|from|at|via)\s+(?:(?:https?:\/\/|www\.)?[a-z0-9][a-z0-9.-]*\.[a-z]{2,}|amazon|ebay|walmart|etsy)\b/i.test(text)) {
+    return true;
+  }
+  return false;
+}
+
 function explicitComputerSurfaceRequested(
   message: string,
   preview: ComputerTaskPlanPreview,
@@ -806,6 +886,15 @@ function explicitComputerSurfaceRequested(
   if (preview.kind !== 'unknown') return true;
   if (classifyBrowserbaseWorkflow(message).kind !== 'general_browser') return true;
   if (designPipeline) return true;
+  // WI-6: URL-less (or plain-web) transactional booking/shopping intent routes
+  // to the browser even without an explicit "use computer / open browser"
+  // surface verb. Mirrors computerUseIntent.ts's transactional pattern
+  // (book|order|buy|reserve|schedule|find|search … flight|hotel|room|ticket|…)
+  // so "find me hotels in chicago this weekend on marriott.com" and
+  // "book me a hotel in chicago" reach the browser runtime (both verified null
+  // before this). Independent of `strategy` so pure discovery phrasings that
+  // resolve no app strategy still route.
+  if (hasTransactionalWebIntent(message)) return true;
   if (!strategy) return false;
   if (isWordPressAdminBrowserTask(message, strategy)) return true;
   return /\b(use|open|launch|focus|control|drive|automate|take over|click|type|paste|press|select|choose|fill|set|create|make|build|edit|update|change|replace|export|save|render|encode|package)\b[\s\S]{0,160}\b(app|application|desktop|computer|browser|website|site|page|window|file|folder|photoshop|indesign|illustrator|figma|canva|autocad|solidworks|fusion\s*360|matlab|simulink|ableton|slack|notion|mail|calendar|shopify|webflow|wix|wordpress)\b/i.test(message)
@@ -831,6 +920,7 @@ function resolveKind(
   preview: ComputerTaskPlanPreview,
   strategy: ComputerAppTaskStrategy | null,
   designPipeline: DesignAppExecutionPipelinePlan | null,
+  message: string,
 ): ChatComputerRequestRouteKind {
   if (strategy?.id === 'agent_asset_acquisition') return 'agent_buildout';
   if (designPipeline || (strategy && APP_STRATEGIES.has(strategy.id))) return 'desktop_app';
@@ -840,6 +930,11 @@ function resolveKind(
   if (preview.kind === 'app_task') return 'desktop_app';
   if (preview.kind === 'file_task') return 'local_file';
   if (preview.kind === 'browser_task') return 'browser';
+  // WI-6: URL-less transactional booking/shopping phrasings the planner leaves
+  // `unknown` ("book me a hotel in chicago", "find me hotels … on marriott.com")
+  // are web tasks — route them to the browser runtime (not the hybrid fallback)
+  // so the zero-tap browser path and WI-2 mid-run payment floor apply.
+  if (preview.kind === 'unknown' && !strategy && hasTransactionalWebIntent(message)) return 'browser';
   return 'hybrid';
 }
 
@@ -949,6 +1044,46 @@ function resolveRisk(input: {
   return maxRisk(input.selectedPipeline?.risk, 'safe');
 }
 
+/**
+ * WI-2: A browser route whose commit step is a *plain-web* transaction
+ * (browse/book/buy on a public site) defers its single side-effect confirm to
+ * the mid-run payment floor, so the route no longer stops the user up front.
+ * Credentialed website-admin routes (WordPress/Dealer Inspire admin, other
+ * login-gated platform control) and desktop mutations are explicitly excluded
+ * so their route-level approval checkpoint survives — the credential/login
+ * floor and admin-mutation gates stay put.
+ */
+export function isCredentialedWebsiteAdminRoute(
+  strategy: ComputerAppTaskStrategy | null,
+  message: string,
+): boolean {
+  // `credentialed_browser` is the login-walled platform-control strategy
+  // (WordPress/CMS admin, form-submission-behind-login). It keeps its up-front
+  // approval checkpoint. `approval_sensitive_browser` (travel_booking,
+  // procurement_shopping, support/finance/social) is a *plain-web* commit
+  // category — it is exactly the booking/shopping flow WI-2 makes zero-tap, so
+  // it is NOT excluded here; its single commit fires mid-run at the payment
+  // floor, and any actual login step trips the login floor separately.
+  if (strategy?.id === 'credentialed_browser') return true;
+  if (isWordPressAdminBrowserTask(message, strategy)) return true;
+  return false;
+}
+
+/**
+ * WI-2: which floor categories, when detected in the route text, still force a
+ * route-level `required=true` for a *browser* route. The pay floor
+ * (pay/purchase/buy/checkout/charge) is deliberately absent: for browser routes
+ * it enforces per-step via `constraintBlocksToolCall` at the mid-run payment
+ * floor instead of stopping the user before the run starts. login/grant (the
+ * credential floor) and delete (permanent destruction) still stop up front on
+ * every route, including browser.
+ */
+const BROWSER_ROUTE_LEVEL_FLOOR_CATEGORIES = new Set<ChatComputerConstraintCategory>([
+  'login',
+  'grant',
+  'delete',
+]);
+
 function buildApproval(input: {
   message: string;
   risk: UserTaskPipelineRisk;
@@ -989,16 +1124,32 @@ function buildApproval(input: {
   if (input.risk === 'destructive') {
     return { required: true, reason: 'The request includes destructive computer/app actions.', stickyApplied: null };
   }
+  // WI-2: a plain-web browser route defers its single commit confirm to the
+  // mid-run payment floor. Credentialed website-admin routes and non-browser
+  // routes are excluded so their up-front approval checkpoint survives.
+  const browserRouteDefersFloor =
+    input.kind === 'browser' && !isCredentialedWebsiteAdminRoute(input.strategy, input.message);
   // T7 floor: checked before every downgrade path (low-risk exports,
   // read-only routing, autonomy, sticky grants) so nothing below can return
-  // required=false for a pay/delete/login/grant task. Not user-disableable
+  // required=false for a delete/login/grant task. Not user-disableable
   // by design — a sticky scope can never carry or cover floor categories.
+  //
+  // WI-2: for browser routes, the PAY floor (pay/purchase/buy/checkout/charge)
+  // no longer forces a route-level stop — it is still stamped onto
+  // `route.alwaysConfirmFloor` (see caller) so `constraintBlocksToolCall`
+  // enforces it per-step at the actual payment submission. login/grant/delete
+  // floor categories still stop up front on every route.
   if (input.alwaysConfirmFloor?.length) {
-    return {
-      required: true,
-      reason: `Always-confirm policy: ${input.alwaysConfirmFloor.join(', ')} actions need explicit user confirmation in every mode.`,
-      stickyApplied: null,
-    };
+    const enforcingFloor = browserRouteDefersFloor
+      ? input.alwaysConfirmFloor.filter((category) => BROWSER_ROUTE_LEVEL_FLOOR_CATEGORIES.has(category))
+      : input.alwaysConfirmFloor;
+    if (enforcingFloor.length) {
+      return {
+        required: true,
+        reason: `Always-confirm policy: ${enforcingFloor.join(', ')} actions need explicit user confirmation in every mode.`,
+        stickyApplied: null,
+      };
+    }
   }
   if (input.userConstraints?.approvalBefore.length) {
     return {
@@ -1011,6 +1162,14 @@ function buildApproval(input: {
     return { required: true, reason: 'The user explicitly requested approval before execution.', stickyApplied: null };
   }
   if (input.risk === 'external_side_effect') {
+    // WI-2: a plain-web browser route (book/order/generic side-effect verbs)
+    // does not stop the user up front for external side effects — its single
+    // commit confirmation fires mid-run at the payment floor
+    // (`constraintBlocksToolCall`). Credentialed website-admin routes and
+    // desktop/app routes still require route-level approval here.
+    if (browserRouteDefersFloor) {
+      return { required: false, reason: 'commit step confirmed mid-run at the payment floor', stickyApplied };
+    }
     if (stickyApplied) return { required: false, reason: null, stickyApplied };
     return { required: true, reason: 'The selected computer/browser path can affect external systems or user files.', stickyApplied: null };
   }
@@ -1398,6 +1557,22 @@ function buildChatComputerRequestActionItems(route: ChatComputerRequestRoute): C
     : items.slice(0, 6);
 }
 
+/**
+ * Meta-questions about automation capability/safety — the user is asking
+ * ABOUT the feature, not asking for an action. Interrogative anchors are
+ * deliberately narrow: "can you open amazon?" is a real request and must
+ * NOT match.
+ */
+// P23: "how do I ..." / "where do I ..." setup/instruction questions are asks
+// for GUIDANCE, not commands — "how do I connect my wordpress site?" was
+// being routed into browser automation. Kept as interrogative-START anchors
+// so imperatives ("connect my wordpress site") still route to automation.
+const AUTOMATION_META_QUESTION_RE = /^(?:is it (?:safe|ok|okay|secure)|how safe is|what happens (?:if|when)|should i (?:let|allow|trust)|can i trust|do i need to worry|what are the risks|how (?:do|can|would|should) i\b|where do i\b|what(?:'s| is) the best way to\b)/i;
+
+export function isAutomationMetaQuestion(message: string): boolean {
+  return AUTOMATION_META_QUESTION_RE.test(String(message || '').trim());
+}
+
 export function buildChatComputerRequestRoute(
   message: string,
   opts: {
@@ -1419,6 +1594,11 @@ export function buildChatComputerRequestRoute(
 ): ChatComputerRequestRoute | null {
   const normalized = String(message || '').trim();
   if (!normalized) return null;
+  // P12 (novice persona finding): questions ABOUT automation — "is it safe
+  // to let an AI use my browser?" — must stay conversational, not spawn a
+  // computer route. High-precision interrogative anchors only, so real
+  // requests ("can you open amazon…") are untouched.
+  if (isAutomationMetaQuestion(normalized)) return null;
 
   const bestMatch = getBestUserTaskPipeline(normalized, { includeFallback: false });
   const initialPipeline = bestMatch ? summarizeUserTaskPipelineMatch(bestMatch) : null;
@@ -1458,7 +1638,7 @@ export function buildChatComputerRequestRoute(
   if (!resolutionCreatesRoute && !explicitComputerSurfaceRequested(normalized, preview, strategy, designPipeline)) return null;
 
   const stagedBrowserTransferIntoDesktopApp = isStagedBrowserFileTransferIntoDesktopApp(normalized, strategy);
-  let kind = directImageConversion ? 'local_file' as const : resolveKind(preview, strategy, designPipeline);
+  let kind = directImageConversion ? 'local_file' as const : resolveKind(preview, strategy, designPipeline, normalized);
   if (stagedBrowserTransferIntoDesktopApp) kind = 'hybrid';
   if (appResolution && !appResolution.explicitAppNamed) {
     // Keep the surface consistent with the resolver's pick: an installed

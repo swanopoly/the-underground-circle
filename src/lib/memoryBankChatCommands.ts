@@ -43,6 +43,13 @@ export interface MemoryBankCommandContext {
 export interface MemoryBankCommandResult {
   message: string;
   success: boolean;
+  /**
+   * Checkpoint written for a destructive write (update/append/clear), when
+   * any. Lets the chat surface render a live Restore strip instead of only
+   * mentioning the id in prose (Phase 2c of
+   * docs/CHAT_UX_INTEGRATION_UPGRADE_PLAN.md).
+   */
+  checkpointId?: string | null;
 }
 
 const HELP_TEXT = [
@@ -99,7 +106,7 @@ export async function executeMemoryBankCommand(
     }
     const { checkpointId } = await writeMemoryBankWithCheckpoint(ctx, kind, '');
     const suffix = checkpointId ? `  (checkpoint \`${checkpointId.slice(0, 8)}\`)` : '';
-    return { success: true, message: `Cleared **${MEMORY_DOC_KIND_LABELS[kind]}**.${suffix}` };
+    return { success: true, message: `Cleared **${MEMORY_DOC_KIND_LABELS[kind]}**.${suffix}`, checkpointId };
   }
 
   // Otherwise: `head` should be a doc_kind alias for a read.
@@ -168,10 +175,11 @@ async function handleWrite(
     ? content
     : await appendContent(ctx.circleId, kind, content);
   const { checkpointId } = await writeMemoryBankWithCheckpoint(ctx, kind, nextContent);
-  const suffix = checkpointId ? `  (checkpoint \`${checkpointId.slice(0, 8)}\` — \`/memory-bank\` shows restore)` : '';
+  const suffix = checkpointId ? `  (checkpoint \`${checkpointId.slice(0, 8)}\` — Restore below undoes this)` : '';
   return {
     success: true,
     message: `${mode === 'replace' ? 'Wrote' : 'Appended to'} **${MEMORY_DOC_KIND_LABELS[kind]}**.${suffix}`,
+    checkpointId,
   };
 }
 

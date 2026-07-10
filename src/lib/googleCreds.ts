@@ -47,6 +47,28 @@ export async function getGoogleAuthStatus(): Promise<GoogleAuthStatus> {
 }
 
 /**
+ * Returns a currently-valid Google Workspace access token via the edge fn's
+ * `?action=token` route, which refreshes with the stored refresh_token when
+ * the cached one has expired (P14 durability fix — connections made weeks ago
+ * keep working). Returns null when not connected or when Google demands a
+ * reconnect. The refresh_token itself never reaches the client.
+ */
+export async function fetchGoogleWorkspaceAccessToken(): Promise<string | null> {
+  const accessToken = await getFreshAccessToken();
+  if (!accessToken) return null;
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/google-oauth?action=token`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return typeof data?.access_token === 'string' && data.access_token ? data.access_token : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Open the Google consent URL in a new tab/window. User grants scopes,
  * Google redirects to our edge fn callback which stores the refresh
  * token, then redirects back to the app with `?google_oauth=ok`.

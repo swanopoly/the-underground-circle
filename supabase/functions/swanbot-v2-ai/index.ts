@@ -1,30 +1,37 @@
 // BlackSwan AI v2 — Hermes-aligned edge function.
 //
-// Side-by-side with `swanbot-ai/index.ts`. This version proves the new
-// stack end-to-end: typed tool-use loop, prompt caching, real agent_runs
-// telemetry. Client opt-in via a flag until we're happy to flip the default.
+// Side-by-side with `swanbot-ai/index.ts`. This version runs the new stack
+// end-to-end: typed tool-use loop, prompt caching, real agent_runs +
+// agent_run_events + claude_api_usage telemetry, and a Feed activity row on
+// terminal runs. Routing is still per-device client opt-in via the `/v2`
+// chat command (`src/lib/swanbotRouting.ts`, default v1).
 //
-// Design parity with `src/lib/agentExecutionCore.ts` — the core logic is
+// Design parity with `src/lib/agentExecutionCore.ts` — the core loop is
 // reimplemented here inline because Supabase edge functions run in Deno
-// and can't import from the RN-flavoured `src/` tree. Keep this file
-// narrow: the core loop, the Anthropic adapter, and the circle-context
-// loader. Tools are invoked over HTTP against the existing `_shared`
-// helpers and the app-side bridge where possible.
+// and can't import from the RN-flavoured `src/` tree. Edge-side tools run
+// against Supabase tables and the `_shared` helpers; desktop/browser bridge
+// tools are client-delegated via the continuation protocol below.
 //
-// Expectations for the caller (client):
-//   - Send `{ message, circleId, userId, mode? }` in the request body.
-//   - We stream tool-call announcements back as SSE `event: tool_call`
-//     frames, and the final assistant text as `event: final`.
+// Contract with the caller (client):
+//   - Send `{ message, circleId, userId, mode?, model?, targetAgentName? }` in
+//     the request body (or `{ continuationRunId, toolResults, circleId, userId }`
+//     to resume).
+//   - The response is a single JSON body — no SSE. Terminal runs return
+//     `{ text, runId, toolCalls, usage, stopReason, ... }`; when the model
+//     calls a client-delegated tool the run pauses and returns
+//     `{ pending: true, clientToolCalls, continuationRunId }`. The client
+//     executes those tools locally (desktop bridge on :7778 / browser
+//     bridge) and calls back with `{ continuationRunId, toolResults }`.
 //   - The run is persisted to `agent_runs` + `agent_run_events` under
 //     `surface: 'main_chat'` / `mode: (mode ?? 'talk')`.
 //
-// NOT in this v2:
-//   - Access to the 30+ tools in `openswanToolRuntime.ts`. The catalog is
-//     deeply wired into client state and can't be hoisted into Deno
-//     without porting half the app. v2 exposes a small read-only tool set
-//     (circle members, recent GitHub events, memory search) proven
-//     against the same tables. Full tool surface lands after v2 has
-//     shipped and been measured.
+// Tool surface: a large typed catalog, not a read-only subset — circle reads
+// (members, memory search, GitHub, rewards, skills, tasks/missions/check-ins/
+// integrations/rooms/office), writes (save_memory, tasks.*, missions.create_task,
+// messages.create, rooms.*), approvals.*, workspace/verification/credentials,
+// WordPress admin (wp.*), and client-delegated `desktop.*` / `browser.*`
+// bridge tools. Anthropic models only: other providers get a 400
+// `model_unsupported_on_v2` and must route via swanbot-ai / llm-proxy.
 //
 // To deploy:   npx supabase functions deploy swanbot-v2-ai
 // To rollback: just stop routing client traffic here; swanbot-ai is untouched.
@@ -49,6 +56,7 @@ import {
 // numbers. See docs/AGENTS_ROADMAP.md §6 Rule #3.
 import { callClaude, addUsage, EMPTY_USAGE, logClaudeUsage, type UsageBreakdown } from "../_claude/anthropic.ts";
 import { wrapUntrusted } from "../_shared/untrusted.ts";
+import { attachToolInputExamples } from "../../../src/lib/toolInputExamples.ts";
 
 // ─── Types (mirroring src/lib/agentExecutionCore.ts) ────────────────────────
 
@@ -151,6 +159,54 @@ function isMissingTableError(error: unknown): boolean {
   const code = (error as any)?.code;
   const msg = String((error as any)?.message || "");
   return code === "PGRST205" || code === "42P01" || /relation .* does not exist/i.test(msg);
+}
+
+/**
+ * Classify a caught loop error as a TRANSIENT upstream failure (retry) vs a
+ * TERMINAL one (fail closed). Parity with `isRetryableProviderError` in
+ * `src/lib/agentProviders/fallbackChain.ts` and the retryable set `callClaude`
+ * itself honors: 429 / 500 / 502 / 503 / 504 / 529 + network drops are
+ * transient; other 4xx and structural errors are terminal.
+ *
+ * `callClaude` already retries these internally with full-jitter backoff BEFORE
+ * throwing, so reaching here means its OWN retries were exhausted — we do NOT
+ * add a second retry loop at this layer (retry lives at one layer). Instead we
+ * surface the transient classification so the HTTP handler can return a
+ * retryable status the client's `isRetryableInvokeError` understands, letting
+ * the single client-side `runWithTransientRetry` decide whether to re-issue the
+ * turn. Structural errors stay fatal.
+ *
+ * `callClaude` throws `Error("Anthropic <status> (after N retries): <body>")`
+ * on an exhausted HTTP failure and a bare network error otherwise, so we read
+ * the status out of the message and fall back to network-marker matching.
+ */
+const TRANSIENT_ANTHROPIC_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
+
+function isRetryableLoopError(error: unknown): boolean {
+  if (!error) return false;
+  const anyErr = error as { status?: unknown; message?: unknown };
+  // Some SDK/HTTP shapes hang the status off the object directly.
+  if (typeof anyErr.status === "number" && TRANSIENT_ANTHROPIC_STATUSES.has(anyErr.status)) return true;
+  const msg = (typeof anyErr.message === "string" ? anyErr.message : String(error)).toLowerCase();
+  if (!msg) return false;
+  // "anthropic 529 (after 2 retries): ..." — pull the leading status code.
+  const m = msg.match(/anthropic\s+(\d{3})\b/);
+  if (m) return TRANSIENT_ANTHROPIC_STATUSES.has(Number(m[1]));
+  // Network-level drops (no HTTP status): mirror the shared marker list.
+  return [
+    "overloaded",
+    "rate limit",
+    "rate_limit",
+    "service unavailable",
+    "service_unavailable",
+    "timeout",
+    "etimedout",
+    "econnreset",
+    "econnrefused",
+    "network",
+    "fetch failed",
+    "socket hang up",
+  ].some((marker) => msg.includes(marker));
 }
 
 async function safeMaybeSingle<T = any>(
@@ -2108,11 +2164,18 @@ async function anthropicTurn(args: {
     system: args.systemBlocks,
     maxTokens: args.maxTokens,
     messages: args.messages.map((m) => ({ role: m.role, content: m.content })),
-    tools: args.tools.map((t) => ({
+    // X4 (P47/P51): decorate the gnarliest schemas with curated,
+    // schema-validated `input_examples` (GA, no beta header; 72→90% param
+    // accuracy on complex inputs). The attach helper re-validates every
+    // example against THIS catalog's schema and drops non-conforming ones —
+    // an invalid example would 400 the whole request, and the v2 schemas can
+    // drift from the client registry's, so fail-safe-by-validation is the
+    // contract here too.
+    tools: attachToolInputExamples(args.tools.map((t) => ({
       name: t.name,
       description: t.description,
       input_schema: t.input_schema,
-    })),
+    }))),
   });
   const content: ContentBlock[] = [];
   for (const b of result.content) {
@@ -2877,35 +2940,53 @@ Deno.serve(async (req: Request) => {
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    // Edge parity with the shared retry policy: classify the mid-loop failure
+    // rather than treating every throw as fatal. A transient upstream failure
+    // (Anthropic 429/5xx/529/network that already exhausted callClaude's own
+    // full-jitter retries) is returned as a RETRYABLE 503 the client's
+    // `isRetryableInvokeError` understands, so the single client-side
+    // `runWithTransientRetry` can re-issue the turn. We do NOT add a second
+    // retry loop here (retry at one layer). Structural errors stay fatal 500.
+    const transient = isRetryableLoopError(e);
     if (runId) {
       await supabase.from("agent_runs").update({
-        status: "failed",
+        // A transient upstream blip isn't a permanent failure — leave the run
+        // "running" so a client retry/continuation can still complete it; a
+        // terminal error is marked failed. Both record final_stop_reason:error
+        // for the readiness gate, matching the kind:"error" event below.
+        status: transient ? "running" : "failed",
         input_tokens: 0,
         output_tokens: 0,
         cached_tokens: 0,
         tool_calls: [],
         iteration_count: 1,
-        // AR4/G2: tag errored runs so the readiness gate counts them as
-        // "error" rather than missing — matches the kind:"error" event below.
         final_stop_reason: "error",
-        completed_at: new Date().toISOString(),
-        metadata: { error: msg, version: "swanbot-v2-ai" },
+        ...(transient ? {} : { completed_at: new Date().toISOString() }),
+        metadata: { error: msg, version: "swanbot-v2-ai", transient },
       }).eq("id", runId);
-      await supabase.from("agent_run_events").insert({ run_id: runId, kind: "error", payload: { message: msg } });
+      await supabase.from("agent_run_events").insert({ run_id: runId, kind: "error", payload: { message: msg, transient } });
     }
-    // Feed loop-in on failure too — surfaces the outage in Feed so users
-    // see "BlackSwan run failed" cards rather than an empty dashboard.
-    void logFeedActivity(supabase, {
-      circleId: circleId ?? "",
-      agentName: "BlackSwan",
-      source: "system",
-      sourceDetail: "swanbot-v2-ai",
-      activityType: "task_failed",
-      status: "failed",
-      title: `Run failed: ${String(message ?? "").slice(0, 80)}`,
-      body: msg.slice(0, 500),
-      metadata: { run_id: runId, error: msg },
-    });
+    // Feed loop-in: only emit the alarming "Run failed" card for TERMINAL
+    // failures. A transient upstream blip that the client will retry shouldn't
+    // spam the Feed with a failure the user can't act on.
+    if (!transient) {
+      void logFeedActivity(supabase, {
+        circleId: circleId ?? "",
+        agentName: "BlackSwan",
+        source: "system",
+        sourceDetail: "swanbot-v2-ai",
+        activityType: "task_failed",
+        status: "failed",
+        title: `Run failed: ${String(message ?? "").slice(0, 80)}`,
+        body: msg.slice(0, 500),
+        metadata: { run_id: runId, error: msg },
+      });
+    }
+    if (transient) {
+      // 503 → client classifies as retryable; `retryable:true` is explicit for
+      // any caller that reads the body instead of the status.
+      return jsonResponse({ error: msg, code: "upstream_transient", retryable: true }, 503);
+    }
     return errResponse(500, "agent_failed", msg);
   }
 });

@@ -45,6 +45,8 @@ import MemberCardModal from '../../../components/MemberCardModal';
 import { LoadingScreen as FeedLoadingAnimation } from '../../../components/LoadingWave';
 import MissionsTab from './MissionsTab';
 import { useMissions, useMissionDetail, missionProgress, isOverdue, type Mission } from '../../../lib/missions';
+import SuggestedTaskChips from '../../../components/SuggestedTaskChips';
+import { getEmptyStateSuggestions, type EmptyStateSuggestionAction } from '../../../lib/emptyStateSuggestions';
 
 // ─── Task Search Bar (rendered in FeedTab, right under OrchestraPanel) ────
 
@@ -263,6 +265,25 @@ function HuggingSwanPanel({ circleId }: { circleId: string }) {
                 <Text style={hs.hintText}>{hint}</Text>
               </View>
             ))}
+          </View>
+          {/* Actionable next steps. These map to real chat commands
+              (/create, /watch, /review, /imagine) that all live in the Chat
+              surface, so picking one navigates there via the existing
+              uc:switch-tab event. Visual guidance only — there is no
+              cross-surface composer-seed plumbing to pre-fill the command,
+              so we land the user in Chat rather than inventing it. */}
+          <View style={{ marginTop: 14, width: '100%' }}>
+            <SuggestedTaskChips
+              suggestions={getEmptyStateSuggestions('feed')}
+              onPick={(action: EmptyStateSuggestionAction) => {
+                // Every feed suggestion is a chat command; open Chat.
+                if (Platform.OS === 'web' && typeof window !== 'undefined') {
+                  try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab: 'CHAT' } })); } catch {}
+                }
+              }}
+              accentColor="#a5b4fc"
+              nativeID="section-feed-empty-suggestions"
+            />
           </View>
         </View>
       ) : (

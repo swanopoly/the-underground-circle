@@ -57,6 +57,21 @@ export async function fileComputerTaskRecipeProposal(args: {
     if (existing) {
       return { ok: false, error: `A skill named "${draft.name}" already exists — edit it via /skill instead.` };
     }
+    // X8 (P50): portability visibility, warn-only. A skill that violates the
+    // Agent Skills standard still saves fine in OUR library — but it would be
+    // rejected the moment someone exports it to claude.ai / the Skills API /
+    // Claude Code. Surface that to the human approver in the description so
+    // the choice is informed. Fail-safe: audit failure never blocks a filing.
+    let compatNote = '';
+    try {
+      const { auditSkillStandardCompat, summarizeSkillCompat } = await import('./skillStandardCompat');
+      const summary = summarizeSkillCompat(auditSkillStandardCompat({
+        name: draft.name,
+        description: draft.description,
+        content: draft.content,
+      }));
+      if (summary && summary.startsWith('⚠️')) compatNote = ` · ${summary.slice(0, 200)}`;
+    } catch { /* observability only */ }
     const { data, error } = await supabase
       .from('agent_approvals')
       .insert({
@@ -64,7 +79,7 @@ export async function fileComputerTaskRecipeProposal(args: {
         session_key: 'default::blackswan',
         agent_name: 'BlackSwan',
         action_type: 'skill.create',
-        description: `Save completed computer task as recipe "${draft.name}"${args.rationale ? ` — ${args.rationale.slice(0, 160)}` : ''}`,
+        description: `Save completed computer task as recipe "${draft.name}"${args.rationale ? ` — ${args.rationale.slice(0, 160)}` : ''}${compatNote}`,
         payload: {
           action: 'create',
           circleId,

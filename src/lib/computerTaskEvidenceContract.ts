@@ -6,6 +6,16 @@ import {
 } from './appAutomationControlSurfaces';
 import type { ChatComputerRequestRoute } from './chatComputerRequestRouter';
 import { formatGenericAppTaskFamilyForUser } from './genericAppNavigator';
+import {
+  shouldVerifyOutcome,
+  buildVerifierPrompt,
+  resolveVerifierAction,
+  VERIFIER_MODEL_HINT,
+  type OutcomeVerifierAction,
+  type OutcomeVerifierEvidenceItem,
+  type OutcomeVerifierGateOptions,
+  type OutcomeVerifierAttemptPolicy,
+} from './outcomeVerifier';
 
 export type ComputerTaskEvidenceContractKind = 'browser' | 'desktop_app' | 'local_file' | 'hybrid' | 'agent_buildout';
 
@@ -442,4 +452,104 @@ export function formatComputerTaskEvidenceContractPromptBlock(contract: Computer
     `Fresh evidence before retry: ${contract.freshEvidenceRequired.join(' | ')}`,
     `Source refs: ${contract.sourceRefs.map((ref) => `${ref.label} <${ref.url}>`).join(' | ') || 'none'}`,
   ].join('\n');
+}
+
+/**
+ * Execute→verify pass (FLAG-DARK).
+ *
+ * After a mutation-lane task claims "done", the research says a FRESH-CONTEXT
+ * verifier grading the produced outcome against a CHECKABLE criterion beats
+ * same-context self-critique. The evidence contract's proof-after list is
+ * exactly that criterion, so this is the natural home for the seam.
+ *
+ * IMPORTANT — this is default-OFF. The pure grading logic (gate + prompt +
+ * action mapping) is ALWAYS computed and returned, but the actual second-model
+ * CALL is never made here and is gated behind an explicit opt-in
+ * (`options.enableModelCall === true`). When the flag is OFF (the default),
+ * `modelCall` is null and behavior is byte-identical to today: no verify pass
+ * fires. The pure `decision`/`prompt` are exposed so a caller can enable the
+ * live call later without changing this contract module.
+ */
+export interface ComputerTaskOutcomeVerifyOptions extends OutcomeVerifierGateOptions {
+  /**
+   * FLAG-DARK opt-in. Default OFF. When left false/undefined, NO live verifier
+   * model call is emitted (`modelCall` is null) and this function is a pure,
+   * side-effect-free decision. Set to true ONLY once a caller is wired to
+   * actually issue the fresh-context verify request.
+   */
+  enableModelCall?: boolean;
+  /** Retry budget for a FAIL verdict; forwarded to resolveVerifierAction. */
+  attemptPolicy?: OutcomeVerifierAttemptPolicy;
+  /** Override the fresh-context verifier model (defaults to VERIFIER_MODEL_HINT). */
+  verifierModel?: string;
+}
+
+/** The live second-model call the caller should issue — only when enabled. */
+export interface ComputerTaskOutcomeVerifyModelCall {
+  /** A DIFFERENT instance from the executor: fresh context, clean eyes. */
+  model: string;
+  /** The bounded fresh-context verifier prompt. */
+  prompt: string;
+}
+
+export interface ComputerTaskOutcomeVerifyDecision {
+  /** Whether this task SHAPE warrants a verify pass (mutation + checkable proof). */
+  shouldVerify: boolean;
+  /** True only when the flag-dark model call is actually enabled AND warranted. */
+  modelCallEnabled: boolean;
+  /**
+   * The verify prompt to send, present whenever `shouldVerify` is true so a
+   * caller can inspect/log it even while the live call stays dark.
+   */
+  prompt: string | null;
+  /**
+   * The live model call to issue. Non-null ONLY when `shouldVerify` AND
+   * `enableModelCall === true`. Null by default (flag-dark).
+   */
+  modelCall: ComputerTaskOutcomeVerifyModelCall | null;
+  /**
+   * How to map an eventual verdict to an action. Exposed so the caller can run
+   * `resolve(parseVerifierVerdict(replyText).verdict)` once it has a reply.
+   */
+  resolveAction: (verdict: Parameters<typeof resolveVerifierAction>[0]) => OutcomeVerifierAction;
+}
+
+/**
+ * Given a completed mutation task's contract + collected evidence, return the
+ * flag-dark verify decision. The default (no `enableModelCall`) is a no-op:
+ * `modelCall` is null, so no second model runs.
+ *
+ * ONE-LINE ENABLEMENT (do this in the caller, not here): pass
+ * `{ enableModelCall: true }` — then, when `decision.modelCall` is non-null,
+ * send `decision.modelCall.prompt` to `decision.modelCall.model` (a fresh
+ * instance), and route the reply through
+ * `decision.resolveAction(parseVerifierVerdict(reply).verdict)`.
+ */
+export function decideComputerTaskOutcomeVerification(args: {
+  task: string;
+  contract: ComputerTaskEvidenceContract;
+  collectedEvidence?: OutcomeVerifierEvidenceItem[];
+  options?: ComputerTaskOutcomeVerifyOptions;
+}): ComputerTaskOutcomeVerifyDecision {
+  const { task, contract, collectedEvidence, options } = args;
+  const shouldVerify = shouldVerifyOutcome(contract, {
+    requireProofAfter: options?.requireProofAfter,
+    collectedEvidence: collectedEvidence ?? options?.collectedEvidence,
+  });
+  const prompt = shouldVerify
+    ? buildVerifierPrompt({ task, contract, collectedEvidence })
+    : null;
+  // FLAG-DARK: the live call is emitted only when the opt-in is explicitly true
+  // AND the task shape warrants verification. Otherwise byte-identical to today.
+  const modelCallEnabled = shouldVerify && options?.enableModelCall === true;
+  const modelCall: ComputerTaskOutcomeVerifyModelCall | null = modelCallEnabled && prompt
+    ? { model: options?.verifierModel || VERIFIER_MODEL_HINT, prompt }
+    : null;
+  return {
+    shouldVerify,
+    modelCallEnabled,
+    prompt,
+    modelCall,
+    resolveAction: (verdict) => resolveVerifierAction(verdict, options?.attemptPolicy),
+  };
 }

@@ -20,8 +20,11 @@ import {
   buildOfficeBuildingBoard,
   buildOfficeTokenTracker,
   buildAgentLiveOps,
+  buildOfficeAgentAccountabilityIndex,
+  formatAccountabilityCounts,
   formatTokenCount,
   formatRelativeTime,
+  OFFICE_ACCOUNTABILITY_WINDOW_MS,
   OFFICE_BOARD_MAX_ROOTS,
   OFFICE_BOARD_MAX_CHILDREN_PER_ROOT,
   OFFICE_BOARD_MAX_RECENTLY_FINISHED,
@@ -321,6 +324,59 @@ console.log('\n[7] determinism');
   const o1 = buildAgentLiveOps({ lastActive: iso(-60_000) }, a.building, NOW);
   const o2 = buildAgentLiveOps({ lastActive: iso(-60_000) }, b.building, NOW);
   check('live ops deterministic for same nowMs', JSON.stringify(o1) === JSON.stringify(o2));
+}
+
+// ─── Per-agent accountability index (O1, P38) ───────────────────────────────
+
+console.log('\n[A] accountability index — outcomes, window, keying, cost');
+{
+  const runs: AgentRunLike[] = [
+    // Research Agent: one success 2h ago, one FAILURE 20m ago (newer → lastLine)
+    run({ id: 'r1', status: 'completed', title: 'Summarize docs', delegated_to: 'research_agent', completed_at: iso(-2 * 60 * 60 * 1000), estimated_cost: 0.12 }),
+    run({ id: 'r2', status: 'failed', title: 'Fetch external corpus', delegated_to: 'research_agent', completed_at: iso(-20 * 60_000), estimated_cost: 0.031 }),
+    // Coder: one success 5m ago
+    run({ id: 'r3', status: 'completed', title: 'Fix login flow', delegated_to: 'coder', completed_at: iso(-5 * 60_000), estimated_cost: 0.5 }),
+    // Outside the 24h window — excluded
+    run({ id: 'r4', status: 'completed', title: 'Old work', delegated_to: 'coder', completed_at: iso(-25 * 60 * 60 * 1000), estimated_cost: 9 }),
+    // Future-dated — excluded
+    run({ id: 'r5', status: 'completed', title: 'Clock skew', delegated_to: 'coder', completed_at: iso(60_000) }),
+    // Still building — ignored (live board's job)
+    run({ id: 'r6', status: 'running', title: 'In flight', delegated_to: 'coder' }),
+  ];
+  const index = buildOfficeAgentAccountabilityIndex(runs, { nowMs: NOW });
+
+  const research = index.get('research agent');
+  check('delegated_to keys by prettified lowercased name', !!research);
+  check('newest finished run wins the line (failure)', !!research && research.lastLine.startsWith('❌ Fetch external corpus'));
+  check('failure tone is danger', research?.tone === 'danger');
+  check('counts: 1 completed + 1 failed', research?.completed24h === 1 && research?.failed24h === 1);
+  check('cost sums + rounds to 2dp', research?.costUsd24h === 0.15, String(research?.costUsd24h));
+  check('line carries relative time', !!research && /ago/.test(research.lastLine));
+
+  const coder = index.get('coder');
+  check('success line has ✅ + title', !!coder && coder.lastLine.startsWith('✅ Fix login flow'));
+  check('success tone is good', coder?.tone === 'good');
+  check('out-of-window + future + building excluded', coder?.completed24h === 1 && coder?.failed24h === 0);
+  check('excluded old run cost not summed', coder?.costUsd24h === 0.5);
+
+  check('counts chip formats "✓1 ✗1"', formatAccountabilityCounts(research) === '✓1 ✗1');
+  check('counts chip formats "✓1"', formatAccountabilityCounts(coder) === '✓1');
+  check('counts chip empty for null', formatAccountabilityCounts(null) === '');
+
+  // Window override + determinism + degenerates
+  const narrow = buildOfficeAgentAccountabilityIndex(runs, { nowMs: NOW, windowMs: 10 * 60_000 });
+  check('custom window excludes older finishes', !narrow.get('research agent') || narrow.get('research agent')!.completed24h === 0);
+  const again = buildOfficeAgentAccountabilityIndex(runs, { nowMs: NOW });
+  check('deterministic for same nowMs', JSON.stringify([...again.entries()]) === JSON.stringify([...index.entries()]));
+  check('null runs → empty map', buildOfficeAgentAccountabilityIndex(null, { nowMs: NOW }).size === 0);
+  check('window constant is 24h', OFFICE_ACCOUNTABILITY_WINDOW_MS === 24 * 60 * 60 * 1000);
+
+  // Long titles stay bounded inside the line
+  const long = buildOfficeAgentAccountabilityIndex(
+    [run({ id: 'r7', status: 'completed', title: 'x'.repeat(200), delegated_to: 'coder', completed_at: iso(-1000) })],
+    { nowMs: NOW },
+  ).get('coder');
+  check('title bounded in line', !!long && long.lastLine.length < 90, String(long?.lastLine.length));
 }
 
 // ─── Summary ────────────────────────────────────────────────────────────────

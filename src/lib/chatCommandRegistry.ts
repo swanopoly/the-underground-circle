@@ -164,6 +164,10 @@ export const CHAT_COMMAND_REGISTRY: ChatCommandDefinition[] = [
   { id: 'browser-open', routeId: 'browser', command: '/browser open', insertText: '/browser open ', title: 'Open In Browser', description: 'Open a site or page in the browser.', category: 'ai_tools', keywords: ['open', 'website', 'url', 'browse'] },
   { id: 'browser-extract', routeId: 'browser', command: '/browser extract', insertText: '/browser extract ', title: 'Extract From Site', description: 'Extract data from a webpage.', category: 'ai_tools', keywords: ['extract', 'scrape', 'site', 'page'] },
   { id: 'browser-screenshot', routeId: 'browser', command: '/browser screenshot', insertText: '/browser screenshot ', title: 'Screenshot Website', description: 'Capture a webpage screenshot.', category: 'ai_tools', keywords: ['screenshot', 'page', 'capture'] },
+  // /watch — intercepted in ChatTab's sendMessage (recurring monitors). No
+  // dedicated route; reuses the 'schedule' route for discoverability since
+  // watches are scheduled re-runs of a read-only browser check.
+  { id: 'watch', routeId: 'schedule', command: '/watch', insertText: '/watch ', title: 'Watch (recurring monitor)', description: 'Re-runs a read-only browser check on a schedule and reports only what changed. Usage: `/watch [hourly|daily|weekly] <task>`. Also: /watch list · /watch stop <n>.', category: 'ai_tools', keywords: ['monitor', 'recurring', 'hourly', 'daily', 'weekly', 'changes'] },
   { id: 'summarize', routeId: 'hf_tools', command: '/summarize', insertText: '/summarize ', title: 'Summarize', description: 'Summarize text or a URL.', category: 'ai_tools', keywords: ['summary', 'text'] },
   { id: 'translate', routeId: 'hf_tools', command: '/translate', insertText: '/translate ', title: 'Translate', description: 'Translate text.', category: 'ai_tools', keywords: ['language'] },
   { id: 'classify', routeId: 'hf_tools', command: '/classify', insertText: '/classify ', title: 'Classify', description: 'Classify text into categories.', category: 'ai_tools', keywords: ['labels'] },
@@ -172,6 +176,29 @@ export const CHAT_COMMAND_REGISTRY: ChatCommandDefinition[] = [
   { id: 'imagine', routeId: 'hf_tools', command: '/imagine', insertText: '/imagine ', title: 'Generate Image', description: 'Generate an image.', category: 'ai_tools', keywords: ['image', 'art'] },
   { id: 'vision', routeId: 'hf_tools', command: '/vision', insertText: '/vision ', title: 'Vision', description: 'Analyze an image or visual input.', category: 'ai_tools', keywords: ['image', 'analyze'] },
   { id: 'openmodel', routeId: 'hf_tools', command: '/openmodel', insertText: '/openmodel ', title: 'Open Model', description: 'Run a direct open-model prompt.', category: 'ai_tools', keywords: ['model'] },
+  // /bestof — intercepted in ChatTab's sendMessage (best-of-N model race). No
+  // dedicated route; reuses the 'hf_tools' route for discoverability since
+  // races are text-only model generations.
+  { id: 'bestof', routeId: 'hf_tools', command: '/bestof', insertText: '/bestof ', title: 'Best-of-N race', description: 'Races 2–4 models on the same task in parallel and judges the winner. Usage: `/bestof model1,model2 <task>`. Aliases: auto, sonnet, haiku, opus, gpt, blackswan.', category: 'ai_tools', aliases: ['/best-of-n'], keywords: ['race', 'models', 'compare', 'parallel', 'judge'] },
+  // Intercepted in ChatTab's sendMessage BEFORE the planner (like /watch);
+  // reuses the 'github' route for discoverability. Read-only: /review never
+  // writes to GitHub.
+  { id: 'review', routeId: 'github', command: '/review', insertText: '/review ', title: 'Code review', description: 'Reviews a pull request with the code-reviewer methodology (correctness → security → design → style; 🔴/🟡/💭 findings). Usage: `/review <pr-url | #123 | latest> [focus]`. Pasting a bare PR link also works.', category: 'ai_tools', keywords: ['pr', 'pull request', 'code review', 'diff', 'audit', 'security'] },
+  // Universal creation entry — classifies the brief and re-dispatches to the
+  // right existing pipeline (/build-page, /imagine, /task, /watch, WordPress,
+  // CSV artifact, …). Intercepted in ChatTab before the planner.
+  { id: 'create', routeId: 'hf_tools', command: '/create', insertText: '/create ', title: 'Create anything', description: 'One entry for making things: webpage, image, code, document, spreadsheet (CSV), WordPress post, task, recurring watch, automation. Usage: `/create <describe it>` — bare `/create` shows the menu.', category: 'ai_tools', aliases: ['/make'], keywords: ['make', 'new', 'generate', 'build', 'write', 'design'] },
+  // /apps — the window into desktop/design/engineering app automation:
+  // what chat can drive (docs/apps profiles) + a live reachability check
+  // (bridge -> installed -> running -> focus -> a11y). Intercepted in ChatTab.
+  { id: 'apps', routeId: 'hf_tools', command: '/apps', insertText: '/apps ', title: 'App automation status', description: 'See which desktop/design/engineering apps chat can automate, and check one live: `/apps` for the overview, `/apps photoshop` for details + a reachability check.', category: 'ai_tools', keywords: ['photoshop', 'cad', 'desktop', 'automation', 'reachable', 'blender', 'figma'] },
+  // /integrations — connected API integrations: list them, get connect steps,
+  // or `act <goal>` to have the agent compose an approval-gated API call
+  // (custom_api.read/request tools). Intercepted in ChatTab (P30).
+  { id: 'integrations', routeId: 'hf_tools', command: '/integrations', insertText: '/integrations ', title: 'Integrations', description: 'See connected integrations, get connect steps, or act: `/integrations` lists them, `/integrations connect linear` shows setup, `/integrations act create a Linear issue "Fix login"` composes the API call for your approval.', category: 'ai_tools', aliases: ['/integration'], keywords: ['api', 'connect', 'slack', 'linear', 'stripe', 'webhook', 'custom api', 'act'] },
+  // /screen — one-tap observation of the frontmost (or named) app: state,
+  // windows, what changed since the last look, suggested next step (P19).
+  { id: 'screen', routeId: 'hf_tools', command: '/screen', insertText: '/screen ', title: "What's on my screen", description: 'Look at the frontmost app (or `/screen <app>`): running state, open windows, what changed since my last look, and a suggested next step.', category: 'ai_tools', keywords: ['observe', 'window', 'desktop', 'next step', 'look'] },
   { id: 'build-page', routeId: 'build_page', command: '/build-page', insertText: '/build-page ', title: 'Build Page', description: 'Generate a webpage.', category: 'ai_tools', aliases: ['/build'], keywords: ['html', 'web'] },
   { id: 'code', routeId: 'hf_tools', command: '/code', insertText: '/code ', title: 'Code', description: 'Generate code from a prompt.', category: 'ai_tools', keywords: ['programming', 'build'] },
   { id: 'speak', routeId: 'hf_tools', command: '/speak', insertText: '/speak ', title: 'Speak', description: 'Convert text to speech.', category: 'ai_tools', keywords: ['audio', 'tts'] },

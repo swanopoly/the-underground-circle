@@ -13,7 +13,7 @@ import {
 import { buildExecutionSurfacePlan, type ExecutionSurfacePlan } from './executionSurfaceRouter';
 import { buildAgentRunLedgerPreview, type AgentRunLedgerPreview } from './agentRunLedger';
 import { buildComputerAppTaskStrategy } from './computerAppTaskStrategy';
-import { buildChatComputerRequestRoute, type ChatComputerRequestRoute } from './chatComputerRequestRouter';
+import { buildChatComputerRequestRoute, isAutomationMetaQuestion, type ChatComputerRequestRoute } from './chatComputerRequestRouter';
 import { summarizeChatComputerRequestUserNotice } from './chatComputerRequestUx';
 import { summarizeComputerTaskEvidenceContract } from './computerTaskEvidenceContract';
 import { classifyAgentFailure } from './agentFailureTaxonomy';
@@ -32,6 +32,8 @@ import {
 } from './wordpressCommandRisk';
 import type { ScenarioPolicy } from './scenarioPolicies';
 import type { LocalComputerAwarenessKind } from './localComputerAwarenessIntent';
+import { detectWordPressImagePostIntent } from './wpImagePostFlow';
+import { isDecisionRelevantAmbiguity, describeClarificationValue } from './clarificationGate';
 
 export type PlannerConversationalIntent =
   | { type: 'wordpress_publish'; title?: string; imageUrl?: string; status: 'draft' | 'publish' }
@@ -148,6 +150,25 @@ function mapConversationalIntentToRouteId(intentType: PlannerConversationalInten
   }
 }
 
+// LOCKSTEP with conversationalRouter.ts OFFICE_AGENT_PATTERNS — the agent
+// reference half of the office-agent-task gate. Kept identical so the planner
+// (classify-once source of truth) catches every office phrasing the legacy
+// detect-then-execute block caught: creation verbs incl. "spin me up", or a
+// bare "agent … called/named" with no creation verb.
+const OFFICE_AGENT_TASK_TRIGGERS = [
+  /\b(spin\s+me\s+up|spin\s+up|create|make)\b.*\b(agent|pixel agent)\b/i,
+  /\b(agent|pixel agent)\b.*\b(called|named)\b/i,
+];
+
+// LOCKSTEP with conversationalRouter.ts TASK_ATTACH_PATTERNS — the task-attach
+// half of the office-agent-task gate. Both an agent trigger AND a task-attach
+// trigger must match, which is the guardrail that keeps plain chat out.
+const OFFICE_TASK_ATTACH_TRIGGERS = [
+  /\b(add|assign|attach|put)\b.*\b(to|onto|on)\b.*\btask\b/i,
+  /\btask\s+we\s+just\s+made\b/i,
+  /\blatest\s+task\b/i,
+];
+
 function detectPlannerConversationalIntent(
   message: string,
   attachments?: Array<{ uri?: string; type?: string; id?: string }>,
@@ -177,7 +198,24 @@ function detectPlannerConversationalIntent(
       status: inferWpPostListStatusFromText(message),
     };
   }
-  if (/\b(spin up|create|make)\b.*\b(agent|pixel agent)\b/i.test(message) && /\btask\b/i.test(message)) {
+  // office_agent_task: superset of conversationalRouter's detection so the
+  // planner-first path catches everything the legacy detect-then-execute block
+  // did (C2 classify-once cutover). The planner keeps its original simple
+  // trigger AND mirrors the legacy (OFFICE_AGENT && TASK_ATTACH) gate so looser
+  // phrasings still route to the office/mission handler:
+  //   - "spin me up an agent called X … task we just made"
+  //   - "the agent called X, add it to the latest task" (agent+called/named
+  //     with no creation verb)
+  // LOCKSTEP with conversationalRouter OFFICE_AGENT_PATTERNS +
+  // TASK_ATTACH_PATTERNS (change both together). The guardrails stay: an office
+  // task is only matched when an agent AND a task-attach reference are BOTH
+  // present, so plain chat / bare "make a quiz" is never captured.
+  const matchesLegacyOfficeAgentTask =
+    OFFICE_AGENT_TASK_TRIGGERS.some((pattern) => pattern.test(message))
+    && OFFICE_TASK_ATTACH_TRIGGERS.some((pattern) => pattern.test(message));
+  const matchesPlannerOfficeAgentTask =
+    /\b(spin up|create|make)\b.*\b(agent|pixel agent)\b/i.test(message) && /\btask\b/i.test(message);
+  if (matchesLegacyOfficeAgentTask || matchesPlannerOfficeAgentTask) {
     return {
       type: 'office_agent_task',
       agentName: extractPlannerOfficeAgentName(message) || 'Agent',
@@ -185,17 +223,23 @@ function detectPlannerConversationalIntent(
       taskTarget: /\btask\s+we\s+just\s+made\b/i.test(message) ? 'latest_user_task' : 'latest_circle_task',
     };
   }
-  if (/\b(create|add|make|open)\b.*\b(task|todo|ticket|issue)\b/i.test(message)) {
+  // create_task: "work item" widened to match conversationalRouter's
+  // TASK_CREATE_PATTERNS coverage (LOCKSTEP — keep the noun list in sync).
+  if (/\b(create|add|make|open)\b.*\b(task|todo|ticket|issue|work item)\b/i.test(message)) {
     return { type: 'create_task', title: message.slice(0, 120) };
   }
-  if (/\bremember\b/i.test(message) && !/\b(remember\s+me|checkbox|check\s*box|button|field|input|toggle|switch|menu|control)\b/i.test(message)) {
+  // P24 (LOCKSTEP with conversationalRouter REMEMBER/FORGET/SHOW_MEMORY
+  // patterns): recall questions are checked FIRST so they never get SAVED;
+  // remember/forget are commands only when start-anchored and imperative.
+  if (/\bwhat do you (?:remember|know)\b|\bshow\b.*\bmemories\b/i.test(message)) {
+    return { type: 'show_memories' };
+  }
+  if (/^(?:please\s+)?remember\b(?!\s+(?:when|what|where|who|how|why)\b)/i.test(message)
+    && !/\b(remember\s+me|checkbox|check\s*box|button|field|input|toggle|switch|menu|control)\b/i.test(message)) {
     return { type: 'remember', content: message.replace(/^(please\s+)?remember\s+/i, '').trim() || message };
   }
-  if (/\b(forget|remove|delete|clear)\b.*\b(memory|what you know)\b/i.test(message)) {
+  if (/^(?:please\s+)?(?:forget|remove|delete|clear)\b[\s\S]*\b(?:memory|memories|that|this|everything|the fact|what (?:i|you|we) (?:said|know|knew|discussed)|about)\b/i.test(message)) {
     return { type: 'forget', query: message.replace(/^(please\s+)?(forget|remove|delete|clear)\s+/i, '').trim() || message };
-  }
-  if (/\bwhat do you remember\b|\bshow\b.*\bmemories\b/i.test(message)) {
-    return { type: 'show_memories' };
   }
   if (/\b(generate|create|make|draw|design)\b.*\b(image|picture|photo|illustration|artwork|logo|banner|icon)\b/i.test(message)) {
     return { type: 'generate_image', prompt: message };
@@ -352,10 +396,47 @@ function detectConversationalClarification(
   }
 }
 
+// ── Decision-relevance gate (clarificationGate.ts) ──────────────────────────
+// detectConversationalClarification tells us WHICH params are missing; the gate
+// decides WHETHER those gaps are decision-relevant enough to be worth asking.
+// The research is explicit: over-asking on already-specified tasks hurts UX,
+// while under-asking (answering prematurely) completes the wrong task. So we
+// only surface a clarification when the pure gate agrees a decision-relevant
+// slot is empty; otherwise the caller proceeds with the action plan + a safe
+// default. When the gate suppresses an ask, we note the rationale for telemetry
+// (bounded, no user content) so the "why we didn't ask" is observable.
+//
+// This is the single chokepoint every clarification site consults — do NOT
+// re-derive an ask decision inline anywhere else in this file.
+function resolveConversationalClarification(
+  intent: PlannerConversationalIntent,
+  message: string,
+): { clarification: ChatAutomationClarification | null; gateReason: string | null } {
+  const clarification = detectConversationalClarification(intent, message);
+  if (!clarification) {
+    // Fully specified for its route: the gate confirms we must not over-ask.
+    const gate = isDecisionRelevantAmbiguity({ message, intentType: intent.type, missingParams: [] });
+    return { clarification: null, gateReason: gate.reason };
+  }
+  const gate = isDecisionRelevantAmbiguity({
+    message,
+    intentType: intent.type,
+    missingParams: clarification.missingParams,
+  });
+  if (!gate.ask) {
+    // The detector found an empty slot, but the gate judged it non
+    // decision-relevant (stylistic / reversible) → proceed with a safe default
+    // instead of interrupting the user.
+    return { clarification: null, gateReason: gate.reason };
+  }
+  return { clarification, gateReason: gate.reason };
+}
+
 function buildClarificationPlan(
   message: string,
   clarification: ChatAutomationClarification,
   pipelineDecision: UserTaskPipelineDecision | null,
+  gateReason?: string | null,
 ): ChatAutomationPlan {
   return {
     source: 'conversational_intent',
@@ -369,7 +450,10 @@ function buildClarificationPlan(
     risk: 'safe',
     approval: { required: false, reason: null },
     confidence: 0.9,
-    notes: [`Underspecified request — asking for: ${clarification.missingParams.join(', ')}.`],
+    notes: [
+      `Underspecified request — asking for: ${clarification.missingParams.join(', ')}.`,
+      describeClarificationValue(gateReason),
+    ],
     pipelineDecision,
   };
 }
@@ -735,6 +819,28 @@ function resolvePlannerQuickActionExecution(text: string): { text: string; mode:
 export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): ChatAutomationPlan {
   const normalized = input.message.trim();
   const lower = normalized.toLowerCase();
+
+  // P12 (novice persona finding): questions ABOUT automation — "is it safe
+  // to let an AI use my browser?" — must stay pure conversation. Multiple
+  // heuristic lanes below (browser rewrite, asset acquisition, hybrid
+  // transfer, computer route) could each catch the wording, so the guard
+  // lives ONCE at the top: meta-questions answer as plain chat.
+  if (!lower.startsWith('/') && isAutomationMetaQuestion(normalized)) {
+    return {
+      source: 'plain_chat',
+      intent: { kind: 'direct_chat', message: normalized },
+      execution: {
+        kind: input.selectedMode && input.selectedMode !== 'none' ? 'run_openswan' : 'run_plain_chat',
+        routeId: null,
+        commandText: normalized,
+      },
+      risk: 'safe',
+      approval: { required: false, reason: null },
+      confidence: 0.9,
+      notes: ['Question about automation capability/safety — answered conversationally, no automation planned.'],
+    };
+  }
+
   const bestPipeline = getBestUserTaskPipeline(normalized, { includeFallback: false });
   const pipelineDecision = buildUserTaskPipelineDecision(normalized, { includeFallback: false });
 
@@ -876,9 +982,11 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
 
   const earlyConversationalIntent = detectPlannerConversationalIntent(normalized, input.attachments);
   if (earlyConversationalIntent.type === 'office_agent_task') {
-    const conversationalClarification = detectConversationalClarification(earlyConversationalIntent, normalized);
-    if (conversationalClarification) {
-      return buildClarificationPlan(normalized, conversationalClarification, pipelineDecision);
+    // Gate through clarificationGate: ask ONLY when the missing slot (which
+    // agent) is decision-relevant. A fully-specified office task proceeds.
+    const { clarification, gateReason } = resolveConversationalClarification(earlyConversationalIntent, normalized);
+    if (clarification) {
+      return buildClarificationPlan(normalized, clarification, pipelineDecision, gateReason);
     }
     return buildConversationalActionPlan(normalized, earlyConversationalIntent);
   }
@@ -912,6 +1020,33 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
       surfacePlan,
       ledgerPreview,
     };
+  }
+
+  // P23 — WordPress image posting with attached images rides the MAIN agent
+  // path (the P20 wp.upload_media directive attaches there with the real
+  // storage paths), NOT browser automation of wp-admin. Only explicit
+  // admin/browser wording ("wp-admin", "log in", "dealer inspire",
+  // "in the browser") keeps the browser route.
+  {
+    const imageAttachmentCount = (input.attachments || []).filter(
+      (a) => (a?.type || '').startsWith('image'),
+    ).length;
+    if (imageAttachmentCount > 0
+      && !/\b(?:wp[-\s]?admin|wp[-\s]?login|log\s?in|sign\s?in|dealer\s?inspire|in\s+the\s+browser)\b/i.test(normalized)) {
+      const wpImageIntent = detectWordPressImagePostIntent({ text: normalized, imageAttachmentCount });
+      if (wpImageIntent) {
+        return {
+          source: 'plain_chat',
+          intent: { kind: 'direct_chat', message: normalized },
+          execution: { kind: 'run_openswan', routeId: null, commandText: normalized },
+          risk: 'external_side_effect',
+          approval: { required: true, reason: 'WordPress media upload is an approval-gated write.' },
+          confidence: 0.9,
+          notes: ['Attached images + WordPress wording → REST media-upload lane (wp.upload_media directive), not browser automation.'],
+          pipelineDecision,
+        };
+      }
+    }
   }
 
   const computerRequestRoute = buildChatComputerRequestRoute(normalized, { pipelineDecision });
@@ -974,11 +1109,12 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
 
   const conversationalIntent = detectPlannerConversationalIntent(normalized, input.attachments);
   if (conversationalIntent.type !== 'none') {
-    // If the matched action is missing a required field, ask instead of
-    // running with a fabricated placeholder.
-    const conversationalClarification = detectConversationalClarification(conversationalIntent, normalized);
-    if (conversationalClarification) {
-      return buildClarificationPlan(normalized, conversationalClarification, pipelineDecision);
+    // Ask ONLY when a decision-relevant slot is empty (clarificationGate). A
+    // fully-specified action — or one whose only gap is stylistic/reversible —
+    // proceeds with the action plan + a safe default instead of asking.
+    const { clarification, gateReason } = resolveConversationalClarification(conversationalIntent, normalized);
+    if (clarification) {
+      return buildClarificationPlan(normalized, clarification, pipelineDecision, gateReason);
     }
     return buildConversationalActionPlan(normalized, conversationalIntent);
   }
@@ -1081,14 +1217,23 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
   // pipeline decision's own (conservative) needsClarification signal so plain
   // questions and chit-chat still fall through to direct chat below.
   if (pipelineDecision?.needsClarification && hasReviewLevelMutationIntent(normalized)) {
-    return buildClarificationPlan(normalized, {
-      question: pipelineDecision.clarificationReason
-        ? `Before I run this I need a bit more detail — ${pipelineDecision.clarificationReason} Could you clarify?`
-        : 'This looks like an action I can take, but I need a bit more to do it right. What exactly should I do, and to what?',
-      missingParams: ['task scope'],
-      reason: pipelineDecision.clarificationReason || 'Ambiguous actionable request matched multiple task pipelines.',
-      pendingIntent: null,
-    }, pipelineDecision);
+    // Route through the same decision-relevance gate so the "we asked because
+    // the mutation target is unresolved" rationale is observable and shares one
+    // policy with the conversational sites. 'task scope' maps to the
+    // decision-relevant action-target reason, so this preserves the existing
+    // (already conservative, double-gated) behaviour.
+    const missingParams = ['task scope'];
+    const gate = isDecisionRelevantAmbiguity({ message: normalized, missingParams });
+    if (gate.ask) {
+      return buildClarificationPlan(normalized, {
+        question: pipelineDecision.clarificationReason
+          ? `Before I run this I need a bit more detail — ${pipelineDecision.clarificationReason} Could you clarify?`
+          : 'This looks like an action I can take, but I need a bit more to do it right. What exactly should I do, and to what?',
+        missingParams,
+        reason: pipelineDecision.clarificationReason || 'Ambiguous actionable request matched multiple task pipelines.',
+        pendingIntent: null,
+      }, pipelineDecision, gate.reason);
+    }
   }
 
   const fallbackPipeline = bestPipeline ? summarizeUserTaskPipelineMatch(bestPipeline) : null;

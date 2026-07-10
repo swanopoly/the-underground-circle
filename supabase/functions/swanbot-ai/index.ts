@@ -11,6 +11,15 @@ import {
 } from "../_shared/edge.ts";
 import { checkCircleClaudeBudget } from "../_claude/anthropic.ts";
 import { wrapUntrusted } from "../_shared/untrusted.ts";
+// Pure config builder for Anthropic's `context_management` (clear_tool_uses)
+// beta. FLAG-DARK: only attached when the request explicitly opts in — see the
+// relay branch below and src/lib/anthropicContextManagement.ts.
+import {
+  appendContextManagementBetasForConfig,
+  resolveContextManagementConfig,
+  shouldAttachContextManagement,
+  stripUnsupportedCompactionEdits,
+} from "../../../src/lib/anthropicContextManagement.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -38,6 +47,14 @@ interface RequestBody {
   tools?: Array<{ name: string; description: string; input_schema: Record<string, unknown> }>;
   tool_messages?: Array<{ role: string; content: any }>;
   system_override?: string;
+  // ── Context-management opt-in (FLAG-DARK, default OFF) ──
+  // Setting either of these opts a relay request into Anthropic's
+  // `clear_tool_uses` context editing so long tool loops shed stale
+  // tool-result bytes. No client sets these today, so the relay is
+  // byte-identical to before. To enable from a client, add ONE line to the
+  // relay request body: `context_management_mode: 'clear_tool_uses'`.
+  context_management_mode?: "clear_tool_uses" | string | null;
+  context_management?: unknown;
 }
 
 const SECRETISH_METADATA_KEY_RE = /(secret|token|password|private|credential|api[_-]?key|access[_-]?key|refresh|client[_-]?secret)/i;
@@ -622,6 +639,32 @@ async function gatherCircleContext(supabase: any, circleId: string, userId: stri
 
 // ─── Build System Prompt ─────────────────────────────────────────────────────
 
+// Prompt honesty: this block is only true for dispatch paths that actually
+// attach tools — the Anthropic tool loop (callClaude with enableTools) keeps
+// it, and the relay tool path supplies its own client system_override so it
+// never sees this prompt. Text-only dispatches (marketplace non-relay,
+// HF proxy, local BlackSwan) swap in TEXT_ONLY_ACTIONS_PROMPT_BLOCK below so
+// the prompt never promises tool powers the request doesn't have.
+// NOTE: keep this text byte-identical to what shipped inline — it lives in
+// the cache_control frozen prefix and any edit invalidates the Anthropic
+// prompt cache for every circle.
+const TOOL_USE_PROMPT_BLOCK = `## Tools & Actions
+You have tools to take real actions — not just talk. When appropriate, USE them:
+- **create_task** — Create Kanban tasks when work is identified or requested
+- **update_task** — Move tasks between statuses, reprioritize, reassign
+- **post_activity** — Post announcements, summaries, or alerts to the circle feed
+- **fetch_url** — Fetch web pages when users share links or need web info
+- **store_memory** — Remember important facts for future conversations
+- **list_tasks** — Check current task board state
+- **search_web** — Search the web for current information
+
+Be proactive: if a user describes work that should be a task, create it. If they share a URL, fetch it. If they tell you something important, store it as memory. Act first, explain second.`;
+
+// Honest replacement for text-only dispatches: no tools array is attached to
+// those provider calls, so the model must not claim it can act this turn.
+const TEXT_ONLY_ACTIONS_PROMPT_BLOCK = `## Tools & Actions
+No tools are attached to this request, so you cannot execute actions this turn. If the user asks for an action (creating a task, posting to the feed, fetching a URL, storing a memory, generating an image), describe the concrete plan in your reply and the app will route the action separately. Never claim you already performed an action.`;
+
 // Returns { frozen, volatile } so callClaude can cache the frozen prefix and
 // only re-send the per-request state. Frozen = personality/tools/instructions/
 // soul wisdom/guardrails — stable for a given circle+spirit. Volatile = all
@@ -644,17 +687,7 @@ function buildSystemPrompt(ctx: any, matchedSkills: string[] = [], memories: any
 - Use emojis very sparingly — only when they actually add something (🦢 🔥 ✅)
 - Keep responses tight — concise for casual chat, structured and thorough for real guidance
 
-## Tools & Actions
-You have tools to take real actions — not just talk. When appropriate, USE them:
-- **create_task** — Create Kanban tasks when work is identified or requested
-- **update_task** — Move tasks between statuses, reprioritize, reassign
-- **post_activity** — Post announcements, summaries, or alerts to the circle feed
-- **fetch_url** — Fetch web pages when users share links or need web info
-- **store_memory** — Remember important facts for future conversations
-- **list_tasks** — Check current task board state
-- **search_web** — Search the web for current information
-
-Be proactive: if a user describes work that should be a task, create it. If they share a URL, fetch it. If they tell you something important, store it as memory. Act first, explain second.
+${TOOL_USE_PROMPT_BLOCK}
 
 ## Expanded Knowledge
 - Design & UI/UX: You understand layout, color theory, typography, component patterns, responsive design, design systems. You can critique interfaces, suggest improvements, and reference real tools (Figma, Framer, Tailwind).
@@ -871,7 +904,7 @@ async function callBlackSwanLLM(systemPrompt: string, userMessage: string): Prom
     if (!response.ok) return null;
 
     const data = await response.json();
-    return data.choices?.[0]?.message?.content || null;
+    return stripBlackSwanReasoningText(data.choices?.[0]?.message?.content || null);
   } catch {
     return null;
   }
@@ -895,6 +928,55 @@ const CLAUDE_MODEL_MAP: Record<string, string> = {
   "claude-opus-4-7": "claude-opus-4-7",
   "claude-opus-4-6": "claude-opus-4-6",
 };
+
+// P26 history-cache breakpoint helper (relay transport).
+//
+// Returns a copy of `messages` with `cache_control: {type:'ephemeral'}`
+// attached to the LAST content block of the LAST message, so the message
+// history caches as a prefix alongside tools+system on the Anthropic relay.
+// This is a pure, defensive metadata attach: it NEVER mutates the caller's
+// array or any message object it holds (verbatim relay invariant — only the
+// terminal block is decorated, the message CONTENT is unchanged), and it
+// leaves the input untouched (returns it as-is) when the array is empty or the
+// last message has an unexpected shape. No throw.
+//
+// Two Anthropic content-block shapes are handled:
+//   - string content  → wrapped into a single text block carrying
+//                        cache_control (a bare string can't hold cache_control)
+//   - array content    → the last block is shallow-cloned with cache_control
+//                        added (an existing cache_control on it is overwritten)
+function withHistoryCacheBreakpoint(messages: unknown): unknown {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+  const lastIndex = messages.length - 1;
+  const lastMessage = messages[lastIndex];
+  if (!lastMessage || typeof lastMessage !== "object") return messages;
+
+  const msg = lastMessage as { role?: unknown; content?: unknown };
+  const content = msg.content;
+  const ephemeral = { type: "ephemeral" as const };
+
+  let nextContent: unknown;
+  if (typeof content === "string") {
+    // Wrap the string into a cache-marked text block. Anthropic treats a
+    // one-block text array identically to the string form for the model, so
+    // this preserves the relayed content byte-for-byte while adding the marker.
+    nextContent = [{ type: "text", text: content, cache_control: ephemeral }];
+  } else if (Array.isArray(content) && content.length > 0) {
+    const blockIndex = content.length - 1;
+    const lastBlock = content[blockIndex];
+    if (!lastBlock || typeof lastBlock !== "object") return messages;
+    const clonedBlocks = content.slice();
+    clonedBlocks[blockIndex] = { ...(lastBlock as Record<string, unknown>), cache_control: ephemeral };
+    nextContent = clonedBlocks;
+  } else {
+    // Unexpected content shape (null, empty array, number, …) — leave unchanged.
+    return messages;
+  }
+
+  const clonedMessages = messages.slice();
+  clonedMessages[lastIndex] = { ...(lastMessage as Record<string, unknown>), content: nextContent };
+  return clonedMessages;
+}
 
 interface ClaudeResult {
   text: string;
@@ -1203,23 +1285,79 @@ function stripLeadingCommand(message: string): string {
     .trim();
 }
 
+// User-facing short names for the image-only model notice line.
+const IMAGE_MODEL_SHORT_NAMES: Record<string, string> = {
+  "flux-schnell": "FLUX Schnell",
+  "flux-dev": "FLUX Dev",
+  "stable-diffusion": "Stable Diffusion",
+  "stable-diffusion-xl": "Stable Diffusion XL",
+};
+
+// User-facing short name for the text model that actually answered when an
+// image-only model was selected. Only the auto-tier models can land here
+// (local BlackSwan or the Claude fallback), but keep a safe fallback.
+function friendlyTextModelName(modelId: string | null | undefined): string {
+  if (!modelId) return "a text model";
+  if (modelId === "blackswan") return "BlackSwan";
+  if (modelId.startsWith("claude-opus")) return "Claude Opus";
+  if (modelId.startsWith("claude-sonnet")) return "Claude Sonnet";
+  if (modelId.startsWith("claude-haiku")) return "Claude Haiku";
+  return modelId.includes("/") ? modelId.slice(modelId.lastIndexOf("/") + 1) : modelId;
+}
+
+// Pure classifier for the image-only-model UX split: decides whether a
+// message typed while an image model is selected is CONVERSATIONAL (answer
+// with text) instead of an image prompt. Descriptive noun-phrase prompts
+// ("a neon city at dusk, cinematic") still generate — that's why the user
+// picked the model. /imagine and /image always generate (the caller checks
+// the explicit command before consulting this).
+function isConversationalMessageForImageModel(message: string): boolean {
+  const trimmed = message.trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+  // Imperative image verbs ("generate/create/make/draw/design/render/paint
+  // ... an/the image/logo/...") always mean a picture — even phrased as a
+  // question ("can you make me a logo?").
+  const imageNoun = "(?:image|picture|photo|photograph|logo|icon|banner|poster|wallpaper|illustration|artwork|art|drawing|painting|sketch|portrait|graphic|thumbnail|sticker|avatar|scene)s?";
+  const imageImperative = new RegExp(
+    `\\b(?:generate|create|make|draw|design|render|paint|produce|illustrate|sketch)\\b[^.?!]{0,60}?\\b(?:an?|the|some|more|my|our)?\\s*${imageNoun}\\b`,
+  ).test(lower);
+  if (imageImperative) return false;
+  const endsWithQuestion = /\?\s*$/.test(trimmed);
+  const startsInterrogativeOrTaskVerb =
+    /^(what|why|how|when|where|who|can|could|do|does|is|are|explain|summarize|translate|help|tell)\b/.test(lower);
+  const codeOrTextTask =
+    /^\/(code|build-page)\b/.test(lower)
+    || /^(write|fix|debug|refactor|review|implement)\b/.test(lower)
+    || /\b(?:fix|debug)\b[^.?!]{0,60}\b(?:code|bug|error|test|function|script)\b/.test(lower);
+  return endsWithQuestion || startsInterrogativeOrTaskVerb || codeOrTextTask;
+}
+
+// True when a selected image-only model should NOT hijack this turn:
+// conversational/code messages fall through to normal text routing (with a
+// one-line notice prepended by the handler). Explicit /imagine and /image
+// commands always generate regardless of message shape.
+function shouldAnswerImageModelSelectionWithText(message: string, model?: string | null): boolean {
+  if (!model || !DIRECT_IMAGE_MODEL_MAP[model]) return false;
+  if (/^\/(imagine|image)\b/.test(message.trim().toLowerCase())) return false;
+  return isConversationalMessageForImageModel(message);
+}
+
 function detectDirectToolIntent(message: string, model?: string | null) {
   const trimmed = message.trim();
   const lower = trimmed.toLowerCase();
   const selectedImageModel = model ? DIRECT_IMAGE_MODEL_MAP[model] : null;
   const explicitStable = /\bstable\s*dif+fusion\b|\bsdxl\b/.test(lower);
   const explicitFlux = /\bflux\b/.test(lower);
-  const imageLikePrompt =
-    /^\/imagine\b/.test(lower) ||
-    /\b(generate|create|make|draw|design|render)\b.{0,30}\b(image|logo|icon|poster|illustration|art|banner|wallpaper|diagram|portrait|avatar)\b/.test(lower) ||
-    /\bimage of\b|\bpicture of\b|\bconcept art\b/.test(lower) ||
-    explicitStable ||
-    explicitFlux;
 
-  if (
-    imageLikePrompt ||
-    (selectedImageModel && imageLikePrompt)
-  ) {
+  // Direct-tool short-circuits skip model selection and every approval
+  // layer, so they only fire on explicit slash-command intent or when the
+  // user's selected model itself maps to the tool. Natural-language
+  // "make me a logo" / "flux vs sdxl" prompts fall through to normal
+  // routing instead of hijacking the turn.
+  const explicitImageCommand = /^\/(imagine|image)\b/.test(lower);
+
+  if (explicitImageCommand || selectedImageModel) {
     const prompt = stripLeadingCommand(trimmed) || trimmed;
     return {
       toolName: "hf_generate_image",
@@ -1237,7 +1375,7 @@ function detectDirectToolIntent(message: string, model?: string | null) {
     };
   }
 
-  if (/^\/build-page\b/.test(lower) || /\b(build|make|create|draft)\b.{0,30}\b(page|landing page|website|web page|homepage)\b/.test(lower)) {
+  if (/^\/build-page\b/.test(lower)) {
     const brief = stripLeadingCommand(trimmed) || trimmed;
     return {
       toolName: "hf_code",
@@ -2243,6 +2381,68 @@ function normalizeOpenAICompatibleChatEndpoint(endpoint: string): string {
   return `${base}/v1/chat/completions`;
 }
 
+function isBlackSwanTextModel(modelId: string | null | undefined): boolean {
+  return /(?:^|\/)(?:blackswan|cswan801\/blackswan)/i.test((modelId || "").trim());
+}
+
+function stripBlackSwanReasoningText(text: string | null): string | null {
+  if (!text) return text;
+  const trimmed = text.trim();
+  if (!trimmed) return trimmed;
+  const reasoningPrefix = /^\s*(?:Thinking Process|Thought Process|Reasoning|Chain[- ]of[- ]Thought)\s*:\s*/i;
+  if (!reasoningPrefix.test(trimmed)) return trimmed;
+
+  const cleanCandidate = (candidate: string): string => {
+    const cleaned = candidate
+      .replace(/^\s*(?:[-*]\s*)?(?:Sentence\s*\d+|Final Answer Formulation|Answer Formulation|Final Answer|Refined Answer|Draft Answer|Answer|Response)\s*:\s*/i, "")
+      .replace(/^\s*(?:\d+\.\s*)?(?:[*_]+\s*)+/g, "")
+      .replace(/^\s*["“]|["”]\s*$/g, "")
+      .replace(/(?:\s*[*_]+)+\s*$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleaned) return "";
+    if (/\b(?:the\s+)?user\s+(?:is\s+)?(?:asking|asks|wants|requested|needs)\b/i.test(cleaned)) return "";
+    if (/^(?:i\s+need|need\s+to|analy[sz]e|identify|formulate|decide|determine|ensure|search results?)\b/i.test(cleaned)) return "";
+    if (/(?:thinking process|thought process|chain[- ]of[- ]thought|hidden reasoning)/i.test(cleaned)) return "";
+    return cleaned;
+  };
+
+  const finalAnswer = trimmed.match(/\n\s*(?:Final Answer|Answer|Response)\s*:\s*/i);
+  if (finalAnswer?.index !== undefined && finalAnswer.index >= 0) {
+    const explicit = cleanCandidate(trimmed.slice(finalAnswer.index));
+    if (explicit) return explicit;
+  }
+
+  const withoutLabel = trimmed.replace(reasoningPrefix, "").trim();
+  const candidates: string[] = [];
+  const labelPattern = /(?:Sentence\s*\d+|Final Answer Formulation|Answer Formulation|Final Answer|Refined Answer|Draft Answer|Answer|Response)\s*:\s*([^\n]+)/gi;
+  for (const match of withoutLabel.matchAll(labelPattern)) {
+    const candidate = cleanCandidate(match[1] || "");
+    if (candidate) candidates.push(candidate);
+  }
+
+  const appAnswerPattern = /\b(The Underground Circle(?: app)?\s+(?:is|helps|lets|gives|provides|brings|turns|tracks|connects)[^\n.?!]*(?:[.?!]|$))/gi;
+  for (const match of withoutLabel.matchAll(appAnswerPattern)) {
+    const candidate = cleanCandidate(match[1] || "");
+    if (candidate) candidates.push(candidate);
+  }
+  if (candidates.length > 0) {
+    return candidates[candidates.length - 1].trim();
+  }
+
+  const inlineFinal = withoutLabel.match(/(?:final answer|answer|response)(?:\s+(?:should be|is))?\s*:?\s*["“]?([^\n"”]+)["”]?/i);
+  if (inlineFinal?.[1]) {
+    const inline = cleanCandidate(inlineFinal[1]);
+    if (inline) return inline;
+  }
+
+  const blocks = withoutLabel.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean);
+  const reasoningBlock = /^(?:\d+\.\s*)?(?:analy[sz]e|identify|formulate|decide|determine|ensure|the user wants|user wants|hidden reasoning|final answer should|i should|i need|therefore\b)/i;
+  const answerBlock = [...blocks].reverse().map(cleanCandidate).find((block) => block && !reasoningBlock.test(block));
+  if (answerBlock) return answerBlock.trim();
+  return "";
+}
+
 async function loadMarketplaceProviderCredential(
   supabase: any,
   circleId: string,
@@ -2562,7 +2762,8 @@ async function callMarketplaceProvider(opts: {
       return { text: null, usage: {}, error: `${provider} ${resp.status}: ${errBody.slice(0, 300)}` };
     }
     const data = await resp.json();
-    const text: string | null = data?.choices?.[0]?.message?.content || null;
+    const rawText: string | null = data?.choices?.[0]?.message?.content || null;
+    const text = isBlackSwanTextModel(modelId) ? stripBlackSwanReasoningText(rawText) : rawText;
     const u = data?.usage || {};
     const inTok = u.prompt_tokens ?? Math.ceil((systemPrompt.length + userMessage.length) / 4);
     const outTok = u.completion_tokens ?? Math.ceil((text?.length || 0) / 4);
@@ -3595,10 +3796,24 @@ Deno.serve(async (req: Request) => {
       }
 
       if (isMarketplaceRelay && routingFallback) {
-        return errResponse(
-          400,
-          "marketplace_provider_unavailable",
-          `Selected marketplace model could not be routed through ${routingFallback.provider}: ${routingFallback.reason}. Connect/fix that provider instead of falling back to Anthropic.`,
+        // Fail-closed exactly as before — the turn stops here and never
+        // falls back to Anthropic — but shaped as a final text turn instead
+        // of a bare 400. supabase-js hands tool-loop clients a null body on
+        // non-2xx, so the descriptive reason used to collapse into a generic
+        // "Tool-use call failed." client-side. Putting the real message in
+        // the existing `error`/`response`/`content` fields lets every
+        // tool-loop client render something actionable without changes.
+        const failClosedMessage = `Selected marketplace model could not be routed through ${routingFallback.provider}: ${routingFallback.reason}. Connect/fix that provider instead of falling back to Anthropic.`;
+        return new Response(
+          JSON.stringify({
+            error: failClosedMessage,
+            code: "marketplace_provider_unavailable",
+            response: `⚠️ ${failClosedMessage}`,
+            content: [{ type: "text", text: `⚠️ ${failClosedMessage}` }],
+            stop_reason: "end_turn",
+            routing_fallback: routingFallback,
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
 
@@ -3622,11 +3837,25 @@ Deno.serve(async (req: Request) => {
         return errResponse(400, "key_missing", byokMissingMessage("anthropic"));
       }
 
+      // P26 history-cache breakpoint. The typed OpenSwan tool loop re-invokes
+      // this relay once per round with a growing `relayMessages` array; at the
+      // ~100:1 input:output ratio, re-sending the whole history UNCACHED every
+      // round is the biggest cost/latency leak. The system breakpoint below
+      // only caches tools+system (render order tools→system→messages), so we
+      // add a SECOND breakpoint on the terminal content block of the last
+      // message so the message history caches too. ≤4 breakpoints total (here:
+      // 2). This is a pure metadata attach on a shallow clone — `relayMessages`
+      // (and the caller's array) is never mutated (verbatim relay invariant),
+      // and the message CONTENT is left byte-identical; we only decorate the
+      // last block. Handles both content shapes; leaves malformed/empty input
+      // untouched (no throw).
+      const cachedRelayMessages = withHistoryCacheBreakpoint(relayMessages);
+
       const relayBody: Record<string, unknown> = {
         model: relayModel,
         max_tokens: relayMaxTokens,
         system: [{ type: "text", text: relaySystem, cache_control: { type: "ephemeral" } }],
-        messages: relayMessages,
+        messages: cachedRelayMessages,
         tools: body.tools,
       };
 
@@ -3643,13 +3872,50 @@ Deno.serve(async (req: Request) => {
         relayBody.max_tokens = Math.max(relayMaxTokens, thinkingLevel === "deep" ? 8192 : 4096);
       }
 
+      // ── Context management (clear_tool_uses + compaction) — FLAG-DARK ──
+      // Long OpenSwan tool loops re-send the whole history each round; once
+      // it's large, most input tokens are stale tool_result bytes. When (and
+      // ONLY when) the request explicitly opts in, attach Anthropic's
+      // `context_management`: `clear_tool_uses_20250919` drops old tool-use/
+      // result pairs (large-chunk clears to stay cache-safe alongside the two
+      // P26 breakpoints above), and — X3/P49 — `compact_20260112` summarizes
+      // earlier context server-side (the successor to client-side hand
+      // pruning; the compaction block rides back through the verbatim relay
+      // and the client loop pushes `data.content` as-is, so the preservation
+      // contract holds end-to-end). Off by default: no client wires either
+      // opt-in yet, so this branch never runs today and the relay is
+      // byte-identical — no context_management field, no extra beta headers.
+      // Client opt-ins are one-liners on the relay request body:
+      //   `context_management_mode: 'clear_tool_uses'`  (context editing)
+      //   `context_management_mode: 'compact'`          (compaction)
+      const relayHeaders: Record<string, string> = {
+        "x-api-key": anthropicKey.apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      };
+      if (shouldAttachContextManagement(body)) {
+        // Forward the client's (validated/normalized) config if present, else
+        // build the mode's default config. Compaction is model-gated (NOT
+        // supported on Haiku 4.5 / Opus 4.5 — attaching would 400 the call),
+        // so compact edits are stripped fail-closed for unsupported models.
+        const resolvedCm = stripUnsupportedCompactionEdits(
+          resolveContextManagementConfig(body),
+          relayModel,
+        );
+        if (resolvedCm) {
+          relayBody.context_management = resolvedCm;
+          // Add exactly the beta tokens the surviving edits require WITHOUT
+          // clobbering any existing anthropic-beta — comma-joined + de-duped.
+          relayHeaders["anthropic-beta"] = appendContextManagementBetasForConfig(
+            relayHeaders["anthropic-beta"],
+            resolvedCm,
+          );
+        }
+      }
+
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: {
-          "x-api-key": anthropicKey.apiKey,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json",
-        },
+        headers: relayHeaders,
         body: JSON.stringify(relayBody),
         signal: AbortSignal.timeout(90_000),
       });
@@ -3665,6 +3931,30 @@ Deno.serve(async (req: Request) => {
       const data = await res.json();
       const textBlocks = (data.content || []).filter((b: any) => b.type === "text");
       const responseText = textBlocks.map((b: any) => b.text).join("");
+
+      // GAP-1: every OpenSwan-session Anthropic call flows through this relay
+      // branch, but until now none were logged to claude_api_usage — so
+      // per-round tool-loop spend (and the cache read/write split that proves
+      // the P26 breakpoints work) was invisible. Mirror the agentic path's
+      // logClaudeUsage call. Fire-and-forget: must not delay the response.
+      if (supabase) {
+        const relayUsage = (data.usage || {}) as Record<string, unknown>;
+        Promise.resolve(
+          logClaudeUsage(supabase, {
+            circleId: circleId ?? null,
+            userId: userId ?? null,
+            source: "swanbot-ai-relay",
+            model: relayModel,
+            inputTokens: Number(relayUsage.input_tokens) || 0,
+            outputTokens: Number(relayUsage.output_tokens) || 0,
+            cacheCreationTokens: Number(relayUsage.cache_creation_input_tokens) || 0,
+            cacheReadTokens: Number(relayUsage.cache_read_input_tokens) || 0,
+            metadata: { relay: true, ...(isMarketplaceRelay ? { marketplace_fallback: true } : {}) },
+          }),
+        ).catch((err) => {
+          console.warn("[swanbot-ai-relay] logClaudeUsage failed:", (err as any)?.message || err);
+        });
+      }
 
       return new Response(
         JSON.stringify({
@@ -4127,6 +4417,22 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       effectiveModel = "claude-sonnet";
     }
 
+    // Image-only model UX: a selected image model still generates for
+    // descriptive prompts and explicit /imagine //image commands, but a
+    // conversational/code message falls through to normal text routing — the
+    // exact tier this request would take with no model selected (local
+    // BlackSwan first, then the budget-capped Claude fallback; the umbrella
+    // Claude budget check already ran above because image-model keys are not
+    // marketplace-prefixed, so this cannot create surprise Anthropic spend a
+    // model-unset request wouldn't). The handler prepends a one-line notice
+    // to the final text so the user learns the split without losing their
+    // answer.
+    let imageOnlyModelTextFallbackKey: string | null = null;
+    if (effectiveModel && shouldAnswerImageModelSelectionWithText(message, effectiveModel)) {
+      imageOnlyModelTextFallbackKey = effectiveModel;
+      effectiveModel = null;
+    }
+
     // Map terminal model keys to HF model IDs for open model routing
     const HF_MODEL_MAP: Record<string, string> = {
       "qwen3.5":      "Qwen/Qwen3.5-72B-Instruct",
@@ -4187,9 +4493,16 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
     // caching, so they get the concatenated system prompt. The Claude path
     // below receives `frozenPrompt` + `volatilePrompt` separately so only the
     // frozen prefix gets a cache_control breakpoint.
-    const combinedSystemPrompt = volatilePrompt && volatilePrompt.trim().length > 0
+    // Prompt honesty: every consumer of `combinedSystemPrompt` is a text-only
+    // dispatch (marketplace non-relay, HF proxy, local BlackSwan) — none of
+    // them attach a tools array — so the "USE your tools" block is swapped
+    // for the honest text-only version. The Claude tool loop below keeps the
+    // untouched `frozenPrompt` (byte-identical → prompt cache preserved)
+    // because callClaude runs with enableTools: true.
+    const combinedSystemPrompt = (volatilePrompt && volatilePrompt.trim().length > 0
       ? frozenPrompt + "\n\n" + volatilePrompt
-      : frozenPrompt;
+      : frozenPrompt
+    ).replace(TOOL_USE_PROMPT_BLOCK, TEXT_ONLY_ACTIONS_PROMPT_BLOCK);
 
     // ── Marketplace integration routing ───────────────────────────────────
     // The chat picker prefixes provider-routed model ids with the
@@ -4350,7 +4663,8 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       }, hfModelId, undefined, userId);
 
       if (!hfResult.error && hfResult.result) {
-        aiResponse = hfResult.result?.choices?.[0]?.message?.content || JSON.stringify(hfResult.result);
+        const rawHfResponse = hfResult.result?.choices?.[0]?.message?.content || JSON.stringify(hfResult.result);
+        aiResponse = isBlackSwanTextModel(hfModelId) ? stripBlackSwanReasoningText(rawHfResponse) : rawHfResponse;
         const est = Math.ceil((combinedSystemPrompt.length + message.length + (aiResponse?.length || 0)) / 4);
         tokenBreakdown = {
           model: hfModelId,
@@ -4434,6 +4748,14 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         cache_read_tokens: result.cacheReadTokens,
         total_tokens: result.inputTokens + result.outputTokens,
       };
+    }
+
+    // Image-only model UX: exactly one notice line, prepended to the visible
+    // message text only (never persisted metadata), and only when the turn
+    // was actually answered by a text model rather than a direct tool.
+    if (imageOnlyModelTextFallbackKey && !directToolIntent && aiResponse) {
+      const selectedShortName = IMAGE_MODEL_SHORT_NAMES[imageOnlyModelTextFallbackKey] || imageOnlyModelTextFallbackKey;
+      aiResponse = `💡 ${selectedShortName} is an image model, so I answered with ${friendlyTextModelName(tokenBreakdown.model)}. Say 'generate an image of …' when you want a picture.\n\n${aiResponse}`;
     }
 
     await completeSwanBotV1Run(supabase, swanBotV1RunId, {

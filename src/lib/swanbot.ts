@@ -44,15 +44,29 @@ import { buildDesignAppObjectManifestPromptBlock } from './designAppObjectManife
 import { buildDesignAppOperationRunbookPromptBlock } from './designAppOperationRunbooks';
 import { buildDesignAppProofReviewPromptBlock } from './designAppProofReview';
 import { buildEngineeringCadOperationRunbookPromptBlock } from './engineeringCadOperationRunbooks';
-import { isBlackSwanModel, isLocalOllamaBlackSwan } from './blackswanRouting';
-// AI-models-first collaboration seam (DEFAULT OFF behind
-// uc_stream_escalate_on_tool_use). These three modules are pure / tsx-safe
+import {
+  applyChatPromptComplexityFloor,
+  assembleChatPromptExtras,
+  composeChatSystemPrompt,
+  omitChatPromptSections,
+  resolveChatPromptContextPolicy,
+  type ChatPromptComplexity,
+  type ChatPromptSectionInput,
+  type ChatPromptSectionKey,
+} from './chatPromptAssembly';
+import { buildBlackSwanGroundingBlock, isBlackSwanModel, isLocalOllamaBlackSwan } from './blackswanRouting';
+// Pure csv/table helpers (no react-native) — see the LOCKSTEP note on
+// SwanBotStructuredArtifact below.
+import { looksLikeCsvArtifact } from './tableArtifact';
+// AI-models-first collaboration seam (LIVE — DEFAULT ON since 2026-07-01
+// behind uc_stream_escalate_on_tool_use, opt-out revertible). These three
+// modules are pure / tsx-safe
 // (value imports only from blackswanRouting + serviceProfileSouls), so importing
 // their VALUES here does not pull react-native into a smoke graph. They decide
 // how the selected model + BlackSwan/OpenSwan grounding + a reliable executor
 // collaborate for a turn, and emit the compact capability menu the model uses to
 // SELECT what it pulls in. All consultation is advisory: it never overrides the
-// user's explicit model selection, and it is a no-op when the flag is OFF.
+// user's explicit model selection, and it is a no-op when the seam is opted out.
 import {
   planModelCollaboration,
   type CollaborationPlan,
@@ -65,10 +79,24 @@ import {
   resolveBlackSwanInvocation,
   type BlackSwanInvocationRoute,
 } from './hostedBlackSwanInvocation';
-// The seam's DEFAULT-OFF flag reader lives in chatTerminalTransportPolicy (its
-// owner). Static-imported so buildChatCollaborationContext can gate synchronously;
-// the reader is native-safe (no localStorage → fails closed to OFF).
+// The seam's flag reader (DEFAULT ON since 2026-07-01) lives in
+// chatTerminalTransportPolicy (its owner). Static-imported so
+// buildChatCollaborationContext can gate synchronously; the reader is
+// native-safe (no localStorage → default ON; native opts out via
+// setStreamEscalateOnToolUseOverride, web via the localStorage key).
 import { isStreamEscalateOnToolUseEnabled } from './chatTerminalTransportPolicy';
+// Phase 2 (2.2): marketplace tool-tier decision (PURE, flag DEFAULT OFF).
+// Decides whether an action-shaped marketplace turn runs the REAL tool loop
+// through the edge relay ('relay_tool_loop'), delegates to a reliable Claude
+// executor with a visible notice ('delegate_executor'), or keeps today's
+// tool-less llm-proxy text tier byte-identical ('plain_text').
+import {
+  buildDelegateExecutorNotice,
+  decideMarketplaceToolTier,
+  MARKETPLACE_TOOL_EXECUTOR_MODEL_ID,
+  proxyToolCallsToAnthropicContent,
+  shouldEscalateProxyToolCalls,
+} from './marketplaceToolTierPolicy';
 import {
   dispatchSwanBotDesktopClientTool,
   serializeSwanBotClientToolError,
@@ -130,6 +158,20 @@ export type SwanBotContext = {
    * this flag the model would see the index twice.
    */
   omitCircleContextSnapshot?: boolean;
+  /**
+   * X1 dedupe: dynamic-tail section keys the caller already delivers through
+   * its own channel (the v2 session runtime's user-message ladder). The
+   * assembler builds sections normally, then drops exactly these keys via
+   * `omitChatPromptSections` — see `getChatPromptLaneSpec('openswan_v2')
+   * .duplicateSectionDebt` for the canonical list.
+   */
+  omitPromptSections?: ChatPromptSectionKey[];
+  /**
+   * X1 (P44): minimum context tier for this turn, applied AFTER
+   * message-derived complexity detection. Set by lanes (v2 session runtime)
+   * whose turns always warrant at least the moderate context stack.
+   */
+  promptComplexityFloor?: ChatPromptComplexity;
   /**
    * Set when the app-trained BlackSwan-v5 collaborator is available to ground a
    * turn even if the user did not explicitly pick a BlackSwan id. Threaded into
@@ -213,7 +255,7 @@ function buildOpenSwanRuntimeContextBundle(args: {
   return sections.filter(Boolean).join('\n\n') || null;
 }
 
-// ─── AI-models-first collaboration seam (DEFAULT OFF) ────────────────────────
+// ─── AI-models-first collaboration seam (DEFAULT ON since 2026-07-01) ────────
 //
 // USER VISION: a normal turn streams a plain model answer; when a task needs
 // capability the model ACTIVATES SwanBot/OpenSwan tools or deploys agents; the
@@ -226,8 +268,8 @@ function buildOpenSwanRuntimeContextBundle(args: {
 // to decide what to pull in. It is purely ADVISORY — it never overrides the
 // user's explicit model selection (`primaryModel` for a plain frontier pick is
 // the same id the caller already resolved), and it is gated behind the EXISTING
-// default-off `uc_stream_escalate_on_tool_use` flag so a turn is byte-identical
-// to today when the flag is OFF.
+// `uc_stream_escalate_on_tool_use` seam flag (DEFAULT ON since 2026-07-01) so
+// an opted-out turn is byte-identical to the legacy path.
 //
 // Purity: planModelCollaboration / buildCapabilityManifestPrompt /
 // resolveBlackSwanInvocation are all tsx-safe pure modules (no react-native, no
@@ -272,9 +314,10 @@ function buildChatCollaborationContext(
 ): ChatCollaborationContext | null {
   let flagOn = false;
   try {
-    // Same default-off seam flag the streaming escalation path checks. Native has
-    // no localStorage → the reader fails closed to OFF, so this returns null and
-    // the turn is byte-identical to today.
+    // Same seam flag the streaming escalation path checks (DEFAULT ON since
+    // 2026-07-01; web opts out via the localStorage key, native via
+    // setStreamEscalateOnToolUseOverride). When opted out this returns null and
+    // the turn is byte-identical to the legacy path.
     flagOn = isStreamEscalateOnToolUseEnabled();
   } catch {
     flagOn = false;
@@ -364,11 +407,31 @@ export interface SwanBotStructuredToolAction {
 }
 
 export interface SwanBotStructuredArtifact {
-  kind: 'summary' | 'image' | 'translation' | 'classification' | 'vision' | 'audio' | 'code' | 'webpage';
+  // LOCKSTEP(src/lib/tableArtifact.ts): kind 'table' carries RAW CSV text in
+  // `content`. Parse/serialize/detection rules live in tableArtifact.ts; the
+  // grid render + "Download CSV" live in src/components/chat/ChatArtifacts.tsx.
+  kind: 'summary' | 'image' | 'translation' | 'classification' | 'vision' | 'audio' | 'code' | 'webpage' | 'table';
   title: string;
   content?: string | null;
   url?: string | null;
   metadata?: Record<string, unknown>;
+}
+
+/**
+ * LOCKSTEP(src/lib/tableArtifact.ts): when a model's fenced code block was
+ * `csv` (the fence language survives as `metadata.language` on the extracted
+ * `code` artifact) — or the content itself looks like CSV per
+ * `looksLikeCsvArtifact` — the artifact is emitted as kind:'table' with the
+ * raw CSV kept as `content`, so ChatArtifacts renders a real grid instead of
+ * a code frame. Every non-CSV artifact passes through untouched.
+ */
+function upgradeCsvCodeArtifactToTable(artifact: SwanBotStructuredArtifact): SwanBotStructuredArtifact {
+  if (!artifact || artifact.kind !== 'code') return artifact;
+  const content = typeof artifact.content === 'string' ? artifact.content : '';
+  if (!content.trim()) return artifact;
+  const language = typeof artifact.metadata?.language === 'string' ? artifact.metadata.language : null;
+  if (!looksLikeCsvArtifact(language, content)) return artifact;
+  return { ...artifact, kind: 'table' };
 }
 
 export interface SwanBotStructuredResponse {
@@ -836,25 +899,46 @@ function stripProviderPrefixForProxy(provider: string, modelId: string): string 
   return modelId;
 }
 
+/** Structured llm-proxy result: the text answer (today's `response` field) plus
+ *  the optional `toolCalls` the proxy may return for tool-capable marketplace
+ *  models (Phase 2.4 adds the field; consumed defensively — it may be absent).
+ *  A non-null result with `text: null` but toolCalls present means the model
+ *  wanted tools instead of answering in prose. */
+type LlmProxyResult = {
+  text: string | null;
+  toolCalls: Array<{ id?: unknown; name?: unknown; arguments?: unknown }>;
+};
+
 async function callLlmProxy(
   provider: string,
   model: string,
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   circleId?: string,
-): Promise<string | null> {
+  opts?: { maxTokens?: number; thinkingLevel?: string },
+): Promise<LlmProxyResult | null> {
   if (shouldBlockExternalAiProvider(provider)) return null;
   const accessToken = await getFreshAccessToken();
   if (!accessToken) return null;
   const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
   if (!supabaseUrl) return null;
   const url = `${supabaseUrl}/functions/v1/llm-proxy`;
+  // Forward the turn's latency/length knobs (Phase 2.4: llm-proxy honors
+  // `max_tokens` + `thinking_level`). Only included when the caller set them so
+  // legacy requests stay byte-identical.
+  const body: Record<string, unknown> = { provider, model, messages, circleId };
+  if (typeof opts?.maxTokens === 'number' && Number.isFinite(opts.maxTokens) && opts.maxTokens > 0) {
+    body.max_tokens = opts.maxTokens;
+  }
+  if (typeof opts?.thinkingLevel === 'string' && opts.thinkingLevel.trim()) {
+    body.thinking_level = opts.thinkingLevel.trim();
+  }
   const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${accessToken}`,
     },
-    body: JSON.stringify({ provider, model, messages, circleId }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -862,7 +946,10 @@ async function callLlmProxy(
     return null;
   }
   const data = await res.json();
-  return typeof data?.response === 'string' && data.response.length > 0 ? data.response : null;
+  return {
+    text: typeof data?.response === 'string' && data.response.length > 0 ? data.response : null,
+    toolCalls: Array.isArray(data?.toolCalls) ? data.toolCalls : [],
+  };
 }
 
 // ─── AI Edge Function Call ───────────────────────────────────────────────────
@@ -1450,27 +1537,24 @@ export async function fireClientTool(
 // or claudeCodeDetector.ts unless the model actually invokes one of
 // these tools through the v2 round-trip.
 
-function normalizeArtifact(raw: unknown): {
-  kind: 'summary' | 'image' | 'translation' | 'classification' | 'vision' | 'audio' | 'code' | 'webpage';
-  title: string;
-  content?: string | null;
-  url?: string | null;
-  metadata?: Record<string, unknown>;
-} | null {
+function normalizeArtifact(raw: unknown): SwanBotStructuredArtifact | null {
   if (!raw || typeof raw !== 'object') return null;
   const a = raw as any;
   const kind = String(a.kind || '');
-  const allowed = ['summary', 'image', 'translation', 'classification', 'vision', 'audio', 'code', 'webpage'];
+  const allowed = ['summary', 'image', 'translation', 'classification', 'vision', 'audio', 'code', 'webpage', 'table'];
   if (!allowed.includes(kind)) return null;
   const title = String(a.title || '').slice(0, 200);
   if (!title) return null;
-  return {
-    kind: kind as any,
+  // LOCKSTEP(src/lib/tableArtifact.ts): csv-fenced `code` payloads parse out
+  // as kind:'table' (raw csv preserved in content); everything else is
+  // byte-identical to the pre-table behavior.
+  return upgradeCsvCodeArtifactToTable({
+    kind: kind as SwanBotStructuredArtifact['kind'],
     title,
     content: typeof a.content === 'string' ? a.content : null,
     url: typeof a.url === 'string' ? a.url : null,
     metadata: (a.metadata && typeof a.metadata === 'object') ? a.metadata : undefined,
-  };
+  });
 }
 
 async function dispatchWorkspaceCreateRoom(input: Record<string, any>): Promise<{ ok: boolean; data?: unknown; error?: string }> {
@@ -2020,18 +2104,36 @@ async function callSwanBotAI(
   maxTokens = 4096,
   systemDirective?: string,
 ): Promise<SwanBotEdgeCallResult | null> {
-  // Phase M1 router: if the user opted into v2, try v2 first. On any
-  // v2 failure we fall through to v1 so a flaky v2 deploy never breaks
-  // chat. See `docs/SWANBOT_V2_MIGRATION_PLAN.md`.
+  // Phase M4 router: v2 (typed loop) is now the DEFAULT; `/v2 off` opts
+  // a device back into v1. On any v2 transport failure we still fall
+  // through to v1 so a flaky v2 deploy never breaks chat, and after 2
+  // consecutive transport failures the session circuit breaker skips v2
+  // entirely until a v2 success, `/v2 on`, or a reload.
+  // See `docs/SWANBOT_V2_MIGRATION_PLAN.md`.
   try {
-    const { isSwanbotV2Enabled } = await import('./swanbotRouting');
+    const { isSwanbotV2Enabled, isSwanbotV2CircuitOpen, recordSwanbotV2Outcome } =
+      await import('./swanbotRouting');
     if (isSwanbotV2Enabled()) {
-      const v2 = await callSwanBotV2(
-        message, circleId, userId, discordContext, model, wikiContext,
-        conversationMessages, thinkingLevel, maxTokens, systemDirective,
-      );
-      if (v2) return { response: v2 };
-      console.log('[SwanBot] v2 returned null — falling back to v1.');
+      if (isSwanbotV2CircuitOpen()) {
+        console.log('[SwanBot] v2 circuit open (repeated transport failures) — skipping v2 this session, using v1.');
+      } else {
+        let v2: string | null;
+        try {
+          v2 = await callSwanBotV2(
+            message, circleId, userId, discordContext, model, wikiContext,
+            conversationMessages, thinkingLevel, maxTokens, systemDirective,
+          );
+        } catch (v2Err) {
+          recordSwanbotV2Outcome(false);
+          throw v2Err;
+        }
+        if (v2) {
+          recordSwanbotV2Outcome(true);
+          return { response: v2 };
+        }
+        recordSwanbotV2Outcome(false);
+        console.log('[SwanBot] v2 returned null — falling back to v1.');
+      }
     }
   } catch (err) {
     console.warn('[SwanBot] routing check failed — using v1:', err);
@@ -2130,7 +2232,11 @@ async function callSwanBotAIStructured(
         response: data.response,
         usage: data.usage,
         tool_actions: data.tool_actions || [],
-        artifacts: data.artifacts || [],
+        // LOCKSTEP(src/lib/tableArtifact.ts): csv code-fence artifacts arrive
+        // from the edge as kind:'code' with metadata.language — upgrade them
+        // to kind:'table' (raw csv stays in content). All other artifacts
+        // pass through unchanged.
+        artifacts: ((data.artifacts || []) as SwanBotStructuredArtifact[]).map(upgradeCsvCodeArtifactToTable),
         ...(Object.keys(routing).length > 0 ? { routing } : {}),
       };
     }
@@ -2157,50 +2263,56 @@ async function buildSystemPromptAsync(
   const route = currentMessage
     ? analyzeMessageRouting(currentMessage, 'main_chat').route
     : null;
-  const complexity = route?.complexity || 'moderate';
+  const complexity = applyChatPromptComplexityFloor(
+    route?.complexity || 'moderate',
+    context.promptComplexityFloor,
+  );
   const responseIntent = route?.intent || 'question';
   const base = buildSystemPrompt(context, data, responseIntent);
-  const extras: string[] = [];
+  // W5 (P38): sections are keyed; ordering/budget/boundary are owned by the
+  // pure chatPromptAssembly seam (smoke-pinned), not by push-call position.
+  const sections: ChatPromptSectionInput[] = [];
   const pipelineBlock = buildUserTaskPipelinePromptBlock(currentMessage || '', { limit: 2 });
-  if (pipelineBlock) extras.push(pipelineBlock);
+  if (pipelineBlock) sections.push({ key: 'task_pipeline', body: pipelineBlock });
   const computerRequestRouteBlock = buildChatComputerRequestRoutePromptBlock(currentMessage || '');
-  if (computerRequestRouteBlock) extras.push(computerRequestRouteBlock);
+  if (computerRequestRouteBlock) sections.push({ key: 'computer_request_route', body: computerRequestRouteBlock });
   const computerStrategyBlock = buildComputerAppTaskStrategyPromptBlock(currentMessage || '');
-  if (computerStrategyBlock) extras.push(computerStrategyBlock);
+  if (computerStrategyBlock) sections.push({ key: 'computer_strategy', body: computerStrategyBlock });
   const computerGroundingBlock = buildComputerAppGroundingPromptBlock(currentMessage || '');
-  if (computerGroundingBlock) extras.push(computerGroundingBlock);
+  if (computerGroundingBlock) sections.push({ key: 'computer_grounding', body: computerGroundingBlock });
   const designAppBlock = buildDesignAppAutomationPromptBlock(currentMessage || '');
-  if (designAppBlock) extras.push(designAppBlock);
+  if (designAppBlock) sections.push({ key: 'design_automation', body: designAppBlock });
   const designExecutionPipelineBlock = buildDesignAppExecutionPipelinePromptBlock(currentMessage || '');
-  if (designExecutionPipelineBlock) extras.push(designExecutionPipelineBlock);
+  if (designExecutionPipelineBlock) sections.push({ key: 'design_execution_pipeline', body: designExecutionPipelineBlock });
   const designCreativeAiBlock = buildDesignAppCreativeAiPromptBlock(currentMessage || '');
-  if (designCreativeAiBlock) extras.push(designCreativeAiBlock);
+  if (designCreativeAiBlock) sections.push({ key: 'design_creative_ai', body: designCreativeAiBlock });
   const designCreativeAiRecipeBlock = buildDesignAppCreativeAiRecipePromptBlock(currentMessage || '');
-  if (designCreativeAiRecipeBlock) extras.push(designCreativeAiRecipeBlock);
+  if (designCreativeAiRecipeBlock) sections.push({ key: 'design_creative_ai_recipe', body: designCreativeAiRecipeBlock });
   const designObjectManifestBlock = buildDesignAppObjectManifestPromptBlock(currentMessage || '');
-  if (designObjectManifestBlock) extras.push(designObjectManifestBlock);
+  if (designObjectManifestBlock) sections.push({ key: 'design_object_manifest', body: designObjectManifestBlock });
   const designOperationRunbookBlock = buildDesignAppOperationRunbookPromptBlock(currentMessage || '');
-  if (designOperationRunbookBlock) extras.push(designOperationRunbookBlock);
+  if (designOperationRunbookBlock) sections.push({ key: 'design_operation_runbook', body: designOperationRunbookBlock });
   const designProofReviewBlock = buildDesignAppProofReviewPromptBlock(currentMessage || '');
-  if (designProofReviewBlock) extras.push(designProofReviewBlock);
+  if (designProofReviewBlock) sections.push({ key: 'design_proof_review', body: designProofReviewBlock });
   const engineeringCadOperationRunbookBlock = buildEngineeringCadOperationRunbookPromptBlock(currentMessage || '');
-  if (engineeringCadOperationRunbookBlock) extras.push(engineeringCadOperationRunbookBlock);
+  if (engineeringCadOperationRunbookBlock) sections.push({ key: 'cad_operation_runbook', body: engineeringCadOperationRunbookBlock });
   const computerReceiptBlock = buildComputerAppExecutionReceiptPromptBlock(currentMessage || '');
-  if (computerReceiptBlock) extras.push(computerReceiptBlock);
+  if (computerReceiptBlock) sections.push({ key: 'computer_receipt', body: computerReceiptBlock });
 
-  // AI-models-first collaboration menu (DEFAULT OFF). When the
+  // AI-models-first collaboration menu (DEFAULT ON since 2026-07-01). When the
   // uc_stream_escalate_on_tool_use seam is ON, inject the compact capability
   // manifest so the model knows what it can ACTIVATE / pull in from the app, plus
   // a one-line note of how the selected model collaborates with BlackSwan/OpenSwan
   // grounding + a reliable executor for this turn. Quiet-in-chat by construction
-  // (the manifest tells the model to keep discovery silent). When the flag is OFF
-  // buildChatCollaborationContext returns null and this is a no-op, so the prompt
-  // is byte-identical to today. Skipped during conversational builds — those turns
-  // are intentionally lean (the build directive is the behavior).
+  // (the manifest tells the model to keep discovery silent). When a surface opts
+  // out, buildChatCollaborationContext returns null and this is a no-op, so the
+  // prompt is byte-identical to the legacy path. Skipped during conversational
+  // builds — those turns are intentionally lean (the build directive is the
+  // behavior).
   if (!(context as any).systemDirective) {
     const collab = buildChatCollaborationContext(context, currentMessage || '');
     if (collab) {
-      if (collab.manifestBlock) extras.push(collab.manifestBlock);
+      if (collab.manifestBlock) sections.push({ key: 'collab_manifest', body: collab.manifestBlock });
       // One compact line so the model knows who is grounding / executing without
       // surfacing routing chatter to the user. Keep the user's selected model
       // authoritative — this only narrates the arrangement.
@@ -2211,7 +2323,17 @@ async function buildSystemPromptAsync(
           ? 'Treat the grounding model as highest-priority app context; the executor owns reliable tool calling.'
           : 'You are answering directly; activate a capability only when the turn needs it.',
       ].join('\n');
-      extras.push(collabNote);
+      sections.push({ key: 'collab_note', body: collabNote });
+      // P8: wire the (previously never-called) BlackSwan grounding contract.
+      // Emits only when the primary/grounding model is a BlackSwan id — the
+      // app-grounding rules + secret-safety guardrail travel with the turn.
+      try {
+        const groundingBlock = buildBlackSwanGroundingBlock({
+          model: collab.plan.groundingModel || collab.plan.primaryModel,
+          source: 'main_chat',
+        });
+        if (groundingBlock) sections.push({ key: 'blackswan_grounding', body: groundingBlock });
+      } catch { /* grounding is additive — never block the turn */ }
     }
   }
 
@@ -2222,14 +2344,11 @@ async function buildSystemPromptAsync(
   //               bounded by retrievalBudget/Count and MAX_EXTRAS_CHARS below)
   //   moderate → + SOUL wisdom + missions
   //   complex  → + attachments + full retrieval budget
-  const loadProfile  = true;
-  const loadMemory   = complexity !== 'trivial';
-  const loadWisdom   = complexity === 'moderate' || complexity === 'complex';
-  const loadRetrieval = complexity !== 'trivial';
-  const loadMissions = complexity === 'moderate' || complexity === 'complex';
-  const loadSkills   = complexity !== 'trivial';
-  const retrievalBudget = complexity === 'complex' ? 2500 : complexity === 'moderate' ? 1200 : 600;
-  const retrievalCount  = complexity === 'complex' ? 12 : complexity === 'moderate' ? 6 : 3;
+  const contextPolicy = resolveChatPromptContextPolicy(complexity);
+  const {
+    loadProfile, loadMemory, loadWisdom, loadRetrieval, loadMissions, loadSkills,
+    retrievalBudget, retrievalCount,
+  } = contextPolicy;
 
   // Shared timeout for async extras
   const withTimeout = <T>(p: Promise<T>, ms = 3000): Promise<T | null> =>
@@ -2240,7 +2359,7 @@ async function buildSystemPromptAsync(
       const { loadUserProfile, generateProfileContext } = await import('./userChatProfile');
       const profile = await withTimeout(loadUserProfile());
       const profileCtx = profile ? generateProfileContext(profile) : null;
-      if (profileCtx) extras.push(profileCtx);
+      if (profileCtx) sections.push({ key: 'user_chat_profile', body: profileCtx });
     } catch (e) { console.warn('[SwanBot] Profile load failed:', e); }
   }
 
@@ -2265,9 +2384,15 @@ async function buildSystemPromptAsync(
         // cross-agent bridge context). Fence each so the model treats them as
         // data, not instructions (the v1 prompt already explains the tag; the
         // separate retrieveForTurn block is fenced at its source).
-        if (stores?.userProfile) extras.push(wrapUntrusted(stores.userProfile));
-        if (stores?.runtimeMemory) extras.push(wrapUntrusted(stores.runtimeMemory));
-        if (stores?.workingMemory) extras.push(wrapUntrusted(stores.workingMemory, { heading: '## Working Memory' }));
+        // X1 (P43): user-authored notes are a first-class fenced section on
+        // EVERY lane now — previously they only reached the v2 lane (via a
+        // chatHistory injection, retired with this) because the batch lane's
+        // memoryContext plumbing was dead. Highest-signal source, so it
+        // precedes the inferred profile (canonical order).
+        if (stores?.userNotes) sections.push({ key: 'memory_user_notes', body: wrapUntrusted(stores.userNotes) });
+        if (stores?.userProfile) sections.push({ key: 'memory_user_profile', body: wrapUntrusted(stores.userProfile) });
+        if (stores?.runtimeMemory) sections.push({ key: 'memory_runtime', body: wrapUntrusted(stores.runtimeMemory) });
+        if (stores?.workingMemory) sections.push({ key: 'memory_working', body: wrapUntrusted(stores.workingMemory, { heading: '## Working Memory' }) });
       }
     } catch (e) { console.warn('[SwanBot] Memory context failed:', e); }
   }
@@ -2292,7 +2417,7 @@ async function buildSystemPromptAsync(
           queryText: currentMessage,
         }));
         const wisdomBlock = formatSoulWisdomBlock(wisdom);
-        if (wisdomBlock) extras.push(wisdomBlock);
+        if (wisdomBlock) sections.push({ key: 'soul_wisdom', body: wisdomBlock });
       }
     } catch (e) { console.warn('[SwanBot] Soul wisdom load failed:', e); }
   }
@@ -2313,7 +2438,7 @@ async function buildSystemPromptAsync(
             finalCount: retrievalCount,
           }),
         );
-        if (retrieval?.formatted) extras.push(retrieval.formatted);
+        if (retrieval?.formatted) sections.push({ key: 'turn_retrieval', body: retrieval.formatted });
       }
     } catch (e) { console.warn('[SwanBot] Turn retrieval failed:', e); }
   }
@@ -2321,12 +2446,12 @@ async function buildSystemPromptAsync(
   // Wiki / knowledge base — only load for moderate+ complexity and when
   // the message touches knowledge topics. Keeps simple chat lean.
   if (loadWisdom && context.wikiContext) {
-    extras.push(`## Internal Wiki Context\nUse this as trusted internal reference context.\n${context.wikiContext}`);
+    sections.push({ key: 'wiki_context', body: `## Internal Wiki Context\nUse this as trusted internal reference context.\n${context.wikiContext}` });
   }
 
   // Phase C1 — Block D: attachment context
   if ((context as any).attachmentContext) {
-    extras.push((context as any).attachmentContext);
+    sections.push({ key: 'attachment_context', body: (context as any).attachmentContext });
   }
 
   // Progressive project context discovery — load root context eagerly and
@@ -2339,7 +2464,7 @@ async function buildSystemPromptAsync(
       conversationMessages: context.conversationMessages,
     })));
     if (discovery?.block) {
-      extras.push(discovery.block);
+      sections.push({ key: 'project_discovery', body: discovery.block });
     }
   } catch (e) { console.warn('[SwanBot] Project context discovery failed:', e); }
 
@@ -2357,7 +2482,7 @@ async function buildSystemPromptAsync(
             query: currentMessage || context.chatHistory || '',
             maxSkills: context.modeKey === 'research' || context.taskKind === 'research' ? 8 : 6,
           }).then((resolution) => resolution.promptBlock)));
-        if (skillsBlock) extras.push(skillsBlock);
+        if (skillsBlock) sections.push({ key: 'skills', body: skillsBlock });
       }
     } catch (e) { console.warn('[SwanBot] Skills block failed:', e); }
   }
@@ -2387,7 +2512,7 @@ async function buildSystemPromptAsync(
         if (identity.boundAiProvider || identity.boundModel) {
           identityLines.push(`Preferred runtime: ${(identity.boundAiProvider || 'unknown')} / ${(identity.boundModel || 'unknown')}`);
         }
-        if (identityLines.length > 1) extras.push(identityLines.join('\n'));
+        if (identityLines.length > 1) sections.push({ key: 'agent_identity', body: identityLines.join('\n') });
       }
     }
   } catch (e) { console.warn('[SwanBot] Agent identity context failed:', e); }
@@ -2399,7 +2524,8 @@ async function buildSystemPromptAsync(
     identity,
     spirit,
   });
-  if (runtimeBundle) extras.unshift(runtimeBundle);
+  // Canonical ordering places runtime_bundle FIRST (the legacy unshift).
+  if (runtimeBundle) sections.push({ key: 'runtime_bundle', body: runtimeBundle });
 
   // Load active missions for this circle (skip for trivial/simple messages)
   if (loadMissions) {
@@ -2424,11 +2550,11 @@ async function buildSystemPromptAsync(
               missionLines.push(`  Blocked: ${blocked.map(t => t.title).join(', ')}`);
             }
           }
-          extras.push([
+          sections.push({ key: 'missions', body: [
             wrapUntrusted(missionLines.join('\n'), { heading: '## Active Missions' }),
             '',
             'When users ask about missions or progress, reference this data. Nudge on overdue missions. Celebrate completed ones.',
-          ].join('\n'));
+          ].join('\n') });
         }
       }
     } catch (e) { console.warn('[SwanBot] Mission loading failed:', e); }
@@ -2451,7 +2577,7 @@ async function buildSystemPromptAsync(
     try {
       const { buildCircleSnapshotContextMessage } = await import('./circleSnapshotContextInjection');
       const snapshotBlock = await buildCircleSnapshotContextMessage(context.circleId);
-      if (snapshotBlock) extras.push(snapshotBlock);
+      if (snapshotBlock) sections.push({ key: 'circle_snapshot', body: snapshotBlock });
     } catch (e) { console.warn('[SwanBot] Circle snapshot context failed:', e); }
   }
 
@@ -2459,31 +2585,18 @@ async function buildSystemPromptAsync(
   try {
     if (context.circleId) {
       const lastSession = await getLastSessionContext(context.circleId, context.userId);
-      if (lastSession) extras.push(lastSession);
+      if (lastSession) sections.push({ key: 'last_session', body: lastSession });
     }
   } catch (e) { console.warn('[SwanBot] Session context failed:', e); }
 
-  if (extras.length === 0) return base;
-
-  // Cache boundary — Anthropic's prompt caching caches the prefix of the
-  // system prompt. Everything ABOVE this line is stable across turns (base
-  // personality, rules, capabilities). Everything BELOW is dynamic per-turn
-  // (memories, missions, session context). The boundary helps Claude cache
-  // the stable prefix and only re-process the dynamic tail.
-  const CACHE_BOUNDARY = '\n\n---\n<!-- dynamic context below — changes per turn -->\n';
-
-  // Adaptive extras budget — trivial messages get a tiny prompt, complex ones get the full budget
-  const MAX_EXTRAS_CHARS = complexity === 'trivial' ? 1200 : complexity === 'simple' ? 3000 : complexity === 'moderate' ? 5500 : 8000;
-  let combined = extras.join('\n\n');
-  if (combined.length > MAX_EXTRAS_CHARS) {
-    combined = combined.slice(0, MAX_EXTRAS_CHARS);
-    const lastBreak = combined.lastIndexOf('\n');
-    if (lastBreak > MAX_EXTRAS_CHARS * 0.7) {
-      combined = combined.slice(0, lastBreak);
-    }
-  }
-
-  return base + CACHE_BOUNDARY + combined;
+  // W5 (P38): canonical ordering + adaptive budget clip + cache boundary all
+  // live in the pure chatPromptAssembly seam — byte-identical to the legacy
+  // inline join/clip/boundary (smoke-pinned there). X1: a lane that carries
+  // some sections in its own channel (v2's user-message ladder) omits exactly
+  // those keys here instead of receiving message-derived duplicates.
+  const dedupedSections = omitChatPromptSections(sections, context.omitPromptSections);
+  const assembled = assembleChatPromptExtras(dedupedSections, { maxExtrasChars: contextPolicy.maxExtrasChars });
+  return composeChatSystemPrompt(base, assembled.text);
 }
 
 // ── Adaptive response directives per intent ─────────────────────────────────
@@ -2773,6 +2886,15 @@ The honest limit: I can’t see or control ${localSurface} unless the bridge/scr
 
 const localCommands: CmdHandler[] = [
   {
+    // X7 (P48): per-lane quality report — which chat lanes succeeded/failed
+    // this session, with the lane-isolated vs multi-lane classification.
+    match: /^(?:\/lanes|lane health|lane status)\s*[?!]?$/i,
+    handler: async () => {
+      const { formatChatLaneHealthReportNow } = await import('./chatLaneHealthRegistry');
+      return formatChatLaneHealthReportNow();
+    },
+  },
+  {
     match: /^(help|commands|what can you do)\s*[?!]?$/i,
     handler: async () => `🦢 **Here's what I got:**\n\n📋 **"my tasks"** — your open tasks\n📊 **"status"** — circle stats\n🔥 **"streak"** — your streak\n🏆 **"leaderboard"** — rankings\n✅ **"who checked in"** — today's check-ins\n📅 **"daily plan"** — plan your day\n📝 **"create task [title]"** — make a task\n📚 **"/wiki [topic]"** — search the Wiki\n🔬 **"/research [topic]"** — search the curated research corpus\n🔎 **"search wiki [topic]"** — same thing\n\nOr just talk to me directly — I can use the wiki and research corpus when it helps.`,
   },
@@ -2954,7 +3076,8 @@ async function getSwanBotResponseImpl(
     context.connectedProviders,
   );
 
-  // AI-models-first collaboration (DEFAULT OFF behind uc_stream_escalate_on_tool_use):
+  // AI-models-first collaboration (DEFAULT ON since 2026-07-01 behind
+  // uc_stream_escalate_on_tool_use):
   // consult planModelCollaboration on the RESOLVED concrete model to learn the
   // grounding/executor split for this turn (e.g. BlackSwan grounds while a
   // reliable Claude executor drives a tool/agent loop). This is ADVISORY only —
@@ -2962,8 +3085,8 @@ async function getSwanBotResponseImpl(
   // below actually calls, and for a plain frontier pick the plan's primaryModel
   // equals it with no grounding/executor, so nothing changes. The plan is carried
   // on enrichedContext so the system prompt and any downstream reader see one
-  // consistent arrangement. No-op (collabPlan stays undefined) when the flag is
-  // OFF, so the turn is byte-identical to today.
+  // consistent arrangement. No-op (collabPlan stays undefined) when the seam is
+  // opted out, so that turn is byte-identical to the legacy path.
   let collabPlan: CollaborationPlan | undefined;
   try {
     const collab = buildChatCollaborationContext(
@@ -3116,6 +3239,54 @@ async function getSwanBotResponseImpl(
       const circleData = await getCircleContextData(enrichedContext);
       const systemPrompt = await buildSystemPromptAsync(enrichedContext, circleData, cleaned);
       const history = enrichedContext.circleId ? getHistory(enrichedContext.circleId) : [];
+
+      // ── Phase 2 (2.2): marketplace tool tier (flag DEFAULT OFF). ──────────
+      // Action-shaped turns on a tool-capable marketplace model run the
+      // EXISTING `executeToolUseLoop` with the marketplace model — the edge
+      // relay branch executes the tools through the provider's own key, and
+      // every v1 reliability layer (fresh-evidence gate, deterministic
+      // re-observe, proof-coverage nudge, stuck-breaker, cap checkpoints)
+      // applies automatically. Tool-less/unknown models delegate to the
+      // reliable Claude executor with a VISIBLE "<selected> plans, <executor>
+      // executes" line — never silently. Flag off or a conversational turn
+      // keeps the tool-less llm-proxy text path below byte-identical.
+      const marketplaceToolTier = decideMarketplaceToolTier({
+        modelId: enrichedContext.model || '',
+        message: cleaned,
+      });
+      if (marketplaceToolTier.tier !== 'plain_text' && enrichedContext.circleId && enrichedContext.userId) {
+        try {
+          const loopModel = marketplaceToolTier.tier === 'delegate_executor'
+            ? (marketplaceToolTier.executorModelId || MARKETPLACE_TOOL_EXECUTOR_MODEL_ID)
+            : enrichedContext.model!;
+          console.log(`[SwanBot] Tier 1.5: marketplace tool tier '${marketplaceToolTier.tier}' — tool loop on ${loopModel}`);
+          const loop = await executeToolUseLoop({
+            systemPrompt,
+            userMessage: cleaned,
+            model: loopModel,
+            circleId: enrichedContext.circleId,
+            userId: enrichedContext.userId,
+            surface: 'main_chat',
+            mode: typeof enrichedContext.modeKey === 'string' ? enrichedContext.modeKey : null,
+          });
+          // An incomplete loop with ZERO tool events means the edge call itself
+          // failed (e.g. relay 400 marketplace_provider_unavailable) — fall
+          // through to today's plain-text proxy tier instead of surfacing the
+          // loop's internal failure copy.
+          const loopUsable = !!loop.response && !(loop.incomplete && loop.toolEvents.length === 0);
+          if (loopUsable) {
+            const finalText = marketplaceToolTier.tier === 'delegate_executor'
+              ? `${buildDelegateExecutorNotice(enrichedContext.model || 'Selected model', loopModel)}\n\n${loop.response}`
+              : loop.response;
+            addToHistory(enrichedContext.circleId, 'model', finalText);
+            return finalText;
+          }
+          console.warn('[SwanBot] Tier 1.5: marketplace tool loop unusable — falling back to plain-text proxy tier.');
+        } catch (loopErr) {
+          console.warn('[SwanBot] Tier 1.5: marketplace tool loop error — falling back to plain-text proxy tier:', loopErr);
+        }
+      }
+
       const proxyMessages = [
         { role: 'system' as const, content: systemPrompt },
         ...history.slice(-10).map(h => ({
@@ -3125,7 +3296,51 @@ async function getSwanBotResponseImpl(
         { role: 'user' as const, content: cleaned },
       ];
       const proxyModel = stripProviderPrefixForProxy(customModelProvider, enrichedContext.model!);
-      const proxyResponse = await callLlmProxy(customModelProvider, proxyModel, proxyMessages, enrichedContext.circleId);
+      const proxyResult = await callLlmProxy(
+        customModelProvider,
+        proxyModel,
+        proxyMessages,
+        enrichedContext.circleId,
+        { maxTokens: enrichedContext.maxTokens, thinkingLevel: enrichedContext.thinkingLevel },
+      );
+      // ── Phase 2 (2.2c): proxy tool-calls are an escalation trigger. ───────
+      // When llm-proxy reports the model tried to CALL TOOLS (optional
+      // `toolCalls` field, Phase 2.4), don't render the raw text — upgrade this
+      // turn through the existing stream->escalate seam so the SAME OpenSwan
+      // tool loop runs it. Gated by the marketplace tool-loop flag AND
+      // toolUse:true capability (unknown ids fail closed), so with the flag off
+      // the text below renders exactly as today.
+      if (
+        proxyResult
+        && enrichedContext.circleId
+        && shouldEscalateProxyToolCalls({ modelId: enrichedContext.model || '', toolCalls: proxyResult.toolCalls })
+      ) {
+        try {
+          const escalation = await maybeEscalateStreamedTurnToToolLoop({
+            streamedTurn: {
+              stopReason: 'tool_use',
+              content: proxyToolCallsToAnthropicContent(proxyResult.toolCalls),
+            },
+            systemPrompt,
+            userMessage: cleaned,
+            model: enrichedContext.model!,
+            circleId: enrichedContext.circleId,
+            userId: enrichedContext.userId,
+            surface: 'main_chat',
+            mode: typeof enrichedContext.modeKey === 'string' ? enrichedContext.modeKey : null,
+            // The marketplace flag already made this decision (checked above);
+            // don't let the separate stream-escalate seam flag veto it.
+            streamEscalateOnToolUse: true,
+          });
+          if (escalation.escalated && escalation.response) {
+            addToHistory(enrichedContext.circleId, 'model', escalation.response);
+            return escalation.response;
+          }
+        } catch (escErr) {
+          console.warn('[SwanBot] Tier 1.5: proxy tool-call escalation failed — falling back to proxy text:', escErr);
+        }
+      }
+      const proxyResponse = proxyResult?.text ?? null;
       if (proxyResponse) {
         if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', proxyResponse);
         return proxyResponse;
@@ -3224,7 +3439,14 @@ async function getSwanBotResponseImpl(
       // Normalize the picked legacy id (e.g. `gemini-pro`, `gemini-1.5-flash`)
       // to a current google_ai model via the shared, tested alias resolver.
       const geminiModel = findAliasKey(enrichedContext.model || '') || 'gemini-2.5-flash';
-      const geminiResponse = await callLlmProxy('google_ai', geminiModel, proxyMessages, enrichedContext.circleId);
+      const geminiResult = await callLlmProxy(
+        'google_ai',
+        geminiModel,
+        proxyMessages,
+        enrichedContext.circleId,
+        { maxTokens: enrichedContext.maxTokens, thinkingLevel: enrichedContext.thinkingLevel },
+      );
+      const geminiResponse = geminiResult?.text ?? null;
       if (geminiResponse) {
         console.log('[SwanBot] Tier 3: Got response from Gemini via llm-proxy');
         if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', geminiResponse);
@@ -3330,8 +3552,9 @@ async function getSwanBotStructuredResponseImpl(
     memoryStores: memoryStores || undefined,
     spiritId,
   };
-  // Advisory collaboration plan (DEFAULT OFF). Carried for consistency with the
-  // text path; never overrides effectiveModel. No-op when the seam flag is OFF.
+  // Advisory collaboration plan (DEFAULT ON since 2026-07-01). Carried for
+  // consistency with the text path; never overrides effectiveModel. No-op when
+  // the seam is opted out.
   try {
     const collab = buildChatCollaborationContext({ ...context, model: effectiveModel }, cleaned);
     if (collab) (enrichedContext as any).collaborationPlan = collab.plan;
@@ -3520,11 +3743,65 @@ export async function executeToolUseLoop(opts: {
   const constraintInputs: ChatComputerConstraintInputs = resolveChatComputerConstraintInputs(opts.userMessage);
   const enforceConstraints = hasChatComputerConstraintInputs(constraintInputs);
 
-  const anthropicTools = tools.map(t => ({
+  let anthropicTools: Array<Record<string, unknown>> = tools.map(t => ({
     name: t.name,
     description: t.description,
     input_schema: t.input_schema,
+    // X4 (P47): curated input_examples attached at the catalog chokepoint
+    // ride through to the relay (forwarded verbatim to Anthropic; the
+    // OpenAI-shape marketplace converter ignores them harmlessly).
+    ...((t as { input_examples?: Array<Record<string, unknown>> }).input_examples
+      ? { input_examples: (t as { input_examples?: Array<Record<string, unknown>> }).input_examples }
+      : {}),
   }));
+
+  // X2 (P46) — API-native deferred tool loading, FLAG-DARK (default OFF).
+  // When a device opts in (`uc_native_deferred_tools`='1') and the loop model
+  // is on the documented tool-search compatibility list, the relay request
+  // carries the FULL surface catalog: the native search tool first, the
+  // pinned core non-deferred, everything else `defer_loading: true`. The
+  // array is byte-stable across rounds (unlike the P25 client append, which
+  // busts the tools cache tier on unlock rounds — the P26 honest limit). The
+  // edge relay forwards `tools` verbatim and tool search needs no beta
+  // header, so no edge change is required. Fail-safe: any error keeps the
+  // legacy pinned palette. The client-side `tools.search` is excluded when
+  // native search is active (redundant duplicate path).
+  try {
+    const {
+      isNativeDeferredToolsEnabled,
+      shouldUseNativeDeferredTools,
+      buildNativeDeferredToolPayload,
+      summarizeNativeDeferredToolPayload,
+    } = await import('./anthropicNativeToolSearch');
+    if (isNativeDeferredToolsEnabled()) {
+      const fullCatalog = getToolDefinitions(undefined, opts.surface || 'main_chat', opts.mode)
+        .map((t: { name: string; description: string; input_schema: Record<string, unknown>; input_examples?: Array<Record<string, unknown>> }) => ({
+          name: t.name,
+          description: t.description,
+          input_schema: t.input_schema,
+          // X4 (P47): examples expand along with a deferred tool's definition
+          // when discovered via native tool search.
+          ...(t.input_examples ? { input_examples: t.input_examples } : {}),
+        }));
+      const decision = shouldUseNativeDeferredTools({
+        flagEnabled: true,
+        model: opts.model,
+        toolCount: fullCatalog.length,
+      });
+      if (decision.use) {
+        const payload = buildNativeDeferredToolPayload(fullCatalog, {
+          pinnedNames: tools.map((t) => t.name),
+          excludeNames: ['tools.search'],
+        });
+        if (payload.tools.length > 1) {
+          anthropicTools = payload.tools;
+          console.log('[SwanBot] native deferred tools:', JSON.stringify(summarizeNativeDeferredToolPayload(payload)));
+        }
+      }
+    }
+  } catch (nativeToolsErr) {
+    console.warn('[SwanBot] native deferred tools setup failed, using legacy palette:', nativeToolsErr);
+  }
 
   const messages: Array<{ role: string; content: any }> = [
     { role: 'user', content: opts.userMessage },
@@ -3860,7 +4137,7 @@ export async function executeToolUseLoop(opts: {
   };
 }
 
-// ─── Phase 2: stream-by-default → escalate-on-tool-use seam (DEFAULT OFF) ────
+// ─── Phase 2: stream-by-default → escalate-on-tool-use seam (DEFAULT ON) ─────
 //
 // AI-models-first means a normal chat turn streams plainly and fast. To let the
 // model still *reach* a capability without paying the full tool-loop cost up
@@ -3870,12 +4147,12 @@ export async function executeToolUseLoop(opts: {
 // tool loop (`executeToolUseLoop`) — "then it activates swanbot/openswan".
 //
 // This is the runtime half of the seam whose transport decision lives in
-// `chatTerminalTransportPolicy.ts` (`stream_then_escalate`). It is NOT
-// runtime-proven, so it ships DARK behind the SAME DEFAULT-OFF flag and is
-// instantly revertible: while OFF nothing here runs (the transport never
+// `chatTerminalTransportPolicy.ts` (`stream_then_escalate`). It is gated behind
+// the SAME seam flag (LIVE — DEFAULT ON since 2026-07-01) and is instantly
+// revertible: when a surface opts out nothing here runs (the transport never
 // returns `stream_then_escalate`, so these helpers are never called, AND
 // `maybeEscalateStreamedTurnToToolLoop` itself re-checks the flag and no-ops),
-// so chat behavior is byte-for-byte the current plain stream.
+// so opted-out chat behavior is byte-for-byte the legacy plain stream.
 
 /**
  * The tiny pinned tool set to advertise on the escalation-capable streaming
@@ -3883,7 +4160,7 @@ export async function executeToolUseLoop(opts: {
  * model can reach the rest of the catalog through one tool). Reuses the exact
  * progressive-disclosure pin list from `openswanToolRuntime`, so the streaming
  * palette stays consistent with the batch tools-first palette. Lazy-imported to
- * keep the streaming module graph light while the flag is OFF.
+ * keep the streaming module graph light on turns that never escalate.
  */
 export async function getStreamEscalationPinnedToolNames(
   surface: 'main_chat' | 'room_chat' | 'office' | 'task_run' = 'main_chat',
@@ -3930,10 +4207,10 @@ export type StreamEscalationResult =
  * the escalated loop opens with the pinned core + `tools.search` and unlocks the
  * rest through search exactly as the batch tools-first path does.
  *
- * Fail-safe / revertible: when the flag is OFF this returns
+ * Fail-safe / revertible: when the seam is opted out this returns
  * `{ escalated: false, reason: 'flag_off' }` WITHOUT calling any model or tool,
- * so wiring it into the streaming completion handler is a no-op until the flag
- * is flipped. When there is no tool-use signal it returns
+ * so the streaming completion handler degrades to the plain-stream behavior the
+ * moment a surface reverts. When there is no tool-use signal it returns
  * `{ escalated: false, reason: 'no_tool_use_signal' }`, letting the caller keep
  * the already-streamed plain text untouched.
  */
@@ -3956,8 +4233,9 @@ export async function maybeEscalateStreamedTurnToToolLoop(opts: {
   allowedToolNames?: string[];
   toolApprovalGate?: (call: { name: string; input: any }) => Promise<'approve' | 'reject'>;
   /**
-   * Explicit flag override (DEFAULT OFF). When omitted, the live
-   * `STREAM_ESCALATE_ON_TOOL_USE_FLAG` decides — so OFF is the default.
+   * Explicit flag override. When omitted, the live
+   * `STREAM_ESCALATE_ON_TOOL_USE_FLAG` reader decides (DEFAULT ON since
+   * 2026-07-01; opt-out via localStorage or the native runtime override).
    */
   streamEscalateOnToolUse?: boolean;
 }): Promise<StreamEscalationResult> {
@@ -4015,6 +4293,13 @@ export async function buildStreamableSystemPrompt(opts: {
   resolvedSkillsPromptBlock?: string | null;
   /** See SwanBotContext.omitCircleContextSnapshot. */
   omitCircleContextSnapshot?: boolean;
+  /** X1: pre-resolved memory stores — the assembler skips its own recall
+   *  when set (single-recall contract; see SwanBotContext.memoryStores). */
+  memoryStores?: OpenSwanMemoryStores;
+  /** See SwanBotContext.omitPromptSections (X1 lane dedupe). */
+  omitSections?: ChatPromptSectionKey[];
+  /** See SwanBotContext.promptComplexityFloor (X1/P44 lane floor). */
+  complexityFloor?: ChatPromptComplexity;
 }): Promise<string> {
   const context: SwanBotContext = {
     userId: opts.userId,
@@ -4031,6 +4316,9 @@ export async function buildStreamableSystemPrompt(opts: {
     resolvedSkills: opts.resolvedSkills,
     resolvedSkillsPromptBlock: opts.resolvedSkillsPromptBlock,
     omitCircleContextSnapshot: opts.omitCircleContextSnapshot,
+    memoryStores: opts.memoryStores,
+    omitPromptSections: opts.omitSections,
+    promptComplexityFloor: opts.complexityFloor,
   };
   const circleData = opts.circleId
     ? await getCircleContextData(context)

@@ -31,14 +31,31 @@
  *     start at 25; edge-function consumers can lower to 8 for Haiku).
  */
 
-import { compressContextIfOversized } from './agentContextCompression';
+import { compressContextIfOversized, PRUNED_IMAGE_PLACEHOLDER_TEXT } from './agentContextCompression';
 import { partitionParallelSafeBatch } from './toolBatchParallelism';
 import type { ToolParallelPolicy } from './toolBatchParallelism';
+import { buildToolFailureFeedback } from './toolFailureFeedback';
+import { detectRepeatedToolFailure, hashToolInput, type RecentToolCall } from './toolLoopStuckBreaker';
+import { buildSolverConsultationMessage, previewToolInput, shouldConsultSolver } from './toolLoopSolver';
+
+/** Bounded recent-call ring size for progress-based stuck detection. Big enough
+ *  to hold the last few rounds' calls, small enough to stay cheap. */
+const RECENT_TOOL_CALL_RING_MAX = 24;
+
+/**
+ * tool_result content part — EXACT Anthropic Messages API shape (P21 image
+ * side channel). Providers that relay messages verbatim (the swanbot-ai
+ * transport, agentProviders/anthropic) can pass these through untouched and
+ * the model sees real pixels instead of a JSON-stringified base64 bomb.
+ */
+export type AgentToolResultContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
 
 export type AgentMessageContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
+  | { type: 'tool_result'; tool_use_id: string; content: string | AgentToolResultContentPart[]; is_error?: boolean };
 
 export type AgentMessage = {
   role: 'user' | 'assistant' | 'system';
@@ -50,6 +67,9 @@ export type AgentToolDefinition = {
   description: string;
   /** JSON Schema (subset) for input validation and provider tool advertising. */
   input_schema: Record<string, unknown>;
+  /** Optional Anthropic `input_examples` (X4/P47) — schema-validated example
+   *  inputs advertised alongside the schema; providers forward when present. */
+  input_examples?: Array<Record<string, unknown>>;
   /** Dispatch handler. MUST NOT throw — wrap errors as `{ok: false, error}`. */
   handler: (input: unknown, ctx: AgentToolContext) => Promise<AgentToolResult>;
   /**
@@ -186,6 +206,21 @@ export type AgentEvent =
   | { kind: 'final_response'; iteration: number; text: string }
   | { kind: 'max_iterations_exceeded'; iteration: number }
   /**
+   * Progress-based loop exit (not iteration-cap based). Fired when the loop
+   * detects it is re-sampling the SAME failing tool call with the SAME input
+   * ~3 rounds in a row and stops BEFORE running it again — raising the cap
+   * would just make the runaway more expensive, so the exit is progress-based.
+   * `reason` is the human-readable "repeated identical failing call — <tool> x3".
+   */
+  | { kind: 'loop_stopped_no_progress'; iteration: number; reason: string }
+  /**
+   * P56: the stuck point injected ONE fresh-eyes solver consultation instead
+   * of stopping — the model must produce a root-cause hypothesis + two
+   * different approaches (or a blocker report). Fired at most once per run;
+   * a second stuck verdict after this proceeds to `loop_stopped_no_progress`.
+   */
+  | { kind: 'solver_consultation'; iteration: number; reason: string }
+  /**
    * Fired after each completed tool round (R12), BEFORE the next provider
    * turn. `messages` is a shallow snapshot of the full history at this
    * boundary — callers can persist it as a resumable checkpoint (the
@@ -193,7 +228,9 @@ export type AgentEvent =
    * checkpoint). Persistence adapters should store counts, not the
    * messages themselves (they can be large).
    */
-  | { kind: 'iteration_complete'; iteration: number; messages: AgentMessage[] };
+  | { kind: 'iteration_complete'; iteration: number; messages: AgentMessage[] }
+  /** Mid-run steering (P7b): a drained note was injected as a user message at this iteration boundary (`note` truncated to 200 chars). */
+  | { kind: 'steering_applied'; iteration: number; note: string };
 
 export type AgentRunOptions = {
   initialMessages: AgentMessage[];
@@ -257,6 +294,16 @@ export type AgentRunOptions = {
    */
   onRoundComplete?: AgentRoundCompleteHook;
   /**
+   * Mid-run steering (P7b): drained at each iteration boundary — after tool
+   * results and the iteration_complete checkpoint, before the next model
+   * turn. Notes arrive ALREADY normalized + framed by the steering bus
+   * (openswanSteering.drainOpenSwanSteeringNotes wraps them in the
+   * guidance-only "NOT an approval" framing), so the core injects them
+   * verbatim as user messages — mirroring the appendUserNote precedent.
+   * Guidance only: tool approval gates are untouched.
+   */
+  steering?: { drain: () => string[] };
+  /**
    * Optional pre-turn context compression (Phase CA-8a). When provided,
    * the running message history is summarised before each provider turn
    * once it crosses the threshold. The `summariser` is injected so this
@@ -286,6 +333,179 @@ export type AgentRunResult = {
   /** True if we hit maxIterations without a clean end_turn. */
   hitMaxIterations: boolean;
 };
+
+// ─── Image side channel + binary hygiene (P21) ──────────────────────────────
+//
+// Protocol, in LOCKSTEP across three seams:
+//   1. PRODUCER — `openswanBridge` (and any other tool adapter): a runtime
+//      tool result carrying a large string `base64` field publishes it as
+//      `data.image = { base64, mimeType }` and replaces the field inside
+//      `data.raw` with `binaryOmittedMarker(len)` (never a silent delete —
+//      the model should still know a capture happened).
+//   2. RESHAPERS — `openswanSessionRuntimeAdapters.shapeLegacyToolHandlerResult`
+//      forwards `data.image` untouched while keeping event text/metadata
+//      image-free.
+//   3. CONSUMER — `dispatchOne` below lifts `data.image` into a REAL
+//      Anthropic image block and HARD-strips the payload from the JSON text
+//      portion (smoke-pinned guarantee: the stringified envelope never
+//      contains a base64 payload).
+
+/** Live-image budget: before each provider turn, image blocks beyond the
+ *  most recent N are replaced with `PRUNED_IMAGE_PLACEHOLDER_TEXT`. Two keeps
+ *  a before/after screenshot pair actionable while bounding request size. */
+export const MAX_LIVE_IMAGES = 2;
+
+/** Binary-payload threshold (chars). Anything at or under this stays inline —
+ *  tiny data-URI icons aren't worth an image block; real captures are 100s of KB. */
+export const BINARY_SIDE_CHANNEL_MIN_CHARS = 512;
+
+/** Anthropic-accepted media types; anything else normalizes to image/png
+ *  (what the desktop/browser capture bridges actually emit). */
+const SUPPORTED_IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+export function normalizeImageMediaType(mimeType: unknown): string {
+  return typeof mimeType === 'string' && SUPPORTED_IMAGE_MEDIA_TYPES.has(mimeType)
+    ? mimeType
+    : 'image/png';
+}
+
+/** Replacement text for an omitted binary payload. Marker (not deletion) so
+ *  the model knows the capture happened and how big it was. */
+export function binaryOmittedMarker(charCount: number): string {
+  return `[binary omitted: ${charCount} chars]`;
+}
+
+/**
+ * PRODUCER-side extraction (generic binary-hygiene rule, tool-name agnostic):
+ * if a raw runtime tool result has a string `base64` field longer than
+ * `BINARY_SIDE_CHANNEL_MIN_CHARS`, return the image side channel plus a
+ * shallow-copied result with the payload replaced by the omission marker.
+ * Returns null when the rule doesn't apply (result untouched).
+ */
+export function extractToolResultImageSideChannel(result: unknown): {
+  image: { base64: string; mimeType: string };
+  sanitizedRaw: Record<string, unknown>;
+} | null {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
+  const rec = result as Record<string, unknown>;
+  const base64 = typeof rec.base64 === 'string' ? rec.base64 : null;
+  if (!base64 || base64.length <= BINARY_SIDE_CHANNEL_MIN_CHARS) return null;
+  return {
+    image: { base64, mimeType: normalizeImageMediaType(rec.mimeType) },
+    sanitizedRaw: { ...rec, base64: binaryOmittedMarker(base64.length) },
+  };
+}
+
+/**
+ * CONSUMER-side read: does this tool result `data` carry a usable image side
+ * channel? (Any non-empty string base64 counts here — the producer owns the
+ * size threshold.) Used by `dispatchOne` and by the session adapters'
+ * passthrough so all layers agree on what "an image result" is.
+ */
+export function readToolResultImageSideChannel(
+  data: unknown,
+): { base64: string; mimeType: string } | null {
+  if (!data || typeof data !== 'object') return null;
+  const image = (data as Record<string, unknown>).image;
+  if (!image || typeof image !== 'object') return null;
+  const rec = image as Record<string, unknown>;
+  if (typeof rec.base64 !== 'string' || !rec.base64) return null;
+  return { base64: rec.base64, mimeType: normalizeImageMediaType(rec.mimeType) };
+}
+
+/**
+ * Defensive deep scrub: returns a copy of `value` with EVERY string property
+ * named `base64` longer than `BINARY_SIDE_CHANNEL_MIN_CHARS` replaced by the
+ * omission marker (the producer's short marker strings survive re-scrubbing).
+ * Fail-closed: past the depth cap or on a cycle it returns a placeholder
+ * string rather than the raw subtree, so a pathological result can never
+ * smuggle a payload through. Used for the image-path text envelope and for
+ * telemetry payload hygiene (openswanSessionRuntimeAdapters).
+ */
+export function stripBase64Payloads(value: unknown, depth = 0, seen?: WeakSet<object>): unknown {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value == null) {
+    return value;
+  }
+  if (typeof value !== 'object') return value;
+  if (depth > 8) return '[omitted: nesting too deep]';
+  const tracker = seen ?? new WeakSet<object>();
+  if (tracker.has(value as object)) return '[omitted: circular]';
+  tracker.add(value as object);
+  if (Array.isArray(value)) {
+    return value.map((item) => stripBase64Payloads(item, depth + 1, tracker));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'base64' && typeof v === 'string' && v.length > BINARY_SIDE_CHANNEL_MIN_CHARS) {
+      out[key] = binaryOmittedMarker(v.length);
+    } else {
+      out[key] = stripBase64Payloads(v, depth + 1, tracker);
+    }
+  }
+  return out;
+}
+
+/**
+ * Live-image pruning (P21 image economics). Walks the history and replaces
+ * every image block inside tool_result content arrays EXCEPT the
+ * `maxLiveImages` most recent (counted from the end — deterministic) with a
+ * `PRUNED_IMAGE_PLACEHOLDER_TEXT` text block.
+ *
+ * Mutation contract: the live `messages` ARRAY is updated in place (same
+ * convention as the loop's push/compaction writes), but pruned entries are
+ * REPLACED with fresh message objects — a message's existing content array is
+ * never mutated. That matters because R12 `iteration_complete` checkpoints
+ * (and `onRoundComplete` snapshots) are shallow copies (`[...messages]`) that
+ * SHARE message objects with the live array: replacing (not mutating) means
+ * earlier snapshots keep their full original images and stay coherent.
+ *
+ * tool_use/tool_result pairing is untouched — only parts INSIDE a
+ * tool_result's content array are swapped, never the block itself.
+ * Returns the number of image blocks pruned.
+ */
+export function pruneStaleToolResultImages(messages: AgentMessage[], maxLiveImages: number): number {
+  // Reverse scan: count image blocks newest→oldest; everything past the
+  // budget is a prune target, addressed as "messageIdx → blockIdx:partIdx".
+  let liveSeen = 0;
+  const targets = new Map<number, Set<string>>();
+  for (let mi = messages.length - 1; mi >= 0; mi--) {
+    const content = messages[mi].content;
+    if (typeof content === 'string') continue;
+    for (let bi = content.length - 1; bi >= 0; bi--) {
+      const block = content[bi];
+      if (block.type !== 'tool_result' || typeof block.content === 'string') continue;
+      for (let pi = block.content.length - 1; pi >= 0; pi--) {
+        if (block.content[pi].type !== 'image') continue;
+        liveSeen += 1;
+        if (liveSeen > maxLiveImages) {
+          if (!targets.has(mi)) targets.set(mi, new Set());
+          targets.get(mi)!.add(`${bi}:${pi}`);
+        }
+      }
+    }
+  }
+  if (targets.size === 0) return 0;
+  let pruned = 0;
+  for (const [mi, coords] of targets) {
+    const original = messages[mi];
+    const blocks = original.content as AgentMessageContentBlock[];
+    const nextBlocks = blocks.map((block, bi) => {
+      if (block.type !== 'tool_result' || typeof block.content === 'string') return block;
+      let changed = false;
+      const nextParts = block.content.map((part, pi) => {
+        if (part.type === 'image' && coords.has(`${bi}:${pi}`)) {
+          changed = true;
+          pruned += 1;
+          return { type: 'text' as const, text: PRUNED_IMAGE_PLACEHOLDER_TEXT };
+        }
+        return part;
+      });
+      return changed ? { ...block, content: nextParts } : block;
+    });
+    messages[mi] = { role: original.role, content: nextBlocks };
+  }
+  return pruned;
+}
 
 // ─── Internals ──────────────────────────────────────────────────────────────
 
@@ -355,6 +575,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     resolveAdditionalTools,
     toolParallelPolicyProvider,
     onRoundComplete,
+    steering,
   } = opts;
 
   const emit = (e: AgentEvent) => { try { onEvent?.(e); } catch {} };
@@ -369,6 +590,28 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
   let lastStopReason: ProviderTurnResult['stop_reason'] = 'end_turn';
   let lastText = '';
   let iteration = 0;
+
+  // Progress-based stuck detection (loop-reliability upgrade). A bounded ring
+  // of the most recent dispatched calls (name + stable input hash + ok). When
+  // the loop is about to re-sample the SAME failing (name+input) call a ~3rd
+  // time, `detectRepeatedToolFailure` trips and we STOP-or-replan instead of
+  // running it again — raising the iteration cap would only make a runaway
+  // more expensive. NOT temperature handling: at temperature 0 the model
+  // re-samples the identical action and reproduces the identical failure, so
+  // the exit must be progress-based, not a re-sample retry.
+  // P56: the stuck point consults the solver ONCE per run before stopping;
+  // `lastToolErrorText` carries the most recent failure text (bounded) so the
+  // consultation can quote the real error.
+  let solverConsulted = false;
+  let lastToolErrorText: string | null = null;
+
+  const recentToolCalls: RecentToolCall[] = [];
+  const pushRecentCall = (call: RecentToolCall) => {
+    recentToolCalls.push(call);
+    if (recentToolCalls.length > RECENT_TOOL_CALL_RING_MAX) {
+      recentToolCalls.splice(0, recentToolCalls.length - RECENT_TOOL_CALL_RING_MAX);
+    }
+  };
 
   while (iteration < maxIterations) {
     if (signal?.aborted) break;
@@ -412,6 +655,13 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
       }
     }
 
+    // P21 image economics: keep only the MAX_LIVE_IMAGES most recent image
+    // blocks live in the request; older ones become placeholder text. Runs
+    // before EVERY provider turn (pruned entries are replaced, not mutated,
+    // so R12 checkpoint snapshots keep their originals — see the fn's
+    // mutation contract).
+    pruneStaleToolResultImages(messages, MAX_LIVE_IMAGES);
+
     const turn = await provider.turn({
       messages,
       tools: advertisedTools,
@@ -440,6 +690,72 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
       lastText = extractText(turn.content);
       emit({ kind: 'final_response', iteration, text: lastText });
       return { text: lastText, messages, iterations: iteration, stopReason: 'end_turn', hitMaxIterations: false };
+    }
+
+    // Progress-based stuck-loop exit (BEFORE dispatching this round). If the
+    // model is asking to re-run the SAME single tool with the SAME input that
+    // already failed the last (threshold-1) times, running it again would just
+    // reproduce the identical failure. We project the requested call onto the
+    // recent-call ring as a hypothetical failure and, if that trips
+    // `detectRepeatedToolFailure`, STOP-or-replan instead of dispatching it a
+    // ~3rd time. Guarded to a single-tool round so a legitimate multi-tool
+    // round (or a round mixing different/succeeding calls) is never blocked.
+    if (toolUses.length === 1) {
+      const requested: RecentToolCall = {
+        name: toolUses[0].name,
+        inputHash: hashToolInput(toolUses[0].input),
+        ok: false, // hypothesis: "if we run it and it fails like before…"
+      };
+      const projected = detectRepeatedToolFailure([...recentToolCalls, requested]);
+      if (projected.stuck && shouldConsultSolver({ stuck: true, alreadyConsulted: solverConsulted })) {
+        // P56: before giving up, inject ONE structured fresh-eyes
+        // consultation. The requested call is NOT dispatched (it would fail
+        // identically); its tool_use is closed with an explanatory error
+        // result (transcript stays well-formed), then a solver user message
+        // forces a root-cause + two-different-approaches re-plan. Gates and
+        // constraints are untouched — this changes the plan, not permissions.
+        solverConsulted = true;
+        emit({ kind: 'solver_consultation', iteration, reason: projected.reason });
+        messages.push({
+          role: 'user',
+          content: [{
+            type: 'tool_result',
+            tool_use_id: toolUses[0].id,
+            content: `not executed — this exact call already failed repeatedly (${projected.reason}); a solver consultation follows.`,
+            is_error: true,
+          }],
+        });
+        messages.push({
+          role: 'user',
+          content: buildSolverConsultationMessage({
+            tool: toolUses[0].name,
+            inputPreview: previewToolInput(toolUses[0].input),
+            stuckReason: projected.reason,
+            lastError: lastToolErrorText,
+            availableTools: Array.from(toolsByName.keys()),
+          }),
+        });
+        continue;
+      }
+      if (projected.stuck) {
+        // We do NOT run the failing call again. Close the just-recorded
+        // assistant tool_use with a terminal tool_result (keeps the transcript
+        // well-formed / resumable — no dangling tool_use), stamp `result.text`
+        // with the human-readable stop reason, and end the run. This is a
+        // progress-based exit, distinct from `hitMaxIterations`. When the P56
+        // solver consultation already ran, say so — the blocker is real.
+        const note = solverConsulted
+          ? `stopped: ${projected.reason} — still stuck after a solver consultation; report the blocker to the user.`
+          : `stopped: ${projected.reason} — same failing call not retried; re-observe or ask the user before trying a different approach.`;
+        emit({ kind: 'loop_stopped_no_progress', iteration, reason: projected.reason });
+        messages.push({
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: toolUses[0].id, content: note, is_error: true }],
+        });
+        lastText = note;
+        emit({ kind: 'final_response', iteration, text: lastText });
+        return { text: lastText, messages, iterations: iteration, stopReason: 'end_turn', hitMaxIterations: false };
+      }
     }
 
     const ctx: AgentToolContext = { session, iteration };
@@ -531,11 +847,55 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
       const modelVisible: AgentToolResult = result.ok
         ? { ok: true, data: result.data }
         : { ok: false, error: result.error };
+      // P21 image side channel (CONSUMER seam): a tool result carrying
+      // `data.image` becomes a REAL Anthropic image block so the model can
+      // see captures, while the text envelope is deep-scrubbed so the
+      // stringified JSON can never contain a base64 payload (smoke-pinned).
+      // Non-image results keep the exact legacy string shape.
+      const sideChannelImage = result.ok ? readToolResultImageSideChannel(result.data) : null;
+      if (sideChannelImage && result.ok) {
+        const { image: _omitted, ...dataSansImage } = (result.data ?? {}) as Record<string, unknown>;
+        const scrubbedVisible = stripBase64Payloads({ ok: true, data: dataSansImage });
+        return {
+          type: 'tool_result',
+          tool_use_id: use.id,
+          content: [
+            { type: 'text', text: JSON.stringify(scrubbedVisible) },
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: normalizeImageMediaType(sideChannelImage.mimeType),
+                data: sideChannelImage.base64,
+              },
+            },
+          ],
+          is_error: false,
+        };
+      }
+      // Error path (loop-reliability upgrade): a RAW error fed straight back
+      // makes the model apologize and retry the identical failing call —
+      // especially smaller models. Lead the tool_result with a CLASSIFIED,
+      // ACTIONABLE recovery template at MAX RECENCY ("re-observe the screen"
+      // beats "try again"), followed by the original (clamped) error envelope
+      // so the model still sees exactly what failed. We keep the legacy
+      // `{"ok":false,"error":...}` JSON as the echoed error body so any
+      // downstream parser still finds it — only a recovery preamble is added.
+      // The block SHAPE is unchanged (same `tool_use_id`, `is_error: true`,
+      // string content); SUCCESS results below are byte-identical to before.
+      if (!result.ok) {
+        return {
+          type: 'tool_result',
+          tool_use_id: use.id,
+          content: buildToolFailureFeedback(use.name, JSON.stringify(modelVisible)),
+          is_error: true,
+        };
+      }
       return {
         type: 'tool_result',
         tool_use_id: use.id,
         content: JSON.stringify(modelVisible),
-        is_error: !result.ok,
+        is_error: false,
       };
     };
 
@@ -565,6 +925,34 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
       toolResultBlocks = await runWithConcurrency(toolUses, dispatchOne, effectiveConcurrency);
     }
 
+    // Record this round's calls into the progress-based stuck-detection ring
+    // (name + stable input hash + ok), in original tool_use order. `ok` is read
+    // from the emitted tool_result block's `is_error` so it matches exactly
+    // what the model saw (a policy-blocked / gate-rejected / thrown call all
+    // count as a failure here). The pre-dispatch check above uses this to stop
+    // before re-running an identical failing call a ~3rd time.
+    for (let i = 0; i < toolUses.length; i++) {
+      const block = toolResultBlocks[i];
+      const ok = !(block?.type === 'tool_result' && block.is_error === true);
+      pushRecentCall({ name: toolUses[i].name, inputHash: hashToolInput(toolUses[i].input), ok });
+      // P56: keep the latest failure text (bounded) for the solver
+      // consultation — prefer the readable `.error` when the content is the
+      // JSON envelope, so the consultation quotes the actual message instead
+      // of escaped JSON.
+      if (!ok && block?.type === 'tool_result' && typeof block.content === 'string') {
+        let text = block.content;
+        // Failure content = recovery preamble + the `{"ok":false,"error":…}`
+        // envelope — pull the readable error out of the embedded JSON
+        // (escape-aware, then JSON-unescaped) so the consultation quotes the
+        // actual message, not preamble or escaped bytes.
+        const embedded = text.match(/"error"\s*:\s*"((?:[^"\\]|\\.){1,300})"/);
+        if (embedded) {
+          try { text = JSON.parse(`"${embedded[1]}"`); } catch { text = embedded[1]; }
+        }
+        lastToolErrorText = text.slice(0, 300);
+      }
+    }
+
     // Tool results arrive as a single user-role message containing every
     // tool_result block, in the same order the tools were requested — this
     // is how Anthropic's Messages API expects the follow-up to be shaped.
@@ -574,6 +962,22 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     // history is consistent (tool_use/tool_result pairs closed). Snapshot
     // so later mutation of `messages` doesn't alias into the handler.
     emit({ kind: 'iteration_complete', iteration, messages: [...messages] });
+
+    // Mid-run steering (P7b): drain queued user guidance and inject each note
+    // VERBATIM as a user message — the same shape as onRoundComplete's
+    // appendUserNote below (the bus owns normalization + framing). Skipped on
+    // the final round (no next provider turn to consume it). Best-effort: a
+    // drain throw must never break the loop. Guidance only — tool approval
+    // gates are untouched.
+    if (steering && iteration < maxIterations) {
+      try {
+        for (const note of steering.drain()) {
+          if (typeof note !== 'string' || !note.trim()) continue;
+          messages.push({ role: 'user', content: note });
+          emit({ kind: 'steering_applied', iteration, note: note.slice(0, 200) });
+        }
+      } catch { /* steering is best-effort — never break the loop */ }
+    }
 
     // Round-boundary guidance (O1 nudge parity). Skipped on the final round:
     // there is no next provider turn to consume the note, matching the legacy

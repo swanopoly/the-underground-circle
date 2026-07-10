@@ -83,7 +83,15 @@ export type LegacyToolLoopResult = {
   routing?: SwanBotRoutingInfo;
   incomplete?: boolean;
   checkpoint?: ToolLoopCheckpoint;
-  usage?: { input_tokens: number; output_tokens: number; total_tokens: number };
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    // GAP-2: cache read vs creation kept separate (the ratio that proves cache
+    // discipline works). Additive alongside total_tokens for back-compat.
+    cache_read_tokens: number;
+    cache_creation_tokens: number;
+  };
 };
 
 /** Legacy gate signature (OpenSwanRunCallbacks.onToolApproval). */
@@ -407,12 +415,28 @@ export function createLegacyRoundNudgeHook(args: {
 export type LoopUsageAccumulator = {
   input_tokens: number;
   output_tokens: number;
+  /** Aggregate cache tokens (read + creation) — kept for back-compat. */
   cache_tokens: number;
+  // GAP-2: cache reads vs creation accumulated SEPARATELY. The read:creation
+  // ratio is the exact signal that proves the P26 cache breakpoints work
+  // (high reads = the history/system prefix is being served from cache); the
+  // old single `cache_tokens` sum discarded it. `parseSwanbotToolTurnData`
+  // already reads both fields off each turn's usage — we just stop collapsing
+  // them here.
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
   sawUsage: boolean;
 };
 
 export function createLoopUsageAccumulator(): LoopUsageAccumulator {
-  return { input_tokens: 0, output_tokens: 0, cache_tokens: 0, sawUsage: false };
+  return {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_tokens: 0,
+    cache_read_tokens: 0,
+    cache_creation_tokens: 0,
+    sawUsage: false,
+  };
 }
 
 /** Feed each `turn_end` event's usage into the accumulator. */
@@ -424,24 +448,39 @@ export function accumulateLoopUsage(
   acc.sawUsage = true;
   acc.input_tokens += usage.input_tokens || 0;
   acc.output_tokens += usage.output_tokens || 0;
-  acc.cache_tokens +=
-    (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0);
+  const read = usage.cache_read_input_tokens || 0;
+  const creation = usage.cache_creation_input_tokens || 0;
+  acc.cache_read_tokens += read;
+  acc.cache_creation_tokens += creation;
+  acc.cache_tokens += read + creation;
 }
 
 /**
  * Final usage in the SwanBotStructuredResponse shape. `total_tokens`
  * includes cache reads/creation so the run-status math
  * (`cached = total - (input + output)`) yields the cache token count.
- * Returns undefined when the edge never reported usage (legacy parity: {}).
+ * `cache_read_tokens` / `cache_creation_tokens` carry the split through to
+ * persistence (GAP-2) alongside the aggregate. Returns undefined when the
+ * edge never reported usage (legacy parity: {}).
  */
 export function finalizeLoopUsage(
   acc: LoopUsageAccumulator,
-): { input_tokens: number; output_tokens: number; total_tokens: number } | undefined {
+):
+  | {
+      input_tokens: number;
+      output_tokens: number;
+      total_tokens: number;
+      cache_read_tokens: number;
+      cache_creation_tokens: number;
+    }
+  | undefined {
   if (!acc.sawUsage) return undefined;
   return {
     input_tokens: acc.input_tokens,
     output_tokens: acc.output_tokens,
     total_tokens: acc.input_tokens + acc.output_tokens + acc.cache_tokens,
+    cache_read_tokens: acc.cache_read_tokens,
+    cache_creation_tokens: acc.cache_creation_tokens,
   };
 }
 
@@ -449,12 +488,15 @@ export function finalizeLoopUsage(
 
 /** Anthropic tool shapes the edge fn expects (definition minus handler). */
 export function toAnthropicToolShapes(
-  tools: Array<Pick<AgentToolDefinition, 'name' | 'description' | 'input_schema'>>,
-): Array<{ name: string; description: string; input_schema: Record<string, unknown> }> {
+  tools: Array<Pick<AgentToolDefinition, 'name' | 'description' | 'input_schema' | 'input_examples'>>,
+): Array<{ name: string; description: string; input_schema: Record<string, unknown>; input_examples?: Array<Record<string, unknown>> }> {
   return tools.map((t) => ({
     name: t.name,
     description: t.description,
     input_schema: t.input_schema,
+    // X4 (P47): forward curated input_examples when present (GA, no header;
+    // the edge relay forwards tools verbatim to Anthropic).
+    ...(t.input_examples ? { input_examples: t.input_examples } : {}),
   }));
 }
 
@@ -563,7 +605,7 @@ export function buildLegacyToolLoopResult(args: {
   edgeFailed?: boolean;
   /** Result of the runtime's no-tools finalization call, when it ran. */
   finalizationText?: string | null;
-  usage?: { input_tokens: number; output_tokens: number; total_tokens: number };
+  usage?: LegacyToolLoopResult['usage'];
 }): LegacyToolLoopResult {
   const base = {
     toolEvents: args.toolEvents,

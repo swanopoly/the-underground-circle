@@ -26,12 +26,7 @@ import {
   type SiteAgentReadinessSnapshot,
   type SiteAgentReadinessPriority,
 } from '../../../../lib/siteAgentReadiness';
-import { getBridgeEnvironment, getBridgeUrl } from '../../../../lib/bridgeEnvironment';
-import { probeBridges } from '../../../../lib/bridgeHealthDiag';
-import {
-  buildOfficeBridgeReadinessSnapshot,
-  type OfficeBridgeReadinessSnapshot,
-} from '../../../../lib/officeBridgeReadiness';
+import type { OfficeBridgeReadinessSnapshot } from '../../../../lib/officeBridgeReadiness';
 
 interface Props {
   editable?: boolean;
@@ -313,29 +308,17 @@ export default function Whiteboard({
   }, [circleId, expanded, refreshReadiness]);
 
   const refreshBridgeReadiness = useCallback(async () => {
-    const env = getBridgeEnvironment();
     setBridgeLoading(true);
     setBridgeError(null);
     try {
-      if (!env.available) {
-        setBridgeReadiness(buildOfficeBridgeReadinessSnapshot([], {
-          available: false,
-          unavailableReason: env.reason,
-        }));
-        return;
-      }
-      const results = await probeBridges({
-        timeoutMs: 1500,
-        urlForPort: (port) => getBridgeUrl(port),
-      });
-      setBridgeReadiness(buildOfficeBridgeReadinessSnapshot(results, { available: true }));
+      // Single probe→snapshot owner (O5, P39) — shared with the OfficeTab
+      // main-view readiness strip so the two surfaces can never drift. Probe
+      // failures are folded INTO the snapshot (fail-visible), not thrown.
+      const { runOfficeBridgeReadinessProbe } = await import('../../../../lib/officeBridgeReadinessProbe');
+      setBridgeReadiness(await runOfficeBridgeReadinessProbe({ timeoutMs: 1500 }));
     } catch (error: any) {
-      const message = error?.message || 'Bridge health audit failed.';
-      setBridgeError(message);
-      setBridgeReadiness(buildOfficeBridgeReadinessSnapshot([], {
-        available: true,
-        error: message,
-      }));
+      // The probe helper never throws; belt-and-braces for the import itself.
+      setBridgeError(error?.message || 'Bridge health audit failed.');
     } finally {
       setBridgeLoading(false);
     }
