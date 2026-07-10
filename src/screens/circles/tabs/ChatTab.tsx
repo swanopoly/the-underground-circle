@@ -3122,8 +3122,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 const clarification = await runComputerTaskClarifierCheck({
                   task: trimmed,
                   circleId,
-                  userId: currentUserId || '',
+                  userId: currentUserId || 'anonymous',
                   executionSummary: `browser · ${execution.preview.label}`,
+                  // Parity with the app lane's call inside
+                  // executeComputerTaskWithAgent: without the conversation
+                  // tail / attachment / resolved-app context, this lane
+                  // re-asks questions the user already answered in chat.
+                  appResolutionName: computerPlan.computerRequestRoute?.appResolution?.best?.displayName || null,
+                  hasAttachments: attachments.length > 0,
+                  chatHistoryTail: messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n').slice(-1500),
                   isLaunchOnly: false,
                 });
                 if (clarification) {
@@ -3386,6 +3393,24 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             });
             // L0 escalation breadcrumbs: persist runtime surface escalations onto the durable record fire-and-forget (console/Office cards consume them).
             if (result.surfaceEscalations?.length) void import('../../../lib/computerTaskState').then((m) => m.recordComputerTaskSurfaceEscalations(circleId, activeThreadId, result.surfaceEscalations)).catch(() => {});
+            // P62: a clarification is a QUESTION, not a completed task — the
+            // runtime early-returned before executing anything. Surface it as
+            // needs_input so the outcome pipeline's clarification seam below
+            // renders the questions verbatim and parks the task for resume
+            // (a 'completed' status here used to archive "Computer task
+            // completed" for a task that never ran, and image tasks had the
+            // questions replaced by fabricated proof-failure copy).
+            if (result.clarification) {
+              return {
+                executionKind: 'run_computer_task',
+                status: 'needs_input',
+                message: result.response,
+                data: {
+                  adapterId: result.adapterId,
+                  clarification: result.clarification,
+                },
+              };
+            }
             const completedAutoRetryBuildout = options?.readyCapabilityBuildout
               ? {
                   ...(result.capabilityBuildout || options.readyCapabilityBuildout),
@@ -3481,6 +3506,40 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           ? 'computer-file-adapter'
           : (computerTaskModel || null),
       };
+      // ── P62: clarification seam ─────────────────────────────────────────
+      // A needs_input outcome carrying clarifier questions is a CONVERSATION
+      // turn, not a task outcome. Render the questions VERBATIM (the
+      // sanitize/compaction pipeline below can replace them with credential-
+      // failure or bridge copy), park the original task so the user's next
+      // reply resumes it with the answers folded in (the existing
+      // pendingClarificationRef seam — same resume path as ask_clarification),
+      // clear any planning-phase task card, and skip every completion/failure
+      // surface: no archive line, no failure recovery, no blocked/completed
+      // state.
+      const outcomeClarification = outcome.status === 'needs_input'
+        && outcome.data && typeof outcome.data === 'object'
+        ? (outcome.data as { clarification?: { questions?: unknown[]; assumptions?: unknown[] } }).clarification
+        : null;
+      if (outcomeClarification && typeof outcome.message === 'string' && outcome.message.trim()) {
+        const clarifyKey = activeThreadId || 'main';
+        pendingClarificationRef.current.set(clarifyKey, {
+          originalMessage: trimmed,
+          pendingIntent: null, // default fold-in: `${original} — ${answer}`
+          missingParams: Array.isArray(outcomeClarification.questions)
+            ? outcomeClarification.questions.map(String).slice(0, 3)
+            : [],
+          askedAt: Date.now(),
+        });
+        persistPendingClarifications();
+        setAttentionTick((tick) => tick + 1);
+        setComputerTaskState(null);
+        await clearComputerTaskState(circleId, activeThreadId).catch(() => {});
+        addBotMessage(outcome.message, undefined, {
+          source: computerTaskSource,
+          quickReplies: ['Proceed'],
+        });
+        return { handled: true as const, browser: false };
+      }
       const outcomeGroundingTrace = outcome.data?.groundingTrace as any;
       const outcomeGroundingState: ComputerTaskStateGrounding | null = outcomeGroundingTrace?.display
         ? {
@@ -9246,11 +9305,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         ? formatChatFailureRecoveryOptionSelectionForPrompt(selectedRecoveryOption)
         : '';
       const recentMessages = messages.slice(-10);
-      const chatHistory = recentMessages.map(m => {
+      // P62: the most recent bot message gets a much larger history budget.
+      // "Continue"-style follow-ups (including interrupted-stream partials,
+      // whose UI hint literally says "Say 'continue'") need that answer's
+      // tail — a uniform 300-char slice meant continue only ever saw the
+      // first 300 chars of what it was asked to continue.
+      let lastBotMessageIdx = -1;
+      for (let mi = recentMessages.length - 1; mi >= 0; mi--) {
+        if (recentMessages[mi].isBot) { lastBotMessageIdx = mi; break; }
+      }
+      const chatHistory = recentMessages.map((m, mi) => {
         const who = m.isBot ? agentName : (m.userName || 'User');
         const when = m.timestamp ? m.timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '';
         const ago = m.timestamp ? formatTimeAgo(m.timestamp) : '';
-        return `[${who} · ${when}${ago ? ` · ${ago}` : ''}] ${m.content.slice(0, 300)}`;
+        return `[${who} · ${when}${ago ? ` · ${ago}` : ''}] ${m.content.slice(0, mi === lastBotMessageIdx ? 2000 : 300)}`;
       }).join('\n');
 
       // If replying to a specific message, prepend that context
@@ -9511,6 +9579,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               // be silently re-run as batch.
               let streamAccumulated = '';
               let streamPendingMsgId: string | null = null;
+              // P62: the pending message object + source are captured here so
+              // the catch below can PERSIST an interrupted partial (it used to
+              // live only in local React state and vanished on reload).
+              let streamPendingMsg: ReturnType<typeof addPendingBotMessage> | null = null;
+              let streamSourceForRecovery: ChatMessageSource | null = null;
               let streamInterruptedResult: import('../../../lib/swanbotStream').StreamChatResult | undefined;
               try {
                 const { buildStreamableSystemPrompt } = await import('../../../lib/swanbot');
@@ -9556,6 +9629,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 }
                 const pendingMsg = addPendingBotMessage('');
                 streamPendingMsgId = pendingMsg.id;
+                streamPendingMsg = pendingMsg;
                 setRunStatus('running');
                 let accumulated = '';
                 let streamingUsage: SwanBotStructuredResponse['usage'] | undefined;
@@ -9571,6 +9645,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   selectedModel,
                   effectiveModel: streamModel,
                 };
+                streamSourceForRecovery = streamSource;
                 await new Promise<void>((resolve, reject) => {
                   const handle = streamChatResponse({
                     messages: [
@@ -9731,10 +9806,52 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     recordChatLaneOutcomeNow(laneOutcome);
                   } catch {}
                   if (laneOutcome.status === 'interrupted' && streamAccumulated.length > 0) {
+                    const interruptedContent = `${streamAccumulated}\n\n⚠️ _Stream interrupted — the answer above may be incomplete. Say "continue" to pick up from here._`;
+                    const interruptedSource: ChatMessageSource = streamSourceForRecovery || {
+                      actor: agentName,
+                      surface: 'main_chat_stream',
+                      selectedModel,
+                      effectiveModel: streamCandidateModel,
+                    };
                     if (streamPendingMsgId) {
                       updateBotMessage(streamPendingMsgId, {
-                        content: `${streamAccumulated}\n\n⚠️ _Stream interrupted — the answer above may be incomplete. Say "continue" to pick up from here._`,
+                        content: interruptedContent,
                         isPending: false,
+                        source: interruptedSource,
+                      });
+                    }
+                    // P62 (W5 regression fix): the partial lived ONLY in local
+                    // React state — reload/thread switch dropped the whole
+                    // answer while the user's question persisted, and
+                    // "continue" had nothing to continue from. Persist it
+                    // exactly like the clean-stream path above.
+                    if (activeThreadId && streamPendingMsg) {
+                      saveRecoverableChatMessage(activeThreadId, {
+                        ...streamPendingMsg,
+                        content: interruptedContent,
+                        source: interruptedSource,
+                        isPending: false,
+                        timestamp: new Date(),
+                      });
+                    }
+                    if (currentUserId && activeThreadId && streamPendingMsgId) {
+                      const interruptedMsgId = streamPendingMsgId;
+                      persistMainChatBotMessageWithRetry({
+                        circleId,
+                        userId: currentUserId,
+                        agentName,
+                        content: interruptedContent,
+                        threadId: activeThreadId,
+                        localMessageId: interruptedMsgId,
+                        source: interruptedSource,
+                        usage: null,
+                        onError: (error) => console.error('[ChatTab] persist interrupted stream msg:', error),
+                        onPersisted: (dbId) => {
+                          void removePendingBotMessage(activeThreadId, interruptedMsgId).catch(() => {});
+                          setMessages(prev => prev.map((message) => (
+                            message.id === interruptedMsgId ? { ...message, dbId } : message
+                          )));
+                        },
                       });
                     }
                     streamingBuildCleanupRef.current = null;
@@ -9747,6 +9864,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   // The boundary is observability + a stop decision — its own
                   // failure must never take down the legacy fallback.
                   console.warn('[ChatTab] lane-outcome normalize failed:', boundaryErr);
+                }
+                // P62: pre-handshake failure / zero-text interruption → batch
+                // fallback. Remove the stream's empty pending bubble first —
+                // the batch path creates and resolves its OWN bubble, so the
+                // stream's orphan used to sit as an empty isPending message
+                // forever.
+                if (streamPendingMsgId) {
+                  const orphanId = streamPendingMsgId;
+                  setMessages(prev => prev.filter((message) => message.id !== orphanId));
+                  if (activeThreadId) void removePendingBotMessage(activeThreadId, orphanId).catch(() => {});
                 }
                 console.warn('[ChatTab] Streaming failed, falling back to batch:', streamErr);
                 // Fall through to batch path below

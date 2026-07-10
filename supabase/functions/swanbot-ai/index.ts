@@ -47,6 +47,13 @@ interface RequestBody {
   tools?: Array<{ name: string; description: string; input_schema: Record<string, unknown> }>;
   tool_messages?: Array<{ role: string; content: any }>;
   system_override?: string;
+  // Tool-LESS relay mode: honor `system_override` as the ONLY system prompt
+  // and attach NO tools. Used by single-shot guarded calls (the P54 computer-
+  // task clarifier). Without this flag a tools-free request falls through to
+  // the full tool-enabled persona path — the caller's guardrail prompt is
+  // silently dropped and untrusted content reaches an agent that can execute
+  // tools (security F1). Takes precedence over `tools` if both are sent.
+  tools_disabled?: boolean;
   // ── Context-management opt-in (FLAG-DARK, default OFF) ──
   // Setting either of these opts a relay request into Anthropic's
   // `clear_tool_uses` context editing so long tool loops shed stale
@@ -3657,8 +3664,15 @@ Deno.serve(async (req: Request) => {
     //      translate the response back so the client-side tool loop is
     //      unchanged.
     //   2. Native Anthropic model: forward to api.anthropic.com unchanged.
-    if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
-      const isMarketplaceRelay = !!model && /^(openai|openai_compatible|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|cohere|perplexity|together_ai|fireworks_ai|deepseek|zai|z_ai|minimax|ollama|github-models)\//.test(model);
+    // A third shape rides the same branch: `tools_disabled: true` — a tool-
+    // LESS relay for single-shot guarded calls (P54 clarifier). It honors
+    // system_override, attaches no tools, and never runs marketplace
+    // translation (Anthropic-only; slash-prefixed model ids fall back to the
+    // default Claude model rather than 400ing at Anthropic).
+    const relayToolsDisabled = body.tools_disabled === true;
+    const hasRelayTools = !relayToolsDisabled && !!body.tools && Array.isArray(body.tools) && body.tools.length > 0;
+    if (hasRelayTools || relayToolsDisabled) {
+      const isMarketplaceRelay = hasRelayTools && !!model && /^(openai|openai_compatible|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|cohere|perplexity|together_ai|fireworks_ai|deepseek|zai|z_ai|minimax|ollama|github-models)\//.test(model);
       let routingFallback: { provider: string; reason: string } | null = null;
 
       if (isMarketplaceRelay && circleId) {
@@ -3820,9 +3834,14 @@ Deno.serve(async (req: Request) => {
       // Native Claude ids map through CLAUDE_MODEL_MAP. Marketplace ids
       // must route through their selected provider; if that fails, the
       // branch above returns instead of silently spending Anthropic dollars.
+      // Tool-less relay is Anthropic-only: a slash-prefixed (marketplace)
+      // model id there falls back to the default Claude model instead of
+      // being forwarded raw to Anthropic (which would 400).
       const relayModel = isMarketplaceRelay
         ? "claude-sonnet-4-6"
-        : ((model && CLAUDE_MODEL_MAP[model]) || model || "claude-sonnet-4-6");
+        : (model && CLAUDE_MODEL_MAP[model])
+          || (relayToolsDisabled && model && model.includes("/") ? "claude-sonnet-4-6" : model)
+          || "claude-sonnet-4-6";
       const relayMessages = body.tool_messages && body.tool_messages.length > 0
         ? body.tool_messages
         : [{ role: "user", content: message }];
@@ -3856,7 +3875,9 @@ Deno.serve(async (req: Request) => {
         max_tokens: relayMaxTokens,
         system: [{ type: "text", text: relaySystem, cache_control: { type: "ephemeral" } }],
         messages: cachedRelayMessages,
-        tools: body.tools,
+        // Tool-less mode sends NO tools field at all — the model cannot call
+        // anything, so an abandoned/raced clarifier call is side-effect free.
+        ...(relayToolsDisabled ? {} : { tools: body.tools }),
       };
 
       // Extended thinking for Sonnet/Opus when requested.
@@ -3949,7 +3970,7 @@ Deno.serve(async (req: Request) => {
             outputTokens: Number(relayUsage.output_tokens) || 0,
             cacheCreationTokens: Number(relayUsage.cache_creation_input_tokens) || 0,
             cacheReadTokens: Number(relayUsage.cache_read_input_tokens) || 0,
-            metadata: { relay: true, ...(isMarketplaceRelay ? { marketplace_fallback: true } : {}) },
+            metadata: { relay: true, ...(relayToolsDisabled ? { tools_disabled: true } : {}), ...(isMarketplaceRelay ? { marketplace_fallback: true } : {}) },
           }),
         ).catch((err) => {
           console.warn("[swanbot-ai-relay] logClaudeUsage failed:", (err as any)?.message || err);

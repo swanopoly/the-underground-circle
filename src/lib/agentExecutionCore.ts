@@ -735,6 +735,14 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
             availableTools: Array.from(toolsByName.keys()),
           }),
         });
+        // Fresh 3-strike window after the consultation (edge/legacy loop
+        // parity): clearing the ring lets even the IDENTICAL call dispatch
+        // once more — so a transient failure ("not ready yet", a bridge the
+        // user just started, an approval just granted) can succeed on the
+        // post-consultation attempt instead of being killed undispatched.
+        // If it keeps failing, two more real failures plus the projected
+        // third re-trip the verdict with the consultation spent → hard stop.
+        recentToolCalls.length = 0;
         continue;
       }
       if (projected.stuck) {
@@ -744,8 +752,11 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
         // with the human-readable stop reason, and end the run. This is a
         // progress-based exit, distinct from `hitMaxIterations`. When the P56
         // solver consultation already ran, say so — the blocker is real.
+        // (The consultation may have addressed an EARLIER stuck episode —
+        // "spent" is the accurate claim, not "this exact call was consulted
+        // on".)
         const note = solverConsulted
-          ? `stopped: ${projected.reason} — still stuck after a solver consultation; report the blocker to the user.`
+          ? `stopped: ${projected.reason} — no progress and the run's one solver consultation is already spent; report the blocker to the user.`
           : `stopped: ${projected.reason} — same failing call not retried; re-observe or ask the user before trying a different approach.`;
         emit({ kind: 'loop_stopped_no_progress', iteration, reason: projected.reason });
         messages.push({

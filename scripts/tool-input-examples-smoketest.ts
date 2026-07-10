@@ -9,8 +9,11 @@
  *
  * Also covers: the structural validator's failure classes (unknown key,
  * missing required, enum violation, type mismatch, array bounds, nested item
- * checks), the attach helper's fail-safe drop + non-mutation + cap, and the
- * chokepoint integration (catalog defs actually carry input_examples).
+ * checks), RECURSIVE nested-object validation (required/unknown/enum/type
+ * violations inside object-typed properties, free-form objects still pass,
+ * 4-level depth bound, cyclic-input termination), the attach helper's
+ * fail-safe drop + non-mutation + cap, and the chokepoint integration
+ * (catalog defs actually carry input_examples).
  *
  * `openswanToolRuntime` transitively imports react-native (via the supabase
  * singleton) — same registerHooks stub technique as
@@ -47,6 +50,7 @@ async function main() {
   const {
     TOOL_INPUT_EXAMPLES,
     MAX_INPUT_EXAMPLES_PER_TOOL,
+    MAX_NESTED_VALIDATION_DEPTH,
     validateToolInputExample,
     attachToolInputExamples,
     getToolInputExamples,
@@ -138,6 +142,101 @@ async function main() {
     assert(validateToolInputExample(schema, null as any).length > 0, 'case3: null example rejected');
     assert(validateToolInputExample({ properties: { body: { description: 'free-form' } } }, { body: { anything: true } }).length === 0,
       'case3: untyped property accepts any value (compose_action body)');
+  }
+
+  // ─── Case 3b: recursive nested-OBJECT validation (the 400 blind spot) ────
+  // A nested object violating its sub-schema used to pass with zero problems
+  // — which would sail through smoke + the attach guard and then 400 every
+  // live request carrying the example. These cases pin the recursion.
+  {
+    const schema = {
+      type: 'object',
+      properties: {
+        goal: { type: 'string' },
+        target: {
+          type: 'object',
+          properties: {
+            kind: { type: 'string', enum: ['layer', 'frame'] },
+            name: { type: 'string' },
+            geometry: {
+              type: 'object',
+              properties: { x: { type: 'number' }, y: { type: 'number' } },
+              required: ['x', 'y'],
+            },
+          },
+          required: ['kind', 'name'],
+        },
+        body: { type: 'object' }, // type object but NO properties → free-form
+      },
+      required: ['goal'],
+    };
+
+    // (a) nested object missing a required sub-key
+    const missingSub = validateToolInputExample(schema, { goal: 'g', target: { kind: 'layer' } });
+    assert(missingSub.some((p) => p.includes('target') && p.includes('missing required "name"')),
+      'case3b: nested object missing required sub-key caught', missingSub.join('; '));
+
+    // (b) nested unknown key where sub-properties ARE declared
+    const unknownSub = validateToolInputExample(schema, { goal: 'g', target: { kind: 'layer', name: 'Hero', bogus: 1 } });
+    assert(unknownSub.some((p) => p.includes('target') && p.includes('unknown key "bogus"')),
+      'case3b: nested object unknown key caught (sub-properties declared)', unknownSub.join('; '));
+
+    // nested enum + nested primitive type mismatch
+    assert(validateToolInputExample(schema, { goal: 'g', target: { kind: 'path', name: 'x' } })
+      .some((p) => p.includes('kind') && p.includes('enum')),
+      'case3b: nested enum violation caught');
+    assert(validateToolInputExample(schema, { goal: 'g', target: { kind: 'layer', name: 42 } })
+      .some((p) => p.includes('name') && p.includes('expected type string')),
+      'case3b: nested primitive type mismatch caught');
+
+    // (c) free-form object property (type:'object', NO declared sub-properties)
+    // with arbitrary keys must still pass — compose_action's `body` shape.
+    assert(validateToolInputExample(schema, { goal: 'g', body: { anything: true, nested: { deep: [1, 'two'] } } }).length === 0,
+      'case3b: free-form object property (no declared sub-properties) passes');
+
+    // (d) doubly-nested violation (target.geometry missing required "y")
+    const deepViolation = validateToolInputExample(schema, {
+      goal: 'g',
+      target: { kind: 'layer', name: 'Hero', geometry: { x: 1 } },
+    });
+    assert(deepViolation.some((p) => p.includes('geometry') && p.includes('missing required "y"')),
+      'case3b: doubly-nested required violation caught', deepViolation.join('; '));
+
+    // fully conforming nested example passes
+    assert(validateToolInputExample(schema, {
+      goal: 'g',
+      target: { kind: 'frame', name: 'Hero', geometry: { x: 1, y: 2 } },
+    }).length === 0, 'case3b: conforming nested example passes');
+
+    // depth bound: scalar checks reach depth 4; children OF a depth-4
+    // container are past the documented bound and pass unvalidated.
+    assert((MAX_NESTED_VALIDATION_DEPTH as number) === 4,
+      'case3b: depth bound is 4 (update the depth-bound cases below if changed)');
+    const deepSchema = {
+      type: 'object',
+      properties: {
+        a: { type: 'object', properties: {                       // a  = depth 1
+          b: { type: 'object', properties: {                     // b  = depth 2
+            c: { type: 'object', properties: {                   // c  = depth 3
+              d: { type: 'object', properties: { e: { type: 'string' } }, required: ['e'] }, // d = depth 4
+            } },
+          } },
+        } },
+      },
+    };
+    assert(validateToolInputExample(deepSchema, { a: { b: { c: { d: 5 } } } })
+      .some((p) => p.includes('expected type object')),
+      'case3b: violation AT depth 4 still caught (scalar check)');
+    assert(validateToolInputExample(deepSchema, { a: { b: { c: { d: {} } } } }).length === 0,
+      'case3b: violation BELOW depth 4 (missing required inside depth-4 container) passes — documented bound');
+
+    // cyclic schema + cyclic value terminate at the depth bound (never throws/hangs)
+    const cycSchema: any = { type: 'object', properties: {} };
+    cycSchema.properties.self = cycSchema;
+    const cycValue: any = {};
+    cycValue.self = cycValue;
+    assert(Array.isArray(validateToolInputExample(cycSchema, cycValue)),
+      'case3b: cyclic schema+value terminate at the depth bound');
   }
 
   // ─── Case 4: attach helper — fail-safe drop + non-mutation + passthrough ─

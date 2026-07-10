@@ -9,8 +9,13 @@
  *     structure, bounded fields, quoted error, tool list, gate untouched)
  *   - shouldConsultSolver gate (once per run)
  *   - E2E stuck path: 2 real failures → 3rd identical request triggers ONE
- *     solver_consultation (call NOT dispatched) → model retries same →
- *     loop_stopped_no_progress ("still stuck after a solver consultation")
+ *     solver_consultation (that call NOT dispatched; ring cleared for a
+ *     fresh post-consultation window — edge/legacy loop parity) → model
+ *     keeps retrying the identical call → 2 more real failures → next
+ *     identical request → loop_stopped_no_progress (consultation spent)
+ *   - E2E transient path: consultation → the SAME call dispatches again and
+ *     SUCCEEDS (fail-fail-succeed must be recoverable, not killed
+ *     undispatched)
  *   - E2E recovery path: consultation → model switches tool → run completes
  *     normally (no loop_stopped)
  *   - transcript stays well-formed (every tool_use closed by a tool_result)
@@ -121,8 +126,10 @@ async function main() {
       provider: scriptedProvider([
         failingClick('t1'),
         failingClick('t2'),
-        failingClick('t3'), // 3rd identical → solver consultation (not dispatched)
-        failingClick('t4'), // ignores the consultation → hard stop
+        failingClick('t3'), // 3rd identical → solver consultation (not dispatched; ring cleared)
+        failingClick('t4'), // post-consultation retry — DISPATCHES (fresh window), fails
+        failingClick('t5'), // dispatches again, fails
+        failingClick('t6'), // 3rd identical post-consultation → hard stop (not dispatched)
       ]),
       tools,
       initialMessages: [{ role: 'user', content: 'Export the document' }],
@@ -134,9 +141,9 @@ async function main() {
     const stops = events.filter((e) => e.kind === 'loop_stopped_no_progress');
     assert(consults.length === 1, 'case2: exactly ONE solver consultation', `got ${consults.length}`);
     assert(stops.length === 1, 'case2: hard stop still fires after ignored consultation');
-    assert(dispatches === 2, 'case2: the identical call dispatched only twice (3rd + 4th never ran)', `got ${dispatches}`);
-    assert(result.text.includes('still stuck after a solver consultation'),
-      'case2: final text says the consultation already happened', result.text);
+    assert(dispatches === 4, 'case2: 2 pre-consultation + 2 post-consultation dispatches (3rd + 6th requests closed undispatched)', `got ${dispatches}`);
+    assert(result.text.includes('solver consultation is already spent'),
+      'case2: final text says the one consultation is spent', result.text);
 
     const consultIdx = events.findIndex((e) => e.kind === 'solver_consultation');
     const stopIdx = events.findIndex((e) => e.kind === 'loop_stopped_no_progress');
@@ -161,6 +168,41 @@ async function main() {
     }
     assert(useIds.length > 0 && useIds.every((id) => resultIds.includes(id)),
       'case2: every tool_use closed by a tool_result (resumable transcript)');
+  }
+
+  // ─── Case 2b: E2E — transient failure succeeds on the post-consultation
+  // retry of the IDENTICAL call (fail-fail-succeed must be recoverable) ────
+  {
+    const events: AgentEvent[] = [];
+    let attempts = 0;
+    const tools = makeTools();
+    tools[0].handler = async () => {
+      attempts += 1;
+      return attempts >= 3
+        ? { ok: true, data: { clicked: 'Export' } }
+        : { ok: false, error: 'transient: app not ready yet' };
+    };
+
+    const result = await runAgent({
+      provider: scriptedProvider([
+        failingClick('u1'),
+        failingClick('u2'),
+        failingClick('u3'), // → consultation (not dispatched; ring cleared)
+        failingClick('u4'), // identical retry — dispatches and SUCCEEDS
+        { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Export clicked — done.' }] },
+      ]),
+      tools,
+      initialMessages: [{ role: 'user', content: 'Export the document' }],
+      maxIterations: 10,
+      onEvent: (e) => events.push(e),
+    });
+
+    assert(events.filter((e) => e.kind === 'solver_consultation').length === 1,
+      'case2b: one consultation before the transient recovery');
+    assert(events.filter((e) => e.kind === 'loop_stopped_no_progress').length === 0,
+      'case2b: NO hard stop — the identical retry was allowed to dispatch');
+    assert(attempts === 3, 'case2b: third attempt of the identical call ran and succeeded', `got ${attempts}`);
+    assert(result.text.includes('done'), 'case2b: run completed normally after the transient cleared');
   }
 
   // ─── Case 3: E2E — consultation leads to recovery ───────────────────────

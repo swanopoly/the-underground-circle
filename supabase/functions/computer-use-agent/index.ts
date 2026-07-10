@@ -947,6 +947,12 @@ Deno.serve(async (req: Request) => {
             | { type: string; tool_use_id: string; content: any }
             | { type: "text"; text: string }
           > = [];
+          // Did THIS round push anything into the stuck-detection ring?
+          // Gate-handled calls (ask_user, fill_saved_login, pay-floor block)
+          // deliberately don't touch the ring — so a round made ONLY of them
+          // must not re-evaluate the ring's stale tail, or the run gets
+          // killed right after the user answered (stale-verdict bug).
+          let ringTouchedThisRound = false;
           for (const tu of toolUses) {
             emit("action", { tool: tu.name, input: tu.input });
             recordProgress(iter + 1, tu.name, tu.input);
@@ -1083,6 +1089,7 @@ Deno.serve(async (req: Request) => {
               // model's job to judge from pixels).
               browserActionRing.push({ name: tu.name, inputHash: hashToolInput(tu.input), ok: true });
               if (browserActionRing.length > 24) browserActionRing.splice(0, browserActionRing.length - 24);
+              ringTouchedThisRound = true;
             } catch (err: any) {
               emit("error", { message: `Tool ${tu.name} failed: ${err?.message || err}` });
               toolResults.push({
@@ -1093,6 +1100,7 @@ Deno.serve(async (req: Request) => {
               // P61: record the failure for the progress-based detector.
               browserActionRing.push({ name: tu.name, inputHash: hashToolInput(tu.input), ok: false });
               if (browserActionRing.length > 24) browserActionRing.splice(0, browserActionRing.length - 24);
+              ringTouchedThisRound = true;
               lastBrowserToolError = String(err?.message || err).slice(0, 300);
               lastFailingBrowserCall = { tool: tu.name, input: tu.input };
             }
@@ -1112,7 +1120,13 @@ Deno.serve(async (req: Request) => {
           // same user turn as the tool results (text AFTER tool_result blocks
           // — the steering precedent); gates (ask_user, pay floor) are
           // untouched — it changes the plan, never permissions.
-          const stuckVerdict = detectRepeatedToolFailure(browserActionRing);
+          // Only evaluate on rounds that actually recorded a ring entry:
+          // gate-only rounds (ask_user answer, saved-login fill, pay-floor
+          // block) would otherwise re-fire the STALE pre-consultation verdict
+          // and kill the run right after the user unblocked it.
+          const stuckVerdict = ringTouchedThisRound
+            ? detectRepeatedToolFailure(browserActionRing)
+            : { stuck: false, reason: "" };
           if (stuckVerdict.stuck) {
             if (shouldConsultSolver({ stuck: true, alreadyConsulted: solverConsulted })) {
               solverConsulted = true;
@@ -1128,8 +1142,12 @@ Deno.serve(async (req: Request) => {
                   lastObservation: lastKnownUrl ? `current page: ${lastKnownUrl}` : null,
                 }),
               });
+              // Fresh window for the consultation's advice: the model gets a
+              // full 3-strike run at a DIFFERENT approach before the
+              // (consultation-spent) verdict below can terminate the run.
+              browserActionRing.length = 0;
             } else {
-              const stopMessage = `Stopped: ${stuckVerdict.reason} — still stuck after a solver consultation. The same browser action keeps erroring; the session is preserved so you can take over or retry with different instructions.`;
+              const stopMessage = `Stopped: ${stuckVerdict.reason} — no progress and the run's one solver consultation is already spent. The session is preserved so you can take over or retry with different instructions.`;
               await emitPartialResult(iter + 1, "stuck_no_progress", stopMessage);
               emit("error", { message: stopMessage });
               messages.push({ role: "user", content: toolResults });

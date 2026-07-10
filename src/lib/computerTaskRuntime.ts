@@ -663,11 +663,15 @@ export async function runComputerTaskClarifierCheck(input: {
       isLaunchOnly: input.isLaunchOnly,
     });
     if (!gate.run) return null;
-    markClarifierAsked(gate.key);
 
     const { supabase } = await import('./supabase');
     const { getFreshAccessToken } = await import('./authSession');
     const accessToken = await getFreshAccessToken().catch(() => null);
+    // `tools_disabled` routes this through swanbot-ai's tool-LESS relay leg:
+    // system_override is honored as the ONLY system prompt and no tools are
+    // attached. Without it the call falls through to the full tool-enabled
+    // persona path — the clarifier schema never reaches the model AND raw
+    // chat history lands in an agent that can execute tools (security F1).
     const invoke = supabase.functions.invoke('swanbot-ai', {
       headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
       body: {
@@ -682,6 +686,7 @@ export async function runComputerTaskClarifierCheck(input: {
         userId: input.userId,
         model: 'claude-haiku-4-5',
         system_override: CLARIFIER_SYSTEM_PROMPT,
+        tools_disabled: true,
       },
     });
     const raced: any = await Promise.race([
@@ -692,6 +697,11 @@ export async function runComputerTaskClarifierCheck(input: {
       || (Array.isArray(raced?.data?.content)
         ? raced.data.content.filter((b: any) => b?.type === 'text').map((b: any) => b.text).join('\n')
         : '');
+    // Consume the ONE-SHOT slot only when the model actually replied. A
+    // timeout/transport failure must not forfeit the task's single
+    // clarification (it fails open to execution this run; a later identical
+    // task deserves a fresh chance to ask).
+    if (replyText.trim()) markClarifierAsked(gate.key);
     const verdict = parseClarifierResponse(replyText);
     if (!verdict.ready && verdict.questions.length > 0) {
       return {

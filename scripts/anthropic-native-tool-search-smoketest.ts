@@ -58,11 +58,14 @@ function main() {
     for (const supported of [
       'claude-fable-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6',
       'claude-opus-4-5-20251101', 'claude-sonnet-4-6', 'claude-sonnet-4-5-20250929',
-      'claude-sonnet-5', 'claude-haiku-4-5-20251001', 'claude-haiku-4-5',
+      'claude-haiku-4-5-20251001', 'claude-haiku-4-5',
     ]) {
       assert(isNativeToolSearchSupportedModel(supported), `case3: ${supported} supported`);
     }
     for (const unsupported of [
+      // claude-sonnet-5: NOT on the tool-search doc's compatibility table
+      // (fail closed — compaction's separate doc DOES list Sonnet 5).
+      'claude-sonnet-5',
       'claude-opus-4-1', 'claude-3-5-sonnet-20241022', 'auto', 'blackswan',
       'deepseek/deepseek-reasoner', 'openrouter/auto', 'huggingface_endpoint/cswan801/BlackSwan-v5',
       '', null, undefined,

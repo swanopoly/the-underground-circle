@@ -139,13 +139,28 @@ export function getToolInputExamples(toolName: string): ReadonlyArray<Record<str
 
 type JsonSchemaLike = {
   type?: string;
-  properties?: Record<string, JsonSchemaLike & { enum?: unknown[]; items?: JsonSchemaLike }>;
+  properties?: Record<string, JsonSchemaLike>;
   required?: string[];
   enum?: unknown[];
   items?: JsonSchemaLike;
   minItems?: number;
   maxItems?: number;
 };
+
+/**
+ * Nested-validation depth bound. `depth` counts container levels below the
+ * example root (root object = 0, its property values = 1, their items /
+ * sub-properties = 2, ...). Scalar checks (type, enum, array bounds) run on
+ * values through depth 4; a container AT depth 4 does not have its children
+ * enumerated (they pass unvalidated). Curated examples are ≤3 levels deep
+ * today — the bound exists to keep the validator O(size) and terminating
+ * even on pathological or cyclic schemas/values, never to skip real checks.
+ */
+export const MAX_NESTED_VALIDATION_DEPTH = 4;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 function typeMatches(schemaType: string | undefined, value: unknown): boolean {
   if (!schemaType) return true; // untyped property (e.g. free-form body) — anything goes
@@ -154,17 +169,103 @@ function typeMatches(schemaType: string | undefined, value: unknown): boolean {
     case 'number': case 'integer': return typeof value === 'number' && Number.isFinite(value);
     case 'boolean': return typeof value === 'boolean';
     case 'array': return Array.isArray(value);
-    case 'object': return typeof value === 'object' && value !== null && !Array.isArray(value);
+    case 'object': return isPlainObject(value);
     default: return true;
+  }
+}
+
+/**
+ * Validate one value against one (sub-)schema node. Type/enum/array-bound
+ * checks always run; descent into array items and object properties stops at
+ * MAX_NESTED_VALIDATION_DEPTH. Problem paths read like
+ * `key "pairs"[0] missing required "changeText"` or
+ * `key "target".geometry expected type number`.
+ */
+function validateValueAgainstSchema(
+  prop: JsonSchemaLike | null | undefined,
+  value: unknown,
+  path: string,
+  depth: number,
+  problems: string[],
+): void {
+  if (!prop || typeof prop !== 'object' || Array.isArray(prop)) return; // no usable constraints declared
+  if (!typeMatches(prop.type, value)) {
+    problems.push(`${path} expected type ${prop.type}`);
+    return;
+  }
+  if (Array.isArray(prop.enum) && !prop.enum.includes(value)) {
+    problems.push(`${path} value not in enum`);
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (typeof prop.minItems === 'number' && value.length < prop.minItems) {
+      problems.push(`${path} below minItems`);
+    }
+    if (typeof prop.maxItems === 'number' && value.length > prop.maxItems) {
+      problems.push(`${path} above maxItems`);
+    }
+    const itemSchema = prop.items;
+    if (itemSchema && typeof itemSchema === 'object' && depth < MAX_NESTED_VALIDATION_DEPTH) {
+      value.forEach((item, index) => {
+        validateValueAgainstSchema(itemSchema, item, `${path}[${index}]`, depth + 1, problems);
+      });
+    }
+    return;
+  }
+  if (isPlainObject(value) && depth < MAX_NESTED_VALIDATION_DEPTH) {
+    validateObjectAgainstSchema(prop, value, path, depth, problems);
+  }
+}
+
+/**
+ * Validate an object's keys against an object (sub-)schema node. `required`
+ * is enforced whenever declared. Unknown-key checks apply ONLY when the node
+ * declares a `properties` map — a free-form object schema (no `properties`,
+ * e.g. integration.compose_action's `body`) accepts arbitrary keys/values.
+ * `depth` is the container depth of `value` itself; its children are
+ * validated at depth + 1.
+ */
+function validateObjectAgainstSchema(
+  schema: JsonSchemaLike,
+  value: Record<string, unknown>,
+  path: string, // '' when `value` is the example root
+  depth: number,
+  problems: string[],
+): void {
+  const declaredProps: Record<string, JsonSchemaLike> | null =
+    schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+      ? schema.properties
+      : null;
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  const atRoot = path === '';
+
+  for (const key of required) {
+    if (!(key in value)) {
+      problems.push(atRoot ? `missing required key "${key}"` : `${path} missing required "${key}"`);
+    }
+  }
+  for (const [key, entry] of Object.entries(value)) {
+    const prop = declaredProps && Object.prototype.hasOwnProperty.call(declaredProps, key)
+      ? declaredProps[key]
+      : undefined;
+    if (declaredProps && prop === undefined) {
+      problems.push(atRoot ? `unknown key "${key}"` : `${path} unknown key "${key}"`);
+      continue;
+    }
+    validateValueAgainstSchema(prop, entry, atRoot ? `key "${key}"` : `${path}.${key}`, depth + 1, problems);
   }
 }
 
 /**
  * Structural check of one example against a tool `input_schema`. Not a full
  * JSON Schema validator — it covers exactly the failure classes that would
- * 400 the request or mislead the model: unknown keys, missing required keys,
- * enum violations, wrong primitive types, array bounds, and (one level deep)
- * the same checks on object array items. Returns [] when the example passes.
+ * 400 the request or mislead the model: unknown keys (only where the schema
+ * declares a `properties` map — free-form/untyped object properties pass),
+ * missing required keys, enum violations, wrong primitive types, and array
+ * bounds — applied RECURSIVELY through nested object properties and array
+ * items down to MAX_NESTED_VALIDATION_DEPTH container levels. Returns []
+ * when the example passes. Never throws; cyclic schemas or values terminate
+ * at the depth bound.
  */
 export function validateToolInputExample(
   schema: Record<string, unknown> | null | undefined,
@@ -174,61 +275,8 @@ export function validateToolInputExample(
   if (!example || typeof example !== 'object' || Array.isArray(example)) {
     return ['example is not an object'];
   }
-  const s = (schema || {}) as JsonSchemaLike;
-  const properties = s.properties && typeof s.properties === 'object' ? s.properties : {};
-  const required = Array.isArray(s.required) ? s.required : [];
-
-  for (const key of required) {
-    if (!(key in example)) problems.push(`missing required key "${key}"`);
-  }
-  for (const [key, value] of Object.entries(example)) {
-    const prop = properties[key];
-    if (!prop) {
-      problems.push(`unknown key "${key}"`);
-      continue;
-    }
-    if (!typeMatches(prop.type, value)) {
-      problems.push(`key "${key}" expected type ${prop.type}`);
-      continue;
-    }
-    if (Array.isArray(prop.enum) && !prop.enum.includes(value)) {
-      problems.push(`key "${key}" value not in enum`);
-      continue;
-    }
-    if (prop.type === 'array' && Array.isArray(value)) {
-      if (typeof prop.minItems === 'number' && value.length < prop.minItems) {
-        problems.push(`key "${key}" below minItems`);
-      }
-      if (typeof prop.maxItems === 'number' && value.length > prop.maxItems) {
-        problems.push(`key "${key}" above maxItems`);
-      }
-      const itemSchema = prop.items;
-      if (itemSchema && itemSchema.type === 'object') {
-        const itemProps = itemSchema.properties || {};
-        const itemRequired = Array.isArray(itemSchema.required) ? itemSchema.required : [];
-        value.forEach((item, index) => {
-          if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-            problems.push(`key "${key}"[${index}] is not an object`);
-            return;
-          }
-          for (const requiredKey of itemRequired) {
-            if (!(requiredKey in (item as Record<string, unknown>))) {
-              problems.push(`key "${key}"[${index}] missing required "${requiredKey}"`);
-            }
-          }
-          for (const itemKey of Object.keys(item as Record<string, unknown>)) {
-            if (!itemProps[itemKey]) problems.push(`key "${key}"[${index}] unknown key "${itemKey}"`);
-          }
-        });
-      } else if (itemSchema && itemSchema.type) {
-        value.forEach((item, index) => {
-          if (!typeMatches(itemSchema.type, item)) {
-            problems.push(`key "${key}"[${index}] expected type ${itemSchema.type}`);
-          }
-        });
-      }
-    }
-  }
+  const s = (schema && typeof schema === 'object' && !Array.isArray(schema) ? schema : {}) as JsonSchemaLike;
+  validateObjectAgainstSchema(s, example as Record<string, unknown>, '', 0, problems);
   return problems;
 }
 

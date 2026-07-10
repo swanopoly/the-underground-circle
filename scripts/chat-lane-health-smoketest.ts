@@ -11,6 +11,11 @@
  *   - WARN-only hint semantics (healthy/unrecorded/stale → null)
  *   - archive tags (lane_degraded, streak, degradation scope)
  *   - report formatting (empty state + populated), bounds/eviction, reset
+ *   - PER-EVENT staleness: stale failures are excluded from the streak/rate
+ *     floors, so one fresh success cannot resurrect an old alarm, while
+ *     fresh failures within the window degrade exactly as before
+ *   - rate-based degradation copy states the rate ("N of last M failed"),
+ *     never "0 fail(s)" / "0 consecutive failure(s)"
  *
  * Run: npm run smoke:chat-lane-health
  */
@@ -224,6 +229,88 @@ function main() {
     assert(buildChatLaneHealthStripModel(T0 + LANE_HEALTH_STALENESS_MS + 60_000) === null,
       'case9: stale degradation → null (no crying wolf on the Office view)');
     assert(isolated.headline.length <= 120 && isolated.detail.length <= 220, 'case9: strip text bounded');
+  }
+
+  // ─── Case 10: stale failures cannot be resurrected by one fresh event ───
+  // The confirmed repro: 3 stream failures → 40 min silence (strip correctly
+  // null) → ONE fresh SUCCESS lands. Before the fix, the whole-ring rate
+  // (3/4 ≥ 50%) re-raised "LANE DEGRADED — stream: 0 fail(s)".
+  {
+    resetChatLaneHealth();
+    for (let i = 0; i < 3; i += 1) {
+      recordChatLaneTerminal({ lane: 'stream', status: 'failed', reason: 'stream_error' }, T0 + i);
+    }
+    const later = T0 + LANE_HEALTH_STALENESS_MS + 10 * 60_000; // failures now 40 min old
+    assert(buildChatLaneHealthStripModel(later) === null,
+      'case10: stale failures alone → strip null (pre-existing rule kept)');
+    recordChatLaneTerminal({ lane: 'stream', status: 'completed' }, later);
+    const after = later + 1000;
+    assert(assessChatLaneDegradation(after).scope === 'none',
+      'case10: one fresh success does NOT resurrect stale failures (assessment)');
+    const strip = buildChatLaneHealthStripModel(after);
+    assert(strip === null,
+      'case10: one fresh success does NOT resurrect stale failures (strip)', JSON.stringify(strip));
+    assert(getChatLaneHealthHint('stream', after) === null,
+      'case10: no warn hint after stale failures + fresh success');
+    assert(buildChatLaneHealthTags('stream', after).length === 0,
+      'case10: no tags after stale failures + fresh success');
+    const [health] = getChatLaneHealthSnapshot(after);
+    assert(!health.degraded && health.consecutiveFailures === 0 && health.failureRate === 0
+      && health.freshFailures === 0 && health.freshWindow === 1,
+      'case10: snapshot(now) computes streak/rate over fresh events only',
+      JSON.stringify({ streak: health.consecutiveFailures, rate: health.failureRate }));
+    assert(health.total === 4 && health.failed === 3 && health.completed === 1,
+      'case10: whole-ring session counts still recorded for history surfaces');
+  }
+
+  // ─── Case 11: rate-based degradation copy states the rate ───────────────
+  // fail/ok/fail/ok in the fresh window: rate floor fires with streak 0. The
+  // copy must say "2 of last 4 failed", never "0 fail(s)"/"0 consecutive".
+  {
+    resetChatLaneHealth();
+    recordChatLaneTerminal({ lane: 'batch', status: 'failed', reason: 'provider_5xx' }, T0);
+    recordChatLaneTerminal({ lane: 'batch', status: 'completed' }, T0 + 1);
+    recordChatLaneTerminal({ lane: 'batch', status: 'failed', reason: 'provider_5xx' }, T0 + 2);
+    recordChatLaneTerminal({ lane: 'batch', status: 'completed' }, T0 + 3);
+    const [health] = getChatLaneHealthSnapshot(T0 + 10);
+    assert(health.degraded && health.consecutiveFailures === 0,
+      'case11: rate floor fires with streak 0 (setup)');
+    const strip = buildChatLaneHealthStripModel(T0 + 10);
+    assert(!!strip && strip.headline.includes('2 of last 4 failed'),
+      'case11: rate-based strip headline states the rate', strip?.headline ?? 'null');
+    assert(!!strip && !strip.headline.includes('0 fail'),
+      'case11: strip headline never says "0 fail(s)"', strip?.headline ?? 'null');
+    const hint = getChatLaneHealthHint('batch', T0 + 10);
+    assert(!!hint && hint.includes('2 of last 4 failed') && !hint.includes('0 consecutive'),
+      'case11: rate-based hint states the rate, never "0 consecutive"', hint ?? 'null');
+  }
+
+  // ─── Case 12: fresh failures still degrade exactly as before ────────────
+  // Stale failures are excluded from the streak, but a fresh streak crossing
+  // the floor alarms with the original streak copy.
+  {
+    resetChatLaneHealth();
+    recordChatLaneTerminal({ lane: 'openswan_v2', status: 'failed', reason: 'provider_5xx' }, T0);
+    recordChatLaneTerminal({ lane: 'openswan_v2', status: 'failed', reason: 'provider_5xx' }, T0 + 1);
+    const later = T0 + LANE_HEALTH_STALENESS_MS + 5 * 60_000; // the two above are stale
+    recordChatLaneTerminal({ lane: 'openswan_v2', status: 'failed', reason: 'provider_5xx' }, later);
+    recordChatLaneTerminal({ lane: 'openswan_v2', status: 'failed', reason: 'provider_5xx' }, later + 1);
+    assert(!getChatLaneHealthSnapshot(later + 2)[0].degraded,
+      'case12: 2 fresh failures + stale history → below floors, still quiet');
+    assert(buildChatLaneHealthStripModel(later + 2) === null,
+      'case12: stale failures cannot tip a sub-floor fresh lane into alarm');
+    recordChatLaneTerminal({ lane: 'openswan_v2', status: 'failed', reason: 'provider_5xx' }, later + 2);
+    const [health] = getChatLaneHealthSnapshot(later + 3);
+    assert(health.degraded && health.consecutiveFailures === DEGRADED_STREAK_FLOOR,
+      'case12: 3 fresh failures degrade; streak counts fresh events only',
+      `streak=${health.consecutiveFailures}`);
+    const strip = buildChatLaneHealthStripModel(later + 3);
+    assert(!!strip && strip.tone === 'warn' && strip.headline.includes('3 fail')
+      && strip.headline.includes('provider_5xx'),
+      'case12: fresh streak degradation keeps the original streak copy', strip?.headline ?? 'null');
+    const hint = getChatLaneHealthHint('openswan_v2', later + 3);
+    assert(!!hint && hint.includes('3 consecutive'),
+      'case12: fresh streak hint unchanged', hint ?? 'null');
   }
 
   console.log(failures === 0 ? '\nchat-lane-health smoke: ALL GREEN' : `\n${failures} FAILURES`);

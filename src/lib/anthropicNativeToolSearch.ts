@@ -19,8 +19,12 @@
  *     (or the `bm25` variant). GA — NO beta header.
  *   - Every tool's FULL definition is sent on every request, deferred ones
  *     included (the API needs them server-side to search + expand).
- *   - Never defer the search tool itself; at least one tool must stay
- *     non-deferred or the API 400s ("All tools cannot be deferred").
+ *   - Never defer the search tool itself. The API requires at least one
+ *     non-deferred tool, and the doc says the (never-deferred) search tool
+ *     itself normally serves that role — so search + all-others-deferred is
+ *     a doc-valid shape (what this builder emits when nothing is pinned).
+ *     The 400 fires only when literally every tool, search included, is
+ *     deferred.
  *   - A deferred tool must NOT carry `cache_control` (400) — scrubbed here.
  *   - Search results arrive as `server_tool_use` + `tool_search_tool_result`
  *     blocks; NEVER return a tool_result for a `srvtoolu_...` id; pass both
@@ -85,7 +89,10 @@ const SUPPORTED_MODEL_PATTERNS: ReadonlyArray<RegExp> = [
   /^claude-mythos-5/,
   /^claude-opus-4-[5-8]/,
   /^claude-sonnet-4-[5-6]/,
-  /^claude-sonnet-5/,
+  // NOTE: claude-sonnet-5 is deliberately absent — the tool-search doc's
+  // compatibility table has no Sonnet 5 row, and this list fails CLOSED on
+  // undocumented models. (Compaction's list in anthropicContextManagement.ts
+  // is a different doc and DOES include Sonnet 5 — don't "sync" them.)
   /^claude-haiku-4-5/,
 ];
 

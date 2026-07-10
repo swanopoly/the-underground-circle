@@ -753,6 +753,32 @@ async function main() {
     pass("client configs with compact edits normalize, clamp, and order compaction-first");
   }
 
+  // ── 34b. Duplicate same-type edits dedupe (first occurrence of each wins) ─
+  // Neither Anthropic doc defines duplicate-type semantics; forwarding
+  // duplicates could turn a sloppy opted-in client config into a 400.
+  {
+    const deduped = normalizeClientContextManagement({
+      edits: [
+        { type: COMPACTION_STRATEGY_TYPE, trigger: 200_000 },
+        { type: COMPACTION_STRATEGY_TYPE, trigger: 300_000 },
+        { type: CLEAR_TOOL_USES_STRATEGY_TYPE, keep: 5 },
+        { type: CLEAR_TOOL_USES_STRATEGY_TYPE, keep: 9 },
+      ],
+    })!;
+    assert.ok(deduped, "duplicate-heavy config still normalizes");
+    assert.equal(deduped.edits.length, 2,
+      "exactly one edit per type survives (compact,compact,clear,clear → 2)");
+    assert.equal(deduped.edits[0].type, COMPACTION_STRATEGY_TYPE,
+      "compaction still ordered FIRST after dedupe");
+    assert.equal((deduped.edits[0] as any).trigger.value, 200_000,
+      "first compaction occurrence wins");
+    assert.equal(deduped.edits[1].type, CLEAR_TOOL_USES_STRATEGY_TYPE,
+      "clear_tool_uses second");
+    assert.equal((deduped.edits[1] as any).keep.value, 5,
+      "first clear_tool_uses occurrence wins");
+    pass("duplicate same-type edits dedupe to one of each, compact first");
+  }
+
   // ── 35. Beta-token derivation per config ─────────────────────────────────
   {
     assert.deepEqual(requiredContextManagementBetas(buildCompactionConfig()), [COMPACTION_BETA_HEADER],

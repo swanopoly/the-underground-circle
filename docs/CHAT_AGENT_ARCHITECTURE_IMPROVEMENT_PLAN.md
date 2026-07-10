@@ -705,6 +705,110 @@
   typecheck:functions 43/43 green; deployed to rjkniqiqdtroeholxacg
   2026-07-10.
 
+- **P62 — six-agent adversarial review of P38–P61 + full fix pass** ✅ —
+  fanned out 6 review agents (security, clarifier/activation, solver wiring,
+  prompt/lane, Anthropic wire, improvement scout) over everything this arc
+  shipped, then 5 parallel fixer agents + main-thread fixes for every
+  confirmed finding. The big ones:
+  (1) **Clarifier was inert AND unsafe (HIGH, two reviewers)** —
+  swanbot-ai honors `system_override` only on the tools-array relay path, so
+  the tool-less clarifier invoke fell through to the FULL tool-enabled
+  persona: guardrail prompt dropped, JSON schema never reached the model
+  (every parse failed open → feature never asked anything, ~8s + a persona
+  round-trip wasted per eligible task), and 1500 chars of raw chat history
+  landed in an agent that can execute tools. Fix: new `tools_disabled: true`
+  relay mode in swanbot-ai (system_override honored, NO tools attached —
+  an abandoned raced call is now side-effect-free; Anthropic-only, slash
+  models fall back to default Claude; usage-logged with a
+  `tools_disabled` marker) + the client sends the flag. Also fenced
+  task/history in the clarifier message (`wrapUntrusted` +
+  `sanitizeUntrustedForModel` + fence-contract line in the system prompt)
+  and added `CREDENTIAL_QUESTION_PATTERN` output filter so an injected
+  "paste your token" question can never render in the agent's voice.
+  One-shot registry now consumed only when the model actually replied.
+  (2) **Clarification questions were mangled into task outcomes (P1)** —
+  the app lane returned them as `status:'completed'` (archived "Computer
+  task completed" for a task that never ran; image tasks had questions
+  REPLACED by fabricated proof-failure copy) and the browser lane's
+  `needs_input` ran the failure-recovery machinery. Fix: runtime result
+  carries `clarification` → both lanes emit `needs_input` → new ChatTab
+  clarification seam renders the questions VERBATIM (bypasses
+  sanitize/compaction), parks the task in the existing
+  `pendingClarificationRef` resume machinery (answer folds in as
+  `original — answer`; "Proceed" quickReply opts out via the gate's
+  phrase check), clears the task card, and skips archive/recovery/state
+  surfaces entirely. Browser-lane call now passes history/attachments/
+  resolved-app parity args so it won't re-ask answered questions.
+  (3) **Solver stale-verdict kills (HIGH)** — in the edge browser loop, an
+  ask_user/fill_saved_login/pay-floor round never touches the failure ring,
+  so the round-end check re-fired the STALE pre-consultation verdict and
+  killed the run right after the user answered. Same mechanism in the
+  legacy loop via gate-blocked rounds. Fix in both: only evaluate the
+  stuck verdict on rounds that recorded a ring entry, AND clear the ring
+  when a consultation fires (fresh 3-strike window for the new approach).
+  Typed core aligned to the same semantics: ring cleared at consultation so
+  the identical call may dispatch once more — fail-fail-SUCCEED transients
+  (bridge just started, approval just granted) now recover instead of
+  being killed undispatched (solver smoke pins deliberately flipped:
+  case2 now 6 turns/4 dispatches; new case2b pins the transient recovery).
+  Stop wording now says the consultation is "spent" (it may have addressed
+  an earlier episode). `solver_consultation`/`loop_stopped_no_progress`
+  now persisted in agent_run_events (were invisible in telemetry).
+  Solver consultation content (error/input/observation) now fenced inline
+  (zero-import fence mirroring untrustedContent — Deno compat).
+  (4) **Legacy proof-nudge 400 (STRONGLY-PLAUSIBLE)** — a max_tokens-
+  truncated turn WITH complete tool_use blocks hit the done-branch nudge,
+  pushing an assistant turn whose tool_use had no tool_result → next round
+  400s on Anthropic AND OpenAI-shape converters. Fix: nudge only when the
+  turn has ZERO tool_use blocks.
+  (5) **Interrupted-stream partial vanished on reload (HIGH, W5
+  regression)** — the interrupted branch only updated local React state.
+  Fix: persist via saveRecoverableChatMessage +
+  persistMainChatBotMessageWithRetry exactly like the clean path; the
+  stream's orphan pending bubble is now swept before batch fallback
+  (pre-existing leak); the last bot message in chatHistory gets a
+  2000-char budget so "Say 'continue'" actually sees the partial's tail.
+  (6) **Wire fixes** — cap-exhausted finalization sent `tools: []`, which
+  fails the relay's non-empty gate → fell through to the PERSONA path
+  (system prompt dropped, history ignored — the summarizer never worked);
+  now sends the turn's real tool defs + an explicit no-more-tools final
+  instruction (also resolves the tool-search-reference 400 class). P46
+  deferred catalog now respects `allowedToolNames` containment by default
+  with explicit `nativeDeferredCatalog: 'surface'` opt-in for the
+  stream-escalate seam (its allowlist is a pinned core, not a boundary).
+  Sonnet-5 removed from the tool-search support gate (absent from the doc
+  table; fail closed — its presence in the COMPACTION list stays, that doc
+  lists it). Context-management edits deduped by type. Example validator
+  now recurses into object-typed properties to depth 4 (nested-object 400
+  class closed; all 16 curated examples still deeply valid).
+  (7) **Fixer-agent batch** — lane-health rate/streak now computed over
+  FRESH events only (stale failures can't resurrect an alarm on the next
+  success; rate-based copy says "N of last M failed", never "0 fail(s)");
+  `classifyChatLaneError` regexes pinned to the app's REAL gate emissions
+  (bare `constraint`/`floor` no longer classify DB constraint errors as
+  policy_block; bare `500` in prose no longer marks retry-safe provider
+  5xx); probe redacts before slicing + length-only masks + email in the
+  SECRETS list; `/skill view <name> [path]` implemented (the syntax the
+  export hint advertised); dead `agentProviders/anthropic.ts` no longer
+  sends `temperature` (400 on Opus 4.7+).
+  Certification: smoke:all EXIT=0, typecheck EXIT=0, typecheck:functions
+  43/43 EXIT=0. swanbot-ai + computer-use-agent redeployed (v2 untouched).
+  Review-confirmed CLEAN: P61 SSE wiring, /skill export RLS, lane tags,
+  byte-identity of the W5 assembler (2000-trial differential), section
+  ordering, compaction preservation end-to-end, deferred+cache_control
+  impossibility.
+  Scout roadmap captured for next arcs: (a) continue-preserved-session for
+  bounded browser stops (client drops sessionId today), (b) wire the
+  execute→verify seam (`decideComputerTaskOutcomeVerification` has zero
+  callers; self-graded "done" poisons the learned-trace loop), (c) adaptive
+  agent loop for the local playwright path (currently open-loop scripted),
+  (d) reattach-to-run-after-reload, (e) desktop partial-progress on retry.
+  Known-low deferred: typed-core consultation round skips steering
+  drain/round hooks for that one round; activation 'unknown' kind bridge
+  step is blocking; hybrid activation lacks open_browser_target; v2
+  anthropicTurn drops unknown blocks (matters only if compaction lights up
+  on v2).
+
 ## What P21 already shipped from this plan
 
 - **Typed-loop vision + image economics** ✅ — the loop was worse than

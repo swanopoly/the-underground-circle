@@ -61,14 +61,18 @@ const PROBE_ACCESS_TOKEN = process.env.UC_PROBE_ACCESS_TOKEN;
 const PROBE_CIRCLE_ID = process.env.UC_PROBE_CIRCLE_ID;
 const PROBE_MODEL = process.env.UC_PROBE_MODEL || 'claude-sonnet-4-6';
 
-const SECRETS = [SUPABASE_ANON_KEY, PROBE_PASSWORD, PROBE_ACCESS_TOKEN].filter(Boolean) as string[];
+const SECRETS = [SUPABASE_ANON_KEY, PROBE_PASSWORD, PROBE_ACCESS_TOKEN, PROBE_EMAIL].filter(Boolean) as string[];
+/** Replace every secret occurrence. ALWAYS redact BEFORE truncating — a
+ *  slice taken first can cut a secret at the boundary so the remainder
+ *  no longer matches and survives into output. */
 function redact(text: unknown): string {
   let out = typeof text === 'string' ? text : JSON.stringify(text);
   for (const secret of SECRETS) out = out.split(secret).join('[redacted]');
   return out;
 }
+/** Length-only mask — never echo any part of the secret itself. */
 function mask(secret: string | undefined): string {
-  return secret ? `${secret.slice(0, 4)}...(${secret.length} chars)` : '<missing>';
+  return secret ? `***(${secret.length} chars)` : '<missing>';
 }
 
 // ── Gates: env + explicit spend confirmation (no network before both) ───────
@@ -84,7 +88,7 @@ if (!DRY_RUN && !PROBE_CIRCLE_ID) missing.push('UC_PROBE_CIRCLE_ID');
 if (missing.length > 0) {
   console.error('X2 native-deferred-tools probe — missing env, no network call made.\n');
   for (const key of missing) console.error(`  ${key} = <missing>`);
-  console.error(`\n  (auth: email=${PROBE_EMAIL || '<missing>'} password=${mask(PROBE_PASSWORD)} token=${mask(PROBE_ACCESS_TOKEN)})`);
+  console.error(`\n  (auth: email=${mask(PROBE_EMAIL)} password=${mask(PROBE_PASSWORD)} token=${mask(PROBE_ACCESS_TOKEN)})`);
   console.error('\nExport the env vars, then: UC_PROBE_CONFIRM=1 npm run probe:native-deferred-tools\n');
   process.exit(2);
 }
@@ -158,7 +162,7 @@ async function main() {
     });
     const authJson: any = await authRes.json().catch(() => ({}));
     if (!authRes.ok || !authJson.access_token) {
-      console.error(`auth FAILED (${authRes.status}): ${redact(JSON.stringify(authJson).slice(0, 200))}`);
+      console.error(`auth FAILED (${authRes.status}): ${redact(JSON.stringify(authJson)).slice(0, 200)}`);
       process.exit(1);
     }
     accessToken = authJson.access_token;
@@ -225,7 +229,7 @@ async function main() {
     return {
       ok: res.ok && !!data,
       status: res.status,
-      errorText: res.ok ? null : redact(text.slice(0, 300)),
+      errorText: res.ok ? null : redact(text).slice(0, 300),
       stopReason: data?.stop_reason ?? null,
       content,
       toolUseNames: content.filter((b) => b?.type === 'tool_use').map((b) => b.name),

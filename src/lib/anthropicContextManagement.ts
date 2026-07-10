@@ -294,6 +294,10 @@ export function normalizeClientContextManagement(
   const edits = (value as { edits?: unknown }).edits;
   if (!Array.isArray(edits) || edits.length === 0) return null;
 
+  // Duplicate same-type edits are deduped (first occurrence of each type
+  // wins). Neither Anthropic doc defines duplicate-type semantics, so
+  // forwarding duplicates could turn a sloppy opted-in client config into an
+  // Anthropic 400 — exactly what this normalizer exists to prevent.
   const compactionEdits: CompactionEdit[] = [];
   const clearEdits: ClearToolUsesEdit[] = [];
   for (const raw of edits) {
@@ -301,6 +305,7 @@ export function normalizeClientContextManagement(
     const type = (raw as { type?: unknown }).type;
 
     if (type === CLEAR_TOOL_USES_STRATEGY_TYPE) {
+      if (clearEdits.length > 0) continue; // dedupe: first clear_tool_uses edit wins
       // Accept either the nested spec form ({type,value}) or a bare number, and
       // route through the builder so the result is always bounded.
       const trig = extractSpecValue((raw as any).trigger);
@@ -319,6 +324,7 @@ export function normalizeClientContextManagement(
     }
 
     if (type === COMPACTION_STRATEGY_TYPE) {
+      if (compactionEdits.length > 0) continue; // dedupe: first compact edit wins
       // X3 (P49): same clamp-through-the-builder posture for compaction.
       const trig = extractSpecValue((raw as any).trigger);
       const pause = (raw as any).pause_after_compaction === true;
@@ -338,7 +344,8 @@ export function normalizeClientContextManagement(
 
   if (compactionEdits.length === 0 && clearEdits.length === 0) return null;
   // Edits apply sequentially; compaction goes FIRST so history is summarized
-  // before tool results are pruned (documented ordering guidance).
+  // before tool results are pruned. That ordering is a sensible convention of
+  // ours — the compaction doc does not mandate an edit order.
   return { edits: [...compactionEdits, ...clearEdits] };
 }
 

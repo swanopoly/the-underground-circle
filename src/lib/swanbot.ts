@@ -3662,6 +3662,15 @@ export async function executeToolUseLoop(opts: {
   activeSoulKey?: string;
   activePluginIds?: string[];
   allowedToolNames?: string[];
+  /**
+   * X2 (P46): what the native-deferred-tools catalog spans when the flag is
+   * on. 'allowlist' (default whenever `allowedToolNames` is set) keeps the
+   * deferred universe inside the caller's scoped tool set — allowlists are a
+   * containment contract. 'surface' opts into the full surface catalog as
+   * deferred-discoverable; ONLY for callers whose allowlist is an eager
+   * pinned core rather than a boundary (the stream-escalate seam).
+   */
+  nativeDeferredCatalog?: 'surface' | 'allowlist';
   surface?: 'main_chat' | 'room_chat' | 'office' | 'task_run';
   /**
    * Chat mode ('plan' | 'build' | 'review' | etc). When provided, tools
@@ -3776,7 +3785,22 @@ export async function executeToolUseLoop(opts: {
       summarizeNativeDeferredToolPayload,
     } = await import('./anthropicNativeToolSearch');
     if (isNativeDeferredToolsEnabled()) {
-      const fullCatalog = getToolDefinitions(undefined, opts.surface || 'main_chat', opts.mode)
+      // Containment invariant: `allowedToolNames` is a SCOPING contract for
+      // most callers (task runners scope tools DOWN) — the deferred catalog
+      // must respect it by default, or the flag silently makes every tool on
+      // the surface discoverable AND callable again. The one caller whose
+      // documented purpose IS expansion — the stream-escalate seam, whose
+      // allowlist is an eager PINNED CORE, not a boundary — opts into the
+      // full surface catalog explicitly with `nativeDeferredCatalog:
+      // 'surface'`. Fail-closed: scoped callers stay scoped unless they say
+      // otherwise.
+      const catalogScope = opts.nativeDeferredCatalog
+        ?? (opts.allowedToolNames ? 'allowlist' : 'surface');
+      const fullCatalog = getToolDefinitions(
+        catalogScope === 'surface' ? undefined : opts.allowedToolNames,
+        opts.surface || 'main_chat',
+        opts.mode,
+      )
         .map((t: { name: string; description: string; input_schema: Record<string, unknown>; input_examples?: Array<Record<string, unknown>> }) => ({
           name: t.name,
           description: t.description,
@@ -3888,7 +3912,11 @@ export async function executeToolUseLoop(opts: {
       // intent. Bounded to a single nudge (proofNudged) so a model that truly
       // can't produce proof still terminates, and skipped on the last possible
       // round where there'd be no room to act on it.
-      if (!proofNudged && round < maxRounds - 1) {
+      // Guarded on ZERO tool_use blocks: a truncated turn (max_tokens with a
+      // complete tool_use inside) must not be pushed back with a text-only
+      // user nudge — an unanswered tool_use in the history 400s the next
+      // round on both Anthropic and the OpenAI-shape converters.
+      if (!proofNudged && round < maxRounds - 1 && toolUseBlocks.length === 0) {
         const coverage = assessProofCoverage(toolEvents);
         if (coverage.missingProof) {
           proofNudged = true;
@@ -3927,6 +3955,12 @@ export async function executeToolUseLoop(opts: {
     // the intent explicitly so the SEPARATE always-on constraint/floor gate
     // added below does NOT silently kill auto-grounding on the riskiest turns.
     const perStepReviewGateActive = !!opts.toolApprovalGate;
+    // Did THIS round record any real dispatch into the stuck ring? Gate/floor-
+    // blocked and user-rejected calls deliberately stay out of the ring — so a
+    // round made ONLY of them must not re-evaluate the ring's stale tail
+    // (post-consultation rounds would be killed by the pre-consultation
+    // verdict even though the model just changed course).
+    let ringTouchedThisRound = false;
     for (let bi = 0; bi < toolUseBlocks.length; bi++) {
       const block = toolUseBlocks[bi];
       // Per-step review gate. The room chat's review mode renders an
@@ -4065,6 +4099,7 @@ export async function executeToolUseLoop(opts: {
         const callFailed = /\b(error|fail|failed|failure|blocked|denied|timeout)\b/i.test(String(dispatched.status || ''));
         stuckRing.push({ name: block.name, inputHash: hashToolInput(block.input), ok: !callFailed });
         if (stuckRing.length > 24) stuckRing.splice(0, stuckRing.length - 24);
+        ringTouchedThisRound = true;
         if (callFailed) {
           lastFailureTextForSolver = String(dispatched.text || '').slice(0, 300);
           lastFailingCall = { tool: block.name, input: block.input };
@@ -4119,7 +4154,13 @@ export async function executeToolUseLoop(opts: {
     // (root cause + two different approaches, gates unchanged); still stuck
     // after that → STOP with an incomplete blocker result instead of
     // re-sampling the doomed call until the round cap.
-    const stuckVerdict = detectRepeatedToolFailure(stuckRing);
+    // Evaluated only on rounds that recorded a real dispatch: a round made
+    // entirely of gate/floor/rejection blocks leaves the ring untouched, and
+    // re-reading its stale tail would kill the turn right after the model
+    // (or user) changed course.
+    const stuckVerdict = ringTouchedThisRound
+      ? detectRepeatedToolFailure(stuckRing)
+      : { stuck: false, reason: '' };
     if (stuckVerdict.stuck) {
       if (shouldConsultSolver({ stuck: true, alreadyConsulted: solverConsulted })) {
         solverConsulted = true;
@@ -4133,9 +4174,13 @@ export async function executeToolUseLoop(opts: {
             availableTools: tools.map((t: { name: string }) => t.name),
           }),
         });
+        // Fresh window for the consultation's advice: the model gets a full
+        // 3-strike run at a DIFFERENT approach before the (consultation-
+        // spent) branch below can terminate the turn.
+        stuckRing.length = 0;
         continue;
       }
-      const stopNote = `Stopped: ${stuckVerdict.reason} — still stuck after a solver consultation. Report the blocker: what was tried, the exact error, and what you need from the user.`;
+      const stopNote = `Stopped: ${stuckVerdict.reason} — no progress and the turn's one solver consultation is already spent. Report the blocker: what was tried, the exact error, and what you need from the user.`;
       return {
         response: stopNote,
         toolEvents,
@@ -4154,9 +4199,18 @@ export async function executeToolUseLoop(opts: {
   let finalText = extractAssistantText(lastAssistant?.content);
   // The cap was hit on a pure tool_use round — the final round's results were
   // pushed to history but no turn ever consumed them, so the model never got to
-  // answer. Give it one no-tools finalization call to summarize from everything
-  // it gathered (incl. that last round), instead of a generic limit message.
-  // Fail-safe: any error falls back to the limit note below.
+  // answer. Give it one finalization call to summarize from everything it
+  // gathered (incl. that last round), instead of a generic limit message.
+  // Two wire constraints shape this call (it used to send `tools: []`, which
+  // failed BOTH): the relay path only engages on a NON-EMPTY tools array —
+  // an empty one fell through to the persona path, dropping systemPrompt and
+  // the gathered history entirely — and any native tool-search references in
+  // the history must resolve against the tools sent, or Anthropic 400s. So we
+  // send the turn's real tool defs and steer to a text answer with an
+  // explicit final instruction (a trailing same-role text turn is legal and
+  // merges after the tool_results). If the model still emits tool_use, there
+  // is no text to extract and we fall back to the limit note — same fail-safe
+  // as before. Fail-safe: any error falls back to the limit note below.
   if (!finalText) {
     try {
       const finalToken = await getFreshAccessToken();
@@ -4167,8 +4221,14 @@ export async function executeToolUseLoop(opts: {
           circleId: opts.circleId,
           userId: opts.userId,
           model: opts.model,
-          tools: [],
-          tool_messages: messages,
+          tools: anthropicTools,
+          tool_messages: [
+            ...messages,
+            {
+              role: 'user',
+              content: 'Tool budget for this turn is exhausted. Do NOT call any more tools — reply now with your best final answer summarizing what the results above established, and name anything that remains unfinished.',
+            },
+          ],
           system_override: opts.systemPrompt,
         },
       });
@@ -4310,6 +4370,12 @@ export async function maybeEscalateStreamedTurnToToolLoop(opts: {
     activeSoulKey: opts.activeSoulKey,
     activePluginIds: opts.activePluginIds,
     allowedToolNames,
+    // This seam's allowlist is the eager PINNED CORE (progressive
+    // disclosure), not a containment boundary — X2's whole point here is
+    // that the escalated turn can discover the rest of the surface catalog
+    // through native tool search. Explicit opt-in per the containment
+    // default on `nativeDeferredCatalog`.
+    nativeDeferredCatalog: 'surface',
     surface,
     mode: opts.mode,
     maxToolRounds: opts.maxToolRounds,

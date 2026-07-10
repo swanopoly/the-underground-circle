@@ -24,7 +24,10 @@ import type { ChatLaneId, ChatLaneStatus, ChatLaneOutcome } from './chatLaneOutc
 
 export const MAX_LANES = 16;
 export const MAX_EVENTS_PER_LANE = 50;
-/** Beyond this age, recorded outcomes are too stale to alarm on. */
+/** Beyond this age, recorded outcomes are too stale to alarm on. Applied
+ *  PER EVENT: stale events are excluded from the streak/rate floors (so old
+ *  failures can never resurrect an alarm once a fresh event lands), and a
+ *  lane whose newest event is stale never alarms at all. */
 export const LANE_HEALTH_STALENESS_MS = 30 * 60 * 1000; // 30 min
 
 /** Degradation thresholds: a lane is degraded when its trailing failure
@@ -125,42 +128,64 @@ export interface ChatLaneHealth {
   interrupted: number;
   neutral: number;
   fallbacks: number;
-  /** Trailing failure streak (newest→oldest, success clears, neutral skips). */
+  /** Trailing failure streak (newest→oldest, success clears, neutral skips)
+   *  over FRESH events only when a `nowMs` was supplied. */
   consecutiveFailures: number;
-  /** failed+interrupted share of non-neutral outcomes in the window. */
+  /** failed+interrupted share of FRESH non-neutral outcomes in the window. */
   failureRate: number;
+  /** failed+interrupted count among FRESH non-neutral outcomes. */
+  freshFailures: number;
+  /** FRESH non-neutral outcome count — the window the floors apply to. */
+  freshWindow: number;
   lastStatus: ChatLaneStatus;
   lastReason: string | null;
   lastAtMs: number;
   degraded: boolean;
 }
 
-function laneHealthFromRing(lane: string, ring: LaneEvent[]): ChatLaneHealth {
+/**
+ * Health for one lane. When `nowMs` is supplied, the alarm inputs — trailing
+ * streak, failure rate, and the degradation floors — consider FRESH events
+ * only (age ≤ LANE_HEALTH_STALENESS_MS), so stale failures can never
+ * resurrect an alarm after a fresh event lands. Whole-ring session counts
+ * (total/completed/failed/…) are kept for history surfaces like `/lanes`.
+ * Without `nowMs`, every recorded event counts (legacy whole-ring behavior).
+ */
+function laneHealthFromRing(lane: string, ring: LaneEvent[], nowMs?: number): ChatLaneHealth {
   let completed = 0;
   let failed = 0;
   let interrupted = 0;
   let neutral = 0;
   let fallbacks = 0;
+  const freshFloorMs = typeof nowMs === 'number' ? nowMs - LANE_HEALTH_STALENESS_MS : -Infinity;
+  const fresh: LaneEvent[] = [];
   for (const event of ring) {
     if (event.status === 'completed') completed += 1;
     else if (event.status === 'failed') failed += 1;
     else if (event.status === 'interrupted') interrupted += 1;
     else if (NEUTRAL_STATUSES.has(event.status)) neutral += 1;
     if (event.fallback) fallbacks += 1;
+    if (event.atMs >= freshFloorMs) fresh.push(event);
   }
   let consecutiveFailures = 0;
-  for (let i = ring.length - 1; i >= 0; i -= 1) {
-    const status = ring[i].status;
+  for (let i = fresh.length - 1; i >= 0; i -= 1) {
+    const status = fresh[i].status;
     if (status === 'completed') break;
     if (FAILURE_STATUSES.has(status)) consecutiveFailures += 1;
     // neutral statuses neither break nor extend the streak
   }
-  const nonNeutral = completed + failed + interrupted;
-  const failureRate = nonNeutral > 0 ? (failed + interrupted) / nonNeutral : 0;
+  let freshCompleted = 0;
+  let freshFailures = 0;
+  for (const event of fresh) {
+    if (event.status === 'completed') freshCompleted += 1;
+    else if (FAILURE_STATUSES.has(event.status)) freshFailures += 1;
+  }
+  const freshWindow = freshCompleted + freshFailures;
+  const failureRate = freshWindow > 0 ? freshFailures / freshWindow : 0;
   const last = ring[ring.length - 1];
   const degraded =
     consecutiveFailures >= DEGRADED_STREAK_FLOOR
-    || (nonNeutral >= DEGRADED_MIN_WINDOW && failureRate >= DEGRADED_FAILURE_RATE_FLOOR);
+    || (freshWindow >= DEGRADED_MIN_WINDOW && failureRate >= DEGRADED_FAILURE_RATE_FLOOR);
   return {
     lane,
     total: ring.length,
@@ -171,6 +196,8 @@ function laneHealthFromRing(lane: string, ring: LaneEvent[]): ChatLaneHealth {
     fallbacks,
     consecutiveFailures,
     failureRate,
+    freshFailures,
+    freshWindow,
     lastStatus: last.status,
     lastReason: last.reason,
     lastAtMs: last.atMs,
@@ -178,12 +205,14 @@ function laneHealthFromRing(lane: string, ring: LaneEvent[]): ChatLaneHealth {
   };
 }
 
-/** Per-lane health for every recorded lane (unordered map → sorted by lane). */
-export function getChatLaneHealthSnapshot(): ChatLaneHealth[] {
+/** Per-lane health for every recorded lane (unordered map → sorted by lane).
+ *  Pass `nowMs` so streak/rate/degraded consider fresh events only; without
+ *  it, every recorded event counts (whole-ring legacy behavior). */
+export function getChatLaneHealthSnapshot(nowMs?: number): ChatLaneHealth[] {
   const out: ChatLaneHealth[] = [];
   for (const [lane, ring] of registry) {
     if (ring.length === 0) continue;
-    out.push(laneHealthFromRing(lane, ring));
+    out.push(laneHealthFromRing(lane, ring, nowMs));
   }
   return out.sort((a, b) => a.lane.localeCompare(b.lane));
 }
@@ -201,13 +230,15 @@ export interface ChatLaneDegradationAssessment {
 }
 
 /**
- * Classify the current pattern. Staleness-aware: lanes whose newest event is
- * older than the staleness window are ignored entirely (no crying wolf about
- * a failure from an hour ago). `lane_isolated` = exactly the situation the
- * postmortems say must be legible; `multi_lane` = treat as systemic.
+ * Classify the current pattern. Staleness-aware twice over: lanes whose
+ * newest event is older than the staleness window are ignored entirely (no
+ * crying wolf about a failure from an hour ago), and within a live lane only
+ * fresh events feed the streak/rate floors (stale failures cannot resurrect
+ * an alarm just because a fresh event landed). `lane_isolated` = exactly the
+ * situation the postmortems say must be legible; `multi_lane` = systemic.
  */
 export function assessChatLaneDegradation(nowMs: number): ChatLaneDegradationAssessment {
-  const fresh = getChatLaneHealthSnapshot().filter(
+  const fresh = getChatLaneHealthSnapshot(nowMs).filter(
     (health) => nowMs - health.lastAtMs <= LANE_HEALTH_STALENESS_MS,
   );
   const degraded = fresh.filter((h) => h.degraded).map((h) => h.lane);
@@ -248,11 +279,19 @@ function formatAge(ms: number): string {
 export function getChatLaneHealthHint(lane: string, nowMs: number): string | null {
   const ring = registry.get(String(lane || '').trim().slice(0, 40));
   if (!ring || ring.length === 0) return null;
-  const health = laneHealthFromRing(lane, ring);
+  const health = laneHealthFromRing(lane, ring, nowMs);
   if (!health.degraded) return null;
   if (nowMs - health.lastAtMs > LANE_HEALTH_STALENESS_MS) return null;
   const reasonPart = health.lastReason ? ` (last: ${health.lastReason})` : '';
-  return `⚠️ ${lane}: ${health.consecutiveFailures} consecutive failure(s)${reasonPart}, ${formatAge(nowMs - health.lastAtMs)}`;
+  return `⚠️ ${lane}: ${describeDegradation(health)}${reasonPart}, ${formatAge(nowMs - health.lastAtMs)}`;
+}
+
+/** One phrase naming WHY the lane is degraded: the streak when the streak
+ *  floor fired, otherwise the fresh-window failure rate (never "0 fail(s)"). */
+function describeDegradation(health: ChatLaneHealth): string {
+  return health.consecutiveFailures >= DEGRADED_STREAK_FLOOR
+    ? `${health.consecutiveFailures} consecutive failure(s)`
+    : `${health.freshFailures} of last ${health.freshWindow} failed`;
 }
 
 /** Archive-safe tags for a failure site: lane health + degradation scope. */
@@ -260,7 +299,7 @@ export function buildChatLaneHealthTags(lane: string, nowMs: number): string[] {
   const tags: string[] = [];
   const ring = registry.get(String(lane || '').trim().slice(0, 40));
   if (ring && ring.length > 0) {
-    const health = laneHealthFromRing(lane, ring);
+    const health = laneHealthFromRing(lane, ring, nowMs);
     if (health.degraded) tags.push('lane_degraded:yes', `lane_failure_streak:${health.consecutiveFailures}`);
   }
   const assessment = assessChatLaneDegradation(nowMs);
@@ -273,14 +312,17 @@ export function buildChatLaneHealthTags(lane: string, nowMs: number): string[] {
  * plain language; shows the degradation classification first.
  */
 export function formatChatLaneHealthReport(nowMs: number): string {
-  const snapshot = getChatLaneHealthSnapshot();
+  const snapshot = getChatLaneHealthSnapshot(nowMs);
   if (snapshot.length === 0) {
     return 'Lane health: no chat lane terminals recorded this session yet. Lanes report here as turns complete or fail (stream, batch, openswan_v2, computer_task, …).';
   }
   const assessment = assessChatLaneDegradation(nowMs);
   const lines: string[] = ['**Lane health (this session)**', assessment.summary, ''];
   for (const health of snapshot.slice(0, MAX_LANES)) {
-    const okShare = health.total > 0 ? Math.round((1 - health.failureRate) * 100) : 100;
+    // Session-wide share so it stays consistent with the counts shown beside
+    // it (health.failureRate is fresh-window-only and drives alarms instead).
+    const nonNeutral = health.completed + health.failed + health.interrupted;
+    const okShare = nonNeutral > 0 ? Math.round((health.completed / nonNeutral) * 100) : 100;
     const flag = health.degraded ? '⚠️' : '✅';
     const parts = [
       `${flag} ${health.lane}: ${health.completed} ok / ${health.failed} failed`
@@ -318,13 +360,18 @@ export interface ChatLaneHealthStripModel {
 export function buildChatLaneHealthStripModel(nowMs: number): ChatLaneHealthStripModel | null {
   const assessment = assessChatLaneDegradation(nowMs);
   if (assessment.scope === 'none') return null;
-  const snapshot = getChatLaneHealthSnapshot();
+  const snapshot = getChatLaneHealthSnapshot(nowMs);
   const degraded = snapshot.filter((h) => assessment.degradedLanes.includes(h.lane));
   if (degraded.length === 0) return null;
   const first = degraded[0];
+  // Streak floor fired → name the streak; otherwise the rate floor fired
+  // (streak may be 0), so name the fresh-window rate — never "0 fail(s)".
+  const firstDetail = first.consecutiveFailures >= DEGRADED_STREAK_FLOOR
+    ? `${first.consecutiveFailures} fail(s)`
+    : `${first.freshFailures} of last ${first.freshWindow} failed`;
   const headline = assessment.scope === 'multi_lane'
     ? `LANES DEGRADED — ${assessment.degradedLanes.slice(0, 3).join(', ')}`
-    : `LANE DEGRADED — ${first.lane}: ${first.consecutiveFailures} fail(s)${first.lastReason ? ` (${first.lastReason})` : ''}`;
+    : `LANE DEGRADED — ${first.lane}: ${firstDetail}${first.lastReason ? ` (${first.lastReason})` : ''}`;
   return {
     tone: assessment.scope === 'multi_lane' ? 'danger' : 'warn',
     headline: headline.slice(0, 120),

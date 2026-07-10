@@ -134,7 +134,12 @@ export interface ChatLaneOutcome {
 const SYSTEM_TRANSIENT_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   [/rate.?limit|429|too many requests/i, 'rate_limited'],
   [/overloaded|529|capacity/i, 'provider_overloaded'],
-  [/\b(500|502|503|504)\b|internal server error|bad gateway|service unavailable|gateway timeout/i, 'provider_5xx'],
+  // 5xx digits need status-code CONTEXT (the app's real templates are
+  // `HTTP ${status}`, `returned ${status}`, `status_${status}`, `error 500`).
+  // A standalone number ("under 500 characters", "503 items") must NOT match —
+  // misreading it as provider_5xx would mark an unknown error retry-safe,
+  // violating the fail-closed contract.
+  [/\b(?:https?|status(?:\s+code)?|error|code|returned)[ :=#_/(]*(?:500|502|503|504)\b|internal server error|bad gateway|service unavailable|gateway timeout/i, 'provider_5xx'],
   [/timed? ?out|timeout|deadline/i, 'timeout'],
   [/network|fetch failed|socket|econn|broken pipe|connection/i, 'network'],
 ];
@@ -149,7 +154,16 @@ const USER_ACTION_PATTERNS: ReadonlyArray<[RegExp, string]> = [
 const NON_RECOVERABLE_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   // 'refus' alone is too greedy — "connection refused" is a network error.
   [/content.?policy|safety (?:violation|filter)|refused to (?:answer|help|comply|generate)|model refus/i, 'content_policy'],
-  [/policy.?block|constraint|always.?confirm|floor/i, 'policy_block'],
+  // Pinned to the EXACT phrasings the app's gates emit — mcpToolBridge
+  // ("POLICY BLOCK: …"), swanbot/openswanToolRuntime ("Always-confirm
+  // floor: …"), the sticky "approval floor", agentExecutionCore ("was
+  // blocked by a user constraint and did not run"), appAutomationControl-
+  // Surfaces ("a user constraint blocks this action"), and swanbot's HARD
+  // constraint stop ("The user forbade … actions"). Bare "constraint" and
+  // bare "floor" are deliberately NOT matched: ordinary DB errors such as
+  // `violates check constraint` / `violates unique constraint` are not
+  // policy blocks and must fall through (→ unclassified, not retry-safe).
+  [/policy.?block|always.?confirm|approval floor|blocked by a user constraint|user constraint blocks|user forbade/i, 'policy_block'],
 ];
 
 /**

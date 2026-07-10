@@ -184,6 +184,21 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
       case 'max_iterations_exceeded':
         void writeEvent('max_iterations_exceeded', { iteration: event.iteration });
         break;
+      case 'solver_consultation':
+        // P56/P62: stuck-solver rounds were invisible in run telemetry —
+        // persist the marker so transcripts/dashboards can spot consultation
+        // rounds (the toolLoopSolver module header promises this).
+        void writeEvent('solver_consultation', {
+          iteration: event.iteration,
+          reason: event.reason,
+        });
+        break;
+      case 'loop_stopped_no_progress':
+        void writeEvent('loop_stopped_no_progress', {
+          iteration: event.iteration,
+          reason: event.reason,
+        });
+        break;
     }
   };
 

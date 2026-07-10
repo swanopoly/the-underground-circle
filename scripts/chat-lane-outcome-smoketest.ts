@@ -8,6 +8,9 @@
  *   - pre-handshake stream failure IS retry-safe (nothing was delivered)
  *   - fail-closed default: unclassified errors are never retry-safe
  *   - two-axis error classification (system/user/none patterns)
+ *   - classifier pinning: policy_block only on real gate phrasings (never
+ *     bare "constraint"/"floor" — DB errors fall through to unknown), and
+ *     provider_5xx only with status-code context (never a standalone number)
  *   - routing fallback becomes VISIBLE servedBy.fallback (never silent)
  *   - recovery options attach non-mutating and bounded
  *   - telemetry summary is compact + bounded
@@ -66,6 +69,66 @@ function main() {
       'case1: FAIL-CLOSED — unclassified error is never retry-safe');
     const empty = classifyChatLaneError(undefined);
     assert(empty.retrySideEffectSafe === false, 'case1: empty/undefined message → not retry-safe');
+  }
+
+  // ─── Case 1b: pinned gate phrases + 5xx status-code context ─────────────
+  {
+    // Ordinary DB errors (the app's own schema gotchas) must NOT read as
+    // policy blocks — they are not stop-and-report gate emissions.
+    const checkConstraint = classifyChatLaneError(
+      'new row for relation "room_messages" violates check constraint "room_messages_message_type_check"');
+    assert(checkConstraint.reason !== 'policy_block' && checkConstraint.recoverableBy !== 'none'
+      && checkConstraint.retrySideEffectSafe === false,
+      'case1b: DB check-constraint violation is NOT policy_block, NOT retry-safe');
+    const uniqueConstraint = classifyChatLaneError(
+      'duplicate key value violates unique constraint "user_xp_pkey"');
+    assert(uniqueConstraint.reason !== 'policy_block' && uniqueConstraint.recoverableBy !== 'none',
+      'case1b: DB unique-constraint violation is NOT policy_block');
+
+    // A standalone number is not an HTTP status — fail closed to unknown.
+    const under500 = classifyChatLaneError('Response must be under 500 characters');
+    assert(under500.reason === 'unclassified_error' && under500.retrySideEffectSafe === false,
+      'case1b: "under 500 characters" → unknown, never retry-safe');
+    const items = classifyChatLaneError('Imported 503 items from the feed');
+    assert(items.reason !== 'provider_5xx' && items.retrySideEffectSafe === false,
+      'case1b: "503 items" is NOT provider_5xx');
+    const rows = classifyChatLaneError('summarized about 503 rows');
+    assert(rows.reason !== 'provider_5xx', 'case1b: "about 503 rows" is NOT provider_5xx');
+
+    // Real status-code context keeps classifying as provider_5xx.
+    const http502 = classifyChatLaneError('HTTP 502 Bad Gateway from provider');
+    assert(http502.reason === 'provider_5xx' && http502.recoverableBy === 'system'
+      && http502.retrySideEffectSafe === true,
+      'case1b: "HTTP 502 Bad Gateway" → provider_5xx, retry-safe');
+    const status503 = classifyChatLaneError('edge invoke failed: status 503');
+    assert(status503.reason === 'provider_5xx', 'case1b: "status 503" → provider_5xx');
+    const error500 = classifyChatLaneError('provider error 500');
+    assert(error500.reason === 'provider_5xx', 'case1b: "error 500" → provider_5xx');
+    const returned504 = classifyChatLaneError('llm-proxy returned 504');
+    assert(returned504.reason === 'provider_5xx',
+      'case1b: "returned 504" (the app\'s own template) → provider_5xx');
+
+    // The gates' REAL emitted phrasings are policy blocks (stop + report).
+    const floorMsg = classifyChatLaneError(
+      'Always-confirm floor: "pay" actions require explicit user confirmation, but no approval context was available — the action was not performed.');
+    assert(floorMsg.recoverableBy === 'none' && floorMsg.reason === 'policy_block',
+      'case1b: swanbot always-confirm-floor message → policy_block/none');
+    const mcpBlock = classifyChatLaneError(
+      'POLICY BLOCK: MCP tool "send_email" on server "gmail" requires approval');
+    assert(mcpBlock.reason === 'policy_block' && mcpBlock.recoverableBy === 'none',
+      'case1b: mcpToolBridge POLICY BLOCK message → policy_block');
+    const constraintBlock = classifyChatLaneError(
+      'Tool "desktop.run_shortcut" was blocked by a user constraint and did not run. Do not retry the same call.');
+    assert(constraintBlock.reason === 'policy_block',
+      'case1b: agentExecutionCore user-constraint block → policy_block');
+    const approvalFloor = classifyChatLaneError(
+      'The pay/charge approval floor always applies to money-moving actions.');
+    assert(approvalFloor.reason === 'policy_block',
+      'case1b: "approval floor" phrase → policy_block');
+    const forbade = classifyChatLaneError(
+      'The user forbade "delete" actions for this task. It was not performed. Stop and report instead.');
+    assert(forbade.reason === 'policy_block' && forbade.recoverableBy === 'none',
+      'case1b: swanbot HARD constraint stop ("user forbade") → policy_block');
   }
 
   // ─── Case 2: stream lane — the interrupted ≠ failed invariant ──────────

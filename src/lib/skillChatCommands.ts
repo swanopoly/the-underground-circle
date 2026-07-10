@@ -9,7 +9,7 @@
  * Supported sub-commands (phase 1):
  *   /skill                      → help (lists available sub-commands)
  *   /skill list [tag:<t>]       → renders the metadata table
- *   /skill view <name>          → renders the full SKILL.md body
+ *   /skill view <name> [path]   → renders the full SKILL.md body (or one bundled sub-file)
  *   /skill import <url>         → fetches, validates, files a create approval
  *   /skill import --replace <url>  → allowPatch variant
  *
@@ -23,7 +23,12 @@ import {
   importLibrarySkillFromText,
   type ImportResult,
 } from './skillLibraryImport';
-import { listLibrarySkills, viewLibrarySkill, listLibrarySkillFiles } from './skillLibrary';
+import {
+  listLibrarySkills,
+  viewLibrarySkill,
+  listLibrarySkillFiles,
+  viewLibrarySkillFile,
+} from './skillLibrary';
 import {
   claudeBridgeAvailable,
   importSelectedClaudeCodeSkills,
@@ -44,7 +49,7 @@ function helpMessage(): string {
   return [
     '**Skill commands**',
     '• `/skill list [tag:<t>]` — show circle SKILL.md library',
-    '• `/skill view <name>` — read a skill\'s full body',
+    '• `/skill view <name> [path]` — read a skill\'s full body (or one bundled file)',
     '• `/skill export <name>` — standard-conformant SKILL.md for claude.ai / Claude Code / the Skills API',
     '• `/skill import <url>` — stage a new skill for review (HITL)',
     '• `/skill import --replace <url>` — update an existing skill',
@@ -106,10 +111,37 @@ async function listSubcommand(args: string, ctx: SkillCommandContext): Promise<S
 async function viewSubcommand(args: string, ctx: SkillCommandContext): Promise<SkillCommandResult> {
   const name = args.trim();
   if (!name) {
-    return { success: false, message: 'Usage: `/skill view <name>` — run `/skill list` to see available skills.' };
+    return { success: false, message: 'Usage: `/skill view <name> [path]` — run `/skill list` to see available skills.' };
   }
   const skill = await viewLibrarySkill(ctx.circleId, name);
   if (!skill) {
+    // `/skill view <name> <path>` — the syntax the export hint advertises.
+    // First token = skill name, remainder = sub-file relpath; fetches one
+    // bundled file body from `circle_skill_files` (same loader family as
+    // export's manifest). Tried only after the whole-args name lookup fails,
+    // so existing skill names containing spaces keep resolving as before.
+    const spaceAt = name.indexOf(' ');
+    if (spaceAt !== -1) {
+      const skillName = name.slice(0, spaceAt);
+      const relpath = name.slice(spaceAt + 1).trim();
+      const file = await viewLibrarySkillFile(ctx.circleId, skillName, relpath);
+      if (file) {
+        return {
+          success: true,
+          message: [
+            `**${skillName}/${file.relpath}**${file.mimeType ? ` \`${file.mimeType}\`` : ''} (${file.sizeBytes} bytes)`,
+            '',
+            '```',
+            file.content,
+            '```',
+          ].join('\n'),
+        };
+      }
+      return {
+        success: false,
+        message: `No skill named **${name}** and no file \`${relpath}\` under **${skillName}** in this circle.`,
+      };
+    }
     return { success: false, message: `No skill named **${name}** in this circle.` };
   }
   return {
