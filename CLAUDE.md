@@ -1,7 +1,7 @@
 # CLAUDE.md - The Underground Circle
 
 > Project context for Claude Code, OpenSwan, Codex, Gemini, and other agents.
-> Last reviewed: 2026-05-11
+> Last reviewed: 2026-07-10
 
 Start with `AGENTS.md`. `docs/AGENTS_ROADMAP.md` is canonical for ownership,
 phase status, SQL status, and runtime rules. This file is a current app review
@@ -173,7 +173,9 @@ Schema gotchas:
 
 - `profiles` has no `email` column.
 - `circle_office_agents` has no `model` column; owner FK is `owner_id`.
-- `user_xp` primary key is `user_id`.
+- `user_xp` primary key is `id` (FK to `profiles.id`). A `user_id` column was
+  added later (migration `20260310_fix_xp_system.sql`) as a mirror of the `id`
+  PK; it is not the primary key.
 - `room_messages.message_type` is constrained.
 - `circle_members` RLS can recurse; use security-definer helpers where present.
 

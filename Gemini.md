@@ -1,7 +1,7 @@
 # Gemini.md - The Underground Circle
 
 > Gemini CLI notes.
-> Last reviewed: 2026-05-09
+> Last reviewed: 2026-07-10
 
 Start with `AGENTS.md`, then `docs/AGENTS_ROADMAP.md`. This file is only the
 Gemini-specific quick sheet.
@@ -14,7 +14,8 @@ Gemini-specific quick sheet.
   marketplace, Browserbase Computer Use, local desktop bridge tools.
 - LLM providers: Anthropic, OpenAI, OpenRouter, Hugging Face, Groq, Google AI,
   Mistral, Cohere, Perplexity, Together, Fireworks, DeepSeek, z.ai, MiniMax,
-  Ollama, GitHub Models, and related marketplace integrations.
+  Ollama, GitHub Models, Replicate, Brave Search, and browser/computer
+  providers such as Browserbase and Stagehand.
 - Web deploy: Netlify. Local app dev server: `http://localhost:8081`.
 
 ## Read Before Editing
@@ -34,8 +35,9 @@ Gemini-specific quick sheet.
 - On React Native Web, prefer native DOM pointer listeners when React pointer
   props are unreliable.
 - Office furniture and draggable office placement stay on the 16px grid.
-- Do not assume `profiles.email`, `circle_office_agents.model`, or
-  `user_xp.id` exist.
+- Do not assume `profiles.email` or `circle_office_agents.model` exist.
+  (`user_xp.id` IS the primary key and always exists; a `user_id` mirror
+  column also exists. Do not confuse the two.)
 
 ## Validation
 

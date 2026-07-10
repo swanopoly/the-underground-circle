@@ -1,7 +1,7 @@
 # MEMORY.md - The Underground Circle
 
 > Persistent project memory for agents.
-> Last reviewed: 2026-05-09
+> Last reviewed: 2026-07-10
 
 `docs/AGENTS_ROADMAP.md` is the authority when this memory conflicts with a
 plan, ownership table, or SQL status.
@@ -11,7 +11,8 @@ plan, ownership table, or SQL status.
 - App: The Underground Circle.
 - Live URL: `https://app.chrisswanson.xyz`.
 - Repo: `github.com/swanopoly/the-underground-circle`.
-- Local repo in this environment: `/Users/cswanson/the-underground-circle`.
+- Local repo path varies by machine and worktree; use the current working
+  directory rather than a hardcoded path.
 - Core wedge: shared AI-agent accountability for small dev teams. BlackSwan
   watches repo/team activity, routes work through agents, and turns runs into
   visible proof, memory, and follow-up.
@@ -88,7 +89,7 @@ When adding a provider, keep these in sync:
 |---|---|
 | `profiles` | No `email` column. Use auth data for email. |
 | `circle_office_agents` | No `model` column. Owner FK is `owner_id`. |
-| `user_xp` | Primary key is `user_id`, not `id`. |
+| `user_xp` | Primary key is `id` (FK to `profiles.id`). `user_id` is a mirror column added later (`20260310_fix_xp_system.sql`), not the PK. |
 | `room_messages` | `message_type` is constrained to known message kinds. |
 | `circle_members` RLS | Avoid recursive policy reads; use security-definer helpers where available. |
 | `circle_integrations` | Provider CHECK must include any new marketplace provider. |

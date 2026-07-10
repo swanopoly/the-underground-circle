@@ -1,7 +1,7 @@
 # AGENT.md - Codex Notes
 
 > Codex-specific repo guidance.
-> Last reviewed: 2026-05-11
+> Last reviewed: 2026-07-10
 
 Start with `AGENTS.md`. Do not use this file as an alternate roadmap.
 `docs/AGENTS_ROADMAP.md` is the authority for ownership, phase status, SQL
@@ -39,14 +39,15 @@ accountability for small dev teams:
 
 - `src/lib/animationPatch.ts` must remain the first import in `App.tsx`.
 - Use the shared Supabase singleton from `src/lib/supabase.ts`.
-- New auth reads should use `safeGetUser`, `safeGetSession`, or
-  `getFreshAccessToken` from `src/lib/authSession.ts`. If a direct
+- New auth reads should use `safeGetUser`, `safeGetSession`, `safeGetUserId`,
+  or `getFreshAccessToken` from `src/lib/authSession.ts`. If a direct
   `supabase.auth.getUser()` or `getSession()` call remains necessary, attach a
   `.catch(...)` handler.
 - Do not add new `profiles.email` reads. `profiles` has `display_name` and
   `username`; use auth data for email.
 - `circle_office_agents` has no `model` column. Owner FK is `owner_id`.
-- `user_xp` primary key is `user_id`.
+- `user_xp` primary key is `id` (FK to `profiles.id`); `user_id` is a mirror
+  column added later (`20260310_fix_xp_system.sql`), not the PK.
 - `room_messages.message_type` must stay within the DB check constraint.
 - Agent memory, user memory, skill, credential, and integration writes need an
   approval or server-side guard where the roadmap requires one.

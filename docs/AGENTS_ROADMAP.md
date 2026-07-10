@@ -2,24 +2,24 @@
 
 **Audience:** Every agent contributing to this repo (Claude Code, Codex, Cursor, Gemini, future bridges). This is the single doc you consult before starting work on the agent runtime. Keep it in sync.
 
-**Last synced:** 2026-05-11
+**Last synced:** 2026-07-10
 
 **Why this doc exists:** Two agents (Claude Code + Codex) have been independently converging on the same Hermes-style architecture for OpenSwan. Each shipped complementary pieces without full awareness of the other. This doc reconciles both into one plan so we stop building parallel stacks.
 
 Related docs (all still valid, read them after this one):
 - [`UC_APP_STACK_REFERENCE.md`](./UC_APP_STACK_REFERENCE.md) — current app map, runtime files, provider routing, and validation guide.
 - [`OPENSWAN_AGENT_IMPLEMENTATION_PLAN.md`](./OPENSWAN_AGENT_IMPLEMENTATION_PLAN.md) — Codex's section-by-section plan (8 architectural sections). Still the authoritative breakdown per concern.
-- [`HERMES_INTEGRATION_PLAN.md`](./HERMES_INTEGRATION_PLAN.md) — research summary of Hermes Agent patterns + the phased adoption we lifted from them.
+- [`AGENT_RUNTIME_INTEGRATION_PLAN.md`](./AGENT_RUNTIME_INTEGRATION_PLAN.md) — research summary of Hermes Agent patterns + the phased adoption we lifted from them (formerly `HERMES_INTEGRATION_PLAN.md`).
 - [`CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md`](./CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md) — full audit of chat automation, routing fragmentation, and the unification plan for command/build/browser/automation flows.
 - [`COMPUTER_AGENT_EXPANSION_PLAN_2026-04-22.md`](./COMPUTER_AGENT_EXPANSION_PLAN_2026-04-22.md) — audit + phased plan for turning the current browser-first stack into a true permissioned computer runtime spanning files, apps, MCP tools, bridges, and browser work.
 - [`CHAT_USE_COMPUTER_CLINE_AUDIT_PLAN_2026-04-22.md`](./CHAT_USE_COMPUTER_CLINE_AUDIT_PLAN_2026-04-22.md) — deep audit of current Chat + `Use Computer` pathways, concrete local findings, and the Cline-inspired runtime plan for plan/act, focus-chain, checkpoints, hooks, workflows, and true file/app/hybrid computer adapters.
 - [`CLINE_ADOPTION_IMPLEMENTATION_PLAN_2026-04-22.md`](./CLINE_ADOPTION_IMPLEMENTATION_PLAN_2026-04-22.md) — canonical implementation order for Cline-inspired runtime work across chat, OpenSwan, and `Use Computer`. Use this to keep all agents on one build sequence.
-- [`HERMES_DELTA_PLAN_2026-04-22.md`](./HERMES_DELTA_PLAN_2026-04-22.md) — research delta vs Hermes Agent (NousResearch). What's shipped, what's partial, what's missing, with the top-10 item ranking.
+- [`AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md`](./AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md) — research delta vs Hermes Agent (NousResearch). What's shipped, what's partial, what's missing, with the top-10 item ranking (formerly `HERMES_DELTA_PLAN_2026-04-22.md`).
 - [`DESKTOP_APP_CAPABILITY_PATHS.md`](./DESKTOP_APP_CAPABILITY_PATHS.md) — four options for "launch X app on my computer" (URL-scheme shortcuts / Claude Code bridge / dedicated Tauri binary / Anthropic computer-use desktop mode). Option A shipped 2026-04-22.
 - [`UNIVERSAL_CONTROL_RESEARCH_2026-04-23.md`](./UNIVERSAL_CONTROL_RESEARCH_2026-04-23.md) — deep research on what it takes for an agent to make changes in any native app and on any website. State-of-art comparison (Anthropic / OpenAI Operator / Mariner / Skyvern / browser-use), benchmark landscape (OSWorld-Verified, WebArena, WebVoyager), and a UC-1..UC-5 phased rollout. TL;DR: next ship is `/desktop/a11y_tree` (~75% token reduction on desktop tasks, semantic selectors, HITL UX win) — everything else compounds from there.
 - [`DESKTOP_AUTOMATION_PHASE_1_PLAN.md`](./DESKTOP_AUTOMATION_PHASE_1_PLAN.md) — canonical rollout for "launch X app AND do something inside it." Phases 1a (bridge plumbing), 1b (agent tools + HITL + known apps + status chip), **and 1c (screenshot + wait_for_app + hardened auto-chain) all shipped**. Phase 1d (click + a11y tree) later.
 - [`SWANBOT_V2_MIGRATION_PLAN.md`](./SWANBOT_V2_MIGRATION_PLAN.md) — canonical plan for retiring the v1 edge function (hardcoded BLACKSWAN_TOOLS) in favour of v2 (typed tool loop, openswanToolRuntime catalog). **M1 + M2 shipped 2026-04-23**: feature flag + `/v2 on|off` slash, `callSwanBotV2` with auto v1 fallback, round-trip client-delegated tool protocol (edge emits `{ pending: true, clientToolCalls, continuationRunId }` → client executes against bridge → posts back `{ continuationRunId, toolResults }` → loop resumes), 11 `desktop.*` tools registered as `clientOnly: true` on v2, 6-continuation cap on client. Smoke coverage: 40+ assertions. M3 (full OpenSwan tool parity on v2) next.
-- [`PHASE_CA-8_HERMES_DELTA_PLAN.md`](./PHASE_CA-8_HERMES_DELTA_PLAN.md) — **canonical rollout** of the top 10. Every agent picks sub-phases (CA-8a..CA-8j) from here.
+- [`PHASE_CA-8_AGENT_RUNTIME_DELTA_PLAN.md`](./PHASE_CA-8_AGENT_RUNTIME_DELTA_PLAN.md) — **canonical rollout** of the top 10. Every agent picks sub-phases (CA-8a..CA-8j) from here (formerly `PHASE_CA-8_HERMES_DELTA_PLAN.md`).
 - [`OPENROUTER_INTEGRATION_RESEARCH_2026-05-06.md`](./OPENROUTER_INTEGRATION_RESEARCH_2026-05-06.md) — OpenRouter/provider-marketplace expansion research. Use as background; implementation ownership stays in this roadmap.
 - [`OPTIMIZATION_PLAN.md`](./OPTIMIZATION_PLAN.md) — non-agent optimization work (bundle, pagination, error boundaries, SQL).
 - [`RUN_THIS_SQL.sql`](./RUN_THIS_SQL.sql) — consolidated idempotent agent/runtime SQL helper; production status is tracked in section 5.
@@ -103,7 +103,7 @@ This table is the tie-breaker. When two files overlap, the one listed under "Can
 | **Client-side Computer Use surface** | `src/lib/computerUseAgent.ts` + `src/lib/useComputerUseTask.ts` + `src/lib/useComputerUseQueue.ts` + `src/components/ComputerUseLiveCard.tsx` | SSE reader, single-task hook, multi-task queue hook (up to 3 concurrent), live card with cache-hit % indicator. `queue` hook shipped but not yet wired into a surface. | Shipped 2026-04-21 (queue unwired) |
 | **Chat automation planner** | `src/lib/chatAutomationPlanner.ts` | Single entry point classifying chat input → `ChatAutomationPlan` with `execution.kind` / `risk` / `approval`. Phase 1 of `CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md`. `ChatTab.sendMessage` now uses it for normalized route/source decisions, planned dispatch for stable route families (`help`, `mission`, `summary`, `room`, `browser`, `github`, `wordpress`, `schedule`, `build_page`, `hf_tools`, `search`, `memory`, `governance`), explicit `run_openswan` mode routing, the shared plain-chat transport, active conversational build discovery continuation, and the main `open_modal` quick-action cases. Full execution migration remains in Phase 1b. | Shipped (Codex), partial ChatTab adoption |
 | **Chat automation dispatcher** | `src/lib/runChatAutomationPlan.ts` | Shared transport dispatcher + normalized outcome contract. `ChatTab.sendMessage` now uses `dispatchChatAutomationPlan(...)` for stable route families, explicit `run_openswan`, the plain conversational chat path, conversational build discovery continuation, and the main `open_modal` quick-action cases before falling back to remaining legacy branches. Planned runs attach `chatAutomationDecision` metadata via `attachPlanDecisionToRun`. | Shipped (Codex), partial ChatTab adoption |
-| **Chat planner smoke test** | `scripts/chat-planner-smoketest.ts` + `npm run smoke:chat-planner` | 14 runnable cases covering slash, quick action, conversational intents, NL rewrite, build heuristic, plain-chat fallback. Locks in the classification matrix before ChatTab migrates onto the planner. | Shipped 2026-04-21 |
+| **Chat planner smoke test** | `scripts/chat-planner-smoketest.ts` + `npm run smoke:chat-planner` | 17 runnable cases covering slash, quick action, conversational intents, NL rewrite, build heuristic, plain-chat fallback. Locks in the classification matrix before ChatTab migrates onto the planner. | Shipped 2026-04-21 |
 | **SKILL.md importer** | `src/lib/skillLibraryImport.ts` | `importLibrarySkillFromUrl` / `importLibrarySkillFromText`. HTTPS-only, 256 KB cap, normalises GitHub blob + gist URLs, validates agentskills.io spec, files `agent_approvals` row (never writes directly). Handles duplicate-name with optional `allowPatch` flow. | Shipped 2026-04-21 |
 | **Skill slash commands** | `src/lib/skillChatCommands.ts` | `/skill`, `/skill list [tag:…]`, `/skill view <name>`, `/skill import <url>`, `/skill import --replace <url>`. `executeSkillCommand()` returns `{ message, success } \| null`; null falls through to other handlers so chatCommandRegistry can dispatch cleanly. | Shipped 2026-04-21 |
 | **sessionSearch tool** | `src/lib/agentTools/sessionSearch.ts` | ILIKE against `messages.content` with optional thread/date scope; untrusted-quoted excerpts; contract survives the later FTS + Haiku-summarization upgrade. | Shipped (Codex) |
@@ -112,13 +112,11 @@ This table is the tie-breaker. When two files overlap, the one listed under "Can
 | **Approval-apply worker** | `src/lib/agentApprovalsWorker.ts` | `applyApprovedAction(approvalId)` dispatches by `action_type` prefix to the right apply function (skill.* / memory.compact / user_memory.*). `applyAllPendingApprovals(circleId)` sweeps approved-but-unapplied rows. Closes the HITL loop — approvals without this sat inert. | Shipped 2026-04-21 |
 | **Plan executor contract** | `src/lib/runChatAutomationPlan.ts` | `dispatchChatAutomationPlan(plan, { handlers, ctx, approvalGate, onOutcome })` — Phase CA-3 normalisation. Transports implement `ChatTransportHandler` → `ChatAutomationOutcome`. Unknown kinds yield `status: 'skipped'` so ChatTab can migrate one kind at a time without breaking legacy routes. `attachPlanDecisionToRun` observer writes `chatAutomationDecision` into `agent_runs.metadata`. | Shipped 2026-04-21 |
 | **SKILL.md frontmatter parser (pure)** | `src/lib/skillFrontmatter.ts` | Pure string parser extracted out of `skillLibrary.ts` so smoke tests + edge functions can import without pulling Supabase / React Native. `skillLibrary.ts` re-exports. | Shipped 2026-04-21 |
-| **Hermes-helpers smoke test** | `scripts/hermes-helpers-smoketest.ts` + `npm run smoke:hermes-helpers` | 21 cases covering `parseSkillFrontmatter`, `normalizeSkillUrl`, `summarisePlanForTelemetry`. `smoke:all` now runs agent-core + chat-planner + hermes-helpers = 41 green cases total. | Shipped 2026-04-21 |
 | **`/automation` slash commands** | `src/lib/automationChatCommands.ts` | Phase CA-2 family: `list`, `status`, `run <name\|id>`, `test <name\|id>`, `pause <name\|id>`, `resume <name\|id>`, `runs <name\|id>`. Fuzzy name matching, ambiguity messaging, stats rolled up from `loadDashboardStats` + `loadAutomations`. `executeAutomationCommand()` returns `{message, success} \| null`; null falls through. | Shipped 2026-04-22 |
 | **Chat automation decisions dashboard** | `src/lib/chatAutomationDecisions.ts` | Phase CA-6 read layer: `loadChatAutomationDecisions(circleId)` + `loadChatAutomationBreakdown(circleId, { windowHours })`. Feeds the Run Ledger UI with source / executionKind / outcome rollups + median duration. Uses the `chatAutomationDecision` metadata that `attachPlanDecisionToRun` stamps per dispatch. | Shipped 2026-04-22 |
 | **HITL approval gate (chat)** | `src/lib/chatApprovalGate.ts` | Phase CA-4 — `createHitlApprovalGate({ sessionKey, agentName, timeoutSeconds, describe })` returns an `ApprovalGate` for `dispatchChatAutomationPlan`. Builds a stable `idempotencyKey` from the plan + looks up pending / approved / rejected / expired matches before filing a fresh `agent_approvals` row. Fails closed on lookup error. | Shipped 2026-04-22 |
 | **Repeated-flow detection** | `src/lib/repeatedFlowDetection.ts` | Phase CA-5a — `detectRepeatedFlows(rows, opts)` is a pure function over `ChatAutomationDecisionRow[]`. Groups by `(executionKind, routeId, commandFingerprint)`, requires ≥3 occurrences + ≥60% success, classifies cadence (under_hour/hourly/daily/multi_day/irregular), scores for ranking. Output is UI-ready for "save as automation" chips. | Shipped 2026-04-22 |
 | **Plan observer (telemetry)** | `src/lib/runChatAutomationPlanObserver.ts` | `attachPlanDecisionToRun` split into its own module so the pure dispatcher stays RN-free for smoke tests. Stamps `chatAutomationDecision` onto `agent_runs.metadata` on every dispatch that created a run. | Shipped 2026-04-22 |
-| **Hermes-runtime smoke test** | `scripts/hermes-runtime-smoketest.ts` + `npm run smoke:hermes-runtime` | 29 cases: dispatch completed / skipped / failed / deferred / approved + observer firing; detector frequency / cadence / success-ratio / maxSuggestions / exclusions. `smoke:all` is now 6+14+21+29 = **70 green cases**. | Shipped 2026-04-22 |
 
 ### Duplicate / deprecated files (keep but do not extend)
 
@@ -405,7 +403,7 @@ Tracked fully in [`CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md`](./CHAT_AUTOMATION_
 - [x] **Phase CA-7b — Checkpoints wired to memory-bank writes** (closes CA-7 pending callsite): `memory_bank.write` registered as a new `CheckpointToolKind`. `writeMemoryBankWithCheckpoint()` in `memoryBankChatCommands.ts` wraps update/append/clear paths — users see a `checkpoint \`abc12345\`` id in the response and can restore via `ToolCallCheckpointStrip`. Restore handler reads/writes `circle_memory(circle_id, doc_kind)` directly to avoid pulling react-native through `sharedMemory.ts`. 5th case added to checkpoint smoke — green. Shipped 2026-04-22.
 - [x] **Phase CA-OS — OpenSwan console pop-up on chat dashboard**: New `src/components/openswan/OpenSwanConsole.tsx` — centered blurred-backdrop modal matching the Computer Use / Assign / Spawn pattern. Reuses `OPENSWAN_MODE_POLICIES` (8 modes with per-mode color + response contract). Quick Action `__OPENSWAN__` opens it; onSubmit syncs `chatMode` + fires `sendMessage(task)` so the task flows through the existing planner + dispatcher + HITL gate. Shipped 2026-04-22.
 
-- [x] **Phase CA-8 — Hermes Delta (top 10 items)**. Canonical rollout: [`PHASE_CA-8_HERMES_DELTA_PLAN.md`](./PHASE_CA-8_HERMES_DELTA_PLAN.md). All 10 sub-phases shipped 2026-04-22/23. Follow-up wiring items tracked below.
+- [x] **Phase CA-8 — Hermes Delta (top 10 items)**. Canonical rollout: [`PHASE_CA-8_AGENT_RUNTIME_DELTA_PLAN.md`](./PHASE_CA-8_AGENT_RUNTIME_DELTA_PLAN.md). All 10 sub-phases shipped 2026-04-22/23. Follow-up wiring items tracked below.
   - [x] CA-8a · agent-side context compression — `src/lib/agentContextCompression.ts`. Pure lib: injected summariser, tail-preserving cut, tool-pair protection, safe bail on summariser throw. 20 smoke assertions. Shipped 2026-04-22.
   - [x] CA-8b · memory bounded-char caps (user_memory) — `src/lib/userMemoryCaps.ts` + enforcement in `appendUserMemory`/`replaceUserMemory` (`memory_cap_exceeded` structured error, `suggestion:'consolidate'`). 23 smoke assertions. Shipped 2026-04-22.
   - [x] CA-8c · skill sub-file support — `circle_skill_files` table + `listLibrarySkillFiles` / `viewLibrarySkillFile` + `skillRelPath.ts` safe-path validator. Primary body stays on `circle_skills.content`. Write-side shipped in CA-8i. 29 smoke assertions. Shipped 2026-04-22.
@@ -413,7 +411,7 @@ Tracked fully in [`CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md`](./CHAT_AUTOMATION_
   - [x] CA-8e · `clarify` / `ask_user` timeout — `src/lib/clarifyTimeout.ts`: 120s default, `autoResolveOnTimeout`, `formatCountdown`. 41 smoke assertions. Shipped 2026-04-23; `HitlApprovalBanner` countdown UI is a pending follow-up.
   - [x] CA-8f · provider fallback chain — `src/lib/agentProviders/fallbackChain.ts`: 429/529/5xx/408/timeout retryable → next provider; 400/401/403/404/422 bubble immediately. Observer fires per chain advance. 55+ smoke assertions. Shipped 2026-04-23.
   - [x] CA-8g · trace export + evals scaffolding — `scripts/export-traces.ts`, `docs/evals/` (10 golden cases), `docs/EVOLVABLE_SURFACES.md` (evolvable surfaces cap: skill bodies + tool descriptions + prompt components only, never `.ts` files). Shipped 2026-04-23.
-  - [x] CA-8h · context file priority + per-turn discovery append — `CONTEXT_FILE_PRIORITY` exported const in `openswanContextDiscovery.ts`. UC order: `.openswan.md → AGENTS.md → AGENT.md → CLAUDE.md → .cursorrules`. First match wins; `resolveContextFilePriority(available)` returns null when nothing matches. 30 smoke assertions. Shipped 2026-04-23.
+  - [x] CA-8h · context file priority + per-turn discovery append — `CONTEXT_FILE_PRIORITY` exported const in `openswanContextDiscovery.ts`. UC order: `.openswan.md → AGENTS.md → AGENT.md → CLAUDE.md → .cursorrules → .hermes.md → HERMES.md` (matches the source const; `.openswan.md`/`.cursorrules`/`.hermes.md`/`HERMES.md` are optional and not present in this repo). First match wins; `resolveContextFilePriority(available)` returns null when nothing matches. 30 smoke assertions. Shipped 2026-04-23.
   - [x] CA-8i · `skill_manage` sub-file actions — `write_file` / `remove_file` actions in `manageLibrarySkill.ts`; `applyApprovedSkillAction` extended in `skillLibraryWrite.ts`. Both gate on safe `relpath`; file HITL `agent_approvals` rows, never write directly. 40+ smoke assertions. Shipped 2026-04-23.
   - [x] CA-8j · session lineage columns — `parent_thread_id` + `lineage_root_id` on `circle_chat_threads` (target table is `circle_chat_threads`, not `room_messages`). Helpers: `resolveLineageRoot`, `walkLineageAncestors`, `orderByLineage` in `src/lib/chatThreadLineage.ts`. Migration `20260508_chat_threads_lineage.sql`. 29 smoke assertions. Shipped 2026-04-23.
 
@@ -444,18 +442,23 @@ Target after Phase 1c:
 | Edge function (v2) | `supabase/functions/swanbot-v2-ai/index.ts` | `agentExecutionCore.runAgent` | `listOpenSwanAnthropicToolsForSurface` + `executeOpenSwanTool` adapter |
 | In-app gateway | `openswanSessionRuntime.ts` | `agentExecutionCore.runAgent` | same adapter |
 
-Adapter shape (new file, ~60 L, Phase 1c):
+Adapter shape (shipped as `src/lib/agentTools/openswanBridge.ts`):
 
 ```ts
 // src/lib/agentTools/openswanBridge.ts
-import { listOpenSwanAnthropicToolsForSurface, executeOpenSwanRuntimeTool, formatOpenSwanRuntimeToolResult, type OpenSwanToolSurface, type OpenSwanRuntimeToolContext } from '../openswanToolRuntime';
+import { listOpenSwanAnthropicToolsForSurface, executeOpenSwanRuntimeTool, formatOpenSwanRuntimeToolResult, type OpenSwanToolSurface, type OpenSwanRuntimeToolName, type OpenSwanRuntimeToolContext } from '../openswanToolRuntime';
 import type { AgentToolDefinition } from '../agentExecutionCore';
 
-export function getToolsForSurface(
+export function getOpenSwanToolsForSurface(
   surface: OpenSwanToolSurface,
   ctx: OpenSwanRuntimeToolContext,
+  opts?: {
+    allowedToolNames?: OpenSwanRuntimeToolName[];
+    includeFormattedText?: boolean;
+  },
 ): AgentToolDefinition[] {
-  const catalog = listOpenSwanAnthropicToolsForSurface(surface);
+  const catalog = listOpenSwanAnthropicToolsForSurface(surface, opts?.allowedToolNames);
+  const includeFormatted = opts?.includeFormattedText !== false;
   return catalog.map((tool) => ({
     name: tool.name,
     description: tool.description,
@@ -463,7 +466,15 @@ export function getToolsForSurface(
     handler: async (input) => {
       try {
         const result = await executeOpenSwanRuntimeTool(tool.name as any, input as any, ctx);
-        return { ok: true, data: { text: formatOpenSwanRuntimeToolResult(tool.name as any, result as any), raw: result } };
+        const data: Record<string, unknown> = { raw: result };
+        if (includeFormatted) {
+          try {
+            data.text = formatOpenSwanRuntimeToolResult(tool.name as any, result as any);
+          } catch {
+            // formatting is best-effort; fall back to raw only
+          }
+        }
+        return { ok: true, data };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
@@ -530,7 +541,7 @@ When in doubt, rerun the relevant idempotent section and then reload schema.
 
 ## 7. Open questions for Chris
 
-(Same as §9 of `HERMES_INTEGRATION_PLAN.md`; repeating for discoverability.)
+(Same as §9 of `AGENT_RUNTIME_INTEGRATION_PLAN.md`; repeating for discoverability.)
 
 1. **Default Phase 1c model.** Claude Sonnet 4.6 for the edge function + Opus 4.7 for the in-app gateway? Or stick with Haiku 4.5 in the edge function for cost?
 2. **Ship `swanbot-v2-ai` side-by-side first, or in-place rewrite?** Side-by-side is safer; in-place is faster.

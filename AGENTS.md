@@ -1,5 +1,7 @@
 # AGENTS.md - Start Here
 
+> Last reviewed: 2026-07-10
+
 This is the entry point for every contributing agent: Claude Code, Codex,
 Cursor, Gemini, OpenSwan bridges, and future runtime agents. Keep this file
 short. Detailed context lives in the linked docs.
@@ -14,10 +16,11 @@ short. Detailed context lives in the linked docs.
    - `Gemini.md` for Gemini CLI.
    - `MEMORY.md` for persistent gotchas and project memory.
 
-**If you are in an openswan worktree** (path contains `.openswan-worktrees/`): the `AGENT.md`
-and `CLAUDE.md` in that worktree are current. The worktree `CLAUDE.md` carries a stale warning
-at the top — read it and follow the root `CLAUDE.md` for anything not in the Missions/office
-sections.
+**If you are in an openswan worktree** (path contains `.openswan-worktrees/`): you are in an
+isolated git branch of the same codebase. Worktrees inherit the repo files as-is, so treat
+`docs/AGENTS_ROADMAP.md` as canonical and `CLAUDE.md` as the current app review, exactly as you
+would at the repo root. (`.openswan-worktrees/` is gitignored, so worktree-local copies are not
+tracked.)
 
 If any doc conflicts with `docs/AGENTS_ROADMAP.md`, the roadmap wins and the
 other doc should be fixed in the same change.
@@ -50,7 +53,8 @@ The active runtime work is centered on:
 - BlackSwan/OpenSwan chat and tool execution.
 - Provider marketplace and BYOK routing across Anthropic, OpenAI, OpenRouter,
   Hugging Face, Groq, Google AI, DeepSeek, Mistral, Cohere, Perplexity,
-  Together, Fireworks, z.ai, MiniMax, Ollama, and related providers.
+  Together, Fireworks, z.ai, MiniMax, Ollama, GitHub Models, Replicate, Brave
+  Search, and browser/computer providers such as Browserbase and Stagehand.
 - Computer Use and local desktop awareness through Browserbase, bridge tools,
   and guarded local actions.
 - Memory bank, user memory, SKILL.md library, checkpoints, and run telemetry.

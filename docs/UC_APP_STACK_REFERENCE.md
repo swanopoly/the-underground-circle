@@ -1,7 +1,7 @@
 # The Underground Circle - App Stack Reference
 
 > Current app map for agents before writing code.
-> Last reviewed: 2026-05-09
+> Last reviewed: 2026-07-10
 
 `AGENTS.md` and `docs/AGENTS_ROADMAP.md` own agent workflow and runtime
 ownership. This file maps the app.
@@ -154,7 +154,7 @@ constraints aligned.
 |---|---|
 | `profiles` | No `email` column. Use auth user data for email. |
 | `circle_office_agents` | No `model` column. Owner FK is `owner_id`. |
-| `user_xp` | Primary key is `user_id`. |
+| `user_xp` | Primary key is `id` (FK to `profiles.id`); `user_id` is a mirror column added later, not the PK. |
 | `room_messages.message_type` | Must match the DB check constraint. |
 | `circle_integrations.provider` | CHECK constraint must include any new provider. |
 | `circle_members` RLS | Avoid recursive policy reads; use security-definer helpers where available. |
