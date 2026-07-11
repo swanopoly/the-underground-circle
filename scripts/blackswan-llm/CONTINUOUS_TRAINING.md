@@ -25,6 +25,23 @@ and the pipeline exits non-zero so launchd can record the retry. (Exception:
 an eval-gate *block* is a successful cycle that chose not to ship — it exits
 0 with loud `SKIPPED — eval gate` banners in the log.)
 
+**Data sources — agent tool traces (P63, 2026-07-10).** Real tool-use runs
+(`agent_runs` + `agent_run_events`) now flow through the pipeline: step 1
+archives them as raw JSON, and the v6 tool-trace chain
+(`export_tool_traces.py` → `score_trajectories.py --top-fraction` →
+`convert_tool_traces.py`, merged by `prepare_dataset_v4.py` at 2x as the
+`tool_traces` source) owns the ShareGPT conversion — `convert_app_data.py`
+deliberately does not touch them. Both exporters prefer the opt-out-safe
+`training_safe_agent_runs` / `training_safe_agent_run_events` views
+(`20260710_training_safe_agent_runs.sql`, PENDING APPLY) and stay green
+before the SQL lands: step 1 skips the missing views (404),
+`export_tool_traces.py` falls back to the raw tables with a loud warning.
+Trajectories are secret-scrubbed fail-closed (key-name drops, sk-/hf_/ghp_/
+JWT/xox value drops, base64 → `[binary omitted]`), bounded (inputs ≤600
+canonical chars, errors ≤400, ≤8 tool rounds — oversized runs are skipped,
+never truncated), and stuck-solver recoveries are exported as gold
+(`solver_consultations` + per-step `solver_note`, rewarded by the scorer).
+
 ## First-time setup
 
 ```bash
@@ -43,6 +60,7 @@ deactivate
 #    Files:
 #      supabase/migrations/20260312_training_privacy.sql       (already run in prod)
 #      supabase/migrations/20260506c_training_safe_wave2_tables.sql
+#      supabase/migrations/20260710_training_safe_agent_runs.sql  (P63 — PENDING APPLY)
 
 # 3. Wire the launchd schedule + secrets file.
 bash launchd/setup.sh

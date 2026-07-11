@@ -142,6 +142,10 @@ def format_observation(group):
             obs["duration_ms"] = step.get("duration_ms")
         if step.get("error"):
             obs["error"] = step.get("error")
+        if step.get("solver_note"):
+            # P63: surface the stuck-solver consultation at the step it
+            # followed, so recovery behavior is learnable in-context.
+            obs["note"] = step.get("solver_note")
         results.append(obs)
     payload = results[0] if len(results) == 1 else results
     return json.dumps(payload, ensure_ascii=False)

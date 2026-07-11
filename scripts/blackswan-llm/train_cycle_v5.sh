@@ -166,6 +166,28 @@ else
     echo
 fi
 
+# ─── Step 1.5: Agent tool-trace flywheel (P63) ─────────────────────────
+# Exports real agent tool-use runs (agent_runs/agent_run_events, prefers
+# the training_safe_* views), scores trajectories, and converts the top
+# half into ShareGPT tool examples that Step 4's prepare merges via the
+# `tool_traces` source tag. Failure-tolerant: a missing view / export
+# error must never kill the weekly cycle.
+if [ "${SKIP_EXPORT}" = false ]; then
+    echo "═══ Step 1.5: Export agent tool traces ══════════════════════"
+    "${PYTHON}" export_tool_traces.py \
+        || echo "  tool-trace export failed — continuing without fresh traces"
+    echo
+fi
+if [ -f raw_data/tool_traces.jsonl ]; then
+    echo "═══ Step 1.6: Score + convert tool traces → ShareGPT ════════"
+    "${PYTHON}" score_trajectories.py --top-fraction 0.5
+    "${PYTHON}" convert_tool_traces.py --input raw_data/tool_traces_top.jsonl
+    echo
+else
+    echo "═══ Step 1.6: Skipped (no raw_data/tool_traces.jsonl) ═══════"
+    echo
+fi
+
 # ─── Step 2: Convert app data to ShareGPT ──────────────────────────────
 echo "═══ Step 2: Convert app data → ShareGPT ═════════════════════"
 "${PYTHON}" convert_app_data.py
