@@ -14,6 +14,7 @@ import type { OfficeCommand } from './office/OfficeChat';
 import {
   OfficeAgent,
   DEFAULT_AGENT,
+  HUGGINGSWAN_AGENT,
   sessionsToAgents,
   getOfficeStatusColor,
   getOfficeStatusLabel,
@@ -81,7 +82,14 @@ import {
 } from '../../../components/office/OfficeOpsBoardCards';
 // officeOpsBoard is a pure model module (zero runtime imports) — safe to
 // import statically for render-time helpers; data fetching stays lazy (D6).
-import { buildAgentLiveOps, formatAccountabilityCounts } from '../../../lib/officeOpsBoard';
+import {
+  applySyntheticAgentStatusUpgrade,
+  buildAgentLiveOps,
+  deriveSyntheticAgentStatusFromRuns,
+  formatAccountabilityCounts,
+  HUGGINGSWAN_RUN_NAME_KEYS,
+  OPENSWAN_RUN_NAME_KEYS,
+} from '../../../lib/officeOpsBoard';
 import type {
   OfficeAgentAccountability as OfficeAgentAccountabilityModel,
   OfficeBuildingBoard,
@@ -2099,7 +2107,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     agent.outputTokens || 0,
   ])), [userAgents]);
   const displayAgents = useMemo(() => {
-    return buildOfficeRoster({
+    const roster = buildOfficeRoster({
       agents: userAgents,
       currentUserId,
       circleAgents: mergedCircleAgents,
@@ -2107,7 +2115,33 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       identities: agentIdentities,
       selectedAgentId: selectedAgent?.id || null,
     });
-  }, [userAgents, currentUserId, mergedCircleAgents, connections, agentIdentities, selectedAgent?.id]);
+    // O8: synthetic pinned agents (OpenSwan; HuggingSwan if ever re-pinned)
+    // have no session/bridge feeding their status, so mid-task they'd keep a
+    // static default. Live agent_runs rows are authoritative evidence of work
+    // (the Building-Now board renders the same nodes), so UPGRADE-only:
+    // idle → building/active, building → active, activity → "Working: <run>".
+    // No evidence and offline/error rows pass through untouched — see
+    // officeOpsBoard.deriveSyntheticAgentStatusFromRuns (mirror image of the
+    // O2 demote-only reconcile). Name matching uses the same lowercased
+    // agentName seam as opsRunNodesByAgent.
+    if (opsRunNodesByAgent.size === 0) return roster;
+    const nowMs = Date.now();
+    return roster.map((agent) => {
+      if (!agent.isSynthetic) return agent;
+      const nameKeys =
+        agent.id === DEFAULT_AGENT.id ? OPENSWAN_RUN_NAME_KEYS
+        : agent.id === HUGGINGSWAN_AGENT.id ? HUGGINGSWAN_RUN_NAME_KEYS
+        : null;
+      if (!nameKeys) return agent;
+      const nodes = nameKeys.flatMap((key) => opsRunNodesByAgent.get(key) ?? []);
+      const upgrade = applySyntheticAgentStatusUpgrade(
+        agent.status,
+        deriveSyntheticAgentStatusFromRuns(nameKeys, nodes, nowMs),
+      );
+      if (!upgrade.changed) return agent;
+      return { ...agent, status: upgrade.status, activity: upgrade.activity ?? agent.activity };
+    });
+  }, [userAgents, currentUserId, mergedCircleAgents, connections, agentIdentities, selectedAgent?.id, opsRunNodesByAgent]);
 
   // Precompute filter counts so every chip can show its hit count inline.
   // `mine` is bridge-pushed agents owned by the current user plus the default

@@ -278,6 +278,22 @@ assert.equal(
   assert.equal(detectRepeatedToolFailure(two, { threshold: 2 }).stuck, true, 'threshold 2 honored');
 }
 
+// The reason string stays BOUNDED against a model-emitted giant tool name —
+// it flows verbatim into loop events, persisted run rows, terminal chat text,
+// and the solver prompt, so an unbounded name would bloat all of them.
+{
+  const giantName = `desktop.${'x'.repeat(20_000)}`;
+  const calls = Array.from({ length: 3 }, () => sig(giantName, {}, false));
+  const v = detectRepeatedToolFailure(calls);
+  assert.equal(v.stuck, true, 'giant-name streak still detected');
+  assert.ok(v.reason.length < 200, `reason bounded (got ${v.reason.length} chars)`);
+  assert.ok(v.reason.includes('desktop.xxx') && v.reason.includes('…'), 'reason keeps a recognizable clamped prefix');
+  assert.ok(/x3$/.test(v.reason), 'reason still states the repeat count');
+  // Normal-length names are untouched.
+  const normal = detectRepeatedToolFailure(Array.from({ length: 3 }, () => sig('desktop.click_element', {}, false)));
+  assert.ok(normal.reason.includes('desktop.click_element x3') && !normal.reason.includes('…'), 'normal names are never clamped');
+}
+
 // ── runAgent WIRING: progress-based stop inside the typed loop ───────────────
 
 function scriptedProvider(turns: ProviderTurnResult[]): AgentProvider {
@@ -302,8 +318,14 @@ const alwaysFail: AgentToolDefinition = {
 };
 
 async function runAgentWiring() {
-  // a) Identical failing call is NOT run a 3rd time; the loop stops with a
-  //    progress-based terminal note + event, well under the iteration cap.
+  // a) Identical failing call is never dispatched a 3rd time IN A ROW without
+  //    intervention. Composed P56/P62 behavior: 2 failures → the 3rd identical
+  //    request is refused undispatched and spends the run's ONE solver
+  //    consultation (ring cleared for a fresh window) → 2 more failures → the
+  //    next identical request is refused undispatched and the loop hard-stops
+  //    with the progress-based terminal, well under the iteration cap.
+  //    (This pin was left on the pre-P56 shape — 2 dispatches, no consult —
+  //    by the P62 pass, leaving this smoke red at HEAD.)
   {
     let handlerCalls = 0;
     const countingFailer: AgentToolDefinition = {
@@ -318,7 +340,9 @@ async function runAgentWiring() {
       maxIterations: 20,
       onEvent: (e) => events.push(e),
     });
-    assert.equal(handlerCalls, 2, 'wiring: identical failing call ran only twice (3rd refused before dispatch)');
+    assert.equal(handlerCalls, 4, 'wiring: 2 dispatches pre-consultation + 2 post (3rd + 6th requests refused undispatched)');
+    assert.equal(events.filter((e) => e.kind === 'solver_consultation').length, 1,
+      'wiring: exactly one solver consultation between the two refusals');
     assert.equal(result.hitMaxIterations, false, 'wiring: stopped on progress, NOT the iteration cap');
     assert.ok(result.iterations < 20, 'wiring: exited well before maxIterations');
     const stopEvent = events.find((e) => e.kind === 'loop_stopped_no_progress');
@@ -326,6 +350,9 @@ async function runAgentWiring() {
     if (stopEvent && stopEvent.kind === 'loop_stopped_no_progress') {
       assert.ok(stopEvent.reason.includes('failer') && /x3/.test(stopEvent.reason), 'wiring: stop event names the tool + count');
     }
+    assert.ok(events.findIndex((e) => e.kind === 'solver_consultation') <
+      events.findIndex((e) => e.kind === 'loop_stopped_no_progress'),
+      'wiring: consultation precedes the hard stop');
     assert.ok(/^stopped:/.test(result.text), 'wiring: terminal text explains the stop');
     // Transcript stays well-formed: the final assistant tool_use is closed by a
     // terminal tool_result (no dangling tool_use).

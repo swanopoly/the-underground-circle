@@ -21,6 +21,10 @@
  *   - creation: build discovery / csv      → run_build_discovery / run_openswan
  *   - watches (bridge diagnostics)         → run_openswan
  *   - image generation                     → conversational_action (hf_tools)
+ *   - recurring cadence ("every morning…") → run_command_handler (schedule)
+ *   - chat-channel sends (Slack/Discord)   → run_openswan (approval-gated)
+ *   - integrations + office/agent status   → run_openswan (read-only)
+ *   - /vault slash commands                → run_command_handler (vault)
  *
  * Any future routing change that moves a canary prompt to a different lane
  * fails CI HERE with `prompt → got X, expected Y`. The prompts that were the
@@ -338,6 +342,187 @@ const CANARIES: Canary[] = [
     kind: 'run_command_handler',
     intentKind: 'conversational_action',
     routeId: 'hf_tools',
+  },
+
+  // ════ W-A1 probe fixes (2026-07 adversarial battery) — new pinned lanes ════
+
+  // ── Lane: recurring cadence → schedule (W-A1/M1) ─────────────────────────────
+  // "every/each <unit>" phrasing was leaking into one-shot lanes: /gh prs
+  // rewrite, desktop-app computer task, or an unrelated pipeline.
+  {
+    lane: 'recurring',
+    prompt: "every morning post yesterday's merged PRs to Slack",
+    kind: 'run_command_handler',
+    routeId: 'schedule',
+    anchor: true,
+    why: 'W-A1/M1: recurring ask was rewritten to a one-shot /gh prs list',
+  },
+  {
+    lane: 'recurring',
+    prompt: 'every Monday at 9am summarize open PRs and post them to slack',
+    kind: 'run_command_handler',
+    routeId: 'schedule',
+    anchor: true,
+    why: 'W-A1/M1: recurring ask was parsed as a desktop-app computer task',
+  },
+  {
+    lane: 'recurring',
+    prompt: 'remind me every day at 5pm to log my hours',
+    kind: 'run_command_handler',
+    routeId: 'schedule',
+    anchor: true,
+    why: 'W-A1/M1: recurring reminder was landing on the cloud_devops pipeline',
+  },
+  {
+    lane: 'recurring',
+    prompt: 'set up a daily research job',
+    kind: 'run_command_handler',
+    routeId: 'schedule',
+    why: 'pre-existing schedule_automation pipeline lane must stay untouched by the cadence gate',
+  },
+  {
+    lane: 'recurring',
+    prompt: 'Schedule a meeting with the design team and send calendar invites',
+    kind: 'run_openswan',
+    routeId: null,
+    why: 'guard: recurring gate must NOT capture meeting/calendar scheduling (meetings pipeline owns it)',
+  },
+  {
+    lane: 'recurring',
+    prompt: 'Build a weekly KPI dashboard from conversion metrics',
+    kind: 'run_openswan',
+    routeId: null,
+    why: 'guard: bare "weekly" is not a cadence command — analytics pipeline keeps it',
+  },
+
+  // ── Lane: external chat-channel send → run_openswan + approval (W-A1/M2) ────
+  {
+    lane: 'channel-send',
+    prompt: "post a summary of today's standup to our Slack channel",
+    kind: 'run_openswan',
+    routeId: null,
+    anchor: true,
+    why: 'W-A1/M2: Slack post fell to plain chat — nothing would be posted',
+  },
+  {
+    lane: 'channel-send',
+    prompt: 'send a message to the #general channel in Slack saying the deploy is done',
+    kind: 'run_openswan',
+    routeId: null,
+    anchor: true,
+    why: 'W-A1/M2: Slack send was parsed as a junk desktop click sequence',
+  },
+  {
+    lane: 'channel-send',
+    prompt: 'Summarize unread emails and prioritize Slack alerts',
+    kind: 'run_openswan',
+    routeId: null,
+    why: 'guard: read-only Slack triage stays on the inbox pipeline, not the send gate',
+  },
+  {
+    lane: 'channel-send',
+    prompt: 'Moderate Discord comments and draft community replies',
+    kind: 'run_openswan',
+    routeId: null,
+    why: 'guard: moderation/drafting stays on the social pipeline, not the send gate',
+  },
+
+  // ── Lane: integrations (slash + status questions) (W-A1/M3) ─────────────────
+  {
+    lane: 'integrations',
+    prompt: '/integrations act create a Linear issue "Fix login"',
+    kind: 'run_command_handler',
+    intentKind: 'slash_command',
+    routeId: 'hf_tools',
+    why: '/integrations act composes an approval-gated API call via the hf_tools route (ChatTab P30 intercept)',
+  },
+  {
+    lane: 'integrations',
+    prompt: 'check which integrations are failing',
+    kind: 'run_openswan',
+    routeId: null,
+    anchor: true,
+    why: 'W-A1/M3: integration health question fell to context-free plain chat',
+  },
+  {
+    lane: 'integrations',
+    prompt: 'what integrations do we have connected',
+    kind: 'run_openswan',
+    routeId: null,
+    anchor: true,
+    why: 'W-A1/M3: connected-integrations question needs the integrations.list tool lane',
+  },
+
+  // ── Lane: office/agent status → run_openswan (W-A1/M4) ──────────────────────
+  {
+    lane: 'office-status',
+    prompt: 'what did my agents do today',
+    kind: 'run_openswan',
+    routeId: null,
+    anchor: true,
+    why: 'W-A1/M4: agent-activity question fell to plain chat with no roster/run tools',
+  },
+  {
+    lane: 'office-status',
+    prompt: 'what are my office agents working on right now',
+    kind: 'run_openswan',
+    routeId: null,
+    anchor: true,
+    why: 'W-A1/M4: office_agents pipeline matched below the confidence floor → plain chat',
+  },
+  {
+    lane: 'office-status',
+    prompt: 'show me the agent roster',
+    kind: 'run_openswan',
+    routeId: null,
+    anchor: true,
+    why: 'W-A1/M4: roster read needs office.list_agents, not a context-free reply',
+  },
+  {
+    lane: 'office-status',
+    prompt: 'is the claude bridge connected',
+    kind: 'run_openswan',
+    routeId: null,
+    why: 'bridge connectivity question stays on the bridge_troubleshooting diagnostics lane',
+  },
+  {
+    lane: 'office-status',
+    prompt: 'create an agent named Scout with Opus and add it to the task we just made',
+    kind: 'run_command_handler',
+    intentKind: 'conversational_action',
+    routeId: 'mission',
+    why: 'guard: agent CREATION keeps the office_agent_task lane, never the status gate',
+  },
+
+  // ── Lane: vault slash → its real registry route (W-A1/M5) ───────────────────
+  {
+    lane: 'vault',
+    prompt: '/vault list',
+    kind: 'run_command_handler',
+    intentKind: 'slash_command',
+    routeId: 'vault',
+    anchor: true,
+    why: 'W-A1/M5: /vault was missing from the planner routeIds list → "did not map cleanly"',
+  },
+  {
+    lane: 'vault',
+    prompt: '/vault grants openswan',
+    kind: 'run_command_handler',
+    intentKind: 'slash_command',
+    routeId: 'vault',
+  },
+
+  // ── W-A1 regression classics re-pinned from the probe battery ───────────────
+  { lane: 'desktop', prompt: 'open Photoshop and create a new project', kind: 'run_computer_task', routeId: 'browser' },
+  { lane: 'browser', prompt: 'book me a hotel in Miami', kind: 'run_computer_task', routeId: 'browser', why: 'travel booking → zero-tap browser runtime' },
+  { lane: 'create', prompt: 'add a task buy milk', kind: 'run_command_handler', intentKind: 'conversational_action', routeId: 'mission' },
+  { lane: 'meta', prompt: 'how do I crop an image in Photoshop?', kind: 'run_plain_chat', why: 'how-to question about an app is guidance, not desktop automation' },
+  {
+    lane: 'memory',
+    prompt: 'remember I prefer dark mode',
+    kind: 'run_command_handler',
+    intentKind: 'conversational_action',
+    routeId: 'memory',
   },
 ];
 

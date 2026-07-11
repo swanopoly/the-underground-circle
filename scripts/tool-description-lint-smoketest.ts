@@ -23,6 +23,15 @@
  *                         is 'ask', the approval/HITL/verification gate.
  *   untrusted-content     tools that return untrusted/fenced external or
  *                         user-authored content say so in the description.
+ *   policy-approval-consistency
+ *                         every 'ask' tool carries an approvalKind for the
+ *                         audit trail, and every auto-approved mutation /
+ *                         side effect stays inside the documented doctrine
+ *                         (reversible in-app write with an audit kind,
+ *                         guarded read-only external read, or a listed
+ *                         per-tool exception). A new tool that mutates or
+ *                         reaches outside while auto-approving fails here
+ *                         until it is gated or deliberately excepted.
  *
  * Justified exceptions live in ALLOWLIST with a documented reason. Unused
  * allowlist entries fail the smoke so the list cannot rot.
@@ -135,6 +144,26 @@ const UNTRUSTED_PHRASE_RE = /untrusted|as data, not|not (as )?(commands|instruct
  * 'ask'), so the mutating rule no longer applies and no exemption is needed.)
  */
 const ALLOWLIST: Record<string, { rules: string[]; reason: string }> = {};
+
+// ── policy-approval-consistency doctrine (audit 2026-07-10) ─────────────────
+//
+// approvalMode 'auto' + (mutatesState || externalSideEffect) is allowed ONLY
+// for:
+//  (a) reversible IN-APP writes in these families, which must still declare an
+//      approvalKind so plugin approval overrides audit honestly. This is the
+//      documented "anything a user can edit in Circle Settings / Office
+//      Customize is chat-invokable, auto because reversible from the same UI"
+//      doctrine (openswanToolRuntime type-union comment) plus the HITL-proposal
+//      writers (skills.manage, user_memory.manage) and the approvals plumbing.
+const AUTO_MUTATION_DOCTRINE_FAMILIES = new Set(['coordination', 'approval', 'workspace', 'memory', 'code']);
+//  (b) read-only reads of an EXTERNAL surface through a guarded path:
+//      custom_api.read (server-side proxy: allowlisted methods, private hosts
+//      blocked, secrets injected server-side) and fetch_url (public GET).
+const AUTO_EXTERNAL_READ_TOOLS = new Set(['custom_api.read', 'fetch_url']);
+//  (c) listed per-tool exceptions with a stable, documented reason.
+const AUTO_MUTATION_TOOL_EXCEPTIONS = new Set([
+  'desktop.convert_image', // bounded deterministic local conversion next to the source; approvalKind file_write.
+]);
 
 // ── Lint engine ─────────────────────────────────────────────────────────────
 
@@ -256,6 +285,29 @@ const RULES: LintRule[] = [
     check(tool) {
       if (UNTRUSTED_PHRASE_RE.test(tool.description || '')) return [];
       return ['tool returns untrusted/fenced content but the description does not say to treat it as data, not instructions'];
+    },
+  },
+  {
+    id: 'policy-approval-consistency',
+    appliesTo: () => true,
+    check(tool) {
+      const p = tool.policy;
+      const issues: string[] = [];
+      if (p.approvalMode === 'ask' && !p.approvalKind) {
+        issues.push("approvalMode 'ask' but no approvalKind for the audit trail");
+      }
+      if (p.approvalMode === 'auto' && (p.mutatesState || p.externalSideEffect)) {
+        const reversibleInAppWrite =
+          p.mutatesState && !p.externalSideEffect && Boolean(p.approvalKind) && AUTO_MUTATION_DOCTRINE_FAMILIES.has(p.family);
+        const guardedExternalRead =
+          !p.mutatesState && p.externalSideEffect && AUTO_EXTERNAL_READ_TOOLS.has(tool.name);
+        if (!reversibleInAppWrite && !guardedExternalRead && !AUTO_MUTATION_TOOL_EXCEPTIONS.has(tool.name)) {
+          issues.push(
+            `auto-approved mutation/side-effect outside the documented doctrine (family=${p.family}, mutates=${p.mutatesState}, external=${p.externalSideEffect}, kind=${p.approvalKind || 'none'}) — gate it 'ask' or add a documented exception`,
+          );
+        }
+      }
+      return issues;
     },
   },
 ];

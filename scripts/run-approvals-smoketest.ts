@@ -62,6 +62,24 @@ function resolveInMemory(rows: Row[], id: string, status: 'approved' | 'rejected
   return rows.map((r) => (r.id === id ? { ...r, status } : r));
 }
 
+// P64 (backlog #1): the service/runtime resolveRunApproval now carries a
+// `.eq('status','pending')` predicate + row-match return, so ONLY a still-
+// pending row transitions and a late/double/expired resolve is a fail-closed
+// no-op (ok:false). This mirrors that contract for the pin below.
+type ResolvableRow = { id: string; status: 'pending' | 'approved' | 'rejected' | 'expired' };
+function resolvePendingOnly(
+  rows: ResolvableRow[],
+  id: string,
+  status: 'approved' | 'rejected',
+): { rows: ResolvableRow[]; ok: boolean } {
+  let matched = false;
+  const next = rows.map((r) => {
+    if (r.id === id && r.status === 'pending') { matched = true; return { ...r, status }; }
+    return r;
+  });
+  return { rows: next, ok: matched };
+}
+
 // Overflow label — matches `${pendingCount - visible.length}` math in
 // the component when more than 3 pending.
 function overflowCount(pendingCount: number, visibleCap = 3): number {
@@ -126,6 +144,27 @@ function main() {
   // → only 'a' is approved.
   assert(rows.filter((r) => r.status === 'approved').length === 1, 'resolve: approved count correct after overwrite');
   assert(rows.filter((r) => r.status === 'rejected').length === 3, 'resolve: rejected count includes overwritten row');
+
+  // ─── pending-only resolve contract (P64 #1) ────────────────
+  // The hardened resolveRunApproval only transitions a still-PENDING row and
+  // reports whether a row actually matched — so a decision can't be flipped
+  // and an expired/late resolve fails closed.
+  const poRows: ResolvableRow[] = [
+    { id: 'p', status: 'pending' },
+    { id: 'a', status: 'approved' },
+    { id: 'x', status: 'expired' },
+  ];
+  const okResolve = resolvePendingOnly(poRows, 'p', 'approved');
+  assert(okResolve.ok === true, 'pending-only: a pending row resolves (ok)');
+  assert(okResolve.rows.find((r) => r.id === 'p')?.status === 'approved', 'pending-only: pending row transitions');
+  const flip = resolvePendingOnly(poRows, 'a', 'rejected');
+  assert(flip.ok === false, 'pending-only: cannot flip an already-approved decision (ok:false)');
+  assert(flip.rows.find((r) => r.id === 'a')?.status === 'approved', 'pending-only: approved row stays approved');
+  const late = resolvePendingOnly(poRows, 'x', 'approved');
+  assert(late.ok === false, 'pending-only: cannot retro-approve an expired row (ok:false)');
+  assert(late.rows.find((r) => r.id === 'x')?.status === 'expired', 'pending-only: expired row stays expired');
+  const gone = resolvePendingOnly(poRows, 'nope', 'approved');
+  assert(gone.ok === false, 'pending-only: unknown id → ok:false (no fresh approval)');
 
   // ─── overflowCount ─────────────────────────────────────────
   assert(overflowCount(0) === 0, 'overflow: 0 pending → 0');

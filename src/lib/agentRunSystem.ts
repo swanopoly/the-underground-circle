@@ -476,11 +476,19 @@ export async function resolveRunApproval(
   status: 'approved' | 'rejected',
   userId: string,
 ): Promise<boolean> {
-  const { error } = await supabase
+  // Fail-closed + idempotent: only a still-PENDING approval can transition, so
+  // an already-resolved / rejected / EXPIRED (timed-out) decision can never be
+  // flipped or retroactively approved. The `.eq('status','pending')` predicate
+  // + row-match check means a no-op update returns false rather than posing as
+  // a fresh approval — protects the approval floor from a double/late resolve.
+  const { data, error } = await supabase
     .from('agent_run_approvals')
     .update({ status, resolved_by: userId, resolved_at: new Date().toISOString() })
-    .eq('id', approvalId);
-  return !error;
+    .eq('id', approvalId)
+    .eq('status', 'pending')
+    .select('id');
+  if (error) return false;
+  return Array.isArray(data) && data.length > 0;
 }
 
 // ── 6. Query Runs ───────────────────────────────────────────────────────────

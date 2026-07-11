@@ -186,9 +186,15 @@ async function checkRealCatalogPolicies() {
   assert.deepEqual(runtime.getOpenSwanToolParallelPolicy('wp.update_post').mutationTargets, ['wordpress'], 'wp.update_post writes wordpress');
 
   // A mutating tool with no domain entry stays a barrier (no targets).
+  // P63: check_ins.log gained a circle_check_ins mapping (A3 policy audit), so
+  // the unmapped-mutator example is now code.generate (auto, mutating,
+  // note-only — deliberately domain-less).
+  const codeGen = runtime.getOpenSwanToolParallelPolicy('code.generate');
+  assert.equal(codeGen.mutationTargets, undefined, 'unmapped mutator declares no targets');
+  assert.equal(isParallelEligibleToolPolicy(codeGen), false, 'unmapped mutator is never parallel-eligible');
+  // And the new mapping itself is pinned so it can't silently regress.
   const checkIn = runtime.getOpenSwanToolParallelPolicy('check_ins.log');
-  assert.equal(checkIn.mutationTargets, undefined, 'unmapped mutator declares no targets');
-  assert.equal(isParallelEligibleToolPolicy(checkIn), false, 'unmapped mutator is never parallel-eligible');
+  assert.deepEqual(checkIn.mutationTargets, ['circle_check_ins'], 'check_ins.log writes circle_check_ins (P63)');
 
   // End-to-end partition over real catalog policies: tasks.create +
   // goals.create are disjoint auto writers (one group); a second

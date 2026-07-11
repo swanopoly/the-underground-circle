@@ -46,6 +46,14 @@ export function hashToolInput(input: unknown): string {
   return `${bounded.length.toString(16)}:${digest}`;
 }
 
+/** Max chars of the tool NAME echoed into a stuck reason. The name is
+ *  MODEL-authored (whatever the model emitted as `tool_use.name`, registered
+ *  or not) and the reason flows unbounded otherwise into loop events,
+ *  persisted `agent_run_events` rows, terminal chat text, and the solver
+ *  consultation prompt — a pathological 20KB "name" bloated all of them.
+ *  Real tool names are far below this bound. */
+export const STUCK_REASON_TOOL_NAME_MAX_CHARS = 120;
+
 /** One entry in a loop's bounded recent-call ring. */
 export interface RecentToolCall {
   name: string;
@@ -81,8 +89,16 @@ export function detectRepeatedToolFailure(
       return { stuck: false, reason: '' };
     }
   }
+  // Clamp the echoed name (see STUCK_REASON_TOOL_NAME_MAX_CHARS): the reason
+  // string is reused verbatim by every downstream surface, so it must stay
+  // bounded even against a model-emitted giant tool name. String() keeps the
+  // never-throws contract if a caller feeds a junk ring entry.
+  const name = String(first.name ?? '');
+  const boundedName = name.length > STUCK_REASON_TOOL_NAME_MAX_CHARS
+    ? `${name.slice(0, STUCK_REASON_TOOL_NAME_MAX_CHARS)}…`
+    : name;
   return {
     stuck: true,
-    reason: `repeated identical failing call — ${first.name} x${threshold}`,
+    reason: `repeated identical failing call — ${boundedName} x${threshold}`,
   };
 }

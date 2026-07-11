@@ -707,7 +707,15 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
         ok: false, // hypothesis: "if we run it and it fails like before…"
       };
       const projected = detectRepeatedToolFailure([...recentToolCalls, requested]);
-      if (projected.stuck && shouldConsultSolver({ stuck: true, alreadyConsulted: solverConsulted })) {
+      // A consultation is only useful when a NEXT provider turn exists to
+      // answer it — the same final-round gating steering/onRoundComplete use.
+      // Without this gate, a stuck verdict on the FINAL iteration pushed a
+      // consultation nobody would ever consume, burned the run's one consult,
+      // and exited via `max_iterations_exceeded` with EMPTY result text (the
+      // last assistant turn is pure tool_use). Falling through to the hard
+      // progress-stop below returns the informative terminal note instead.
+      const nextTurnExists = iteration < maxIterations;
+      if (projected.stuck && nextTurnExists && shouldConsultSolver({ stuck: true, alreadyConsulted: solverConsulted })) {
         // P56: before giving up, inject ONE structured fresh-eyes
         // consultation. The requested call is NOT dispatched (it would fail
         // identically); its tool_use is closed with an explanatory error

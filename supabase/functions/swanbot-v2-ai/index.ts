@@ -2949,22 +2949,39 @@ Deno.serve(async (req: Request) => {
     // retry loop here (retry at one layer). Structural errors stay fatal 500.
     const transient = isRetryableLoopError(e);
     if (runId) {
-      await supabase.from("agent_runs").update({
-        // A transient upstream blip isn't a permanent failure — leave the run
-        // "running" so a client retry/continuation can still complete it; a
-        // terminal error is marked failed. Both record final_stop_reason:error
-        // for the readiness gate, matching the kind:"error" event below.
-        status: transient ? "running" : "failed",
-        input_tokens: 0,
-        output_tokens: 0,
-        cached_tokens: 0,
-        tool_calls: [],
-        iteration_count: 1,
-        final_stop_reason: "error",
-        ...(transient ? {} : { completed_at: new Date().toISOString() }),
-        metadata: { error: msg, version: "swanbot-v2-ai", transient },
-      }).eq("id", runId);
-      await supabase.from("agent_run_events").insert({ run_id: runId, kind: "error", payload: { message: msg, transient } });
+      if (transient && resumeFrom) {
+        // Transient blip while RESUMING a paused (client_pending) run: the
+        // 503 below tells the client to retry the SAME continuationRunId, so
+        // the row MUST keep `final_stop_reason: "client_pending"` and the
+        // `metadata.continuation` snapshot intact. The generic update in the
+        // else-branch replaces metadata wholesale and flips the stop reason,
+        // which turned every "retryable" resume failure into a hard
+        // 400 no_pending_continuation / 409 continuation_closed on the retry
+        // — discarding the in-flight turn (server work + already-executed
+        // client desktop/browser tools). Record the event only.
+        await supabase.from("agent_run_events").insert({
+          run_id: runId,
+          kind: "error",
+          payload: { message: msg, transient: true, phase: "continuation_resume" },
+        });
+      } else {
+        await supabase.from("agent_runs").update({
+          // A transient upstream blip isn't a permanent failure — leave the run
+          // "running" so a client retry/continuation can still complete it; a
+          // terminal error is marked failed. Both record final_stop_reason:error
+          // for the readiness gate, matching the kind:"error" event below.
+          status: transient ? "running" : "failed",
+          input_tokens: 0,
+          output_tokens: 0,
+          cached_tokens: 0,
+          tool_calls: [],
+          iteration_count: 1,
+          final_stop_reason: "error",
+          ...(transient ? {} : { completed_at: new Date().toISOString() }),
+          metadata: { error: msg, version: "swanbot-v2-ai", transient },
+        }).eq("id", runId);
+        await supabase.from("agent_run_events").insert({ run_id: runId, kind: "error", payload: { message: msg, transient } });
+      }
     }
     // Feed loop-in: only emit the alarming "Run failed" card for TERMINAL
     // failures. A transient upstream blip that the client will retry shouldn't

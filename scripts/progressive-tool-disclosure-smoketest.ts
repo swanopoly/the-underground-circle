@@ -168,6 +168,21 @@ async function main() {
   assert(topName('open photoshop') === 'desktop.photoshop_document_status', 'case3b: "open photoshop" ranks the photoshop status tool first (not open_path)', topName('open photoshop'));
   assert(String(topName('post a message to a room')).startsWith('rooms.'), 'case3b: "post a message to a room" ranks a rooms tool first', topName('post a message to a room'));
   assert(topName('create a google doc') === 'docs.create_document', 'case3b: "create a google doc" ranks docs.create_document first', topName('create a google doc'));
+  // Newer integration/messaging tools must be reachable from natural task
+  // phrasings — they are deferred-only, so tools.search IS their unlock path.
+  assert(topName('post to slack') === 'messaging.notify', 'case3b: "post to slack" ranks messaging.notify first', topName('post to slack'));
+  assert(names('send a discord message').slice(0, 3).includes('messaging.notify'), 'case3b: "send a discord message" surfaces messaging.notify in top-3', names('send a discord message').join(','));
+  {
+    const linear = names('create linear issue');
+    assert(
+      linear.slice(0, 3).includes('integration.compose_action') && linear.slice(0, 3).includes('custom_api.request'),
+      'case3b: "create linear issue" surfaces the Custom API act flow (compose + request) in top-3',
+      linear.join(','),
+    );
+  }
+  assert(names('compose api request').slice(0, 2).includes('integration.compose_action'), 'case3b: "compose api request" surfaces integration.compose_action in top-2', names('compose api request').join(','));
+  assert(topName('check integrations') === 'integrations.list', 'case3b: "check integrations" ranks integrations.list first', topName('check integrations'));
+  assert(names('call the api').slice(0, 2).includes('custom_api.read'), 'case3b: "call the api" surfaces custom_api.read in top-2', names('call the api').join(','));
 
   // ── Case 3c — P25 mode discipline holds on the progressive path ───────────
   // The legacy full-catalog path filters mode-tagged tools (TOOL_MODE_TAGS);

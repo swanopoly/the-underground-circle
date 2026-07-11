@@ -3925,11 +3925,19 @@ export async function executeToolUseLoop(opts: {
           continue;
         }
       }
-      // Model gave a final text response (or stop_reason isn't tool_use)
+      // Model gave a final text response (or stop_reason isn't tool_use).
+      // A turn that still CONTAINS tool_use blocks but stopped for another
+      // reason (max_tokens truncation mid-tool-call is the realistic case)
+      // is NOT a clean finish: the intended call never ran and the text may
+      // be mid-thought or empty. Flag it `incomplete` so callers offer
+      // "continue" instead of presenting a truncated answer as done.
+      const truncatedToolIntent = toolUseBlocks.length > 0;
       return {
-        response: extractAssistantText(content) || data.response || '',
+        response: extractAssistantText(content) || data.response
+          || (truncatedToolIntent ? 'My reply was cut off mid-tool-call (output limit) before I could act. Tell me to continue and I\'ll pick up from here.' : ''),
         toolEvents,
         routing: routingInfo,
+        ...(truncatedToolIntent ? { incomplete: true } : {}),
         observations: harvestToolLoopObservations(toolEvents, { isReadTool }),
       };
     }

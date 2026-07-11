@@ -263,6 +263,63 @@ async function main(): Promise<void> {
   const healthyRow = healthyRoster.find(item => item.id === 'codex-dead-bridge');
   assert(healthyRow?.status === 'active' && !healthyRow?.statusNote, 'connected bridge leaves the roster row untouched');
 
+  // ─── Synthetic pinned-agent live status (O8) ───────────────────────────────
+  // Composition pin for the OfficeTab seam: pinned roster row → run evidence →
+  // upgrade-only status/activity. UPGRADE is safe here (unlike the O2
+  // demote-only reconcile) because live agent_runs rows are written by the
+  // executing runtime itself — authoritative evidence work is happening.
+  const {
+    buildOfficeBuildingBoard,
+    deriveSyntheticAgentStatusFromRuns,
+    applySyntheticAgentStatusUpgrade,
+    OPENSWAN_RUN_NAME_KEYS,
+  } = await import('../src/lib/officeOpsBoard');
+  const T1 = Date.now();
+  const liveChatRun = {
+    id: 'run-live-1',
+    title: 'Ship the roadmap digest',
+    status: 'running',
+    surface: 'main_chat',
+    started_at: new Date(T1 - 60_000).toISOString(),
+    created_at: new Date(T1 - 60_000).toISOString(),
+  };
+
+  const applyO8 = (rosterRow: OfficeAgent, runs: Array<Record<string, unknown>>) => {
+    const board = buildOfficeBuildingBoard(runs as any, { nowMs: T1 });
+    const live = deriveSyntheticAgentStatusFromRuns(OPENSWAN_RUN_NAME_KEYS, board.building, T1);
+    return applySyntheticAgentStatusUpgrade(rosterRow.status, live);
+  };
+
+  // Default pinned OpenSwan (baseline 'active'): status never demoted, but the
+  // activity line now reflects the real live run instead of the static blurb.
+  const pinnedDefault = buildOfficeRoster({ agents: [] })[0];
+  assert(pinnedDefault?.id === DEFAULT_AGENT.id && pinnedDefault.isSynthetic === true, 'empty roster still pins synthetic OpenSwan first');
+  const defaultUpgrade = applyO8(pinnedDefault, [liveChatRun]);
+  assert(defaultUpgrade.changed && defaultUpgrade.status === 'active', 'live chat run keeps pinned OpenSwan active (never demoted)');
+  assert(defaultUpgrade.activity === 'Working: Ship the roadmap digest', `live activity line should show the run, got: ${defaultUpgrade.activity}`);
+
+  // DB-fed BlackSwan pin stuck 'idle' mid-task (the O8 gap): run evidence upgrades it.
+  const idlePinned = agent({
+    id: 'db::openswan-row', name: 'BlackSwan', providerType: 'blackswan-local',
+    status: 'idle', isSynthetic: true, lastActive: recent,
+  });
+  const idleRoster = buildOfficeRoster({ agents: [idlePinned], currentUserId: 'user-1' });
+  assert(idleRoster[0]?.id === idlePinned.id && idleRoster[0]?.status === 'idle', 'DB-fed BlackSwan row takes the pinned slot, still idle');
+  const idleUpgrade = applyO8(idleRoster[0], [liveChatRun]);
+  assert(idleUpgrade.changed && idleUpgrade.status === 'active', 'idle pinned agent upgrades to active from a running chat run');
+  const queuedUpgrade = applyO8(idleRoster[0], [{ ...liveChatRun, status: 'queued' }]);
+  assert(queuedUpgrade.changed && queuedUpgrade.status === 'building', 'queued run upgrades idle pin to building only');
+
+  // No evidence / finished evidence → the roster row is left exactly as built.
+  const noEvidence = applyO8(idleRoster[0], []);
+  assert(!noEvidence.changed && noEvidence.status === 'idle', 'no runs → pinned status untouched');
+  const finishedOnly = applyO8(idleRoster[0], [{
+    ...liveChatRun, status: 'completed', completed_at: new Date(T1 - 30_000).toISOString(),
+  }]);
+  assert(!finishedOnly.changed && finishedOnly.status === 'idle', 'finished runs are not upgrade evidence');
+  const foreignRun = applyO8(idleRoster[0], [{ ...liveChatRun, surface: 'feed_task' }]);
+  assert(!foreignRun.changed, 'feed-surface runs do not claim the OpenSwan pin');
+
   console.log('office-roster-grouping smoke passed');
 }
 

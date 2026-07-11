@@ -3669,7 +3669,17 @@ Deno.serve(async (req: Request) => {
     // system_override, attaches no tools, and never runs marketplace
     // translation (Anthropic-only; slash-prefixed model ids fall back to the
     // default Claude model rather than 400ing at Anthropic).
-    const relayToolsDisabled = body.tools_disabled === true;
+    // An EXPLICIT `tools: []` is the same relay intent, not persona intent:
+    // the remaining cap-exhaustion finalization callers (openswanSessionRuntime,
+    // subagentRegistry) send `tools: [] + system_override + tool_messages`, and
+    // falling through to the tool-ENABLED persona path silently dropped their
+    // guardrail system prompt AND the gathered tool history, answering the raw
+    // user message ungrounded (same F1 class the clarifier fix closed). Routing
+    // it here either finishes the summarize call honestly or fails visibly
+    // (Anthropic rejects tool_use history without tools → 502 → the callers'
+    // existing limit-note fallback) — never a silent persona answer.
+    const relayToolsDisabled = body.tools_disabled === true
+      || (Array.isArray(body.tools) && body.tools.length === 0);
     const hasRelayTools = !relayToolsDisabled && !!body.tools && Array.isArray(body.tools) && body.tools.length > 0;
     if (hasRelayTools || relayToolsDisabled) {
       const isMarketplaceRelay = hasRelayTools && !!model && /^(openai|openai_compatible|openrouter|huggingface|huggingface_endpoint|replicate|groq|google_ai|mistral_ai|cohere|perplexity|together_ai|fireworks_ai|deepseek|zai|z_ai|minimax|ollama|github-models)\//.test(model);

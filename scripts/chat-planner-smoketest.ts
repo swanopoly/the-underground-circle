@@ -1176,3 +1176,83 @@ check(
   buildChatAutomationPlan({ message: 'post this image to my wordpress site' }),
   { kind: 'run_computer_task' },
 );
+
+// ── W-A1 probe fixes (2026-07 adversarial battery) — risk/approval pins ─────
+// Lane membership is pinned in route-golden-canary-smoketest.ts; these rows
+// pin the RISK + APPROVAL contract of the new gates so the approval floor
+// cannot silently erode.
+
+// M1: recurring cadence → schedule lane, review risk, no plan-time approval
+// (the scheduler approval-gates its own external sends at run time — same
+// contract as the schedule_automation pipeline lane).
+check(
+  'W-A1/M1: recurring cadence ask routes to the schedule lane',
+  buildChatAutomationPlan({ message: "every morning post yesterday's merged PRs to Slack" }),
+  { source: 'plain_chat', kind: 'run_command_handler', routeId: 'schedule', risk: 'review', approvalRequired: false, minConfidence: 0.8 },
+);
+check(
+  'W-A1/M1: "remind me every day …" routes to the schedule lane',
+  buildChatAutomationPlan({ message: 'remind me every day at 5pm to log my hours' }),
+  { source: 'plain_chat', kind: 'run_command_handler', routeId: 'schedule', risk: 'review', approvalRequired: false },
+);
+check(
+  'W-A1/M1 guard: meeting scheduling stays on the meetings pipeline',
+  buildChatAutomationPlan({ message: 'Schedule a meeting with the design team every Monday' }),
+  { source: 'plain_chat', kind: 'run_openswan', routeId: null, pipelineId: 'meetings_calendar_email' },
+);
+
+// M2: external chat-channel sends are external side effects → approval REQUIRED
+// (approval floor: a message posted to a workspace is not waivable).
+check(
+  'W-A1/M2: Slack channel post is an approval-gated OpenSwan send',
+  buildChatAutomationPlan({ message: "post a summary of today's standup to our Slack channel" }),
+  { source: 'plain_chat', kind: 'run_openswan', routeId: null, risk: 'external_side_effect', approvalRequired: true, minConfidence: 0.8 },
+);
+check(
+  'W-A1/M2: #channel send in Slack is an approval-gated OpenSwan send',
+  buildChatAutomationPlan({ message: 'send a message to the #general channel in Slack saying the deploy is done' }),
+  { source: 'plain_chat', kind: 'run_openswan', routeId: null, risk: 'external_side_effect', approvalRequired: true },
+);
+check(
+  'W-A1/M2 guard: read-only Slack triage keeps the inbox pipeline (review, no send gate)',
+  buildChatAutomationPlan({ message: 'Summarize unread emails and prioritize Slack alerts' }),
+  { source: 'plain_chat', kind: 'run_openswan', routeId: null, risk: 'review', pipelineId: 'inbox_notifications' },
+);
+
+// M3/M4: status questions are read-only → safe, never approval-gated.
+check(
+  'W-A1/M3: integrations health question is a safe read-only OpenSwan turn',
+  buildChatAutomationPlan({ message: 'check which integrations are failing' }),
+  { source: 'plain_chat', kind: 'run_openswan', routeId: null, risk: 'safe', approvalRequired: false },
+);
+check(
+  'W-A1/M4: agent-activity question is a safe read-only OpenSwan turn',
+  buildChatAutomationPlan({ message: 'what did my agents do today' }),
+  { source: 'plain_chat', kind: 'run_openswan', routeId: null, risk: 'safe', approvalRequired: false },
+);
+check(
+  'W-A1/M4 guard: agent creation phrasing keeps the office_agent_task lane',
+  buildChatAutomationPlan({ message: 'create an agent named Scout with Opus and add it to the task we just made' }),
+  { source: 'conversational_intent', kind: 'run_command_handler', routeId: 'mission' },
+);
+check(
+  'W-A1/M4 guard: underspecified agent creation still asks (EVPI gate preserved)',
+  buildChatAutomationPlan({ message: 'spin up an agent and add it to the task we just made' }),
+  { kind: 'ask_clarification' },
+);
+
+// M5: /vault slash commands map to their real registry route.
+check(
+  'W-A1/M5: /vault list maps to the vault route with full confidence',
+  buildChatAutomationPlan({ message: '/vault list' }),
+  { source: 'slash', kind: 'run_command_handler', intentKind: 'slash_command', routeId: 'vault', minConfidence: 0.9 },
+);
+
+// ─── Final gate ──────────────────────────────────────────────────────────────
+// The P23 + W-A1 sections above run AFTER the mid-file summary exit-check, so
+// their failures only printed without flipping the exit code. Re-check here:
+// a FAIL in any post-summary pinned row must fail the suite.
+if (failures > 0) {
+  console.error(`\n${failures} planner smoke-test failure(s) (post-summary sections)`);
+  process.exit(1);
+}

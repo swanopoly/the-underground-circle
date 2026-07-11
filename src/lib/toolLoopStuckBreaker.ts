@@ -150,6 +150,7 @@ export {
   detectRepeatedToolFailure,
   hashToolInput,
   TOOL_INPUT_HASH_MAX_CHARS,
+  STUCK_REASON_TOOL_NAME_MAX_CHARS,
   type RecentToolCall,
   type RepeatedFailureVerdict,
 } from './toolLoopStuckCore';

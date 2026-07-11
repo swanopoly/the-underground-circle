@@ -516,6 +516,138 @@ function startsWithOpenSwanAutomationSeed(message: string): boolean {
     .startsWith(OPENSWAN_AUTOMATION_INTENT_SEED.trim().toLowerCase());
 }
 
+// ── W-A1 probe fixes (2026-07 adversarial prompt battery) ───────────────────
+// Four leak-plug gates for real misroutes found by running realistic prompts
+// through this planner. Each is deliberately narrow; the golden-canary suite
+// pins both the fixed prompts and the neighbouring lanes that must NOT move.
+
+// W-A1/M1 — recurring-cadence requests ("every morning post yesterday's merged
+// PRs to Slack", "remind me every day at 5pm …"). The schedule_automation
+// pipeline matcher only knows the adverb forms (daily/weekly/cron/recurring),
+// so "every/each <unit>" phrasing leaked into earlier lanes: the natural
+// /gh-prs rewrite (one-shot list instead of a schedule), the desktop-app
+// computer route, or an unrelated pipeline. Cadence + an action verb routes to
+// the same schedule lane the pipeline produces. Meeting/calendar wording is
+// excluded — recurring meetings belong to the meetings_calendar_email pipeline
+// (its scorer explicitly penalises schedule_automation for those words).
+const RECURRING_CADENCE_RE = /\b(?:every|each)\s+(?:other\s+)?(?:morning|afternoon|evening|night|day|weekday|weekend|week|month|hour|half[-\s]hour|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d+\s*(?:minutes?|mins?|hours?|hrs?|days?|weeks?|months?))\b/i;
+const RECURRING_ACTION_VERB_RE = /\b(?:post|send|publish|share|summari[sz]e|check|remind(?:er)?|sync|update|report|run|generate|email|message|create|pull|fetch|scan|review|digest|back\s?up|export|import|notify|ping|monitor|watch|log|track|clean|archive|refresh)\b/i;
+const RECURRING_MEETING_EXCLUSION_RE = /\b(?:meeting|calendar|invite|appointment|call)\b/i;
+
+function looksLikeRecurringScheduleRequest(message: string): boolean {
+  const text = String(message || '').trim();
+  if (!text) return false;
+  if (!RECURRING_CADENCE_RE.test(text)) return false;
+  if (!RECURRING_ACTION_VERB_RE.test(text)) return false;
+  if (RECURRING_MEETING_EXCLUSION_RE.test(text)) return false;
+  // Questions about cadence ("do you check my email every day?") stay chat.
+  if (/^(?:what|when|how|why|do|does|did|is|are|can|could|should|would|who|where)\b/i.test(text) && /\?\s*$/.test(text)) return false;
+  return true;
+}
+
+function buildRecurringSchedulePlan(
+  normalized: string,
+  bestPipeline: UserTaskPipelineMatch | null,
+  pipelineDecision: UserTaskPipelineDecision | null,
+): ChatAutomationPlan | null {
+  if (!looksLikeRecurringScheduleRequest(normalized)) return null;
+  // If the schedule pipeline already matches this phrasing, reuse the exact
+  // pipeline plan so this gate changes nothing for prompts that were routed
+  // correctly before it existed.
+  if (bestPipeline?.pipeline.id === 'schedule_automation') {
+    const pipelinePlan = buildPlanFromPipeline(bestPipeline, normalized, pipelineDecision);
+    if (pipelinePlan) return pipelinePlan;
+  }
+  return {
+    source: 'plain_chat',
+    intent: { kind: 'direct_chat', message: normalized },
+    execution: { kind: 'run_command_handler', routeId: 'schedule', commandText: normalized },
+    // Mirrors the schedule_automation pipeline lane: creating/reviewing a
+    // recurring job is review-level; its external sends are approval-gated at
+    // run time by the scheduler itself, not at plan time.
+    risk: 'review',
+    approval: { required: false, reason: null },
+    confidence: 0.82,
+    notes: ['Detected recurring-cadence request ("every/each …") → scheduled-automation lane, not a one-shot command.'],
+    pipelineDecision,
+  };
+}
+
+// W-A1/M2 — external chat-channel sends ("post a summary to our Slack
+// channel", "send a message to #general in Slack"). These fell to plain chat
+// (nothing gets posted) or were parsed as a junk desktop click sequence. They
+// are external side effects and belong on the OpenSwan tool loop
+// (integrations/custom_api with browser fallback), approval-gated. Read-only
+// Slack/Discord wording (summarize/triage/moderate) is untouched — those stay
+// with the inbox/social pipelines.
+function looksLikeChatChannelMessageSend(message: string): boolean {
+  const text = String(message || '');
+  if (!/\b(?:slack|discord|(?:ms|microsoft)\s+teams)\b/i.test(text)) return false;
+  if (!/\b(?:post|send|share|announce|message|dm|notify)\b/i.test(text)) return false;
+  return /\b(?:channel|#[a-z0-9][\w-]*|workspace|dm|direct message|thread|message)\b/i.test(text);
+}
+
+function buildChatChannelMessageSendPlan(
+  normalized: string,
+  pipelineDecision: UserTaskPipelineDecision | null,
+): ChatAutomationPlan | null {
+  if (!looksLikeChatChannelMessageSend(normalized)) return null;
+  return {
+    source: 'plain_chat',
+    intent: { kind: 'direct_chat', message: normalized },
+    execution: { kind: 'run_openswan', routeId: null, commandText: normalized },
+    risk: 'external_side_effect',
+    approval: { required: true, reason: 'Posting a message to an external chat workspace (Slack/Discord/Teams) is an approval-gated send.' },
+    confidence: 0.86,
+    notes: ['Detected external chat-channel message send → OpenSwan integrations lane (custom_api/browser fallback), approval-gated.'],
+    pipelineDecision,
+  };
+}
+
+// W-A1/M3 — integrations status/list questions ("check which integrations are
+// failing", "what integrations do we have connected"). The integrations_models
+// pipeline matcher only knows the singular \bintegration\b, so the plural fell
+// to plain chat — a context-free model reply about live app state it cannot
+// see. Read-only → safe OpenSwan turn (integrations.list), no approval.
+function looksLikeIntegrationsStatusQuestion(message: string): boolean {
+  const text = String(message || '');
+  if (!/\b(?:integrations?|connectors?|connected\s+(?:apps?|providers?|services?))\b/i.test(text)) return false;
+  return /\b(?:check|which|what|list|show|status|failing|failed|broken|working|healthy|down|connected|configured|enabled|active)\b/i.test(text);
+}
+
+// W-A1/M4 — office/agent activity questions ("what did my agents do today",
+// "show me the agent roster"). The office_agents pipeline matched below the
+// actionable-confidence floor, so these fell to plain chat with no tools.
+// Status/roster reads need the live roster (office.list_agents) → safe
+// OpenSwan turn. Creation phrasings are excluded so the office_agent_task
+// lane (and its clarification gate) keep ownership of "make an agent …".
+function looksLikeOfficeAgentStatusQuestion(message: string): boolean {
+  const text = String(message || '').trim();
+  if (!text) return false;
+  if (/\b(?:create|make|spin\s+(?:me\s+)?up|build|new|add|hire)\b[\s\S]*\bagents?\b/i.test(text)) return false;
+  if (/\bagent roster\b/i.test(text)) return true;
+  if (!/\b(?:my|our|office|circle)\s+agents?\b/i.test(text)) return false;
+  return /^(?:what|which|who|how\s+many|are|is|show|list|do|does|did|have|has)\b/i.test(text)
+    || /\b(?:doing|working\s+on|up\s+to|status|activity|active|running|online|busy)\b/i.test(text);
+}
+
+function buildReadOnlyOpenSwanStatusPlan(
+  normalized: string,
+  pipelineDecision: UserTaskPipelineDecision | null,
+  note: string,
+): ChatAutomationPlan {
+  return {
+    source: 'plain_chat',
+    intent: { kind: 'direct_chat', message: normalized },
+    execution: { kind: 'run_openswan', routeId: null, commandText: normalized },
+    risk: 'safe',
+    approval: { required: false, reason: null },
+    confidence: 0.8,
+    notes: [note],
+    pipelineDecision,
+  };
+}
+
 function hasReviewLevelMutationIntent(message: string): boolean {
   return /\b(delete|remove|overwrite|publish|submit|send|transfer|checkout|pay|apply|register|rename|change|move|copy|edit|write|save|replace|create)\b/i.test(message);
 }
@@ -806,8 +938,10 @@ function resolvePlannerQuickActionExecution(text: string): { text: string; mode:
       return { text, mode: 'special', routeId: null };
     default:
       if (text.startsWith('/')) {
+        // W-A1/M5: keep in sync with the slash branch below — 'vault' was
+        // missing, so /vault commands fell to the "did not map cleanly" path.
         const routeIds: ChatCommandRouteId[] = [
-          'help', 'summary', 'schedule', 'mission', 'room', 'github', 'wordpress', 'browser', 'build_page', 'hf_tools', 'local_knowledge', 'memory', 'governance', 'search',
+          'help', 'summary', 'schedule', 'mission', 'room', 'github', 'wordpress', 'browser', 'build_page', 'hf_tools', 'local_knowledge', 'memory', 'governance', 'vault', 'search',
         ];
         const matchedRoute = routeIds.find((routeId) => matchesChatCommandRoute(text, routeId)) || null;
         return { text, mode: 'send', routeId: matchedRoute };
@@ -869,8 +1003,11 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
   }
 
   if (lower.startsWith('/')) {
+    // W-A1/M5: 'vault' is a real registry route (/vault, /vault grant, …) but
+    // was missing here, so every /vault command planned as "did not map
+    // cleanly" with intent routeId 'help' and execution routeId null.
     const routeIds: ChatCommandRouteId[] = [
-      'help', 'summary', 'schedule', 'mission', 'room', 'github', 'wordpress', 'browser', 'build_page', 'hf_tools', 'local_knowledge', 'memory', 'governance', 'search',
+      'help', 'summary', 'schedule', 'mission', 'room', 'github', 'wordpress', 'browser', 'build_page', 'hf_tools', 'local_knowledge', 'memory', 'governance', 'vault', 'search',
     ];
     const matchedRoute = routeIds.find((routeId) => matchesChatCommandRoute(normalized, routeId)) || null;
     const risk = buildRiskForRoute(matchedRoute);
@@ -990,6 +1127,17 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
     }
     return buildConversationalActionPlan(normalized, earlyConversationalIntent);
   }
+
+  // W-A1/M1 + M2 — these must run BEFORE the local desktop-sequence and
+  // computer-request lanes: "every Monday at 9am summarize open PRs and post
+  // them to slack" was being parsed as a desktop app task, and "send a message
+  // to #general in Slack" as a desktop click sequence. Recurring wins over the
+  // channel-send gate: a scheduled Slack post is a schedule, not a one-shot.
+  const recurringSchedulePlan = buildRecurringSchedulePlan(normalized, bestPipeline, pipelineDecision);
+  if (recurringSchedulePlan) return recurringSchedulePlan;
+
+  const chatChannelSendPlan = buildChatChannelMessageSendPlan(normalized, pipelineDecision);
+  if (chatChannelSendPlan) return chatChannelSendPlan;
 
   const localSequencePlan = buildPlanFromLocalComputerSequence(normalized, bestPipeline, pipelineDecision);
   if (localSequencePlan) return localSequencePlan;
@@ -1167,6 +1315,25 @@ export function buildChatAutomationPlan(input: BuildChatAutomationPlanInput): Ch
   if (bestPipeline) {
     const pipelinePlan = buildPlanFromPipeline(bestPipeline, normalized, pipelineDecision);
     if (pipelinePlan) return pipelinePlan;
+  }
+
+  // W-A1/M3 + M4 — late leak-plugs, deliberately AFTER every existing action
+  // lane: they only catch status questions that would otherwise fall to plain
+  // chat, where a context-free model reply about live app state (integration
+  // health, agent activity) is visibly wrong. Read-only → safe, no approval.
+  if (looksLikeIntegrationsStatusQuestion(normalized)) {
+    return buildReadOnlyOpenSwanStatusPlan(
+      normalized,
+      pipelineDecision,
+      'Integration status/list question → OpenSwan integrations lane (read-only integrations.list), not a context-free chat reply.',
+    );
+  }
+  if (looksLikeOfficeAgentStatusQuestion(normalized)) {
+    return buildReadOnlyOpenSwanStatusPlan(
+      normalized,
+      pipelineDecision,
+      'Office/agent activity question → OpenSwan office lane (read-only office.list_agents/agent runs), not a context-free chat reply.',
+    );
   }
 
   const buildish = /\b(build|landing page|website|site|web app|page)\b/i.test(normalized);

@@ -59,6 +59,13 @@ async function main(): Promise<void> {
   const grant = getOpenSwanToolPolicy('vault.grant');
   assert(grant.approvalMode === 'ask', 'vault.grant write stays approval-gated', grant.approvalMode);
 
+  // P64 (backlog #3): publishing a circle is externally-visible exposure that
+  // toggling back doesn't fully undo, so it is 'ask'-gated (not the auto
+  // coordination-write doctrine). Pin so it can't silently regress to auto.
+  const togglePublic = getOpenSwanToolPolicy('circle.toggle_public');
+  assert(togglePublic.approvalMode === 'ask', 'circle.toggle_public is approval-gated (public exposure not reversible)', togglePublic.approvalMode);
+  assert(!!togglePublic.approvalKind, 'circle.toggle_public carries an approvalKind', String(togglePublic.approvalKind));
+
   if (failures > 0) {
     console.error(`\n${failures} credentials-get-policy smoke-test failure(s)`);
     process.exit(1);

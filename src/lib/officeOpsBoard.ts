@@ -13,7 +13,7 @@
  */
 
 import type { AgentRun } from './agentRunSystem';
-import type { OfficeAgent } from './officeAgents';
+import type { AgentStatus, OfficeAgent } from './officeAgents';
 
 // ── Structural input types (duck-typed; real rows must remain assignable) ───
 
@@ -667,4 +667,159 @@ export function formatAccountabilityCounts(entry: OfficeAgentAccountability | nu
   if (entry.completed24h > 0) parts.push(`✓${entry.completed24h}`);
   if (entry.failed24h > 0) parts.push(`✗${entry.failed24h}`);
   return parts.join(' ');
+}
+
+// ─── Synthetic pinned-agent live status (O8) ─────────────────────────────────
+// OpenSwan / HuggingSwan are synthetic pinned roster rows: no session files,
+// no bridge, no per-turn heartbeat — their status field is a static default
+// (or a DB row clamped to idle/building/offline) that nothing bumps mid-task.
+// Live `agent_runs` rows ARE authoritative evidence of work happening — the
+// executing runtime itself writes them, and the Building-Now board already
+// renders them — so it is safe to UPGRADE a synthetic agent's status from run
+// evidence. This is deliberately the mirror image of
+// reconcileAgentStatusWithConnection (O2, officeAgents.ts): O2 only DEMOTES
+// because a session-derived status can outlive its dead bridge; O8 only
+// UPGRADES because a live run row cannot exist without work actually running.
+// Both are fail-visible and never fight each other: no evidence leaves the
+// agent exactly as it was, and offline/error (O2's demotion targets) are never
+// overridden here.
+
+/** Runs older than this (by startedAt) are not live-status evidence — a row
+ *  stuck in `running` by a crashed writer must not pin an agent "Active"
+ *  forever. Matches the roster's 2h "recently useful" window. */
+export const SYNTHETIC_STATUS_RUN_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+/** startedAt further in the future than this is malformed, not evidence. */
+const SYNTHETIC_STATUS_FUTURE_SKEW_MS = 60_000;
+
+// Lowercased OfficeRunNode.agentName keys that attribute a run to a pinned
+// synthetic agent — the SAME seam as opsRunNodesByAgent in OfficeTab
+// (deriveAgentName: delegated_to prettified → "Name: " title prefix → surface
+// label). Mapping decisions:
+//   - 'openswan' / 'blackswan' / 'black swan': the agent's public brand and
+//     its legacy internal tokens (delegated_to 'openswan' | 'blackswan' |
+//     'black_swan', or an "OpenSwan: …" title prefix).
+//   - 'chat agent': the main_chat/floating_chat SURFACE label. Chat-surface
+//     runs with no explicit delegation are created by the OpenSwan session
+//     runtime (provider 'openswan', title = the user message), and OpenSwan is
+//     the pinned Circle AI fronting main chat — so those runs belong to it.
+//     Room/feed/scheduled/api surface labels are deliberately NOT mapped:
+//     those runs are routinely owned by published user agents.
+export const OPENSWAN_RUN_NAME_KEYS: readonly string[] = ['openswan', 'blackswan', 'black swan', 'chat agent'];
+export const HUGGINGSWAN_RUN_NAME_KEYS: readonly string[] = ['huggingswan', 'hugging swan'];
+
+const SYNTHETIC_ACTIVITY_LABELS: Record<string, string> = {
+  running: 'Working',
+  waiting_approval: 'Waiting for approval',
+  queued: 'Queued',
+  planning: 'Planning',
+  paused: 'Paused',
+};
+const SYNTHETIC_ACTIVITY_TITLE_MAX = 48;
+
+export interface SyntheticAgentLiveStatus {
+  /** Conservative mapping: running → active; queued/planning/paused/waiting_approval → building. */
+  status: 'active' | 'building';
+  /** Bounded activity line, e.g. "Working: Fix login flow" (≤ ~70 chars). */
+  activity: string;
+  /** The evidence run backing the status (most live, then newest start). */
+  runId: string;
+}
+
+/**
+ * Derive a live status for a synthetic pinned agent from run nodes. Returns
+ * null when there is NO evidence (no matching, live, fresh run) so callers
+ * leave the existing status untouched. Pure — caller supplies nowMs; walks
+ * children with cycle/dupe guards, so either a flat node list or the board's
+ * `building` roots may be passed.
+ */
+export function deriveSyntheticAgentStatusFromRuns(
+  agentNameKeys: readonly string[],
+  runNodes: OfficeRunNode[] | null | undefined,
+  nowMs: number,
+): SyntheticAgentLiveStatus | null {
+  const keys = new Set(
+    (Array.isArray(agentNameKeys) ? agentNameKeys : [])
+      .map((key) => (typeof key === 'string' ? key.trim().toLowerCase() : ''))
+      .filter(Boolean),
+  );
+  if (keys.size === 0) return null;
+  const now = Number.isFinite(nowMs) ? nowMs : 0;
+
+  const seen = new Set<string>();
+  const candidates: OfficeRunNode[] = [];
+  const visit = (node: OfficeRunNode | null | undefined) => {
+    if (!node || typeof node.runId !== 'string' || !node.runId || seen.has(node.runId)) return;
+    seen.add(node.runId);
+    if (
+      typeof node.agentName === 'string' &&
+      keys.has(node.agentName.trim().toLowerCase()) &&
+      BUILDING_STATUS_SET.has(node.status)
+    ) {
+      const startMs = parseTimestampMs(node.startedAt);
+      const fresh =
+        startMs != null &&
+        startMs <= now + SYNTHETIC_STATUS_FUTURE_SKEW_MS &&
+        now - startMs <= SYNTHETIC_STATUS_RUN_MAX_AGE_MS;
+      if (fresh) candidates.push(node);
+    }
+    for (const child of Array.isArray(node.children) ? node.children : []) visit(child);
+  };
+  for (const node of Array.isArray(runNodes) ? runNodes : []) visit(node);
+  if (candidates.length === 0) return null;
+
+  // Most live status first (running → …), then newest start, then id — the
+  // same deterministic ordering the building board uses.
+  candidates.sort((a, b) => {
+    const rankA = STATUS_ORDER[a.status] ?? 5;
+    const rankB = STATUS_ORDER[b.status] ?? 5;
+    if (rankA !== rankB) return rankA - rankB;
+    const startDelta = (parseTimestampMs(b.startedAt) ?? 0) - (parseTimestampMs(a.startedAt) ?? 0);
+    if (startDelta !== 0) return startDelta;
+    return a.runId.localeCompare(b.runId);
+  });
+
+  const top = candidates[0];
+  const label = SYNTHETIC_ACTIVITY_LABELS[top.status] || 'Working';
+  const title =
+    truncateText((typeof top.title === 'string' && top.title.trim()) || 'Untitled run', SYNTHETIC_ACTIVITY_TITLE_MAX);
+  return {
+    status: top.status === 'running' ? 'active' : 'building',
+    activity: `${label}: ${title}`,
+    runId: top.runId,
+  };
+}
+
+export interface SyntheticAgentStatusUpgrade {
+  status: AgentStatus;
+  /** Set when the agent's activity line should be replaced with the live one. */
+  activity?: string;
+  /** False = leave the agent object completely untouched. */
+  changed: boolean;
+}
+
+/**
+ * Apply the upgrade-only ladder to an agent's existing status:
+ *   - no evidence → untouched;
+ *   - offline/error → untouched (fail-visible O2 demotions always win);
+ *   - idle → building/active per evidence;
+ *   - building → active on running evidence;
+ *   - a status NEVER moves down (active stays active on building evidence).
+ * When any live evidence applies, the activity line is refreshed too — so an
+ * always-on pin whose status is already "active" still shows the real run
+ * ("Working: …") instead of its static default blurb.
+ */
+export function applySyntheticAgentStatusUpgrade(
+  currentStatus: AgentStatus,
+  live: SyntheticAgentLiveStatus | null | undefined,
+): SyntheticAgentStatusUpgrade {
+  if (!live) return { status: currentStatus, changed: false };
+  if (currentStatus === 'offline' || currentStatus === 'error') {
+    return { status: currentStatus, changed: false };
+  }
+  const status: AgentStatus =
+    live.status === 'active' ? 'active'
+    : currentStatus === 'idle' ? 'building'
+    : currentStatus; // building/active keep their tier on building-grade evidence
+  return { status, activity: live.activity, changed: true };
 }

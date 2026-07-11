@@ -2046,7 +2046,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'circle.toggle_public',
     label: 'Toggle Circle Public/Private',
     surfaces: ['main_chat', 'room_chat', 'office'],
-    description: 'Toggle the circle\'s `is_public` flag — when true, the circle appears in /discover so anyone can join. Use only on an explicit user request to publish or hide the circle. Pass explicit true/false.',
+    description: 'Toggle the circle\'s `is_public` flag — when true, the circle appears in /discover so anyone can join. Use only on an explicit user request to publish or hide the circle. Pass explicit true/false. Requires approval: publishing is externally-visible exposure that toggling back does not fully undo.',
     inputSchema: {
       type: 'object',
       properties: { is_public: { type: 'boolean', description: 'true = appear in /discover, false = hidden' } },
@@ -2194,7 +2194,7 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'approvals.resolve',
     label: 'Resolve Approval',
     surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
-    description: 'Approve or reject a pending approval request, unblocking or stopping the waiting run.',
+    description: 'Approve or reject a pending approval request on the user\'s explicit instruction, unblocking or stopping the waiting run. Cannot approve a request created by the current run — the human approval banner owns those (self-approval is blocked).',
     inputSchema: { type: 'object', properties: { approvalId: { type: 'string', description: 'Approval id from approvals.list.' }, status: { type: 'string', description: 'Resolution: approved or rejected.' } }, required: ['approvalId', 'status'] },
   },
   // ─── Skill library / user memory / transcript search (O2 migration) ─────
@@ -3865,6 +3865,7 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     tool === 'goals.list' ||
     tool === 'missions.list' ||
     tool === 'research.search' ||
+    tool === 'automations.list' ||
     tool === 'approvals.list'
   ) {
     return {
@@ -3897,6 +3898,21 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
       externalSideEffect: false,
       approvalKind: 'plan_approval',
       summary: 'Mutates approval state for a gated action.',
+    };
+  }
+
+  if (tool === 'circle.toggle_public') {
+    // Publishing a circle is externally-visible exposure that toggling back
+    // does NOT undo (anyone who discovered/joined it while public remains), so
+    // the "reversible from the same UI" coordination doctrine doesn't apply —
+    // this is 'ask'-gated despite being an in-app write. (P64, backlog #3)
+    return {
+      family: 'coordination',
+      approvalMode: 'ask',
+      mutatesState: true,
+      externalSideEffect: false,
+      approvalKind: 'privileged_action',
+      summary: 'Publishes or hides the circle in /discover; public exposure is not fully reversible.',
     };
   }
 
@@ -4016,6 +4032,23 @@ const TOOL_DEPENDENCY_DOMAINS: Partial<Record<OpenSwanRuntimeToolName, { writes?
   'skills.manage': { writes: ['circle_skills'] },
   'vault.grant': { writes: ['vault'] },
   'vault.revoke': { writes: ['vault'] },
+  // Agent identity / office roster (auto-approved in-app writes).
+  'agent.rename': { writes: ['circle_agents'] },
+  'agent.set_spirit': { writes: ['circle_agents'] },
+  'agent.update_appearance': { writes: ['circle_agents'] },
+  'office.list_agents': { reads: ['circle_agents'] },
+  // Accountability, research library, automations, and the approvals
+  // control plane — all auto-approved in-app mutations, so they declare
+  // their (coarse) domain per the rule above.
+  'check_ins.log': { writes: ['circle_check_ins'] },
+  'check_ins.list': { reads: ['circle_check_ins'] },
+  'research.save': { writes: ['circle_research'] },
+  'research.search': { reads: ['circle_research'] },
+  'automations.toggle_enabled': { writes: ['circle_automations'] },
+  'automations.list': { reads: ['circle_automations'] },
+  'approvals.request': { writes: ['circle_approvals'] },
+  'approvals.resolve': { writes: ['circle_approvals'] },
+  'approvals.list': { reads: ['circle_approvals'] },
   // Local desktop files. Generic writes stay 'ask'-gated; bounded image
   // conversion is auto-approved but still declares the same file domain.
   'desktop.file_write_text': { writes: ['desktop_files'] },
@@ -4079,6 +4112,7 @@ const TOOL_DEPENDENCY_DOMAINS: Partial<Record<OpenSwanRuntimeToolName, { writes?
   // Compose-only: reads local integration metadata + validates a proposed call.
   // No external read/write of its own — the write is custom_api.request.
   'integration.compose_action': { reads: ['integrations'] },
+  'integrations.list': { reads: ['integrations'] },
   // Outbound team-channel post. Serialize against other messaging posts so two
   // agents can't race a duplicate alert into the same channel.
   'messaging.notify': { writes: ['messaging'] },
@@ -4577,7 +4611,9 @@ const TOOL_DISCLOSURE_FAMILY_DEFAULTS: Record<string, OpenSwanToolDisclosure> = 
   check_ins: 'deferred',
   credentials: 'deferred',
   integrations: 'deferred',
+  integration: 'deferred',     // integration.compose_action — act-flow long tail.
   custom_api: 'deferred',
+  messaging: 'deferred',       // messaging.notify — external channel post long tail.
   office: 'deferred',
 };
 
@@ -4637,6 +4673,39 @@ const TOOL_SEARCH_FAMILY_SYNONYMS: Record<string, string[]> = {
   goal: ['goals'],
   memory: ['memory'],
   screenshot: ['desktop', 'browser'],
+  // The integration surface is split across THREE name families
+  // (integrations.list / integration.compose_action / custom_api.*) — map the
+  // singular/plural domain word to all of them so "check integrations" and
+  // "use the integration" both surface the whole act flow.
+  integration: ['integration', 'integrations', 'custom_api'],
+  integrations: ['integrations', 'integration', 'custom_api'],
+};
+
+// W-audit: product/preset nouns → the concrete tool(s) they name. A model
+// asked to "post to slack" or "create a linear issue" reaches for the product
+// noun, which appears in no tool NAME segment — without this tier the generic
+// verb ranks unrelated families first (wp.update_post for "post…",
+// tasks.create for "create…"). Weighted like a distinctive name segment (60)
+// because these nouns are exactly that distinctive. Keep tight: unambiguous
+// product names only, never a word that is already a catalog name segment
+// (so no 'github' — the github.* native family owns it).
+const TOOL_SEARCH_TOOL_SYNONYMS: Record<string, OpenSwanRuntimeToolName[]> = {
+  // Connected team-messaging channels (messaging.notify providers + transport).
+  slack: ['messaging.notify'],
+  discord: ['messaging.notify'],
+  teams: ['messaging.notify'],
+  webhook: ['messaging.notify'],
+  // Custom API preset nouns (see INTEGRATION_PRESETS in integrationPresets.ts)
+  // — the /integrations act flow: compose → approval-gated request; read for
+  // GET goals. integrations.list rides the family synonyms above.
+  linear: ['integration.compose_action', 'custom_api.request', 'custom_api.read'],
+  jira: ['integration.compose_action', 'custom_api.request', 'custom_api.read'],
+  sentry: ['integration.compose_action', 'custom_api.request', 'custom_api.read'],
+  airtable: ['integration.compose_action', 'custom_api.request', 'custom_api.read'],
+  asana: ['integration.compose_action', 'custom_api.request', 'custom_api.read'],
+  hubspot: ['integration.compose_action', 'custom_api.request', 'custom_api.read'],
+  zendesk: ['integration.compose_action', 'custom_api.request', 'custom_api.read'],
+  stripe: ['integration.compose_action', 'custom_api.request', 'custom_api.read'],
 };
 
 export function searchOpenSwanToolCatalog(
@@ -4679,6 +4748,9 @@ export function searchOpenSwanToolCatalog(
         // over the photoshop tool. Distinctive nouns keep the full bonus.
         if (nameSegments.has(t)) score += GENERIC_TOOL_VERB_SEGMENTS.has(t) ? 35 : 60;
         else if (t.length >= 4 && name.includes(t)) score += 35; // partial (e.g. "photo" ⊂ "photoshop") — competitive but below a whole segment.
+        // Product-noun synonym ("slack", "linear") — as strong as a whole name
+        // segment, because the noun IS the domain the tool serves.
+        if ((TOOL_SEARCH_TOOL_SYNONYMS[t] || []).includes(tool.name)) score += 60;
         if (label.includes(t)) score += 12;
         if (description.includes(t)) score += 3;
         // Family match — with a small domain-synonym map so the DEFINING
@@ -4926,10 +4998,24 @@ async function maybeRequestToolApproval(
   tool: OpenSwanRuntimeToolName,
   args: Record<string, unknown>,
   context: OpenSwanRuntimeToolContext,
-): Promise<{ approvalId: string; message: string; status: 'pending' | 'rejected' | 'failed_to_create' | 'lookup_failed' } | null> {
+): Promise<{ approvalId: string; message: string; status: 'pending' | 'rejected' | 'failed_to_create' | 'lookup_failed' | 'no_run_context' } | null> {
   const policy = getOpenSwanToolPolicy(tool, context.activePluginIds);
-  if (policy.approvalMode !== 'ask' || !context.runId || tool.startsWith('approvals.')) {
+  // Non-'ask' tools and the approvals.* mechanism itself never gate here.
+  if (policy.approvalMode !== 'ask' || tool.startsWith('approvals.')) {
     return null;
+  }
+  // Fail-closed (P64, backlog #2): an 'ask' tool with no run context can't have
+  // its approval recorded or later verified, so it must NOT execute ungated.
+  // The floor backstop (maybeBlockToolByConstraint) already fails closed for
+  // pay/delete/login/grant without a runId; this closes the same gap for
+  // ordinary non-floor 'ask' mutations (desktop/browser writes etc.), which
+  // previously slipped through here as a silent skip.
+  if (!context.runId) {
+    return {
+      approvalId: '',
+      status: 'no_run_context',
+      message: `${tool} requires approval, but no run context was available to record it — the tool was not run.`,
+    };
   }
 
   const title = `OpenSwan approval required: ${tool}`;
@@ -6784,7 +6870,11 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           const health = healthHint ? ` — ${healthHint}` : '';
           return `- ${integration.label} [${integration.provider}] ${integration.status}${integration.capability_flags?.length ? ` — ${integration.capability_flags.join(', ')}` : ''}${metadata ? ` — metadata: ${metadata}` : ''}${hint}${health}`;
         });
-        return { ok: true, resultsText: lines.join('\n') } as any;
+        // T10 bound: per-line content is clipped above, but the row COUNT is
+        // not — keep the whole list inside a fixed char budget ("+N more"
+        // trailer keeps the true count visible) so a large circle can't blow
+        // the context with one call.
+        return { ok: true, resultsText: boundListWithBudget(lines, 6000) } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'custom_api.read':
@@ -7014,7 +7104,8 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         if (error) return { ok: false, resultsText: error.message } as any;
         if (!data || data.length === 0) return { ok: true, resultsText: 'No published office agents found.' } as any;
         const lines = (data as any[]).map((agent) => `- ${agent.name} [${agent.provider}] ${agent.status}${agent.spirit ? ` — spirit: ${agent.spirit}` : ''}${agent.owner_display_name ? ` — owner: ${agent.owner_display_name}` : ''}`);
-        return { ok: true, resultsText: lines.join('\n') } as any;
+        // T10 bound: cap the roster ("+N more" keeps the true count visible).
+        return { ok: true, resultsText: formatBulletList(lines, { max: 40 }) } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'agent.codex_acquire_asset': {
@@ -7682,10 +7773,37 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
     }
     case 'approvals.resolve': {
       try {
+        const approvalId = String((args as any).approvalId || '').trim();
+        const status = (args as any).status;
+        if (!approvalId || (status !== 'approved' && status !== 'rejected')) {
+          return { ok: false, resultsText: 'approvalId and status (approved | rejected) are required.' } as any;
+        }
+        // Approval-floor guard (parity with swanbot-v2-ai, where model-side
+        // approvals.resolve is disabled entirely): a run cannot approve its own
+        // gated action — otherwise the loop could waive its own 'ask' gate
+        // (request approval → approvals.resolve('approved') → retry passes).
+        // Same-run approvals are resolved by a human via the approval banner.
+        // Resolving OTHER runs' approvals stays available so an explicit user
+        // "approve/reject the pending X" instruction still works, and same-run
+        // 'rejected' stays allowed (fail-closed direction — the agent may
+        // cancel its own request). Fails closed when the row cannot be read.
+        if (status === 'approved' && context.runId) {
+          const { data: approvalRow, error: approvalRowError } = await supabase
+            .from('agent_run_approvals')
+            .select('id,run_id')
+            .eq('id', approvalId)
+            .maybeSingle();
+          if (approvalRowError || !approvalRow) {
+            return { ok: false, resultsText: `Could not verify approval ${approvalId.slice(0, 8)} before resolving — not resolved.${approvalRowError ? ` (${approvalRowError.message})` : ''}` } as any;
+          }
+          if (String((approvalRow as { run_id?: string | null }).run_id || '') === String(context.runId)) {
+            return { ok: false, resultsText: `Blocked: approval ${approvalId.slice(0, 8)} belongs to the current run, and a run cannot approve its own gated action. Ask the user to approve it from the approval banner.` } as any;
+          }
+        }
         const { resolveRunApproval } = await import('./agentRunSystem');
-        const ok = await resolveRunApproval((args as any).approvalId, (args as any).status, context.userId);
-        if (!ok) return { ok: false, resultsText: 'Failed to resolve approval.' } as any;
-        return { ok: true, resultsText: `Approval ${String((args as any).approvalId).slice(0, 8)} marked ${(args as any).status}.` } as any;
+        const ok = await resolveRunApproval(approvalId, status, context.userId);
+        if (!ok) return { ok: false, resultsText: `Could not mark approval ${approvalId.slice(0, 8)} ${status} — it is no longer pending (already resolved or expired).` } as any;
+        return { ok: true, resultsText: `Approval ${approvalId.slice(0, 8)} marked ${status}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     // ── Desktop automation (Claude Code bridge) ─────────────────────────

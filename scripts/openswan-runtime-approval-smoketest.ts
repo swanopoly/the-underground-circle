@@ -166,6 +166,31 @@ assert(
   'mutating wp.* runtime tools are external side effects',
 );
 
+// Self-approval floor (audit 2026-07-10): the OpenSwan client runtime must not
+// let a run approve ITS OWN gated action via approvals.resolve — that would
+// waive the 'ask' floor (request approval → approvals.resolve('approved') →
+// retry passes). Parity with swanbot-v2-ai, which disables model-side
+// approvals.resolve entirely (see swanbot-v2-approvals-smoketest).
+assert(
+  runtimeSource.includes('a run cannot approve its own gated action'),
+  'approvals.resolve blocks same-run self-approval (approval floor never waivable)',
+);
+assert(
+  /status === 'approved' && context\.runId/.test(runtimeSource),
+  "self-approval guard triggers on 'approved' resolutions with a run context",
+);
+assert(
+  runtimeSource.includes('Could not verify approval'),
+  'approvals.resolve fails closed when the approval row cannot be verified',
+);
+
+// Policy consistency (audit 2026-07-10): automations.list is a pure read and
+// must stay in the read-only knowledge branch, not the mutating catch-all.
+assert(
+  runtimeSource.includes("tool === 'automations.list' ||"),
+  'automations.list is classified in the read-only knowledge policy branch',
+);
+
 assert(runtimeSource.includes("name: 'browser.fill_credential_field'"), 'OpenSwan runtime catalogs browser.fill_credential_field');
 assert(runtimeSource.includes("'browser.fill_credential_field': BrowserToolExecutionResult"), 'browser.fill_credential_field has a typed execution result');
 assert(runtimeSource.includes("'browser.fill_credential_field': { reads: ['vault'], writes: ['browser_page'] }"), 'browser.fill_credential_field declares vault read + browser write dependencies');

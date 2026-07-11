@@ -11,6 +11,8 @@
  *   5. formatTokenCount k/M formatting + formatRelativeTime labels
  *   6. Per-agent live ops bounds, dedupe, relative time, subagent counts
  *   7. Determinism: identical output for identical inputs + nowMs
+ *   8. O8 synthetic pinned-agent live status: evidence → upgrade, no evidence
+ *      → untouched, finished/stale runs → no upgrade, bounds, determinism
  *
  * Usage:
  *   npm run smoke:office-ops-board
@@ -21,13 +23,18 @@ import {
   buildOfficeTokenTracker,
   buildAgentLiveOps,
   buildOfficeAgentAccountabilityIndex,
+  applySyntheticAgentStatusUpgrade,
+  deriveSyntheticAgentStatusFromRuns,
   formatAccountabilityCounts,
   formatTokenCount,
   formatRelativeTime,
+  HUGGINGSWAN_RUN_NAME_KEYS,
+  OPENSWAN_RUN_NAME_KEYS,
   OFFICE_ACCOUNTABILITY_WINDOW_MS,
   OFFICE_BOARD_MAX_ROOTS,
   OFFICE_BOARD_MAX_CHILDREN_PER_ROOT,
   OFFICE_BOARD_MAX_RECENTLY_FINISHED,
+  SYNTHETIC_STATUS_RUN_MAX_AGE_MS,
   type AgentRunLike,
 } from '../src/lib/officeOpsBoard';
 
@@ -377,6 +384,148 @@ console.log('\n[A] accountability index — outcomes, window, keying, cost');
     { nowMs: NOW },
   ).get('coder');
   check('title bounded in line', !!long && long.lastLine.length < 90, String(long?.lastLine.length));
+}
+
+// ─── Synthetic pinned-agent live status (O8) ────────────────────────────────
+
+console.log('\n[O8] synthetic live status — evidence, mapping, staleness');
+{
+  const boardNodes = (runs: AgentRunLike[]) => buildOfficeBuildingBoard(runs, { nowMs: NOW }).building;
+
+  // Name-key contract: the OfficeTab mapping decisions are pinned here.
+  check('OpenSwan keys cover brand + legacy + chat surface',
+    OPENSWAN_RUN_NAME_KEYS.includes('openswan') && OPENSWAN_RUN_NAME_KEYS.includes('blackswan') && OPENSWAN_RUN_NAME_KEYS.includes('chat agent'));
+  check('OpenSwan keys do NOT claim room/feed surfaces',
+    !OPENSWAN_RUN_NAME_KEYS.includes('room agent') && !OPENSWAN_RUN_NAME_KEYS.includes('feed agent'));
+  check('HuggingSwan keys', HUGGINGSWAN_RUN_NAME_KEYS.includes('huggingswan'));
+
+  // Evidence: running chat-surface run (no delegated_to → agentName 'Chat agent') → active.
+  const chatRun = run({
+    id: 'chat-1', status: 'running', surface: 'main_chat',
+    title: 'Fix the login flow for beta members', started_at: iso(-60_000),
+  });
+  const active = deriveSyntheticAgentStatusFromRuns(OPENSWAN_RUN_NAME_KEYS, boardNodes([chatRun]), NOW);
+  check('chat-surface running run → active', active?.status === 'active', JSON.stringify(active));
+  check('activity = "Working: <title>"', active?.activity === 'Working: Fix the login flow for beta members', active?.activity);
+  check('runId carried', active?.runId === 'chat-1');
+
+  // delegated_to variants land on the same agent.
+  const viaDelegated = deriveSyntheticAgentStatusFromRuns(
+    OPENSWAN_RUN_NAME_KEYS,
+    boardNodes([run({ id: 'bs-1', status: 'running', delegated_to: 'black_swan', started_at: iso(-30_000) })]),
+    NOW,
+  );
+  check('delegated_to black_swan → "black swan" key matches', viaDelegated?.status === 'active');
+  const hsLive = deriveSyntheticAgentStatusFromRuns(
+    HUGGINGSWAN_RUN_NAME_KEYS,
+    boardNodes([run({ id: 'hs-1', status: 'running', delegated_to: 'huggingswan', started_at: iso(-30_000) })]),
+    NOW,
+  );
+  check('huggingswan delegated run matches HuggingSwan keys', hsLive?.status === 'active' && hsLive.runId === 'hs-1');
+
+  // Conservative mapping: queued/planning/paused/waiting_approval → building.
+  const waiting = deriveSyntheticAgentStatusFromRuns(
+    OPENSWAN_RUN_NAME_KEYS,
+    boardNodes([run({ id: 'os-w', status: 'waiting_approval', delegated_to: 'openswan', title: 'Deploy docs site', started_at: iso(-120_000) })]),
+    NOW,
+  );
+  check('waiting_approval → building', waiting?.status === 'building');
+  check('building-tier label wording', waiting?.activity === 'Waiting for approval: Deploy docs site', waiting?.activity);
+  const queued = deriveSyntheticAgentStatusFromRuns(
+    OPENSWAN_RUN_NAME_KEYS,
+    boardNodes([run({ id: 'os-q', status: 'queued', delegated_to: 'openswan', started_at: iso(-120_000) })]),
+    NOW,
+  );
+  check('queued → building', queued?.status === 'building');
+
+  // Selection: running beats queued even when queued is newer; deterministic tie-break.
+  const mixed = deriveSyntheticAgentStatusFromRuns(
+    OPENSWAN_RUN_NAME_KEYS,
+    boardNodes([
+      run({ id: 'os-q2', status: 'queued', delegated_to: 'openswan', started_at: iso(-5_000) }),
+      run({ id: 'os-r2', status: 'running', delegated_to: 'openswan', started_at: iso(-90_000) }),
+    ]),
+    NOW,
+  );
+  check('running beats newer queued', mixed?.status === 'active' && mixed.runId === 'os-r2');
+
+  // Tree walk: matching child under a non-matching root still counts.
+  const treeLive = deriveSyntheticAgentStatusFromRuns(
+    OPENSWAN_RUN_NAME_KEYS,
+    boardNodes([
+      run({ id: 'root-x', status: 'running', delegated_to: 'coder', started_at: iso(-60_000) }),
+      run({ id: 'kid-os', status: 'running', parent_run_id: 'root-x', delegated_to: 'openswan', started_at: iso(-30_000) }),
+    ]),
+    NOW,
+  );
+  check('matching child found via tree walk', treeLive?.runId === 'kid-os');
+
+  // No evidence: name mismatch, finished runs, stale runs, malformed future runs.
+  check('name mismatch → null', deriveSyntheticAgentStatusFromRuns(
+    OPENSWAN_RUN_NAME_KEYS,
+    boardNodes([run({ id: 'c-1', status: 'running', delegated_to: 'coder', started_at: iso(-30_000) })]),
+    NOW,
+  ) === null);
+  const finishedNodes = buildOfficeBuildingBoard(
+    [
+      run({ id: 'os-done', status: 'completed', surface: 'main_chat', started_at: iso(-8 * 60_000), completed_at: iso(-60_000) }),
+      run({ id: 'os-fail', status: 'failed', surface: 'main_chat', started_at: iso(-8 * 60_000), completed_at: iso(-30_000) }),
+    ],
+    { nowMs: NOW },
+  ).recentlyFinished;
+  check('finished runs are not evidence', finishedNodes.length === 2
+    && deriveSyntheticAgentStatusFromRuns(OPENSWAN_RUN_NAME_KEYS, finishedNodes, NOW) === null);
+  check('stale running run (> max age) → null', deriveSyntheticAgentStatusFromRuns(
+    OPENSWAN_RUN_NAME_KEYS,
+    boardNodes([run({ id: 'os-stale', status: 'running', delegated_to: 'openswan', started_at: iso(-SYNTHETIC_STATUS_RUN_MAX_AGE_MS - 60_000) })]),
+    NOW,
+  ) === null);
+  check('far-future startedAt → null', deriveSyntheticAgentStatusFromRuns(
+    OPENSWAN_RUN_NAME_KEYS,
+    boardNodes([run({ id: 'os-fut', status: 'running', delegated_to: 'openswan', started_at: iso(10 * 60_000), created_at: iso(10 * 60_000) })]),
+    NOW,
+  ) === null);
+  check('empty keys → null', deriveSyntheticAgentStatusFromRuns([], boardNodes([chatRun]), NOW) === null);
+  check('null nodes → null', deriveSyntheticAgentStatusFromRuns(OPENSWAN_RUN_NAME_KEYS, null, NOW) === null);
+
+  // Bounds: long titles stay clipped inside the activity line.
+  const longLive = deriveSyntheticAgentStatusFromRuns(
+    OPENSWAN_RUN_NAME_KEYS,
+    boardNodes([run({ id: 'os-long', status: 'running', delegated_to: 'openswan', title: 'x'.repeat(300), started_at: iso(-30_000) })]),
+    NOW,
+  );
+  check('activity bounded (≤ 72 chars)', !!longLive && longLive.activity.length <= 72, String(longLive?.activity.length));
+
+  // Determinism: same inputs + nowMs → identical output.
+  const detRuns = [
+    run({ id: 'd-1', status: 'running', delegated_to: 'openswan', started_at: iso(-45_000) }),
+    run({ id: 'd-2', status: 'queued', surface: 'main_chat', started_at: iso(-15_000) }),
+  ];
+  check('deterministic for same nowMs', JSON.stringify(
+    deriveSyntheticAgentStatusFromRuns(OPENSWAN_RUN_NAME_KEYS, boardNodes(detRuns), NOW),
+  ) === JSON.stringify(
+    deriveSyntheticAgentStatusFromRuns(OPENSWAN_RUN_NAME_KEYS, boardNodes(detRuns), NOW),
+  ));
+
+  // Upgrade ladder: upgrade-only, offline/error untouched, never demote.
+  const activeEv = active!;
+  const buildingEv = waiting!;
+  const up1 = applySyntheticAgentStatusUpgrade('idle', activeEv);
+  check('idle + active evidence → active + activity', up1.changed && up1.status === 'active' && up1.activity === activeEv.activity);
+  const up2 = applySyntheticAgentStatusUpgrade('idle', buildingEv);
+  check('idle + building evidence → building', up2.changed && up2.status === 'building');
+  const up3 = applySyntheticAgentStatusUpgrade('building', activeEv);
+  check('building + active evidence → active', up3.changed && up3.status === 'active');
+  const up4 = applySyntheticAgentStatusUpgrade('building', buildingEv);
+  check('building + building evidence → status kept, activity refreshed', up4.changed && up4.status === 'building' && up4.activity === buildingEv.activity);
+  const up5 = applySyntheticAgentStatusUpgrade('active', buildingEv);
+  check('active never demoted by building evidence', up5.changed && up5.status === 'active');
+  const up6 = applySyntheticAgentStatusUpgrade('offline', activeEv);
+  check('offline untouched (O2 demotions win)', !up6.changed && up6.status === 'offline' && up6.activity === undefined);
+  const up7 = applySyntheticAgentStatusUpgrade('error', activeEv);
+  check('error untouched', !up7.changed && up7.status === 'error');
+  const up8 = applySyntheticAgentStatusUpgrade('idle', null);
+  check('no evidence → untouched', !up8.changed && up8.status === 'idle' && up8.activity === undefined);
 }
 
 // ─── Summary ────────────────────────────────────────────────────────────────

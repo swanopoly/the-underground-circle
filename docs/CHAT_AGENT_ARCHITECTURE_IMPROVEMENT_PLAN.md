@@ -8,6 +8,118 @@
 
 ## Shipped from this plan
 
+- **P63 — five-agent improvement wave across chat / SwanBot / OpenSwan / agent
+  loops / Office (2026-07-10)** ✅ — disjoint-territory parallel review+fix pass
+  over the freshly-landed P38-P62 arc. Highest-severity fixes:
+  **(A3/OpenSwan)** `approvals.resolve` self-approval bypass CLOSED — a run
+  could approve its own pending 'ask' gate (request → resolve('approved') →
+  retry passes); now blocks same-run approval, fail-closed on unreadable rows,
+  cross-run + same-run-reject preserved; `automations.list` reclassified
+  read-only; catalog search reachability fixed ("post to slack" ranked
+  messaging.notify #4→#1; "create linear issue" act-tools absent→top-3 via a
+  preset-keyed product-noun synonym tier); `integrations.list`/
+  `office.list_agents` outputs bounded; NEW `policy-approval-consistency` lint
+  rule pins the whole approval doctrine (185 tools/37 families/8 rules green).
+  **(A2/SwanBot)** three edge bugs: v2 transient continuation-resume no longer
+  clobbers `metadata.continuation` (the retryable-503 contract now actually
+  recovers, in-flight client tool work survives); explicit `tools: []` now
+  rides the tool-less relay leg instead of silently falling through to the
+  tool-enabled persona (guardrail prompts were being dropped — same class as
+  P62's clarifier fix, for the cap-exhaustion finalizers); max_tokens-truncated
+  tool_use turns flagged `incomplete` instead of posing as clean finals. Cache
+  discipline, split usage logging, and the v2 breaker verified intact.
+  **(A4/agent loops)** second adversarial pass on the solver stack: stuck
+  consultation on the FINAL iteration wasted the run's one consult and returned
+  empty text (now gated on next-turn-exists); `tool-loop-stuck-breaker`
+  smoke was RED at HEAD (P62 updated behavior but not this smoke — re-pinned);
+  solver inline fields (model-authored tool name!) were unbounded/unscrubbed —
+  a 20K-char name produced a 41KB consultation — now clamped + fence-scrubbed.
+  **(A1/chat routing)** 43-prompt adversarial probe → 5 planner fixes:
+  recurring "every morning post PRs to Slack" → schedule lane (was one-shot
+  /gh rewrite); Slack/Discord/Teams SEND phrasings → approval-gated openswan
+  turn (was plain chat posting nothing / junk desktop clicks); integrations +
+  office/agent status asks → read-only openswan (was plain chat); `/vault`
+  slash routeIds registered. +33 golden canaries (75 prompts / 148 assertions)
+  + a latent exit-code bug in the planner smoke itself fixed (post-summary
+  FAILs used to exit 0). **(A5/Office O8)** synthetic pinned agents now derive
+  live status from run evidence: `deriveSyntheticAgentStatusFromRuns` +
+  `applySyntheticAgentStatusUpgrade` (upgrade-only — never demotes, never
+  touches offline/error, 2h stale-run guard so a crashed writer can't pin
+  "Active"), wired in the displayAgents memo via the same name seam; ops-board
+  smoke → 120 checks. **Certification catch:** the first full-suite run FAILED
+  at `tool-batch-parallelism` — it pinned `check_ins.log` as the *example*
+  unmapped mutator, which A3's (correct) domain-mapping changed; the case now
+  rides `code.generate` (still genuinely unmapped) and the new
+  `circle_check_ins` mapping is itself pinned. Same lesson as P62's red smoke:
+  a behavior change must update every smoke that pins the old behavior — the
+  full-suite certification exists precisely to catch what per-agent validation
+  lists miss. Final validation: typecheck app 0 errors + 43/43 function checks
+  + full smoke:all exit 0 (205 scripts).
+
+### P64 — approval-floor hardening (backlog #1/#2/#3/#11 CLOSED, 2026-07-10)
+
+Security cluster off the P63 backlog, all fail-closed + minimal-diff:
+- **#1 `resolveRunApproval` (both `agentRunSystem.ts` AND the human-UI
+  `runApprovalsService.ts` — the finding named one; both had the identical
+  hole) now carry a `.eq('status','pending')` predicate + row-match return** —
+  only a still-pending approval transitions, so an already-resolved / rejected
+  / **expired** (timed-out) decision can never be flipped or retroactively
+  approved, and a no-op update reports false/`{ok:false}` instead of posing as
+  a fresh approval. The OpenSwan tool handler's `!ok` message now says
+  "no longer pending (already resolved or expired)". (Requester≠resolver was
+  deliberately NOT added — a human approving their own agent is the point of
+  HITL; agent self-approval was already blocked by P63's A3 guard.)
+- **#2 `maybeRequestToolApproval` fail-closed on missing `runId`** — an 'ask'
+  tool with no run context can't have its approval recorded/verified, so it now
+  returns a blocking `no_run_context` result instead of silently skipping the
+  gate (the floor backstop already failed closed here for pay/delete/login/
+  grant; this closes the same gap for ordinary non-floor 'ask' desktop/browser
+  mutations).
+- **#3 `circle.toggle_public` promoted auto→'ask'** — publishing a circle is
+  externally-visible exposure that toggling back doesn't undo; dedicated policy
+  block + description approval vocab (satisfies the P63 `policy-approval-
+  consistency` lint). Pinned in credentials-get-policy smoke.
+- **#11 v2-edge tool-policy — VERIFIED CLEAN (no fix)**: swanbot-v2-ai keeps a
+  tool CATALOG but no per-tool policy flag table (the `automations.list`-class
+  misclassification is structurally impossible); every external/floor/secret
+  tool is uniformly `clientOnly` (client-gated), `approvals.resolve` is disabled
+  + out of all tool groups. Documented so it isn't re-audited.
+Pins: run-approvals (pending-only resolve contract — flip/expired/unknown →
+ok:false), credentials-get-policy (toggle_public 'ask'). Validation: typecheck
+app 0 + 43/43 functions + smoke:all green.
+
+### P63 wave findings backlog (remaining — next targets)
+
+1. ~~`resolveRunApproval` raw seam~~ ✅ CLOSED (P64 #1).
+2. ~~'ask' tools skip approval when `context.runId` absent~~ ✅ CLOSED (P64 #2).
+3. ~~`circle.toggle_public` auto-approved~~ ✅ CLOSED (P64 #3).
+4. `openswanSessionRuntime` (~:916) + `subagentRegistry` (~:605) cap-exhaustion
+   finalizers still send `tools: []` — now fail-visible after A2's edge fix,
+   but full P62 parity means sending real tool defs + a no-more-tools
+   instruction (like swanbot.ts:4219).
+5. swanbot-v2-ai silently drops `systemDirective` + `legacy.conversationMessages`
+   that swanbot.ts sends — v2-routed turns run without chat history or the
+   orchestrator directive (design/cost decision needed).
+6. Same final-round wasted-consult shape as A4's typed-core fix exists in the
+   legacy loop (swanbot.ts ~:4165) and browser edge (computer-use-agent ~:1131).
+7. Aborted runs exit through `max_iterations_exceeded` telemetry
+   (agentExecutionCore ~:617/1025) — cancelled reads as cap-exhausted.
+8. Legacy relay solver consultations aren't persisted to agent_run_events
+   (typed core + browser edge emit them; legacy is invisible in telemetry).
+9. userTaskPipelines matchers: `integrations_models` only matches singular
+   "integration"; `office_agents` misses "my agents" phrasings;
+   `schedule_automation` lacks "every/each <unit>" cadence forms (A1's planner
+   gates plug the leaks; widening the matchers is the proper fix).
+10. `chatCommandRegistry.inferChatCommandExecution` rewrites recurring-intent
+    text to one-shot slash commands (needs a recurrence guard);
+    `content_generation` pipeline matcher over-broad on "summary".
+11. ~~v2 edge tool-policy misclassification~~ ✅ VERIFIED CLEAN (P64 #11 — no
+    per-tool policy flag table; clientOnly split gates everything).
+12. Breaker counts edge-BODY errors (model_unsupported_on_v2, key_missing) as
+    transport failures (semantics drift).
+13. `AgentsScreenLive.tsx` (~:429) pins DEFAULT_AGENT/HUGGINGSWAN with static
+    statuses — could reuse A5's O8 helpers.
+
 - **Item 1 — Deferred tool loading DEFAULT-ON (P25)** ✅ — progressive
   disclosure (pinned ~25-40 core + `tools.search` unlock) is now the default
   typed-loop palette; explicit opt-out via

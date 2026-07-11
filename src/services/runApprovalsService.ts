@@ -66,15 +66,24 @@ export async function resolveRunApproval(
   status: 'approved' | 'rejected',
   userId: string,
 ): Promise<{ ok: boolean; error?: string }> {
-  const { error } = await supabase
+  // Fail-closed + idempotent (mirrors agentRunSystem.resolveRunApproval): only
+  // a still-PENDING row transitions, so a late click (after another approver or
+  // after expiry) can't flip a resolved/expired decision. A no-op update
+  // reports ok:false with a clear reason instead of a silent success.
+  const { data, error } = await supabase
     .from('agent_run_approvals')
     .update({
       status,
       resolved_by: userId,
       resolved_at: new Date().toISOString(),
     })
-    .eq('id', approvalId);
+    .eq('id', approvalId)
+    .eq('status', 'pending')
+    .select('id');
   if (error) return { ok: false, error: error.message };
+  if (!Array.isArray(data) || data.length === 0) {
+    return { ok: false, error: 'This approval is no longer pending (already resolved or expired).' };
+  }
   return { ok: true };
 }
 
