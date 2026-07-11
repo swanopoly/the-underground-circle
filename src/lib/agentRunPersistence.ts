@@ -47,6 +47,38 @@ export type CreatePersistedRunOptions = {
   metadata?: Record<string, unknown>;
 };
 
+/**
+ * #8: persist a single `solver_consultation` marker for a run that is NOT
+ * driven by the typed-core event stream above.
+ *
+ * The typed core (via `onEvent` → `writeEvent`) and the browser edge already
+ * write this row when the stuck-solver is consulted, so consultation rounds
+ * show up in transcripts/dashboards. The LEGACY relay loop in `swanbot.ts`
+ * consults the same solver but has only a bare `runId` string (no
+ * PersistedRunHandle), so its consultations were invisible. This helper is
+ * the same raw insert `writeEvent` uses — identical `kind` + `{ iteration,
+ * reason }` payload shape — so the two paths are indistinguishable in the
+ * event log. Non-fatal by the same rule: a telemetry write must never break
+ * a user-visible run.
+ */
+export async function recordSolverConsultationEvent(opts: {
+  runId: string;
+  iteration: number;
+  reason: string;
+}): Promise<void> {
+  if (!opts.runId) return;
+  try {
+    await supabase.from('agent_run_events').insert({
+      run_id: opts.runId,
+      kind: 'solver_consultation',
+      payload: { iteration: opts.iteration, reason: opts.reason },
+    });
+  } catch (e) {
+    // Non-fatal — telemetry failures should never bubble (writeEvent rule).
+    console.warn('[agentRunPersistence] solver_consultation insert failed:', e);
+  }
+}
+
 export async function createPersistedRun(opts: CreatePersistedRunOptions): Promise<PersistedRunHandle | null> {
   const run = await createRun({
     circleId: opts.circleId,

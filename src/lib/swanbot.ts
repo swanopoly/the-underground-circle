@@ -54,7 +54,7 @@ import {
   type ChatPromptSectionInput,
   type ChatPromptSectionKey,
 } from './chatPromptAssembly';
-import { buildBlackSwanGroundingBlock, isBlackSwanModel, isLocalOllamaBlackSwan } from './blackswanRouting';
+import { buildBlackSwanGroundingBlock, isBlackSwanModel, isLocalOllamaBlackSwan, planBlackSwanEndpointFailover } from './blackswanRouting';
 // Pure csv/table helpers (no react-native) — see the LOCKSTEP note on
 // SwanBotStructuredArtifact below.
 import { looksLikeCsvArtifact } from './tableArtifact';
@@ -456,6 +456,13 @@ export interface SwanBotStructuredResponse {
     provider_routed?: string;
     provider_model?: string;
     routing_fallback?: { provider: string; reason: string };
+    /**
+     * FAIL-VISIBLE BlackSwan failover: set when a BlackSwan turn could not be
+     * routed (endpoint cold / not configured) and the turn was re-issued once
+     * on the advertised failover chain. The matching user notice is prepended
+     * to the response text — this field is the machine-readable receipt.
+     */
+    blackswan_failover?: { failover_from: string; fallback_model: string; reason: string };
   };
 }
 
@@ -970,6 +977,15 @@ async function callLlmProxy(
  * side effects through the legacy path.
  * See `docs/SWANBOT_V2_MIGRATION_PLAN.md` for rollout boundaries.
  */
+/** Outcome of a v2 attempt, carrying enough for the orchestrator to make the
+ *  right circuit-breaker call (#12). `text` is the terminal answer (null when
+ *  v2 couldn't produce one). `bodyError` is set when the edge returned a
+ *  200-with-error-body (config/permanent) — the orchestrator surfaces it but
+ *  must NOT count it toward the transient transport breaker. A transport
+ *  failure leaves `bodyError` undefined with `text` null (the value the
+ *  breaker DOES count). */
+type V2CallResult = { text: string | null; bodyError?: V2BodyError };
+
 async function callSwanBotV2(
   message: string,
   circleId: string,
@@ -981,13 +997,18 @@ async function callSwanBotV2(
   thinkingLevel: 'fast' | 'balanced' | 'deep' = 'balanced',
   _maxTokens = 4096,
   systemDirective?: string,
-): Promise<string | null> {
-  if (shouldBlockExternalAiProvider('anthropic')) return null;
+): Promise<V2CallResult> {
+  if (shouldBlockExternalAiProvider('anthropic')) return { text: null };
   const MAX_CONTINUATIONS = 6;
   let attemptedClientTools = false;
+  // #12: capture a 200-with-error-body from ANY leg (initial or continuation)
+  // so the orchestrator can distinguish it from a transport failure. Last one
+  // wins — a config error is a config error regardless of which leg hit it.
+  let bodyError: V2BodyError | undefined;
+  const captureBodyError = (err: V2BodyError) => { bodyError = err; };
   try {
     const accessToken = await getFreshAccessToken();
-    if (!accessToken) return null;
+    if (!accessToken) return { text: null };
 
     // ── First call — initial message. ─────────────────────────────────
     let response = await invokeSwanbotV2(accessToken, {
@@ -998,8 +1019,8 @@ async function callSwanBotV2(
       model: model || undefined,
       systemDirective,
       legacy: { conversationMessages },
-    });
-    if (!response) return null;
+    }, captureBodyError);
+    if (!response) return { text: null, bodyError };
 
     // ── Continuation loop for clientOnly tool calls. ──────────────────
     for (let i = 0; i < MAX_CONTINUATIONS; i++) {
@@ -1016,25 +1037,25 @@ async function callSwanBotV2(
         userId,
         continuationRunId: response.continuationRunId,
         toolResults,
-      });
+      }, captureBodyError);
       if (!response) {
         if (attemptedClientTools) {
           console.warn('[SwanBot/v2] continuation failed after client tools; not falling back to v1.');
-          return swanBotV2ClientToolStopMessage('continuation_failed');
+          return { text: swanBotV2ClientToolStopMessage('continuation_failed'), bodyError };
         }
-        return null;
+        return { text: null, bodyError };
       }
     }
 
     if (response.pending) {
       console.warn('[SwanBot/v2] hit continuation cap; not falling back to v1.');
-      return swanBotV2ClientToolStopMessage('continuation_cap');
+      return { text: swanBotV2ClientToolStopMessage('continuation_cap'), bodyError };
     }
-    return response.text || response.response || null;
+    return { text: response.text || response.response || null, bodyError };
   } catch (err: any) {
     console.warn('[SwanBot/v2] call failed:', err?.message || err);
-    if (attemptedClientTools) return swanBotV2ClientToolStopMessage('continuation_failed');
-    return null;
+    if (attemptedClientTools) return { text: swanBotV2ClientToolStopMessage('continuation_failed'), bodyError };
+    return { text: null, bodyError };
   }
 }
 
@@ -1059,13 +1080,33 @@ type V2Response =
       response?: string;
     };
 
+/** A 200-with-error-body from the v2 edge (e.g. `model_unsupported_on_v2`,
+ *  `key_missing`). Distinct from a transport failure: the function RAN and
+ *  chose to error — usually a permanent config problem, not a transient
+ *  blip. #12: this must NOT count toward the session circuit breaker (which
+ *  counts transport failures only), or one config error trips it and
+ *  disables v2 for the whole session. Threaded out so the orchestrator can
+ *  surface it (fail-visible) without incrementing the breaker. */
+type V2BodyError = { code?: string; message: string };
+
+function extractV2BodyError(data: any): V2BodyError | null {
+  if (!data?.error) return null;
+  const message = typeof data.error === 'string' ? data.error : String(data.error);
+  const code = typeof data.code === 'string' ? data.code : undefined;
+  return { code, message };
+}
+
 // One invoke attempt, classified for retry. Returns a discriminated
 // outcome so `invokeSwanbotV2` can retry transient failures (S4): a 429 /
 // 5xx / network blip on a CONTINUATION call would otherwise discard the
 // whole in-flight turn (server work + already-executed client tools).
+// `onBodyError` (#12): a 200-with-error-body is reported to this sink so the
+// caller can distinguish it from a transport failure (both still resolve to
+// the same terminal `null` for the retry wrapper).
 async function invokeSwanbotV2Once(
   accessToken: string,
   body: Record<string, unknown>,
+  onBodyError?: (err: V2BodyError) => void,
 ): Promise<RetryAttemptResult<V2Response>> {
   const { data, error } = await supabase.functions.invoke('swanbot-v2-ai', {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -1079,9 +1120,13 @@ async function invokeSwanbotV2Once(
     );
     return { ok: false, retryable };
   }
-  if (data?.error) {
+  const bodyError = extractV2BodyError(data);
+  if (bodyError) {
     // The function ran and chose to error — retrying won't change the result.
+    // Report it distinctly (config error, not transport) then resolve
+    // terminally: the retry wrapper still sees a non-retryable failure.
     console.warn('[SwanBot/v2] edge returned error:', data.error);
+    onBodyError?.(bodyError);
     return { ok: false, retryable: false };
   }
   if (!data) return { ok: false, retryable: false };
@@ -1091,8 +1136,9 @@ async function invokeSwanbotV2Once(
 async function invokeSwanbotV2(
   accessToken: string,
   body: Record<string, unknown>,
+  onBodyError?: (err: V2BodyError) => void,
 ): Promise<V2Response | null> {
-  return runWithTransientRetry((_tryIndex) => invokeSwanbotV2Once(accessToken, body), {
+  return runWithTransientRetry((_tryIndex) => invokeSwanbotV2Once(accessToken, body, onBodyError), {
     maxRetries: 2,
     baseDelayMs: 400,
     onRetry: ({ attempt, delayMs }) =>
@@ -2092,6 +2138,32 @@ function normalizeSwanBotEdgeError(data: any): SwanBotEdgeCallResult['error'] | 
   return { code, message };
 }
 
+/**
+ * Read the JSON `{ error, code }` body off a non-2xx `functions.invoke`
+ * failure. supabase-js hands non-2xx responses back as a FunctionsHttpError
+ * with `data: null` and the Response on `error.context` — so the swanbot-ai
+ * fail-closed HTTP 400 (`marketplace_provider_unavailable`, e.g. the BlackSwan
+ * endpoint being cold or unconfigured) used to collapse into a generic null
+ * and the FAIL-VISIBLE failover could never see WHY the turn failed.
+ * Best-effort: any shape/parse problem returns null (no behavior change).
+ */
+async function readSwanBotInvokeErrorBody(error: unknown): Promise<SwanBotEdgeCallResult['error'] | null> {
+  try {
+    const ctx = (error as { context?: unknown } | null | undefined)?.context as
+      | { json?: () => Promise<any>; clone?: () => { json: () => Promise<any> } }
+      | undefined;
+    if (!ctx) return null;
+    const body = typeof ctx.clone === 'function'
+      ? await ctx.clone().json()
+      : typeof ctx.json === 'function'
+        ? await ctx.json()
+        : null;
+    return normalizeSwanBotEdgeError(body);
+  } catch {
+    return null;
+  }
+}
+
 async function callSwanBotAI(
   message: string,
   circleId: string,
@@ -2111,28 +2183,47 @@ async function callSwanBotAI(
   // entirely until a v2 success, `/v2 on`, or a reload.
   // See `docs/SWANBOT_V2_MIGRATION_PLAN.md`.
   try {
-    const { isSwanbotV2Enabled, isSwanbotV2CircuitOpen, recordSwanbotV2Outcome } =
+    const { isSwanbotV2Enabled, isSwanbotV2CircuitOpen, recordSwanbotV2Outcome, v2OutcomeCountsTowardBreaker } =
       await import('./swanbotRouting');
     if (isSwanbotV2Enabled()) {
       if (isSwanbotV2CircuitOpen()) {
         console.log('[SwanBot] v2 circuit open (repeated transport failures) — skipping v2 this session, using v1.');
       } else {
-        let v2: string | null;
+        let v2: V2CallResult;
         try {
           v2 = await callSwanBotV2(
             message, circleId, userId, discordContext, model, wikiContext,
             conversationMessages, thinkingLevel, maxTokens, systemDirective,
           );
         } catch (v2Err) {
+          // A thrown error IS a transport-level failure (invoke/network) —
+          // count it toward the breaker, unchanged. (Body errors never throw;
+          // they come back as a data.error body, handled below.)
           recordSwanbotV2Outcome(false);
           throw v2Err;
         }
-        if (v2) {
-          recordSwanbotV2Outcome(true);
-          return { response: v2 };
+        // #12: classify the outcome so the breaker only counts TRANSPORT
+        // failures. A 200-with-error-body (`model_unsupported_on_v2`,
+        // `key_missing`, …) is a PERMANENT CONFIG error — v2 IS reachable and
+        // answered — so it must NOT trip the breaker (one config error was
+        // disabling v2 for the whole session). We still SURFACE it
+        // (fail-visible) rather than silently masking it; v1 shares the same
+        // key/config and would usually hit the same wall. A real transport
+        // failure (null text, no body error) counts and falls through to v1.
+        const outcome: import('./swanbotRouting').SwanbotV2Outcome = v2.text
+          ? { kind: 'success' }
+          : v2.bodyError
+            ? { kind: 'body_error' }
+            : { kind: 'transport_failure' };
+        if (v2OutcomeCountsTowardBreaker(outcome)) {
+          recordSwanbotV2Outcome(outcome.kind === 'success');
         }
-        recordSwanbotV2Outcome(false);
-        console.log('[SwanBot] v2 returned null — falling back to v1.');
+        if (v2.text) return { response: v2.text };
+        if (v2.bodyError) {
+          console.warn('[SwanBot] v2 returned a config error body (not counted toward the breaker):', v2.bodyError.code || v2.bodyError.message);
+          return { response: null, error: v2.bodyError };
+        }
+        console.log('[SwanBot] v2 returned null (transport) — falling back to v1.');
       }
     }
   } catch (err) {
@@ -2150,6 +2241,10 @@ async function callSwanBotAI(
     // R5: v1 is still the primary tier, but before this it collapsed on any
     // one-off 429/5xx/network blip. Reuse S4's bounded-backoff wrapper around
     // the invoke only. An error BODY means the edge ran — terminal, no retry.
+    // Fail-visible: capture the terminal (non-retryable) HTTP error body so a
+    // fail-closed 400 like `marketplace_provider_unavailable` (BlackSwan
+    // endpoint cold/unconfigured) surfaces as a coded error instead of null.
+    let invokeErrorBody: SwanBotEdgeCallResult['error'] | null = null;
     const data = await runWithTransientRetry<any>(async (): Promise<RetryAttemptResult<any>> => {
       const { data: invokeData, error } = await supabase.functions.invoke('swanbot-ai', {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -2174,11 +2269,17 @@ async function callSwanBotAI(
         if (!/401|non-2xx/i.test(message)) {
           console.warn('[SwanBot] Edge function error:', message);
         }
-        return { ok: false, retryable: isRetryableInvokeError(error) };
+        const retryable = isRetryableInvokeError(error);
+        if (!retryable) {
+          invokeErrorBody = await readSwanBotInvokeErrorBody(error);
+        }
+        return { ok: false, retryable };
       }
       return { ok: true, value: invokeData };
     });
-    if (data == null) return null;
+    if (data == null) {
+      return invokeErrorBody ? { response: null, error: invokeErrorBody } : null;
+    }
     if (data?.error) {
       console.warn('[SwanBot] Edge function returned error:', data.error);
       return { response: null, error: normalizeSwanBotEdgeError(data) || { message: 'The SwanBot edge function returned an error.' } };
@@ -3403,6 +3504,57 @@ async function getSwanBotResponseImpl(
     if (aiResult?.error?.message) {
       lastFailureReason = aiResult.error.message;
       console.warn('[SwanBot] Tier 2: Edge function returned user-actionable error:', aiResult.error.code || aiResult.error.message);
+      // FAIL-VISIBLE BlackSwan failover (never silent, never twice): when the
+      // explicit BlackSwan pick could not be routed — the scale-to-zero
+      // endpoint is cold/waking, or the endpoint URL/integration isn't
+      // configured — the edge fails CLOSED (`marketplace_provider_unavailable`)
+      // instead of silently spending Anthropic. Honor the advertised failover
+      // chain HERE: re-issue the SAME request once on the chain's first model
+      // and tell the user exactly what served the turn.
+      // `planBlackSwanEndpointFailover` fails closed for anything that isn't
+      // clearly a BlackSwan-route outage, and the fallback result is never
+      // re-planned (single inline attempt — no loop). The chain is passed in
+      // from `serviceProfileSouls` (it imports blackswanRouting's constants,
+      // so the planner can't import it back without a cycle).
+      try {
+        const { getModelFailoverChain } = await import('./serviceProfileSouls');
+        const dispatchedModel = v2SafeModel || enrichedContext.model || '';
+        const failoverPlan = planBlackSwanEndpointFailover(
+          {
+            model: dispatchedModel,
+            errorCode: aiResult.error.code ?? null,
+            errorMessage: aiResult.error.message ?? null,
+            alreadyFailedOver: false,
+          },
+          getModelFailoverChain(dispatchedModel),
+        );
+        if (failoverPlan.failover) {
+          console.log('[SwanBot] Tier 2: BlackSwan route unavailable — visible failover:', failoverPlan.routingNote);
+          const failoverResult = await callSwanBotAI(
+            cleaned,
+            enrichedContext.circleId,
+            enrichedContext.userId,
+            enrichedContext.discordContext,
+            failoverPlan.fallbackModel,
+            enrichedContext.wikiContext,
+            enrichedContext.conversationMessages,
+            enrichedContext.thinkingLevel || 'balanced',
+            enrichedContext.maxTokens || 4096,
+            (enrichedContext as any).systemDirective,
+          );
+          const failoverText = failoverResult?.response || null;
+          if (failoverText) {
+            const noticedResponse = `${failoverPlan.userNotice}\n\n${failoverText}`;
+            if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', noticedResponse);
+            return noticedResponse;
+          }
+          // The fallback also produced nothing — report both hops, fail visible.
+          lastFailureReason = `${aiResult.error.message} (visible failover to ${failoverPlan.fallbackModel} also returned nothing)`;
+          console.warn('[SwanBot] Tier 2: BlackSwan failover model returned nothing:', failoverPlan.fallbackModel);
+        }
+      } catch (failoverErr) {
+        console.warn('[SwanBot] Tier 2: BlackSwan failover attempt errored:', failoverErr);
+      }
     } else {
       console.warn('[SwanBot] Tier 2: Edge function returned null');
       lastFailureReason = 'the Claude edge function returned nothing — the Anthropic key may be missing or the service is rate-limited';
@@ -3715,7 +3867,10 @@ export async function executeToolUseLoop(opts: {
   const { canParallelizeToolBatch } = await import('./toolBatchParallelism');
   const { isRetryableEdgeFailure, edgeRetryBackoffMs, EDGE_INVOKE_RETRIES } = await import('./edgeInvokeRetry');
   const { appendStuckBreaker, detectRepeatedToolFailure, hashToolInput } = await import('./toolLoopStuckBreaker');
-  const { buildSolverConsultationMessage, previewToolInput, shouldConsultSolver } = await import('./toolLoopSolver');
+  const { buildSolverConsultationMessage, previewToolInput } = await import('./toolLoopSolver');
+  // #6: gate the stuck-solver consult on "a next round actually exists"
+  // (typed-core `nextTurnExists` parity) — see shouldConsultSolverThisRound.
+  const { shouldConsultSolverThisRound } = await import('./swanbotRouting');
   const { toolBudgetReminder } = await import('./toolLoopBudget');
   const { planDeterministicReobserve, summarizeObservationForRetry } = await import('./deterministicReobserve');
   const { assessProofCoverage, proofCoverageNudge } = await import('./proofCoverage');
@@ -3839,6 +3994,15 @@ export async function executeToolUseLoop(opts: {
   // for a turn, so the routing outcome is also fixed. We grab whatever
   // the first round reports and ignore later rounds.
   let routingInfo: SwanBotStructuredResponse['routing'] | undefined;
+  // FAIL-VISIBLE BlackSwan failover state for the relay path (never silent,
+  // never twice). When the marketplace relay fails CLOSED for a BlackSwan
+  // model (HTTP 200 body with `marketplace_provider_unavailable` +
+  // `routing_fallback` + a ⚠️ text turn — endpoint cold or unconfigured), the
+  // loop swaps onto the first advertised failover model, redoes the round
+  // (no tool ran for the failed round, so this is a pure re-issue), and
+  // surfaces what served the turn via the prepended notice + routing metadata.
+  let loopModel = opts.model;
+  let blackSwanFailoverNotice: string | null = null;
 
   const maxRounds = Math.max(1, Math.min(MAX_TOOL_ROUNDS, opts.maxToolRounds ?? MAX_TOOL_ROUNDS));
   // Completion proof-check fires at most once per turn (see the done-branch).
@@ -3868,7 +4032,7 @@ export async function executeToolUseLoop(opts: {
           message: opts.userMessage,
           circleId: opts.circleId,
           userId: opts.userId,
-          model: opts.model,
+          model: loopModel,
           tools: anthropicTools,
           tool_messages: messages.length > 1 ? messages : undefined,
           system_override: opts.systemPrompt,
@@ -3896,6 +4060,41 @@ export async function executeToolUseLoop(opts: {
       if (data.provider_routed) routingInfo.provider_routed = data.provider_routed;
       if (data.provider_model) routingInfo.provider_model = data.provider_model;
       if (data.routing_fallback) routingInfo.routing_fallback = data.routing_fallback;
+    }
+
+    // FAIL-VISIBLE BlackSwan failover: the relay fail-closed shape is an
+    // HTTP 200 body carrying `code: 'marketplace_provider_unavailable'` +
+    // `routing_fallback` + a ⚠️ text turn. For a BlackSwan model that means
+    // the endpoint is cold (scale-to-zero) or unconfigured — honor the
+    // advertised failover chain by re-issuing THIS round once on the chain's
+    // first model instead of returning the raw fail-closed text. The planner
+    // fails closed for non-BlackSwan models/errors, and `alreadyFailedOver`
+    // (notice already set) guarantees the swap can never chain twice.
+    if (data.code === 'marketplace_provider_unavailable' || data.routing_fallback) {
+      try {
+        const { getModelFailoverChain } = await import('./serviceProfileSouls');
+        const failoverPlan = planBlackSwanEndpointFailover(
+          {
+            model: loopModel,
+            errorCode: typeof data.code === 'string' ? data.code : null,
+            errorMessage: typeof data.error === 'string' ? data.error : null,
+            routingFallbackProvider: typeof data.routing_fallback?.provider === 'string'
+              ? data.routing_fallback.provider
+              : null,
+            alreadyFailedOver: blackSwanFailoverNotice != null,
+          },
+          getModelFailoverChain(loopModel),
+        );
+        if (failoverPlan.failover) {
+          console.log('[SwanBot] tool loop: BlackSwan route unavailable — visible failover:', failoverPlan.routingNote);
+          blackSwanFailoverNotice = failoverPlan.userNotice;
+          loopModel = failoverPlan.fallbackModel;
+          routingInfo = { ...(routingInfo || {}), blackswan_failover: failoverPlan.routingNote };
+          continue; // redo this round on the fallback model; loop state is untouched.
+        }
+      } catch (failoverErr) {
+        console.warn('[SwanBot] tool loop: BlackSwan failover attempt errored:', failoverErr);
+      }
     }
 
     // Check if the response contains tool_use blocks
@@ -3932,9 +4131,13 @@ export async function executeToolUseLoop(opts: {
       // be mid-thought or empty. Flag it `incomplete` so callers offer
       // "continue" instead of presenting a truncated answer as done.
       const truncatedToolIntent = toolUseBlocks.length > 0;
+      const finalResponseText = extractAssistantText(content) || data.response
+        || (truncatedToolIntent ? 'My reply was cut off mid-tool-call (output limit) before I could act. Tell me to continue and I\'ll pick up from here.' : '');
       return {
-        response: extractAssistantText(content) || data.response
-          || (truncatedToolIntent ? 'My reply was cut off mid-tool-call (output limit) before I could act. Tell me to continue and I\'ll pick up from here.' : ''),
+        // Fail-visible: a BlackSwan failover turn leads with what served it.
+        response: blackSwanFailoverNotice
+          ? [blackSwanFailoverNotice, finalResponseText].filter(Boolean).join('\n\n')
+          : finalResponseText,
         toolEvents,
         routing: routingInfo,
         ...(truncatedToolIntent ? { incomplete: true } : {}),
@@ -4170,8 +4373,31 @@ export async function executeToolUseLoop(opts: {
       ? detectRepeatedToolFailure(stuckRing)
       : { stuck: false, reason: '' };
     if (stuckVerdict.stuck) {
-      if (shouldConsultSolver({ stuck: true, alreadyConsulted: solverConsulted })) {
+      // #6: only consult when a NEXT round exists to consume the advice.
+      // The consultation is one extra turn (root cause + two approaches to
+      // run next); on the FINAL round the loop exits right after pushing it,
+      // so the consult is wasted (and the run's one consult is burned).
+      // `roundsRemaining` = rounds after this one — mirrors the typed core's
+      // `nextTurnExists = iteration < maxIterations` gate. On the last round
+      // we skip straight to the honest stop below.
+      const roundsRemaining = maxRounds - 1 - round;
+      if (shouldConsultSolverThisRound({ stuck: true, alreadyConsulted: solverConsulted, roundsRemaining })) {
         solverConsulted = true;
+        // #8: the typed core + browser edge write a `solver_consultation`
+        // row to agent_run_events; the legacy loop consulted but never
+        // persisted it, so its consultations were invisible in telemetry.
+        // Same raw insert + `{ iteration, reason }` payload as the typed
+        // core (iteration is 1-indexed there — `round` is 0-indexed here, so
+        // +1 keeps the shapes identical). Best-effort: only when a runId is
+        // present (internal tool-tier / stream-escalate callers may omit it),
+        // fire-and-forget, never blocks the loop.
+        const solverRunId = opts.runId;
+        if (solverRunId) {
+          void import('./agentRunPersistence')
+            .then(({ recordSolverConsultationEvent }) =>
+              recordSolverConsultationEvent({ runId: solverRunId, iteration: round + 1, reason: stuckVerdict.reason }))
+            .catch(() => { /* telemetry is non-fatal */ });
+        }
         messages.push({
           role: 'user',
           content: buildSolverConsultationMessage({
@@ -4188,7 +4414,13 @@ export async function executeToolUseLoop(opts: {
         stuckRing.length = 0;
         continue;
       }
-      const stopNote = `Stopped: ${stuckVerdict.reason} — no progress and the turn's one solver consultation is already spent. Report the blocker: what was tried, the exact error, and what you need from the user.`;
+      // #6: this branch also fires on the FINAL round now (no next round to
+      // consult), so word it accurately — don't claim the consult was spent
+      // if it never ran (parity with the typed core's conditional stop text).
+      const spentClause = solverConsulted
+        ? "the turn's one solver consultation is already spent"
+        : "no tool rounds remain to try a different approach";
+      const stopNote = `Stopped: ${stuckVerdict.reason} — no progress and ${spentClause}. Report the blocker: what was tried, the exact error, and what you need from the user.`;
       return {
         response: stopNote,
         toolEvents,
@@ -4228,7 +4460,9 @@ export async function executeToolUseLoop(opts: {
           message: opts.userMessage,
           circleId: opts.circleId,
           userId: opts.userId,
-          model: opts.model,
+          // `loopModel`, not `opts.model`: after a visible BlackSwan failover
+          // the finalization must not re-hit the dead BlackSwan route.
+          model: loopModel,
           tools: anthropicTools,
           tool_messages: [
             ...messages,
@@ -4248,7 +4482,8 @@ export async function executeToolUseLoop(opts: {
   const limitNote = `I reached my tool-step limit for this turn (${maxRounds} steps) before finishing. Tell me to continue and I'll pick up where I left off.`;
   const progress = summarizeToolLoopProgress(toolEvents);
   return {
-    response: [finalText || limitNote, progress].filter(Boolean).join('\n\n'),
+    // Fail-visible: a BlackSwan failover turn leads with what served it.
+    response: [blackSwanFailoverNotice, finalText || limitNote, progress].filter(Boolean).join('\n\n'),
     toolEvents,
     routing: routingInfo,
     incomplete: true,

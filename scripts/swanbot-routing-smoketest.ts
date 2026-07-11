@@ -30,6 +30,8 @@ import {
   describeSwanbotV2Circuit,
   parseSwanbotV2Command,
   applySwanbotV2Command,
+  shouldConsultSolverThisRound,
+  v2OutcomeCountsTowardBreaker,
 } from '../src/lib/swanbotRouting';
 
 let failures = 0;
@@ -167,6 +169,56 @@ recordSwanbotV2Outcome(false);
   const r = applySwanbotV2Command('enable');
   assert(isSwanbotV2CircuitOpen() === false, 'apply enable: resets the circuit breaker');
   assert(!r.message.includes('paused this session'), 'apply enable: circuit note cleared after reset');
+}
+
+// ─── #6: shouldConsultSolverThisRound (final-round consult gate) ──────
+// Parity primitive for the legacy relay loop + browser edge: consult only
+// when stuck, not-yet-consulted, AND a next round exists to answer it.
+assert(shouldConsultSolverThisRound({ stuck: true, alreadyConsulted: false, roundsRemaining: 1 }) === true,
+  'consult-gate: stuck + fresh + a round remains → consult');
+assert(shouldConsultSolverThisRound({ stuck: true, alreadyConsulted: false, roundsRemaining: 3 }) === true,
+  'consult-gate: several rounds remaining → consult');
+assert(shouldConsultSolverThisRound({ stuck: true, alreadyConsulted: false, roundsRemaining: 0 }) === false,
+  'consult-gate: FINAL round (0 remaining) → skip consult, go straight to the honest stop (#6)');
+assert(shouldConsultSolverThisRound({ stuck: true, alreadyConsulted: false, roundsRemaining: -1 }) === false,
+  'consult-gate: negative remaining (defensive) → no consult');
+assert(shouldConsultSolverThisRound({ stuck: true, alreadyConsulted: true, roundsRemaining: 2 }) === false,
+  'consult-gate: already spent → no consult even with rounds left (once per run)');
+assert(shouldConsultSolverThisRound({ stuck: false, alreadyConsulted: false, roundsRemaining: 2 }) === false,
+  'consult-gate: not stuck → no consult');
+
+// ─── #12: v2OutcomeCountsTowardBreaker (body vs transport) ────────────
+// The breaker counts TRANSPORT failures only. A 200-with-error-body
+// (config/permanent, e.g. model_unsupported_on_v2 / key_missing) must NOT
+// count — else one config error trips the breaker + disables v2 all session.
+assert(v2OutcomeCountsTowardBreaker({ kind: 'transport_failure' }) === true,
+  'breaker-class: transport failure counts toward the breaker');
+assert(v2OutcomeCountsTowardBreaker({ kind: 'success' }) === true,
+  'breaker-class: success counts (it resets the streak)');
+assert(v2OutcomeCountsTowardBreaker({ kind: 'body_error' }) === false,
+  'breaker-class: a 200-with-error-body (config) is NOT counted (#12)');
+{
+  // End-to-end breaker behavior: two consecutive BODY errors must leave the
+  // breaker CLOSED (they are surfaced, not counted), where two transport
+  // failures would have opened it. This is the exact regression #12 fixes.
+  resetSwanbotV2Circuit();
+  const record = (o: Parameters<typeof v2OutcomeCountsTowardBreaker>[0]) => {
+    if (v2OutcomeCountsTowardBreaker(o)) recordSwanbotV2Outcome(o.kind === 'success');
+  };
+  record({ kind: 'body_error' });
+  record({ kind: 'body_error' });
+  assert(isSwanbotV2CircuitOpen() === false, 'breaker-class: 2 consecutive body errors do NOT open the breaker (#12)');
+  record({ kind: 'transport_failure' });
+  record({ kind: 'transport_failure' });
+  assert(isSwanbotV2CircuitOpen() === true, 'breaker-class: 2 consecutive TRANSPORT failures still open it');
+  // A body error in the middle of a transport streak neither counts nor
+  // resets — the transport streak stays intact around it.
+  resetSwanbotV2Circuit();
+  record({ kind: 'transport_failure' });
+  record({ kind: 'body_error' });   // ignored — must not reset the streak
+  record({ kind: 'transport_failure' });
+  assert(isSwanbotV2CircuitOpen() === true, 'breaker-class: an ignored body error does not reset a transport streak');
+  resetSwanbotV2Circuit();
 }
 
 if (failures > 0) {

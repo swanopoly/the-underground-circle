@@ -626,6 +626,86 @@ async function case11_onRoundCompleteHook() {
   assertEqual(resultD.messages.length, 7, 'case11d: whitespace-only note NOT appended');
 }
 
+// ─── Case 12 — aborted run is NOT mislabeled as cap-exhausted (backlog #7) ──
+
+async function case12_abortedNotCapExhausted() {
+  const tool: AgentToolDefinition = {
+    name: 'step',
+    description: 'always asks to run again',
+    input_schema: { type: 'object', properties: {} },
+    async handler() { return { ok: true, data: null }; },
+  };
+  // Provider that always requests another tool round — left to run it would
+  // hit the cap, so this isolates cap-exhaustion vs. abort as the only
+  // difference between (a) and the real-cap control below.
+  const loopingTurns = (n: number): ProviderTurnResult[] =>
+    Array.from({ length: n }, (_, i) => ({
+      stop_reason: 'tool_use' as const,
+      content: [{ type: 'tool_use' as const, id: `tu_step_${i}`, name: 'step', input: {} }],
+    }));
+
+  // (a) Abort fires at a loop boundary (after round 1's tool_result +
+  //     iteration_complete): deterministic — the controller aborts inside the
+  //     onEvent handler when the first iteration_complete checkpoint lands, so
+  //     the NEXT `while` guard sees signal.aborted and breaks. No wall-clock.
+  const controller = new AbortController();
+  const eventsA: AgentEvent[] = [];
+  const resultA = await runAgent({
+    initialMessages: [{ role: 'user', content: 'go' }],
+    tools: [tool],
+    provider: scriptedProvider(loopingTurns(5)),
+    maxIterations: 5,
+    signal: controller.signal,
+    onEvent: (e) => {
+      eventsA.push(e);
+      // Cancel exactly once, at the first round boundary — the next loop
+      // iteration's `if (signal?.aborted) break;` then exits via the aborted
+      // path, well before maxIterations is reached.
+      if (e.kind === 'iteration_complete' && e.iteration === 1) controller.abort();
+    },
+  });
+  assertEqual(resultA.aborted, true, 'case12a: aborted flag set');
+  assertEqual(resultA.hitMaxIterations, false, 'case12a: aborted is NOT hitMaxIterations');
+  assert(resultA.iterations < 5, 'case12a: exited before the cap (not exhaustion)');
+  assert(!eventsA.some((e) => e.kind === 'max_iterations_exceeded'),
+    'case12a: aborted run does NOT emit the cap-exhausted event');
+
+  // (b) Already-aborted signal on entry: breaks immediately (iteration 0),
+  //     still honest — aborted, not cap-exhausted.
+  const preAborted = AbortSignal.abort();
+  const eventsB: AgentEvent[] = [];
+  const resultB = await runAgent({
+    initialMessages: [{ role: 'user', content: 'go' }],
+    tools: [tool],
+    provider: scriptedProvider(loopingTurns(1)),
+    maxIterations: 3,
+    signal: preAborted,
+    onEvent: (e) => eventsB.push(e),
+  });
+  assertEqual(resultB.aborted, true, 'case12b: pre-aborted run flagged aborted');
+  assertEqual(resultB.hitMaxIterations, false, 'case12b: pre-aborted is NOT hitMaxIterations');
+  assertEqual(resultB.iterations, 0, 'case12b: no provider turn ran');
+  assert(!eventsB.some((e) => e.kind === 'max_iterations_exceeded'),
+    'case12b: pre-aborted run does NOT emit the cap-exhausted event');
+
+  // (c) CONTROL — a genuine cap exhaustion (no signal) still reports
+  //     hitMaxIterations AND emits max_iterations_exceeded, and is NOT aborted.
+  //     This is the distinct behavior backlog #7 must preserve.
+  const eventsC: AgentEvent[] = [];
+  const resultC = await runAgent({
+    initialMessages: [{ role: 'user', content: 'go' }],
+    tools: [tool],
+    provider: scriptedProvider(loopingTurns(3)),
+    maxIterations: 3,
+    onEvent: (e) => eventsC.push(e),
+  });
+  assertEqual(resultC.hitMaxIterations, true, 'case12c: real cap still hitMaxIterations');
+  assert(resultC.aborted !== true, 'case12c: real cap is NOT flagged aborted');
+  assertEqual(resultC.iterations, 3, 'case12c: ran to the cap');
+  assert(eventsC.some((e) => e.kind === 'max_iterations_exceeded'),
+    'case12c: real cap still emits the cap-exhausted event');
+}
+
 // ─── Run all ────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -641,6 +721,7 @@ async function main() {
     ['case9_checkpointAndMetadata', case9_checkpointAndMetadata],
     ['case10_dependencyAwareParallelism', case10_dependencyAwareParallelism],
     ['case11_onRoundCompleteHook',  case11_onRoundCompleteHook],
+    ['case12_abortedNotCapExhausted', case12_abortedNotCapExhausted],
   ];
   for (const [name, fn] of cases) {
     const before = failures;

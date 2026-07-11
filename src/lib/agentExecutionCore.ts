@@ -332,6 +332,14 @@ export type AgentRunResult = {
   stopReason: ProviderTurnResult['stop_reason'];
   /** True if we hit maxIterations without a clean end_turn. */
   hitMaxIterations: boolean;
+  /**
+   * True if the run exited because its `signal` was aborted (user cancel /
+   * caller teardown) at a loop boundary, NOT because it exhausted the
+   * iteration cap. Mutually exclusive with `hitMaxIterations`: an aborted run
+   * is honest telemetry — it must never read as cap-exhaustion. Absent (falsy)
+   * for every non-aborted exit, so existing consumers are unaffected.
+   */
+  aborted?: boolean;
 };
 
 // ─── Image side channel + binary hygiene (P21) ──────────────────────────────
@@ -613,8 +621,17 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     }
   };
 
+  // Distinguishes the two ways the `while` can terminate that both fall
+  // through to the terminal block below: a `signal.aborted` break (user cancel
+  // / caller teardown) vs. genuine iteration-cap exhaustion. Without this the
+  // aborted break emitted `max_iterations_exceeded` and returned
+  // `hitMaxIterations: true`, so a cancelled run read as cap-exhausted in
+  // telemetry and to callers (backlog #7). The in-loop early returns
+  // (end_turn, empty-tool_use, progress-stop) never reach that block.
+  let abortedExit = false;
+
   while (iteration < maxIterations) {
-    if (signal?.aborted) break;
+    if (signal?.aborted) { abortedExit = true; break; }
     iteration += 1;
     emit({ kind: 'turn_start', iteration });
 
@@ -1029,10 +1046,32 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     // Loop re-enters provider.turn() with the updated message history.
   }
 
-  // Exited via max-iterations guard.
-  emit({ kind: 'max_iterations_exceeded', iteration });
+  // Loop terminated at a boundary. Recover the last assistant text either way.
   const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
   lastText = lastAssistant ? extractText(ensureBlocks(lastAssistant.content)) : '';
+
+  // Aborted exit (signal cancelled): honest terminal signal — NOT cap
+  // exhaustion. We deliberately do NOT emit `max_iterations_exceeded` here (it
+  // would mislabel the run in telemetry / to `agentRunPersistence.finalize`,
+  // which reads `hitMaxIterations`). There is no dedicated `run_aborted` event
+  // kind in AgentEvent today, so we surface the abort via the result flag
+  // only; a dedicated emit kind is a recommended follow-up (out of territory).
+  if (abortedExit) {
+    return {
+      text: lastText,
+      messages,
+      iterations: iteration,
+      // Keep the last real model stop reason (defaults to 'end_turn'); the
+      // constrained union has no 'aborted' member and widening it would ripple
+      // to out-of-territory consumers. `aborted: true` carries the true reason.
+      stopReason: lastStopReason,
+      hitMaxIterations: false,
+      aborted: true,
+    };
+  }
+
+  // Exited via max-iterations guard (genuine cap exhaustion).
+  emit({ kind: 'max_iterations_exceeded', iteration });
   return {
     text: lastText,
     messages,

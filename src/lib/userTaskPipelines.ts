@@ -1361,7 +1361,14 @@ export const USER_TASK_PIPELINES: UserTaskPipelineDefinition[] = [
     title: 'Office Agents And Control Panel',
     category: 'automation',
     description: 'Manage OpenSwan, agents, rosters, models, control panel settings, agent memories, and Office dashboard state.',
-    matchers: [/\b(office dashboard|office agents?|openswan control panel|agent roster|agent memories|customize agent|published agents|agent helper)\b/i],
+    matchers: [
+      /\b(office dashboard|office agents?|openswan control panel|agent roster|agent memories|customize agent|published agents|agent helper)\b/i,
+      // "my agents" / "our agents" activity/status phrasings ("what did my
+      // agents do today"). Kept to the possessive/office-scoped form so it
+      // never captures single-agent creation ("create an agent named …",
+      // "spin me up an agent …") — those stay on the office_agent_task lane.
+      /\b(?:my|our)\s+agents?\b/i,
+    ],
     routeId: null,
     executionKind: 'run_openswan',
     risk: 'safe',
@@ -1382,7 +1389,7 @@ export const USER_TASK_PIPELINES: UserTaskPipelineDefinition[] = [
     title: 'Integrations, Models, And API Keys',
     category: 'business',
     description: 'Connect marketplace providers, Custom API actions, save API keys securely, route models, and choose the best model for a task.',
-    matchers: [/\b(integration|marketplace|api key|provider|model picker|openrouter|hugging ?face|anthropic|openai|google ai|gemini|brave search|browserbase|auto picker|smart route|custom api|api action|rest api|http api|api connector|endpoint|webhook)\b/i],
+    matchers: [/\b(integrations?|marketplace|api key|provider|model picker|openrouter|hugging ?face|anthropic|openai|google ai|gemini|brave search|browserbase|auto picker|smart route|custom api|api action|rest api|http api|api connector|endpoint|webhook)\b/i],
     routeId: null,
     executionKind: 'run_openswan',
     risk: 'review',
@@ -1404,7 +1411,14 @@ export const USER_TASK_PIPELINES: UserTaskPipelineDefinition[] = [
     title: 'Scheduled And Recurring Automation',
     category: 'automation',
     description: 'Create, review, pause, run, or debug cron jobs, scheduled actions, recurring workflows, and agent routines.',
-    matchers: [/\b(schedule|cron|recurring|daily|weekly|automation|workflow|pipeline|runner|background job|reminder|send later)\b/i],
+    matchers: [
+      /\b(schedule|cron|recurring|daily|weekly|automation|workflow|pipeline|runner|background job|reminder|send later)\b/i,
+      // "every/each <unit>" cadence ("every morning …", "each weekday …",
+      // "every Monday at 9am …"). The adverb list above misses these phrasings.
+      // Anchored to a named time-unit/weekday so it never fires on non-cadence
+      // "every"/"each" ("every single time", "each of the agents").
+      /\b(?:every|each)\s+(?:other\s+)?(?:morning|afternoon|evening|night|day|weekday|weekend|week|month|hour|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i,
+    ],
     routeId: 'schedule',
     executionKind: 'run_command_handler',
     risk: 'review',
@@ -1567,7 +1581,12 @@ function scorePipeline(message: string, pipeline: UserTaskPipelineDefinition): U
   if (pipeline.id === 'content_generation' && /\bwordpress|wp admin|publish|schedule\b/i.test(text)) score -= 4;
   if (
     pipeline.id === 'integrations_models' &&
-    /\b(custom api|api action|rest api|http api|api connector|webhook|endpoint|apis?)\b/i.test(text) &&
+    // Specific integration/connector API phrasings only. Bare `apis?` used to
+    // be here, but it fired this API-*action* bonus on credential/security
+    // phrases like "API keys are secure", stealing the lane from
+    // security_privacy. The pipeline is for composing/calling connector APIs,
+    // so require the connector-shaped noun forms.
+    /\b(custom api|api action|rest api|http api|api connector|webhook|endpoint)\b/i.test(text) &&
     /\b(create|add|make|connect|call|invoke|post|put|patch|delete|send|run|automate|use)\b/i.test(text)
   ) score += 5;
   if (pipeline.id === 'integrations_models' && /\b(custom api|api connector|api action)\b/i.test(text)) score += 2;

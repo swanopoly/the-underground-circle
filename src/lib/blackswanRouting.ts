@@ -365,6 +365,144 @@ export function buildBlackSwanRoutingMetadata(opts: {
   };
 }
 
+// ─── FAIL-VISIBLE BlackSwan endpoint failover (pure) ────────────────────────
+
+/** Input evidence for `planBlackSwanEndpointFailover`. All fields except
+ *  `model` are optional — missing evidence simply means "no failover". */
+export interface BlackSwanEndpointFailoverInput {
+  /** The model id that was actually dispatched for this turn. */
+  model: string;
+  /** Edge/body error code, e.g. `marketplace_provider_unavailable`. */
+  errorCode?: string | null;
+  /** Edge/body error message (may contain provider details — never echoed). */
+  errorMessage?: string | null;
+  /** `routing_fallback.provider` from the swanbot-ai relay body, if present. */
+  routingFallbackProvider?: string | null;
+  /** True when this turn already failed over once — never chain twice. */
+  alreadyFailedOver?: boolean;
+}
+
+export type BlackSwanEndpointFailoverPlan =
+  | { failover: false }
+  | {
+      failover: true;
+      /** First entry of the caller-supplied failover chain. */
+      fallbackModel: string;
+      /** One friendly, secret-free line to show the user (FAIL-VISIBLE). */
+      userNotice: string;
+      /** Compact metadata for routing/telemetry structures. Slug reason only —
+       *  raw provider error text (which may embed tokens) is never carried. */
+      routingNote: { failover_from: string; fallback_model: string; reason: string };
+    };
+
+/** Matches messages that name the BlackSwan route itself (the swanbot-ai
+ *  fail-closed copy routes through `blackswan` or `hugging_face`). */
+const BLACKSWAN_ROUTE_ERROR_RE =
+  /could not be routed through (blackswan|hugging_face)|endpoint url not set|blackswan/i;
+
+/** Unavailability vocabulary that must accompany a route mention before a
+ *  message alone (no code / no fallback provider) can justify a failover.
+ *  Deliberately does NOT include generic words like "rate limit" — an
+ *  unrelated provider error must fail closed (no failover). */
+const BLACKSWAN_UNAVAILABILITY_RE =
+  /unavailable|not set|not connected|integration_not_connected|not configured|could not be routed|unreachable|cold|warming|waking|scal(?:e[sd]?|ing)[\s-]*to[\s-]*zero|initializ|starting|paused|\b50[234]\b|\b5\d{2}\b|timed?\s?-?out|timeout|refused|provider_call_failed|failed/i;
+
+/** Config-problem flavor: the endpoint URL / integration is not set up at all
+ *  (fix it in Marketplace) — as opposed to a cold / warming / unreachable
+ *  endpoint that will come back on its own. */
+const BLACKSWAN_CONFIG_PROBLEM_RE =
+  /endpoint url not set|integration_not_connected|not connected|not configured/i;
+
+/** Human-friendly fallback display name for the failover notice: strips any
+ *  provider prefix and date suffix, then prettifies claude ids
+ *  (`claude-haiku-4-5-20251001` → `Claude Haiku 4.5`). */
+function describeFallbackModelForNotice(modelId: string): string {
+  const bare = modelId.replace(/^[^/]*\//, '').replace(/-20\d{6}$/, '');
+  const m = bare.match(/^claude-([a-z]+)-(\d+)-(\d+)$/i);
+  if (m) return `Claude ${m[1].charAt(0).toUpperCase()}${m[1].slice(1)} ${m[2]}.${m[3]}`;
+  return bare;
+}
+
+/**
+ * Decide whether a failed BlackSwan turn should fail over VISIBLY to the first
+ * model of the advertised failover chain (`MODEL_FAILOVER` /
+ * `getModelFailoverChain` in `serviceProfileSouls`).
+ *
+ * FAIL-VISIBLE house rule: this never plans a silent switch — the returned
+ * `userNotice` MUST be shown to the user as part of the turn, and the
+ * `routingNote` names exactly what served it.
+ *
+ * Failover fires only when ALL hold:
+ *   (a) `model` is one of the hosted BlackSwan ids
+ *       (`BLACKSWAN_ENDPOINT_MODEL_ID`, `BLACKSWAN_PUBLIC_MODEL_ID`, or the
+ *       bare `BLACKSWAN_MODEL_ID`),
+ *   (b) the error clearly indicates BlackSwan-ROUTE unavailability
+ *       (`marketplace_provider_unavailable` code, a `routing_fallback`
+ *       provider of `blackswan`, or a route-naming message combined with an
+ *       unavailability word) — unrelated errors (rate limits, etc.) fail
+ *       closed,
+ *   (c) this turn has not already failed over (`alreadyFailedOver`), and
+ *   (d) the supplied chain has a non-empty first entry (empty chain → fail
+ *       closed).
+ *
+ * The failover CHAIN is a parameter (call sites pass
+ * `getModelFailoverChain(model)`) instead of an import: `serviceProfileSouls`
+ * already imports this module's constants, so importing it back from here
+ * would create an import cycle.
+ *
+ * Notices are fully templated — the raw `errorMessage` (which can embed
+ * provider tokens or URLs) is never interpolated into the notice or the
+ * routing note.
+ */
+export function planBlackSwanEndpointFailover(
+  input: BlackSwanEndpointFailoverInput,
+  chain: readonly string[],
+): BlackSwanEndpointFailoverPlan {
+  if (input.alreadyFailedOver) return { failover: false };
+
+  const model = String(input.model || '').trim();
+  const normalizedModel = model.toLowerCase();
+  const isBlackSwanId =
+    normalizedModel === BLACKSWAN_ENDPOINT_MODEL_ID.toLowerCase()
+    || normalizedModel === BLACKSWAN_PUBLIC_MODEL_ID.toLowerCase()
+    || normalizedModel === BLACKSWAN_MODEL_ID.toLowerCase();
+  if (!isBlackSwanId) return { failover: false };
+
+  const errorCode = String(input.errorCode || '').trim();
+  const errorMessage = String(input.errorMessage || '');
+  const fallbackProvider = String(input.routingFallbackProvider || '').trim().toLowerCase();
+  const routeUnavailable =
+    errorCode === 'marketplace_provider_unavailable'
+    || fallbackProvider === 'blackswan'
+    || (BLACKSWAN_ROUTE_ERROR_RE.test(errorMessage) && BLACKSWAN_UNAVAILABILITY_RE.test(errorMessage));
+  if (!routeUnavailable) return { failover: false };
+
+  // First non-empty chain entry; an empty chain fails closed (no failover).
+  const fallbackModel = chain
+    .map((entry) => String(entry || '').trim())
+    .find((entry) => entry.length > 0);
+  if (!fallbackModel) return { failover: false };
+
+  const configProblem = BLACKSWAN_CONFIG_PROBLEM_RE.test(errorMessage);
+  const fallbackName = describeFallbackModelForNotice(fallbackModel);
+  const userNotice = configProblem
+    ? `⚠️ BlackSwan's endpoint isn't connected — this answer came from ${fallbackName} instead. Connect or fix the BlackSwan integration in Marketplace to route turns to BlackSwan.`
+    : `⚠️ BlackSwan is waking up (its endpoint scales to zero when idle) — this answer came from ${fallbackName} instead. Ask again in a minute or two to use BlackSwan.`;
+
+  return {
+    failover: true,
+    fallbackModel,
+    userNotice,
+    routingNote: {
+      failover_from: model,
+      fallback_model: fallbackModel,
+      reason: configProblem
+        ? 'blackswan_endpoint_not_configured'
+        : 'blackswan_endpoint_cold_or_unreachable',
+    },
+  };
+}
+
 export function buildBlackSwanGroundingBlock(opts: {
   model?: string | null;
   intent?: MessageIntent | string | null;

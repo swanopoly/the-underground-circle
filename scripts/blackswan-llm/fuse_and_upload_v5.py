@@ -31,6 +31,53 @@ UPLOAD_DIR = MODELS_DIR / "hf_upload_v2"
 BASE_MODEL = "mlx-community/Qwen3.5-4B-4bit"
 HF_REPO = "cswan801/BlackSwan-v5"
 
+# Rollback support: every successful upload is tagged `cycle-<RUN_TIMESTAMP>`
+# on the HF repo and described in training_runs/<RUN_TIMESTAMP>.json (+
+# training_runs/latest.json). The eval-gate baseline written by
+# train_cycle_v5.sh is echoed into that metadata when present.
+RUN_TIMESTAMP = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+LAST_GOOD_EVAL = Path.home() / ".blackswan-train" / "last_good_eval.json"
+STATS_FILE = SCRIPT_DIR / "training_data" / "stats_v4.json"
+
+
+def read_last_good_eval():
+    """Eval-gate record from ~/.blackswan-train/last_good_eval.json, or None."""
+    try:
+        with open(LAST_GOOD_EVAL) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def build_run_metadata(tag_name):
+    """Payload for training_runs/<ts>.json on the HF repo.
+
+    Keeps the historical top-level shape (base_model / data_export) and
+    extends it with the rollback tag + eval-gate metric for this cycle.
+    """
+    data_export = {}
+    try:
+        with open(STATS_FILE) as f:
+            stats = json.load(f)
+        data_export = {
+            "train_count": stats.get("final", {}).get("train_count"),
+            "eval_count": stats.get("final", {}).get("eval_count"),
+            "sources": stats.get("sources", {}),
+        }
+    except (OSError, ValueError):
+        pass
+
+    eval_info = read_last_good_eval() or {}
+    return {
+        "base_model": BASE_MODEL,
+        "data_export": data_export,
+        "timestamp": RUN_TIMESTAMP,
+        "tag": tag_name,
+        "eval_metric": eval_info.get("metric"),
+        "eval_metric_name": eval_info.get("metric_name"),
+        "eval_timestamp": eval_info.get("timestamp"),
+    }
+
 
 def fused_weight_files():
     """Return the current MLX fused safetensor shards, preferring the index."""
@@ -318,8 +365,42 @@ def step3_upload(hf_token):
             repo_type="model",
         )
         print(f"    Done: {f.name}")
-    
+
     print(f"\n  All files uploaded to https://huggingface.co/{HF_REPO}")
+
+    # ── Post-upload: run metadata + rollback tag ─────────────────────────
+    # Everything below is best-effort: a metadata or tagging failure must
+    # never fail the upload step (the weights are already live on main).
+    tag_name = f"cycle-{RUN_TIMESTAMP}"
+    commit_sha = None
+
+    try:
+        meta = build_run_metadata(tag_name)
+        meta_bytes = json.dumps(meta, indent=2).encode("utf-8")
+        for repo_path in (f"training_runs/{RUN_TIMESTAMP}.json", "training_runs/latest.json"):
+            info = api.upload_file(
+                path_or_fileobj=meta_bytes,
+                path_in_repo=repo_path,
+                repo_id=HF_REPO,
+                repo_type="model",
+            )
+            # CommitInfo.oid is the commit sha of that upload; the last one
+            # is the tip of main containing weights + metadata.
+            commit_sha = getattr(info, "oid", None) or commit_sha
+        print(f"  Run metadata uploaded: training_runs/{RUN_TIMESTAMP}.json (+ latest.json)")
+    except Exception as exc:  # noqa: BLE001 — deliberately never fatal here
+        print(f"  WARNING: run-metadata upload failed (non-fatal): {exc}")
+
+    try:
+        if not commit_sha:
+            commit_sha = api.model_info(repo_id=HF_REPO).sha
+        api.create_tag(HF_REPO, tag=tag_name, revision=commit_sha, repo_type="model")
+        print(f"  Tagged {HF_REPO}@{str(commit_sha)[:12]} as '{tag_name}' (rollback point)")
+    except Exception as exc:  # noqa: BLE001 — deliberately never fatal here
+        if "exist" in str(exc).lower():
+            print(f"  WARNING: tag '{tag_name}' already exists — leaving it as-is.")
+        else:
+            print(f"  WARNING: tagging failed (non-fatal): {exc}")
 
 
 def main():

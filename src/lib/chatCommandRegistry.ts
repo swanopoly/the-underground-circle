@@ -322,10 +322,21 @@ export function inferChatCommandRoute(input: string): ChatCommandRouteId | null 
   return ranked[0][0];
 }
 
+// "every/each <unit>" recurring cadence. A recurring request ("every morning
+// post yesterday's merged PRs to Slack") must NOT be rewritten to a one-shot
+// slash command (e.g. /gh prs) — the surrounding recurrence intent is the
+// point. When this matches we return null so the request falls through to the
+// planner's schedule lane (buildRecurringSchedulePlan). Anchored to a named
+// time-unit/weekday so it never fires on non-cadence "every"/"each".
+const INFER_RECURRING_CADENCE_RE = /\b(?:every|each)\s+(?:other\s+)?(?:morning|afternoon|evening|night|day|weekday|weekend|week|month|hour|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i;
+
 export function inferChatCommandExecution(input: string): ChatCommandExecutionMatch | null {
   const normalized = input.trim();
   const lower = normalized.toLowerCase();
   if (!normalized || lower.startsWith('/')) return null;
+
+  // Recurring cadence → never a one-shot rewrite; let the schedule lane own it.
+  if (INFER_RECURRING_CADENCE_RE.test(normalized)) return null;
 
   if (/\b(use|open|launch|run|browse|visit|check|inspect|extract|screenshot|monitor)\b.*\bbrowser\b/i.test(normalized)) {
     const task = normalized

@@ -33,8 +33,14 @@ Reward, as implemented:
                so length alone never flips a completed run negative.
   tool qual. = -0.05 per failed tool call (ok is not true), capped at -0.30
   parallel   = +0.05 if any iteration contains >=2 tool calls
+  recovery   = +0.05 if a COMPLETED run consulted the stuck-solver
+               (trajectory carries solver_consultations, exported since
+               P63) and still landed >=1 successful call — recovering
+               from a stuck loop is GOLD behavior we want ranked into
+               the rejection-sampled SFT slice, not buried under its own
+               failed-call penalties.
 
-  reward = base + evidence - efficiency - tool_quality + parallel
+  reward = base + evidence - efficiency - tool_quality + parallel + recovery
 
 `--top-fraction 0.5` additionally writes the highest-reward COMPLETED
 trajectories (deterministic: reward desc, run_id tiebreak) to
@@ -81,6 +87,11 @@ FAILED_CALL_PENALTY = 0.05      # per tool call whose ok is not true
 FAILED_CALL_PENALTY_CAP = 0.30
 
 PARALLEL_BONUS = 0.05           # any iteration with >=2 calls
+
+SOLVER_RECOVERY_BONUS = 0.05    # completed run that recovered after a
+                                # stuck-solver consultation (P63 gold —
+                                # offsets roughly one failed-call penalty
+                                # so recovery runs rank into the top slice)
 
 
 def concave_length_cost(x, k=EFFICIENCY_K, q=EFFICIENCY_Q):
@@ -137,7 +148,16 @@ def score_trajectory(trajectory):
         count >= 2 for count in calls_per_iteration.values()
     ) else 0.0
 
-    reward = base + evidence_bonus - efficiency_penalty - tool_quality_penalty + parallelism_bonus
+    # P63 recovery gold: stuck-solver consultation followed by eventual
+    # success. Backward compatible — rows exported before P63 have no
+    # solver_consultations key and score exactly as before.
+    solver_consultations = trajectory.get("solver_consultations") or []
+    solver_recovery_bonus = SOLVER_RECOVERY_BONUS if (
+        completed and solver_consultations and ok_calls >= 1
+    ) else 0.0
+
+    reward = (base + evidence_bonus - efficiency_penalty - tool_quality_penalty
+              + parallelism_bonus + solver_recovery_bonus)
 
     breakdown = {
         "base": base,
@@ -145,6 +165,8 @@ def score_trajectory(trajectory):
         "efficiency_penalty": round(efficiency_penalty, 6),
         "tool_quality_penalty": round(tool_quality_penalty, 6),
         "parallelism_bonus": parallelism_bonus,
+        "solver_recovery_bonus": solver_recovery_bonus,
+        "solver_consultations": len(solver_consultations),
         "efficiency_x": round(x, 4),
         "steps": len(steps),
         "ok_calls": ok_calls,

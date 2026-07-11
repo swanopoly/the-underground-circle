@@ -33,6 +33,7 @@ import { getFreshAccessToken } from './authSession';
 import { supabase } from './supabase';
 import {
   accumulateLoopUsage,
+  buildCapExhaustionFinalizationBody,
   buildLegacyToolEventFromResult,
   buildLegacyToolLoopResult,
   buildSwanbotToolTurnBody,
@@ -907,23 +908,30 @@ async function runTypedCoreToolLoop(args: {
 
   // Legacy parity: the cap was hit on a pure tool_use round — the final
   // round's results were pushed to history but no turn consumed them, so the
-  // model never answered. Give it one no-tools finalization call. Fail-safe:
-  // any error falls back to the limit note in buildLegacyToolLoopResult.
+  // model never answered. Give it one finalization call in true P62 shape:
+  // the turn's REAL tool defs (the exact `assembledTools` advertised in the
+  // loop — always non-empty; both progressive and full-catalog branches above
+  // return early when empty) PLUS an explicit "no more tools — wrap up now"
+  // steer, so the model produces a clean final message referencing the
+  // completed results instead of being handed `tools: []` (which after P64/A2
+  // rides the tool-less relay leg and can't produce the intended wrap-up).
+  // Fail-safe: any error (or a model that still emits tool_use, leaving no
+  // text) falls back to the limit note in buildLegacyToolLoopResult.
   let finalizationText: string | null = null;
   if (!edgeFailed && needsCapExhaustionFinalization(runResult)) {
     try {
       const finalToken = await getFreshAccessToken();
       const { data: finalData } = await supabase.functions.invoke('swanbot-ai', {
         headers: finalToken ? { Authorization: `Bearer ${finalToken}` } : undefined,
-        body: {
-          message: args.userMessage,
+        body: buildCapExhaustionFinalizationBody({
+          userMessage: args.userMessage,
           circleId: args.circleId,
           userId: args.userId,
           model: loopModel,
-          tools: [],
-          tool_messages: runResult.messages.map((m) => ({ role: m.role, content: m.content })),
-          system_override: args.systemPrompt,
-        },
+          systemPrompt: args.systemPrompt,
+          tools: toAnthropicToolShapes(assembledTools),
+          messages: runResult.messages,
+        }),
       });
       finalizationText = extractAssistantText((finalData as any)?.content)
         || String((finalData as any)?.response || '');

@@ -24,6 +24,17 @@ export interface OfficeBridgeReadinessSnapshot {
   results: BridgeProbeResult[];
 }
 
+export function shouldShowOfficeMainBridgeReadinessStrip(
+  snapshot: OfficeBridgeReadinessSnapshot | null | undefined,
+): boolean {
+  if (!snapshot) return false;
+  if (snapshot.tone !== 'warn' && snapshot.tone !== 'danger') return false;
+  // Optional bridge issues should not create a persistent banner on the main
+  // Office view when the core OpenSwan path can already run agent work.
+  if (snapshot.readyForAgentTasks && !snapshot.requiredIssue) return false;
+  return true;
+}
+
 const CORE_BRIDGE_NAME = 'openswan-proxy';
 const EXECUTION_BRIDGE_NAMES = new Set<BridgeProbeResult['name']>([
   'claude-code',

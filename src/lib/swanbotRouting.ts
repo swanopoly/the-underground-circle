@@ -79,6 +79,31 @@ export function recordSwanbotV2Outcome(ok: boolean): void {
   consecutiveV2TransportFailures = ok ? 0 : consecutiveV2TransportFailures + 1;
 }
 
+// #12: classify a completed v2 attempt for the breaker. The breaker exists to
+// stop paying doomed v2 round-trips when the v2 DEPLOY is broken — i.e. real
+// TRANSPORT failures (invoke returned null / threw). A 200-with-error-body
+// (`model_unsupported_on_v2`, `key_missing`, …) means v2 IS reachable and
+// answered — it's a PERMANENT CONFIG error, not a transient transport blip.
+// Counting it let a single config problem trip the breaker and disable v2 for
+// the whole session; worse, `/v2 on` reset it only for it to re-trip on the
+// next identical config error. So a body error must NOT count. Success clears
+// the streak; a bare transport failure (no answer at all) counts.
+export type SwanbotV2Outcome =
+  /** v2 produced a terminal answer. */
+  | { kind: 'success' }
+  /** The edge ran and returned an error body (config/permanent). */
+  | { kind: 'body_error' }
+  /** invoke returned null / threw — no answer reached us (transport). */
+  | { kind: 'transport_failure' };
+
+/** True when this outcome should move the transient breaker streak (open on
+ *  failure, reset on success). A `body_error` is neither — it's surfaced by
+ *  the caller and left OUT of the breaker. Pure/testable; the live
+ *  orchestrator calls this then `recordSwanbotV2Outcome` only when true. */
+export function v2OutcomeCountsTowardBreaker(outcome: SwanbotV2Outcome): boolean {
+  return outcome.kind !== 'body_error';
+}
+
 /** True once the session has seen `CIRCUIT_THRESHOLD` consecutive v2
  *  transport failures — the router should skip v2 until reset. */
 export function isSwanbotV2CircuitOpen(): boolean {
@@ -96,6 +121,37 @@ export function resetSwanbotV2Circuit(): void {
 export function describeSwanbotV2Circuit(): string | null {
   if (!isSwanbotV2CircuitOpen()) return null;
   return 'v2 paused this session after repeated failures — `/v2 on` to retry.';
+}
+
+// ─── Final-round stuck-solver gate (parity primitive) ────────────────
+//
+// The stuck-loop solver injects ONE fresh-eyes consultation as an extra
+// turn — root cause + two different approaches for the model to run NEXT.
+// That only helps if a next turn actually exists to consume it. On the
+// LAST round the consultation is pushed, the loop exits, the run
+// finalizes, and the consult is wasted (in the typed core it also
+// returned EMPTY text — the trailing turn is pure tool_use). The typed
+// core (`agentExecutionCore`) fixed this with an inline
+// `nextTurnExists = iteration < maxIterations` AND-gate before
+// `shouldConsultSolver`; this shared primitive gives the LEGACY relay loop
+// (`swanbot.ts`) and the BROWSER edge the same decision so all three loops
+// skip the consult on the final round and go straight to the honest
+// progress-stop. `shouldConsultSolver` semantics (once-per-run, only when
+// stuck) live in `toolLoopSolver.ts` and stay canonical — this only adds
+// the "is there a turn left to answer it?" bound.
+export function shouldConsultSolverThisRound(input: {
+  /** The progress-based stuck verdict for this round. */
+  stuck: boolean;
+  /** Has the run already spent its one consultation? */
+  alreadyConsulted: boolean;
+  /** Turns still available AFTER the current one (0 ⇒ this is the last). */
+  roundsRemaining: number;
+}): boolean {
+  return (
+    input.stuck === true &&
+    input.alreadyConsulted !== true &&
+    input.roundsRemaining > 0
+  );
 }
 
 /** Pure parser for the `/v2` slash command. Returns the new intent, or

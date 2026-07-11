@@ -581,10 +581,69 @@ export function parseSwanbotToolTurnData(data: unknown): {
 
 // ─── Result mapping (AgentRunResult → legacy loop result) ───────────────────
 
-/** True when the runtime should make the legacy one-shot no-tools
- *  finalization call (cap hit on a pure tool_use round → no trailing text). */
+/** True when the runtime should make the legacy one-shot finalization call
+ *  (cap hit on a pure tool_use round → no trailing text). */
 export function needsCapExhaustionFinalization(runResult: AgentRunResult): boolean {
   return runResult.hitMaxIterations && !runResult.text;
+}
+
+/**
+ * The explicit "no more tools — wrap up now" steer appended as a trailing
+ * user-role turn on the cap-exhaustion finalization call. Byte-identical to
+ * the legacy chat loop's finalization note (swanbot.ts `executeToolUseLoop`)
+ * so both surfaces produce the same clean final message.
+ */
+export const CAP_EXHAUSTION_FINALIZATION_NOTE =
+  'Tool budget for this turn is exhausted. Do NOT call any more tools — reply now with your best final answer summarizing what the results above established, and name anything that remains unfinished.';
+
+/**
+ * Builds the `swanbot-ai` invoke body for the cap-exhaustion finalization
+ * call in true P62 shape. The cap was hit on a pure tool_use round: the final
+ * round's tool_results were pushed to history but no turn ever consumed them,
+ * so the model never produced a final message.
+ *
+ * Two wire constraints (both broken by the old `tools: []` body — see
+ * swanbot.ts:4212-4221) shape this call:
+ *   1. The swanbot-ai relay only engages on a NON-EMPTY `tools` array — an
+ *      empty one falls through to a different (tool-less) leg. After P64/A2
+ *      an empty array is fail-visible rather than silently mis-routed, but it
+ *      still can't produce the intended clean wrap-up, and any native tool-
+ *      search reference in the history has no tools to resolve against.
+ *   2. So we send the turn's REAL tool defs (the exact defs advertised in the
+ *      loop) and steer to a text answer with an explicit final instruction
+ *      appended as a trailing same-role user turn (legal — it merges after the
+ *      tool_results). If the model still emits tool_use there is no text to
+ *      extract and the caller falls back to the limit note (same fail-safe as
+ *      before).
+ *
+ * `tools` must be the turn's real (non-empty) Anthropic tool shapes; callers
+ * already guarantee a non-empty advertised set before the loop runs, and
+ * `needsCapExhaustionFinalization` gates this call, so an empty `tools` here
+ * would be a caller bug. `system_override` carries the caller's frozen system
+ * prompt (cache-hot). Everything preserved from the legacy body: `message`
+ * (original user prompt), full `tool_messages` history, `model`, ids.
+ */
+export function buildCapExhaustionFinalizationBody(args: {
+  userMessage: string;
+  circleId: string;
+  userId: string;
+  model: string;
+  systemPrompt: string;
+  tools: Array<{ name: string; description: string; input_schema: Record<string, unknown>; input_examples?: Array<Record<string, unknown>> }>;
+  messages: AgentMessage[];
+}): Record<string, unknown> {
+  return {
+    message: args.userMessage,
+    circleId: args.circleId,
+    userId: args.userId,
+    model: args.model,
+    tools: args.tools,
+    tool_messages: [
+      ...args.messages.map((m) => ({ role: m.role, content: m.content })),
+      { role: 'user', content: CAP_EXHAUSTION_FINALIZATION_NOTE },
+    ],
+    system_override: args.systemPrompt,
+  };
 }
 
 /**

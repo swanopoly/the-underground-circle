@@ -12,6 +12,7 @@ import {
   getBestUserTaskPipeline,
   rankUserTaskPipelines,
 } from '../src/lib/userTaskPipelines';
+import { inferChatCommandExecution } from '../src/lib/chatCommandRegistry';
 
 let failures = 0;
 function fail(message: string) { failures += 1; console.error('FAIL:', message); }
@@ -104,6 +105,82 @@ assertPipeline('Moderate Discord comments and draft community replies', 'social_
 assertPipeline('Summarize unread emails and prioritize Slack alerts', 'inbox_notifications');
 assertPipeline('Teach me Supabase RLS and make a quiz', 'learning_training');
 assertPipeline('Should I take this medication if I have chest pain?', 'high_stakes_advice');
+
+// ── P65 #9/#10: widened matchers must catch the phrasings that were latent ────
+// These matchers were widened MINIMALLY so the pipeline is no longer invisible
+// underneath the planner's A1 gates. The planner keeps the exact lane (its
+// M3/M4 status gates + recurring-cadence gate own routing) because the matches
+// stay below the 0.5 actionable floor — so here we pin that the pipeline is at
+// least *present in the ranking* (no longer a silent miss), plus the one case
+// that legitimately becomes the top match.
+function assertPipelineRanked(input: string, expectedId: string) {
+  const ranked = rankUserTaskPipelines(input, { limit: 6, includeFallback: false });
+  if (ranked.some((item) => item.pipeline.id === expectedId)) {
+    pass(`ranked ${expectedId}: ${input}`);
+    return;
+  }
+  const got = ranked.map((item) => `${item.pipeline.id}:${item.score}`).join(', ') || 'none';
+  fail(`${input} expected ${expectedId} in ranking, got [${got}]`);
+}
+function assertNotRanked(input: string, unexpectedId: string) {
+  const ranked = rankUserTaskPipelines(input, { limit: 8, includeFallback: false });
+  if (!ranked.some((item) => item.pipeline.id === unexpectedId)) {
+    pass(`not ranked ${unexpectedId}: ${input}`);
+    return;
+  }
+  fail(`${input} unexpectedly matched ${unexpectedId}`);
+}
+
+// #9a — integrations_models must catch the PLURAL "integrations" (was \binteg…
+// singular only → the plural fell through to NO pipeline match at all).
+assertPipeline('what integrations do we have connected', 'integrations_models');
+assertPipeline('check which integrations are failing', 'integrations_models');
+// Regression guard: the singular marketplace phrasing still matches.
+assertPipeline('Add Brave Search as a marketplace integration and connect it to chat', 'integrations_models');
+// Precision guard: a security question about API keys must NOT be captured by
+// the integrations API-action bonus (it belongs to security_privacy).
+assertPipeline('Make sure user API keys are secure and not shared with other users', 'security_privacy');
+assertNotRanked('Make sure user API keys are secure and not shared with other users', 'integrations_models');
+
+// #9b — office_agents must catch "my agents" / "office agents" activity asks.
+assertPipelineRanked('what did my agents do today', 'office_agents');
+assertPipelineRanked('what are my office agents working on right now', 'office_agents');
+// Precision guard: single-agent CREATION must NOT be captured by office_agents
+// (it stays on the office_agent_task lane the planner owns).
+assertNotRanked('create an agent named Scout with Opus and add it to the task we just made', 'office_agents');
+assertNotRanked('spin me up an agent called Scout and add it to the latest task', 'office_agents');
+
+// #9c — schedule_automation must catch "every/each <unit>" cadence forms.
+assertPipelineRanked("every morning post yesterday's merged PRs to Slack", 'schedule_automation');
+assertPipelineRanked('remind me every day at 5pm to log my hours', 'schedule_automation');
+assertPipelineRanked('each weekday summarize open PRs', 'schedule_automation');
+// Precision guard: non-cadence "every"/"each" must NOT trigger the schedule
+// cadence matcher, and meeting/analytics phrasings keep their own pipelines.
+assertNotRanked('every single time I ask you get it wrong', 'schedule_automation');
+assertPipeline('Schedule a meeting with the design team and send calendar invites', 'meetings_calendar_email');
+assertPipeline('Build a weekly KPI dashboard from conversion metrics', 'analytics_reporting');
+
+// #10 — inferChatCommandExecution recurrence guard: a recurring PR-to-Slack ask
+// must NOT be rewritten to the one-shot /gh prs command (it belongs to the
+// planner's schedule lane). Non-recurring PR asks still rewrite.
+if (inferChatCommandExecution("every morning post yesterday's merged PRs to Slack") === null) {
+  pass('#10 recurrence: "every morning … PRs to Slack" is NOT rewritten to /gh prs');
+} else {
+  fail('#10 recurrence: recurring PR-to-Slack ask was rewritten to a one-shot command');
+}
+if (inferChatCommandExecution('every Monday at 9am summarize open PRs and post them to slack') === null) {
+  pass('#10 recurrence: "every Monday … open PRs" is NOT rewritten to /gh prs');
+} else {
+  fail('#10 recurrence: recurring Monday PR ask was rewritten to a one-shot command');
+}
+{
+  const oneShot = inferChatCommandExecution('show me the open pull requests');
+  if (oneShot && oneShot.commandText === '/gh prs') {
+    pass('#10 guard: a NON-recurring "open pull requests" ask still rewrites to /gh prs');
+  } else {
+    fail(`#10 guard: non-recurring PR ask should still rewrite to /gh prs, got ${oneShot ? oneShot.commandText : 'null'}`);
+  }
+}
 
 assertDecisionIncludes('Research Browserbase Stagehand and build the implementation plan', ['live_research', 'coding_build']);
 assertDecisionIncludes('Login to WordPress with my saved vault credentials and draft a post', ['wordpress_cms', 'vault_credentials', 'browser_form_submission']);

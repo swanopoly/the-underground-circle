@@ -857,6 +857,59 @@ ALTER TABLE messages ADD CONSTRAINT messages_content_check CHECK (char_length(co
 
 NOTIFY pgrst, 'reload schema';
 
+-- ─── §22. Training-safe agent tool-trace views (2026-07-10) ──────────────────
+-- Source: 20260710_training_safe_agent_runs.sql
+-- P63 BlackSwan tool-trace flywheel — PENDING APPLY
+-- Lets export_training_data.py / export_tool_traces.py read agent_runs +
+-- agent_run_events through the standard training_opt_out gate (profiles
+-- flag + field-level array; events gated via the parent-run view, same
+-- pattern as training_safe_mission_tasks). agent_run_events' timestamp
+-- column is `at` (NOT created_at — production-verified 2026-07-02); the
+-- view aliases it to created_at so exporters order uniformly. Until this
+-- is applied, both exporters skip/fall back gracefully (404 path).
+
+CREATE OR REPLACE VIEW training_safe_agent_runs
+  WITH (security_invoker = true) AS
+  SELECT
+    r.id,
+    r.circle_id,
+    r.surface,
+    r.title,
+    r.goal,
+    r.mode,
+    r.model,
+    r.provider,
+    r.status,
+    r.created_at,
+    r.completed_at
+  FROM agent_runs r
+  JOIN profiles p ON p.id = r.user_id
+  WHERE r.status = 'completed'
+    AND p.training_opt_out = false
+    AND NOT ('agent_runs' = ANY(COALESCE(p.training_opt_out_fields, '{}')));
+
+CREATE OR REPLACE VIEW training_safe_agent_run_events
+  WITH (security_invoker = true) AS
+  SELECT
+    e.run_id,
+    e.kind,
+    e.payload,
+    e.at AS created_at
+  FROM agent_run_events e
+  JOIN training_safe_agent_runs r ON r.id = e.run_id
+  WHERE e.kind IN (
+    'tool_call_start',
+    'tool_call_result',
+    'final_response',
+    'solver_consultation',
+    'turn_end'
+  );
+
+GRANT SELECT ON training_safe_agent_runs       TO authenticated, service_role;
+GRANT SELECT ON training_safe_agent_run_events TO authenticated, service_role;
+
+NOTIFY pgrst, 'reload schema';
+
 -- Final verify:
 --   SELECT jobname, schedule FROM cron.job ORDER BY jobname;
 --   \d user_google_credentials
@@ -869,3 +922,5 @@ NOTIFY pgrst, 'reload schema';
 --   \d circle_site_credentials
 --   SELECT column_name FROM information_schema.columns
 --    WHERE table_name = 'computer_use_runs' AND column_name = 'action_trace';
+--   SELECT table_name FROM information_schema.views
+--    WHERE table_name IN ('training_safe_agent_runs', 'training_safe_agent_run_events');

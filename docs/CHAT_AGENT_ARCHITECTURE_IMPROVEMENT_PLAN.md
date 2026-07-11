@@ -8,6 +8,40 @@
 
 ## Shipped from this plan
 
+- **P65 — backlog wave 2: five-agent disjoint pass closing the P63 findings
+  backlog (2026-07-10)** ✅ — **#6** final-round solver consult now gated on a
+  next-turn-existing check in BOTH the legacy relay loop (`swanbot.ts`, via a
+  new pure `shouldConsultSolverThisRound` in swanbotRouting) and the browser
+  edge (`computer-use-agent`), so the run's one consult is never wasted on the
+  last round; **#8** legacy relay solver consultations now persist a
+  `solver_consultation` event (parity with the typed core + browser edge);
+  **#12** the v2 circuit breaker no longer counts edge-BODY errors
+  (`model_unsupported_on_v2`/`key_missing` — permanent config, returned 200)
+  as transient transport failures, so a config problem can't disable v2 for
+  the session (new pure `v2OutcomeCountsTowardBreaker`); **#7** aborted/
+  cancelled runs return a distinct `aborted:true` terminal instead of
+  `max_iterations_exceeded`+`hitMaxIterations:true`, so a user cancel no longer
+  reads as cap-exhausted in telemetry (`agentExecutionCore`); **#9** widened
+  the underlying userTaskPipelines matchers A1 had papered over (integrations
+  plural, "my agents", every/each cadence) — precisely, staying below the 0.5
+  actionable floor so the route-golden canaries still hold — plus a
+  pre-existing red fix (bare `|apis?` in the integrations bonus was stealing
+  the `security_privacy` lane from "make sure API keys are secure");
+  **#10** `inferChatCommandExecution` no longer rewrites recurring
+  "every morning post PRs to Slack" to a one-shot `/gh prs` (recurrence guard —
+  lets the schedule lane own it); **#13** `AgentsScreenLive` synthetic pins
+  (OpenSwan/HuggingSwan) now derive live status from run evidence via the P63
+  O8 helpers (upgrade-only, 2h stale guard), matching the Office; **#4** the two
+  cap-exhaustion finalizers (`openswanSessionRuntime`, `subagentRegistry`) now
+  send the turn's REAL tool defs + a "no more tools — wrap up" note (shared
+  `buildCapExhaustionFinalizationBody`) instead of `tools:[]`, giving true P62
+  finalization parity. Validation: combined typecheck app 0 + 43/43 function
+  checks; smoke pins added across agent-core, swanbot-routing,
+  user-task-pipelines, openswan-session-core-adapter; full smoke:all exit 0.
+  Backlog now: #1/#2/#3/#11 (P64) + #4/#6/#7/#8/#9/#10/#12/#13 (P65) CLOSED;
+  only **#5** remains (v2-ai drops systemDirective + legacy conversation
+  history — a prompt/cost design decision, not a bug).
+
 - **P63 — five-agent improvement wave across chat / SwanBot / OpenSwan / agent
   loops / Office (2026-07-10)** ✅ — disjoint-territory parallel review+fix pass
   over the freshly-landed P38-P62 arc. Highest-severity fixes:
@@ -93,32 +127,24 @@ app 0 + 43/43 functions + smoke:all green.
 1. ~~`resolveRunApproval` raw seam~~ ✅ CLOSED (P64 #1).
 2. ~~'ask' tools skip approval when `context.runId` absent~~ ✅ CLOSED (P64 #2).
 3. ~~`circle.toggle_public` auto-approved~~ ✅ CLOSED (P64 #3).
-4. `openswanSessionRuntime` (~:916) + `subagentRegistry` (~:605) cap-exhaustion
-   finalizers still send `tools: []` — now fail-visible after A2's edge fix,
-   but full P62 parity means sending real tool defs + a no-more-tools
-   instruction (like swanbot.ts:4219).
-5. swanbot-v2-ai silently drops `systemDirective` + `legacy.conversationMessages`
-   that swanbot.ts sends — v2-routed turns run without chat history or the
-   orchestrator directive (design/cost decision needed).
-6. Same final-round wasted-consult shape as A4's typed-core fix exists in the
-   legacy loop (swanbot.ts ~:4165) and browser edge (computer-use-agent ~:1131).
-7. Aborted runs exit through `max_iterations_exceeded` telemetry
-   (agentExecutionCore ~:617/1025) — cancelled reads as cap-exhausted.
-8. Legacy relay solver consultations aren't persisted to agent_run_events
-   (typed core + browser edge emit them; legacy is invisible in telemetry).
-9. userTaskPipelines matchers: `integrations_models` only matches singular
-   "integration"; `office_agents` misses "my agents" phrasings;
-   `schedule_automation` lacks "every/each <unit>" cadence forms (A1's planner
-   gates plug the leaks; widening the matchers is the proper fix).
-10. `chatCommandRegistry.inferChatCommandExecution` rewrites recurring-intent
-    text to one-shot slash commands (needs a recurrence guard);
-    `content_generation` pipeline matcher over-broad on "summary".
+4. ~~cap-exhaustion finalizers send `tools: []`~~ ✅ CLOSED (P65 #4 — real tool
+   defs + no-more-tools note via `buildCapExhaustionFinalizationBody`).
+5. **swanbot-v2-ai silently drops `systemDirective` + `legacy.conversationMessages`
+   that swanbot.ts sends** — v2-routed turns run without chat history or the
+   orchestrator directive. THE LAST OPEN ITEM — deferred because it's a
+   prompt-size / cost / cache design decision (forwarding full history to v2
+   changes token economics), not a clear bug. Needs a product call.
+6. ~~final-round wasted-consult in legacy loop + browser edge~~ ✅ CLOSED (P65 #6).
+7. ~~aborted runs mislabeled cap-exhausted~~ ✅ CLOSED (P65 #7 — `aborted` flag).
+8. ~~legacy relay solver consultations not persisted~~ ✅ CLOSED (P65 #8).
+9. ~~userTaskPipelines matchers too narrow~~ ✅ CLOSED (P65 #9).
+10. ~~inferChatCommandExecution rewrites recurring→one-shot~~ ✅ CLOSED (P65 #10).
+    (`content_generation` "summary" was verified a NON-issue: it's excluded from
+    ACTIONABLE_PIPELINE_IDS, so it can't fire an action plan — no routing bug.)
 11. ~~v2 edge tool-policy misclassification~~ ✅ VERIFIED CLEAN (P64 #11 — no
     per-tool policy flag table; clientOnly split gates everything).
-12. Breaker counts edge-BODY errors (model_unsupported_on_v2, key_missing) as
-    transport failures (semantics drift).
-13. `AgentsScreenLive.tsx` (~:429) pins DEFAULT_AGENT/HUGGINGSWAN with static
-    statuses — could reuse A5's O8 helpers.
+12. ~~breaker counts edge-BODY errors as transport failures~~ ✅ CLOSED (P65 #12).
+13. ~~`AgentsScreenLive` static synthetic statuses~~ ✅ CLOSED (P65 #13 — O8 parity).
 
 - **Item 1 — Deferred tool loading DEFAULT-ON (P25)** ✅ — progressive
   disclosure (pinned ~25-40 core + `tools.search` unlock) is now the default

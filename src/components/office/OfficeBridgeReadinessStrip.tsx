@@ -15,7 +15,10 @@
  */
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import type { OfficeBridgeReadinessSnapshot } from '../../lib/officeBridgeReadiness';
+import {
+  shouldShowOfficeMainBridgeReadinessStrip,
+  type OfficeBridgeReadinessSnapshot,
+} from '../../lib/officeBridgeReadiness';
 
 export default function OfficeBridgeReadinessStrip({
   snapshot,
@@ -23,7 +26,7 @@ export default function OfficeBridgeReadinessStrip({
   snapshot: OfficeBridgeReadinessSnapshot | null;
 }) {
   if (!snapshot) return null;
-  if (snapshot.tone !== 'warn' && snapshot.tone !== 'danger') return null;
+  if (!shouldShowOfficeMainBridgeReadinessStrip(snapshot)) return null;
 
   const color = snapshot.tone === 'danger' ? '#ef4444' : '#e8b339';
   const issue = snapshot.primaryIssue || snapshot.summary || '';

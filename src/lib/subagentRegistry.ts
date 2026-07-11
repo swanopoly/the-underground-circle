@@ -32,6 +32,7 @@ import { extractAssistantText } from './toolLoopProgress';
 import { getFreshAccessToken } from './authSession';
 import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './privacyMode';
 import {
+  buildCapExhaustionFinalizationBody,
   buildLegacyToolEventFromResult,
   buildLegacyToolLoopResult,
   buildSwanbotToolTurnBody,
@@ -598,20 +599,30 @@ async function runTypedCoreSubagentToolLoop(args: {
     },
   });
 
-  // Legacy parity: cap hit on a pure tool_use round → one no-tools
-  // finalization call so the child summarizes what it gathered.
+  // Legacy parity: cap hit on a pure tool_use round → one finalization call so
+  // the child summarizes what it gathered. True P62 shape: the child's REAL
+  // tool defs (the exact `wrappedTools` advertised in the loop — always
+  // non-empty; the loop returns early above when the child has no advertised
+  // tools) PLUS an explicit "no more tools — wrap up now" steer, so the child
+  // produces a clean final message referencing the completed results instead
+  // of being handed `tools: []` (which after P64/A2 rides the tool-less relay
+  // leg and can't produce the intended wrap-up). Fail-safe: any error (or a
+  // model that still emits tool_use, leaving no text) falls back to the limit
+  // note in buildLegacyToolLoopResult.
   let finalizationText: string | null = null;
   if (!edgeFailed && needsCapExhaustionFinalization(runResult)) {
     try {
-      const { data: finalData } = await invokeSwanbotChildToolTurn({
-        message: args.userMessage,
-        circleId: args.circleId,
-        userId: args.userId,
-        model: args.model,
-        tools: [],
-        tool_messages: runResult.messages.map((m) => ({ role: m.role, content: m.content })),
-        system_override: args.systemPrompt,
-      });
+      const { data: finalData } = await invokeSwanbotChildToolTurn(
+        buildCapExhaustionFinalizationBody({
+          userMessage: args.userMessage,
+          circleId: args.circleId,
+          userId: args.userId,
+          model: args.model,
+          systemPrompt: args.systemPrompt,
+          tools: toAnthropicToolShapes(wrappedTools),
+          messages: runResult.messages,
+        }),
+      );
       finalizationText = extractAssistantText((finalData as any)?.content)
         || String((finalData as any)?.response || '');
     } catch { /* fall back to the limit note */ }

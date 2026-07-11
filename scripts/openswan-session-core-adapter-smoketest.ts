@@ -34,9 +34,11 @@
 
 import {
   accumulateLoopUsage,
+  buildCapExhaustionFinalizationBody,
   buildLegacyToolEventFromResult,
   buildLegacyToolLoopResult,
   buildSwanbotToolTurnBody,
+  CAP_EXHAUSTION_FINALIZATION_NOTE,
   createLegacyApprovalGateAdapter,
   createLegacyRoundNudgeHook,
   createLoopUsageAccumulator,
@@ -400,6 +402,55 @@ async function main() {
   });
   assert(finalizedResult.response.startsWith('Here is what I found so far.'),
     'finalization text replaces the limit note when present');
+
+  // ── 6b. Cap-exhaustion finalization body (P62 shape) ─────────────────────
+  // The finalization call must send the turn's REAL tool defs + a trailing
+  // "no more tools — wrap up now" user note (NOT tools:[], which after P64/A2
+  // rides the tool-less relay leg and can't produce the intended wrap-up).
+  {
+    const finalizeTools = [
+      { name: 'tasks.list', description: 'list', input_schema: { type: 'object' } },
+      { name: 'browser.dom_snapshot', description: 'snap', input_schema: { type: 'object' } },
+    ];
+    const finalizeHistory = [
+      { role: 'user' as const, content: 'do the thing' },
+      { role: 'assistant' as const, content: [{ type: 'tool_use', id: 'tu1', name: 'tasks.list', input: {} }] },
+      { role: 'user' as const, content: [{ type: 'tool_result', tool_use_id: 'tu1', content: '3 open tasks' }] },
+    ];
+    const finalizeBody = buildCapExhaustionFinalizationBody({
+      userMessage: 'do the thing',
+      circleId: 'c1',
+      userId: 'u1',
+      model: 'claude-sonnet-4-6',
+      systemPrompt: 'SYSTEM',
+      tools: finalizeTools,
+      messages: finalizeHistory,
+    });
+    // (1) real, non-empty tool defs ride the call — NOT tools:[]
+    assertEqual(finalizeBody.tools, finalizeTools,
+      'finalization: sends the turn\'s REAL tool defs (P62), never tools:[]');
+    assert(Array.isArray(finalizeBody.tools) && (finalizeBody.tools as unknown[]).length === 2,
+      'finalization: tool defs are non-empty');
+    // (2) full history preserved, with the no-more-tools steer appended as a
+    //     trailing user turn (legal — merges after the tool_results).
+    const finalizeMessages = finalizeBody.tool_messages as Array<{ role: string; content: unknown }>;
+    assertEqual(finalizeMessages.length, finalizeHistory.length + 1,
+      'finalization: full tool_messages history + one appended steer turn');
+    assertEqual(finalizeMessages.slice(0, 3), finalizeHistory,
+      'finalization: original history preserved verbatim (tool_use/tool_result intact)');
+    assertEqual(finalizeMessages[finalizeMessages.length - 1], { role: 'user', content: CAP_EXHAUSTION_FINALIZATION_NOTE },
+      'finalization: trailing user-role no-more-tools steer appended last');
+    // (3) system_override + ids preserved (cache-hot system prompt).
+    assertEqual(finalizeBody.system_override, 'SYSTEM', 'finalization: system_override carries the frozen system prompt');
+    assertEqual(finalizeBody.message, 'do the thing', 'finalization: message carries the original user prompt');
+    assertEqual(finalizeBody.model, 'claude-sonnet-4-6', 'finalization: model preserved');
+    // (4) the steer is byte-identical to the legacy chat-loop finalization note.
+    assert(
+      CAP_EXHAUSTION_FINALIZATION_NOTE.startsWith('Tool budget for this turn is exhausted. Do NOT call any more tools')
+        && CAP_EXHAUSTION_FINALIZATION_NOTE.includes('reply now'),
+      'finalization: steer matches the legacy "no more tools — wrap up" wording',
+    );
+  }
 
   // ── 7. Usage aggregation ──────────────────────────────────────────────────
   const acc = createLoopUsageAccumulator();

@@ -1128,7 +1128,16 @@ Deno.serve(async (req: Request) => {
             ? detectRepeatedToolFailure(browserActionRing)
             : { stuck: false, reason: "" };
           if (stuckVerdict.stuck) {
-            if (shouldConsultSolver({ stuck: true, alreadyConsulted: solverConsulted })) {
+            // #6: only consult when a NEXT iteration exists to consume the
+            // advice. The consultation is one extra turn (root cause + two
+            // approaches for the model to run next); on the FINAL iteration
+            // the loop exits right after pushing it, wasting the consult and
+            // burning the run's one consultation. `iter < maxIterations - 1`
+            // is the edge's `nextTurnExists` bound — parity with the typed
+            // core's `iteration < maxIterations` and the legacy relay loop.
+            // On the last iteration we fall through to the honest stop below.
+            const nextIterationExists = iter < maxIterations - 1;
+            if (nextIterationExists && shouldConsultSolver({ stuck: true, alreadyConsulted: solverConsulted })) {
               solverConsulted = true;
               emit("solver_consultation", { reason: stuckVerdict.reason });
               toolResults.push({
@@ -1147,7 +1156,16 @@ Deno.serve(async (req: Request) => {
               // (consultation-spent) verdict below can terminate the run.
               browserActionRing.length = 0;
             } else {
-              const stopMessage = `Stopped: ${stuckVerdict.reason} — no progress and the run's one solver consultation is already spent. The session is preserved so you can take over or retry with different instructions.`;
+              // #6: this branch now also covers the FINAL iteration (no next
+              // turn to consult), not just the consultation-spent case. Word
+              // the reason accurately — parity with the typed core's
+              // conditional stop text — so we don't claim a consult was spent
+              // when it never ran (last-round stop, or a stuck verdict before
+              // any consultation).
+              const spentClause = solverConsulted
+                ? "no progress and the run's one solver consultation is already spent"
+                : "no progress and no turns remain to try a different approach";
+              const stopMessage = `Stopped: ${stuckVerdict.reason} — ${spentClause}. The session is preserved so you can take over or retry with different instructions.`;
               await emitPartialResult(iter + 1, "stuck_no_progress", stopMessage);
               emit("error", { message: stopMessage });
               messages.push({ role: "user", content: toolResults });

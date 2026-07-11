@@ -174,6 +174,27 @@ TABLES = {
         "select": "id,circle_id,created_by,name,description,trigger_type,cron_expression,enabled,last_run_at,last_error,template_id,created_at,updated_at",
         "order": "created_at.asc",
     },
+    # ── P63: agent tool-trace flywheel (added 2026-07-10) ──
+    # Real agent tool-use runs — the richest app data we have. Exported
+    # ONLY through the training_safe views (see the TRAINING_SAFE_VIEWS
+    # remap below and migration 20260710_training_safe_agent_runs.sql):
+    # the views apply opt-out filtering, expose completed runs only, and
+    # alias agent_run_events.at → created_at (the raw table has no
+    # created_at column). `optional` keeps exports green until that SQL
+    # is applied in prod — a 404 on the view is skipped, never a hard
+    # fail. The ShareGPT conversion of these rows is owned by the tool-
+    # trace pipeline (export_tool_traces.py → score_trajectories.py →
+    # convert_tool_traces.py), not convert_app_data.py.
+    "agent_runs": {
+        "select": "id,circle_id,surface,title,goal,mode,model,provider,status,created_at,completed_at",
+        "order": "created_at.asc",
+        "optional": True,
+    },
+    "agent_run_events": {
+        "select": "run_id,kind,payload,created_at",
+        "order": "created_at.asc",
+        "optional": True,
+    },
 }
 
 
@@ -201,6 +222,13 @@ def main():
         "proof_of_work":         "training_safe_proof_of_work",
         "circle_github_events":  "training_safe_github_events",
         "circle_automations":    "training_safe_automations",
+        # P63 tool-trace flywheel — see 20260710_training_safe_agent_runs.sql.
+        # These two must NEVER fall back to the raw tables here: the raw
+        # tables carry user_id and skip opt-out, and raw agent_run_events
+        # has `at` instead of created_at. Their TABLES entries are marked
+        # optional, so a missing view 404s and is skipped cleanly.
+        "agent_runs":            "training_safe_agent_runs",
+        "agent_run_events":      "training_safe_agent_run_events",
     }
 
     print(f"Exporting from {SUPABASE_URL}")

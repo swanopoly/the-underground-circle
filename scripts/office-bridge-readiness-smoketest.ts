@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { buildOfficeBridgeReadinessSnapshot } from '../src/lib/officeBridgeReadiness';
+import {
+  buildOfficeBridgeReadinessSnapshot,
+  shouldShowOfficeMainBridgeReadinessStrip,
+} from '../src/lib/officeBridgeReadiness';
 import type { BridgeProbeResult } from '../src/lib/bridgeHealthDiag';
 
 function result(
@@ -49,6 +52,19 @@ assert.equal(optionalOffline.tone, 'warn', 'optional bridge outages use warning 
 assert.equal(optionalOffline.readyForAgentTasks, true, 'core plus one execution bridge is enough to run work');
 assert.equal(optionalOffline.optionalIssues.length, 2, 'optional issues are preserved separately');
 assert.equal(optionalOffline.requiredIssue, undefined, 'optional outages do not create required issue');
+assert.equal(shouldShowOfficeMainBridgeReadinessStrip(optionalOffline), false, 'main Office strip hides optional bridge outages when core task path is ready');
+
+const geminiAuthOnly = buildOfficeBridgeReadinessSnapshot([
+  result('claude-code', 'Claude Code', 'healthy', { sessionCount: 1, port: 7778 }),
+  result('codex', 'Codex', 'healthy', { port: 7779 }),
+  result('gemini-cli', 'Gemini CLI', 'degraded', { detail: 'bridge up but not authenticated (auth=none)', port: 7780 }),
+  result('cursor', 'Cursor', 'healthy', { port: 7781 }),
+  result('openswan-proxy', 'OpenSwan Proxy', 'healthy', { port: 18790 }),
+]);
+
+assert.equal(geminiAuthOnly.statusLabel, 'CORE BRIDGES READY', 'Gemini auth-only issue keeps core bridges ready');
+assert.equal(geminiAuthOnly.primaryIssue, 'Gemini CLI: bridge up but not authenticated (auth=none)', 'Gemini auth issue is still retained for diagnostics');
+assert.equal(shouldShowOfficeMainBridgeReadinessStrip(geminiAuthOnly), false, 'main Office strip hides Gemini auth-only optional warning');
 
 const mixed = buildOfficeBridgeReadinessSnapshot([
   result('claude-code', 'Claude Code', 'healthy', { sessionCount: 1, port: 7778 }),
@@ -65,6 +81,7 @@ assert.equal(mixed.offline, 1, 'mixed offline count');
 assert.equal(mixed.readyForAgentTasks, false, 'missing OpenSwan core blocks agent task readiness');
 assert.equal(mixed.primaryIssue, 'OpenSwan Proxy: not checked', 'primary issue names missing core bridge');
 assert.equal(mixed.actionDetail, 'OpenSwan Proxy: not checked', 'action detail surfaces required issue');
+assert.equal(shouldShowOfficeMainBridgeReadinessStrip(mixed), true, 'main Office strip still shows required bridge failures');
 
 const degradedOnly = buildOfficeBridgeReadinessSnapshot([
   result('gemini-cli', 'Gemini CLI', 'degraded', { detail: 'bridge up but not authenticated', port: 7780 }),

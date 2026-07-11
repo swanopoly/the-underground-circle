@@ -129,8 +129,14 @@ Model IDs may be provider-prefixed, such as `openrouter/auto`,
 - BlackSwan-v5 lives at `cswan801/BlackSwan-v5`.
 - Public HF path: `huggingface/cswan801/BlackSwan-v5`.
 - Dedicated endpoint path: `huggingface_endpoint/cswan801/BlackSwan-v5`.
-- Tool-heavy BlackSwan requests should use a reliable tool executor model
-  (`claude-sonnet-4-6`) while BlackSwan remains app-grounding context.
+- Tool-heavy BlackSwan requests use a reliable tool executor model —
+  `BLACKSWAN_TOOL_EXECUTOR_MODEL_ID` in `src/lib/blackswanRouting.ts`
+  (currently `claude-haiku-4-5`) — while BlackSwan remains app-grounding
+  context.
+- Training/auto-update: weekly launchd job on the dev Mac (Sunday 03:00,
+  `scripts/blackswan-llm/launchd/`), full cycle in
+  `scripts/blackswan-llm/train_cycle_v5.sh` — see
+  `scripts/blackswan-llm/CONTINUOUS_TRAINING.md`.
 - `buildBlackSwanGroundingBlock` injects app-state rules and safe memory
   references without exposing secrets.
 

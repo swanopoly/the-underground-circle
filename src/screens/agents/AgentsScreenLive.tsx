@@ -32,6 +32,7 @@ import {
 } from 'react-native';
 import FlatIcon from '../../components/FlatIcon';
 import {
+  getAutoConnectCircleId,
   getAutoConnectConnections,
   getAutoConnectSessions,
   subscribeAutoConnect,
@@ -55,6 +56,14 @@ import {
   isConnectedOfficeStatus,
   sessionsToAgents,
 } from '../../lib/officeAgents';
+import {
+  applySyntheticAgentStatusUpgrade,
+  deriveSyntheticAgentStatusFromRuns,
+  HUGGINGSWAN_RUN_NAME_KEYS,
+  type OfficeBuildingBoard,
+  type OfficeRunNode,
+  OPENSWAN_RUN_NAME_KEYS,
+} from '../../lib/officeOpsBoard';
 
 const PAGE_MAX_WIDTH = 2200;
 
@@ -118,6 +127,40 @@ function getBondedIdentities(
     .filter(id => !liveSessionKeys.has(id.sessionKey))
     .filter(id => !!(id.customName || id.bondLevel || id.totalTurns))
     .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+}
+
+/**
+ * O8 parity with the Office (officeOpsBoard.deriveSyntheticAgentStatusFromRuns).
+ * The two pinned defaults have no bridge session feeding their status, so
+ * without this they'd render their STATIC status (OpenSwan = "active",
+ * HuggingSwan = "idle") even while a chat/OpenSwan run is mid-task. Live
+ * agent_runs rows (the same nodes the Building-Now board renders) are the
+ * authoritative evidence, so we UPGRADE-only: idle → building/active,
+ * building → active, activity → "Working: <run>". No evidence / offline / error
+ * pass through untouched (the helper's 2h stale-run guard + upgrade-only ladder
+ * enforce "never fabricate active"). The static constants are never mutated —
+ * we spread into a fresh object. `deriveSyntheticAgentStatusFromRuns` walks
+ * children itself, so the board's `building` roots can be passed directly.
+ */
+function upgradePinnedFromRuns(
+  pins: OfficeAgent[],
+  buildingNodes: OfficeRunNode[] | null | undefined,
+  nowMs: number,
+): OfficeAgent[] {
+  if (!buildingNodes || buildingNodes.length === 0) return pins;
+  return pins.map((agent) => {
+    const nameKeys =
+      agent.id === DEFAULT_AGENT.id ? OPENSWAN_RUN_NAME_KEYS
+      : agent.id === HUGGINGSWAN_AGENT.id ? HUGGINGSWAN_RUN_NAME_KEYS
+      : null;
+    if (!nameKeys) return agent;
+    const upgrade = applySyntheticAgentStatusUpgrade(
+      agent.status,
+      deriveSyntheticAgentStatusFromRuns(nameKeys, buildingNodes, nowMs),
+    );
+    if (!upgrade.changed) return agent;
+    return { ...agent, status: upgrade.status, activity: upgrade.activity ?? agent.activity };
+  });
 }
 
 // ── Section renderers ──────────────────────────────────────────────────────
@@ -401,37 +444,79 @@ function matchesQuery(haystack: string[], q: string): boolean {
 export default function AgentsScreen({ navigation }: any) {
   const [identities, setIdentities] = useState<Map<string, AgentIdentity>>(new Map());
   const [connections, setConnections] = useState<AgentConnection[]>([]);
+  // O8 parity: live agent_runs board for the active circle, used only to
+  // upgrade the pinned defaults off their static status. Null until (and
+  // unless) a circle is known + the fetch succeeds; the screen renders fine
+  // without it (pins fall back to their static status).
+  const [opsBoard, setOpsBoard] = useState<OfficeBuildingBoard | null>(null);
   const [tick, setTick] = useState(0);
   const [query, setQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<SectionKey | 'all'>('all');
   const [lastUpdatedAt, setLastUpdatedAt] = useState(() => Date.now());
 
   useEffect(() => {
+    let cancelled = false;
+
+    // O8 parity with OfficeTab: fetch the circle's live runs so the pinned
+    // defaults can be upgraded off their static status mid-task. The fleet
+    // screen has no circleId prop, so we reuse the active circle published by
+    // the auto-connect runtime (the same module we already subscribe to).
+    // Bounded fetch, lazy import, silent-fail — never break the screen.
+    const reloadRuns = async () => {
+      const circleId = getAutoConnectCircleId();
+      if (!circleId) { if (!cancelled) setOpsBoard(null); return; }
+      try {
+        const [{ listCircleLiveRuns }, { buildOfficeBuildingBoard }] = await Promise.all([
+          import('../../lib/agentRunSystem'),
+          import('../../lib/officeOpsBoard'),
+        ]);
+        const runs = await listCircleLiveRuns(circleId, { limit: 200 });
+        if (cancelled) return;
+        setOpsBoard(buildOfficeBuildingBoard(runs, { nowMs: Date.now() }));
+      } catch { /* live-status extra — never break the fleet screen */ }
+    };
+
     loadAgentIdentities().then(setIdentities).catch(err =>
       console.warn('[AgentsScreen] loadAgentIdentities failed:', err),
     );
     loadConnections().then(setConnections).catch(err =>
       console.warn('[AgentsScreen] loadConnections failed:', err),
     );
+    void reloadRuns();
     const unsub = subscribeAutoConnect(() => {
       setTick(v => v + 1);
       setLastUpdatedAt(Date.now());
       loadAgentIdentities().then(setIdentities).catch(() => {});
       loadConnections().then(setConnections).catch(() => {});
+      void reloadRuns(); // circle/session change may bring pin runs online
     });
-    return () => unsub();
+    // Poll on the same cadence as OfficeTab's run reload so a run that starts
+    // or finishes with no auto-connect event still flips the pin within ~15s.
+    const runsTimer = setInterval(() => { void reloadRuns(); }, 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(runsTimer);
+      unsub();
+    };
   }, []);
 
   const fleet = useMemo<FleetData>(() => {
     const live = getLiveAgents(identities);
     const bonded = getBondedIdentities(identities, live);
+    // O8: upgrade the static pins from live run evidence (upgrade-only; never
+    // demotes, never fabricates active without a fresh run — see helper).
+    const pinned = upgradePinnedFromRuns(
+      [DEFAULT_AGENT, HUGGINGSWAN_AGENT],
+      opsBoard?.building,
+      Date.now(),
+    );
     return {
-      pinned: [DEFAULT_AGENT, HUGGINGSWAN_AGENT],
+      pinned,
       live,
       bonded,
       providers: connections,
     };
-  }, [identities, connections, tick]);
+  }, [identities, connections, opsBoard, tick]);
 
   // Apply search filter to each section independently
   const filteredFleet = useMemo<FleetData>(() => {
