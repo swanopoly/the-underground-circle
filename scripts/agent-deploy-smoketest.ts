@@ -15,6 +15,7 @@ import {
   MAX_AGENTS_PER_DEPLOY,
   PER_DEPLOY_COST_CAP_USD,
   DEPLOYED_AGENTS_ARE_TRANSIENT,
+  MAX_CONCURRENT_DEPLOY_LAUNCHES,
   capDeployCount,
   estimateDeployCostUsd,
   shouldRequireApproval,
@@ -212,6 +213,26 @@ console.log('resolveDeployModel');
   // unknown/garbage id fails closed even on web (never launches)
   const garbage = resolveDeployModel('totally-not-a-real-model', { connectedProviders: [], channel: 'web' });
   assert('unknown bare id fails closed on web', garbage.ok === false);
+
+  // HOUSE INVARIANT: NO Grok / xAI anywhere. A structurally-valid
+  // provider-prefixed passthrough id must NOT sneak an xAI model past the
+  // gate on the web channel (the head 'openrouter' + non-empty tail would
+  // otherwise satisfy the structural check).
+  const grokOr = resolveDeployModel('openrouter/x-ai/grok-2', { connectedProviders: ['openrouter'], channel: 'web' });
+  assert('openrouter/x-ai/grok-2 FAILS CLOSED on web (banned vendor)', grokOr.ok === false);
+  assert('grok reason names the banned vendor', /grok|xai/i.test(grokOr.reason || ''));
+  const grokOr2 = resolveDeployModel('openrouter/grok', { connectedProviders: ['openrouter'], channel: 'web' });
+  assert('openrouter/grok FAILS CLOSED on web (banned vendor)', grokOr2.ok === false);
+  const grokBare = resolveDeployModel('grok-2', { connectedProviders: ['openrouter'], channel: 'web' });
+  assert('bare grok-2 FAILS CLOSED on web', grokBare.ok === false);
+  const xaiHead = resolveDeployModel('xai/grok-3', { connectedProviders: ['openrouter'], channel: 'web' });
+  assert('xai/grok-3 FAILS CLOSED on web', xaiHead.ok === false);
+  const grokBridge = resolveDeployModel('openrouter/x-ai/grok-2', { connectedProviders: ['openrouter'], channel: 'bridge' });
+  assert('openrouter/x-ai/grok-2 FAILS CLOSED on bridge too', grokBridge.ok === false);
+  // Guard against over-eager matching: a legit non-xAI catalog id whose name
+  // merely contains letters must still resolve (no false ban).
+  const notGrok = resolveDeployModel('openrouter/anthropic/claude-sonnet-4-6', { connectedProviders: ['openrouter'], channel: 'web' });
+  assert('legit openrouter/anthropic/claude id is NOT banned', notGrok.ok === true);
 
   // empty id fails closed
   const empty = resolveDeployModel('', { connectedProviders: [], channel: 'web' });

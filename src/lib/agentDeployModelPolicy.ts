@@ -93,6 +93,20 @@ export function resolveDeployModel(
     resolved = normalizeProviderPrefix(raw);
   }
 
+  // House invariant: NO Grok / xAI anywhere. A structurally-valid
+  // provider-prefixed id (e.g. `openrouter/x-ai/grok-2`) would otherwise sail
+  // through isResolvableModelId (which only checks the provider HEAD + a
+  // non-empty tail), so an xAI model could be smuggled in behind the
+  // OpenRouter passthrough. Fail closed on any banned-vendor token in any
+  // segment of the id, on BOTH channels, before the structural check.
+  if (isBannedVendorModelId(resolved)) {
+    return {
+      model: resolved,
+      ok: false,
+      reason: `Model "${resolved}" is a banned vendor (Grok / xAI) and cannot be deployed.`,
+    };
+  }
+
   // Validate the (possibly prefix-normalized) id exists in the catalog or is
   // a structurally valid provider-prefixed id. This is the fail-closed gate:
   // an unknown id never launches.
@@ -132,6 +146,23 @@ function normalizeProviderPrefix(id: string): string {
   if (head === 'hugging_face') return `huggingface${rest}`;
   if (head === 'z_ai') return `zai${rest}`;
   return id;
+}
+
+/** Banned-vendor gate (house invariant: NO Grok / xAI anywhere). Matches
+ *  xAI's provider tokens and the Grok model family in ANY `/`-delimited
+ *  segment of the id, so passthrough forms like `openrouter/x-ai/grok-2`,
+ *  `openrouter/grok`, `xai/...`, and bare `grok-...` all fail closed. Kept
+ *  segment-scoped (not a raw substring scan) so an unrelated model whose
+ *  name merely contains these letters is not false-flagged. */
+function isBannedVendorModelId(id: string): boolean {
+  const lower = (id || '').toLowerCase();
+  if (!lower) return false;
+  // Split on both '/' and ':' (OpenRouter variant suffixes) to inspect each token.
+  const segments = lower.split(/[/:]/).map((s) => s.trim()).filter(Boolean);
+  const BANNED_VENDOR_TOKENS = new Set(['xai', 'x-ai', 'x_ai']);
+  return segments.some(
+    (seg) => BANNED_VENDOR_TOKENS.has(seg) || seg === 'grok' || seg.startsWith('grok-'),
+  );
 }
 
 /** True when the id is a recognized canonical (bare) catalog id OR a

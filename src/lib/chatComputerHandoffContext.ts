@@ -266,8 +266,26 @@ export interface ChatComputerHandoffContext {
   chatLines: string[];
 }
 
-function compactList(values: Array<string | null | undefined>, max = 3): string[] {
-  return Array.from(new Set(values.map((value) => String(value || '').trim()).filter(Boolean))).slice(0, max);
+/**
+ * Per-string bound for anything persisted into handoff metadata. This is the
+ * persistence boundary into chat message rows, so it MUST fail closed on
+ * oversized/secret-bearing input rather than trust the caller: grounding /
+ * preflight summaries and warning items are derived from app observations
+ * (untrusted per CLAUDE.md) and are stored verbatim otherwise. Diagnostic
+ * summaries get a slightly longer cap than one-line approval/grant notices.
+ */
+const HANDOFF_TEXT_MAX = 600;
+const HANDOFF_LINE_MAX = 240;
+
+function boundedText(value: string | null | undefined, max = HANDOFF_TEXT_MAX): string | null {
+  const text = String(value || '').replace(/\r/g, '').trim();
+  return text ? text.slice(0, max) : null;
+}
+
+function compactList(values: Array<string | null | undefined>, max = 3, itemMax = HANDOFF_LINE_MAX): string[] {
+  return Array.from(new Set(
+    values.map((value) => String(value || '').trim().slice(0, itemMax)).filter(Boolean),
+  )).slice(0, max);
 }
 
 function summarizeAppAutomationRouteDecision(
@@ -383,9 +401,19 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
         notice: formatStickyScopeAppliedNotice({ scopeKey: String(input.stickyScopeApplied.scopeKey).slice(0, 120) }).slice(0, 240),
       }
     : null;
+  // Bound the caller-supplied text fields ONCE (grounding/preflight summaries
+  // are untrusted app-observation text and were otherwise stored verbatim);
+  // both the visible chatLines and the persisted metadata read these.
+  const taskLabelText = boundedText(input.taskLabel, HANDOFF_LINE_MAX);
+  const preflightStatusText = boundedText(input.preflightStatus, HANDOFF_LINE_MAX);
+  const preflightSummaryText = boundedText(input.preflightSummary);
+  const groundingStatusText = boundedText(input.groundingStatus, HANDOFF_LINE_MAX);
+  const groundingSummaryText = boundedText(input.groundingSummary);
+  const grantSummaryText = boundedText(input.grantSummary, HANDOFF_LINE_MAX);
+  const approvalSummaryText = boundedText(input.approvalSummary, HANDOFF_LINE_MAX);
   const chatLines = [
     `- Surface: ${surfaceLabel(surface)} via ${adapterLabel(input, surface)}`,
-    input.taskLabel ? `- Task: ${input.taskLabel}` : null,
+    taskLabelText ? `- Task: ${taskLabelText}` : null,
     designAppTask ? `- Design app: ${designAppTask.appName}` : null,
     designAppTask ? `- Design operations: ${designAppTask.operations.join(', ')}` : null,
     executionPipelinePlan ? `- Design pipeline: ${executionPipelinePlan.phases.map((phase) => phase.label).join(' -> ')}` : null,
@@ -397,10 +425,10 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
     input.browserPlanId ? `- Browser plan: ${input.browserPlanId}${Number.isFinite(input.browserActionCount || NaN) ? ` (${input.browserActionCount} actions)` : ''}` : null,
     packageSummary?.manifestPath ? `- Package manifest: ${packageSummary.manifestPath}` : null,
     packageSummary ? `- Package files: ${packageSummary.fileCount}${packageSummary.sha256Count ? ` (${packageSummary.sha256Count} hashed)` : ''}` : null,
-    input.preflightStatus ? `- Preflight: ${input.preflightStatus}` : null,
+    preflightStatusText ? `- Preflight: ${preflightStatusText}` : null,
     appRouteDecision ? `- App route decision: ${appRouteDecision.status} via ${appRouteDecision.chosenSurfaceLabel} for ${appRouteDecision.taskFamily}` : null,
-    input.groundingStatus ? `- Grounding: ${input.groundingStatus}` : null,
-    input.approvalSummary ? `- Approval: ${input.approvalSummary}` : null,
+    groundingStatusText ? `- Grounding: ${groundingStatusText}` : null,
+    approvalSummaryText ? `- Approval: ${approvalSummaryText}` : null,
     standingGrant ? `- Standing grant: ${standingGrant.scopeKey}` : null,
     warnings.length ? `- Warnings: ${warnings.join('; ')}` : null,
     blockers.length ? `- Blockers: ${blockers.join('; ')}` : null,
@@ -425,23 +453,23 @@ export function buildChatComputerHandoffContext(input: ChatComputerHandoffContex
       entrypoint: input.entrypoint || null,
       adapterId: input.adapterId || null,
       taskKind: input.taskKind || null,
-      taskLabel: input.taskLabel || null,
+      taskLabel: taskLabelText,
       capabilityProfile: input.capabilityProfile || null,
       recommendedMode: input.recommendedMode || null,
       browserPlanId: input.browserPlanId || null,
       browserActionCount: input.browserActionCount ?? null,
       runId: input.runId || null,
-      preflightStatus: input.preflightStatus || null,
-      preflightSummary: input.preflightSummary || null,
-      groundingStatus: input.groundingStatus || null,
-      groundingSummary: input.groundingSummary || null,
+      preflightStatus: boundedText(input.preflightStatus, HANDOFF_LINE_MAX),
+      preflightSummary: boundedText(input.preflightSummary),
+      groundingStatus: boundedText(input.groundingStatus, HANDOFF_LINE_MAX),
+      groundingSummary: boundedText(input.groundingSummary),
       warningCount: warnings.length,
       blockerCount: blockers.length,
       warnings,
       rawWarnings,
       blockers,
-      grantSummary: input.grantSummary || null,
-      approvalSummary: input.approvalSummary || null,
+      grantSummary: boundedText(input.grantSummary, HANDOFF_LINE_MAX),
+      approvalSummary: boundedText(input.approvalSummary, HANDOFF_LINE_MAX),
       desktopAttachmentPackage: packageSummary,
       designAppTask,
       designCreativeAi: creativeAiPlan

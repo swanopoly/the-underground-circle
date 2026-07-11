@@ -20,7 +20,14 @@
  * when a skill looks relevant.
  */
 
-import { listLibrarySkills, loadSkillHealthByName, renderLibraryMetadataTable } from './skillLibrary';
+import {
+  fenceSkillBodyForModel,
+  listLibrarySkills,
+  loadSkillHealthByName,
+  renderLibraryMetadataTable,
+  viewLibrarySkill,
+  viewLibrarySkillFile,
+} from './skillLibrary';
 
 export type BuildSkillsContextOptions = {
   /** Narrow to skills whose tags overlap this list. Default: no filter. */
@@ -57,4 +64,45 @@ export async function buildSkillsContextMessage(
     healthByName = await loadSkillHealthByName(circleId);
   } catch {}
   return renderLibraryMetadataTable(skills, healthByName);
+}
+
+/**
+ * Canonical way to hand a full SKILL.md body to the model (the
+ * `viewLibrarySkill` / `skills.view` tool result). Fetches the body and runs
+ * it through `fenceSkillBodyForModel` so it arrives UNTRUSTED-fenced and
+ * bounded — a body containing `</skill_body>` or `</untrusted_quoted>` cannot
+ * break out and be read as instructions.
+ *
+ * Tool handlers (chat runtime + edge) MUST use this instead of interpolating
+ * the raw body into a hand-rolled `<skill_body>` wrapper. Returns null when
+ * the skill doesn't exist / RLS blocks — same posture as `viewLibrarySkill`.
+ */
+export async function buildSkillBodyMessageForModel(
+  circleId: string,
+  name: string,
+  opts: { maxChars?: number } = {},
+): Promise<string | null> {
+  const skill = await viewLibrarySkill(circleId, name);
+  if (!skill) return null;
+  return fenceSkillBodyForModel(skill, skill.content, opts);
+}
+
+/**
+ * Same contract as `buildSkillBodyMessageForModel` for a Level-2 sub-file
+ * body (`references/…`, `templates/…`, `scripts/…`). The relpath is validated
+ * inside `viewLibrarySkillFile`; the returned body is fenced + bounded.
+ */
+export async function buildSkillFileMessageForModel(
+  circleId: string,
+  name: string,
+  relpath: string,
+  opts: { maxChars?: number } = {},
+): Promise<string | null> {
+  const file = await viewLibrarySkillFile(circleId, name, relpath);
+  if (!file) return null;
+  return fenceSkillBodyForModel(
+    { name: `${name}/${file.relpath}`, description: file.mimeType || undefined },
+    file.content,
+    opts,
+  );
 }

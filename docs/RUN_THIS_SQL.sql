@@ -859,7 +859,9 @@ NOTIFY pgrst, 'reload schema';
 
 -- ─── §22. Training-safe agent tool-trace views (2026-07-10) ──────────────────
 -- Source: 20260710_training_safe_agent_runs.sql
--- P63 BlackSwan tool-trace flywheel — PENDING APPLY
+-- P63 BlackSwan tool-trace flywheel — APPLIED 2026-07-10 (Management API;
+-- verified: both views readable via PostgREST as service_role, 34
+-- completed runs visible).
 -- Lets export_training_data.py / export_tool_traces.py read agent_runs +
 -- agent_run_events through the standard training_opt_out gate (profiles
 -- flag + field-level array; events gated via the parent-run view, same
@@ -924,3 +926,40 @@ NOTIFY pgrst, 'reload schema';
 --    WHERE table_name = 'computer_use_runs' AND column_name = 'action_trace';
 --   SELECT table_name FROM information_schema.views
 --    WHERE table_name IN ('training_safe_agent_runs', 'training_safe_agent_run_events');
+
+-- ─── §23. agent_run_events RLS policy — the empty-flywheel root cause ────────
+-- Source: 20260710b_agent_run_events_rls_policy.sql
+-- APPLIED 2026-07-10 (Management API; verified in pg_policies).
+-- agent_run_events had RLS ENABLED with ZERO policies → every client-side
+-- event insert (P11 trace wiring, agentRunPersistence, subagent ledgers)
+-- was silently rejected since the table was created; agent_runs grew to 40
+-- rows while events stayed at 0. Policy mirrors agent_runs_circle_member
+-- through the parent run. Client trace persistence works from apply time —
+-- flywheel data accumulates from real usage FORWARD.
+
+DROP POLICY IF EXISTS agent_run_events_circle_member ON agent_run_events;
+CREATE POLICY agent_run_events_circle_member ON agent_run_events
+  FOR ALL
+  USING (
+    run_id IN (
+      SELECT r.id FROM agent_runs r
+      WHERE r.circle_id IN (
+        SELECT circle_members.circle_id
+        FROM circle_members
+        WHERE circle_members.user_id = auth.uid()
+      )
+    )
+  )
+  WITH CHECK (
+    run_id IN (
+      SELECT r.id FROM agent_runs r
+      WHERE r.circle_id IN (
+        SELECT circle_members.circle_id
+        FROM circle_members
+        WHERE circle_members.user_id = auth.uid()
+      )
+    )
+  );
+
+CREATE INDEX IF NOT EXISTS idx_agent_run_events_run_id
+  ON agent_run_events (run_id);

@@ -36,6 +36,20 @@ export const DEPLOYED_AGENTS_ARE_TRANSIENT = true;
 /** Approval is forced once a fan-out exceeds this many agents, even if cheap. */
 export const APPROVAL_AGENT_COUNT_THRESHOLD = 10;
 
+/**
+ * Max deploy agents the orchestrator launches CONCURRENTLY within one fan-out.
+ *
+ * The plan is capped at MAX_AGENTS_PER_DEPLOY (50) total, but launching all 50
+ * at once fires 50 simultaneous model turns and defeats the per-circle
+ * delegation concurrency cap (that cap is a check-then-act count read; 50
+ * parallel launches all observe the same pre-launch snapshot and pass
+ * together). Bounding in-flight launches keeps the burst sane and lets the
+ * downstream gate actually throttle. The remaining specs run as earlier ones
+ * settle, so the TOTAL launched is still the full (capped) plan — only the
+ * instantaneous parallelism is bounded.
+ */
+export const MAX_CONCURRENT_DEPLOY_LAUNCHES = 5;
+
 export interface DeployCostEstimateOptions {
   /** Model turns per agent (a streamed deploy turn + a couple tool rounds). */
   avgTurnsPerAgent?: number;

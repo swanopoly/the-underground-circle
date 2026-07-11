@@ -43,7 +43,11 @@
  */
 
 import type { AgentDeployPlan, AgentDeploySpec } from './agentDeployPlan';
-import { DEPLOYED_AGENTS_ARE_TRANSIENT, MAX_AGENTS_PER_DEPLOY } from './agentDeployPolicy';
+import {
+  DEPLOYED_AGENTS_ARE_TRANSIENT,
+  MAX_AGENTS_PER_DEPLOY,
+  MAX_CONCURRENT_DEPLOY_LAUNCHES,
+} from './agentDeployPolicy';
 import {
   getSubagentCapability,
   listSubagentCapabilities,
@@ -168,61 +172,76 @@ async function deployViaWeb(
   specs: AgentDeploySpec[],
   deps: ResolvedDeps,
 ): Promise<DeployAgentsResult> {
-  const items: DeployAgentsResult['items'] = [];
-
-  const settled = await Promise.allSettled(
-    specs.map((spec) =>
-      // delegateToSubagent enforces the delegation gate (depth / concurrency /
-      // daily-spend) internally and creates a child run that auto-completes —
-      // no persistent office-agent row is created, so the agent is transient.
-      //
-      // Each turn carries an EXPLICIT per-agent `model` (resolved upstream by
-      // agentDeployModelPolicy.resolveDeployModel), so the deployed agent runs
-      // exactly that model. This is the v2-Haiku-fallback guard: the explicit
-      // model means the v1 child loop's own 'claude-haiku-4-5' default never
-      // fires, and we never reach swanbot-v2-ai's `claude-haiku` default at
-      // all because this path uses swanbot-ai (v1).
-      //
-      // Mass deploy is a ROOT fan-out: we intentionally pass NO parentRunId so
-      // each spec is a depth-1 root delegation rather than chaining off some
-      // caller run (which would risk tripping the depth cap immediately). The
-      // gate's concurrency/spend caps still apply per the circle.
-      deps.delegate({
+  // Launch ONE spec. delegateToSubagent enforces the delegation gate (depth /
+  // concurrency / daily-spend) internally and creates a child run that
+  // auto-completes — no persistent office-agent row is created, so the agent
+  // is transient.
+  //
+  // Each turn carries an EXPLICIT per-agent `model` (resolved upstream by
+  // agentDeployModelPolicy.resolveDeployModel), so the deployed agent runs
+  // exactly that model. This is the v2-Haiku-fallback guard: the explicit
+  // model means the v1 child loop's own 'claude-haiku-4-5' default never
+  // fires, and we never reach swanbot-v2-ai's `claude-haiku` default at all
+  // because this path uses swanbot-ai (v1).
+  //
+  // Mass deploy is a ROOT fan-out: we intentionally pass NO parentRunId so
+  // each spec is a depth-1 root delegation rather than chaining off some
+  // caller run (which would risk tripping the depth cap immediately).
+  //
+  // A gate rejection comes back as a fulfilled DelegationResult carrying
+  // `gateRejection` (not a throw); a transport crash rejects. Both map to a
+  // failed item so the rest of the fan-out proceeds (partial-failure
+  // aggregation) and no one launch failure aborts the batch.
+  const launchOne = async (spec: AgentDeploySpec): Promise<DeployAgentsResult['items'][number]> => {
+    try {
+      const res = await deps.delegate({
         circleId: input.circleId,
         userId: input.userId,
         surface: 'main_chat',
         message: spec.prompt || `Deployed agent ${spec.index + 1} task.`,
         subagent: resolveSubagentProfile(spec.role),
         model: spec.model,
-      }),
-    ),
-  );
+      });
+      const rejected = res?.gateRejection;
+      if (rejected) {
+        return { index: spec.index, ok: false, error: gateRejectionMessage(rejected) };
+      }
+      return { index: spec.index, ok: true };
+    } catch (err: any) {
+      return {
+        index: spec.index,
+        ok: false,
+        error: err?.message || String(err || 'delegation failed'),
+      };
+    }
+  };
+
+  // BOUNDED concurrency: keep at most MAX_CONCURRENT_DEPLOY_LAUNCHES launches
+  // in flight at once instead of firing all (up to 50) simultaneously. The
+  // per-circle delegation concurrency cap is a check-then-act count read, so a
+  // fully-parallel fan-out would let every spec observe the same pre-launch
+  // snapshot and pass the cap together (a burst the cap is meant to prevent).
+  // Feeding launches through a small pool bounds the instantaneous parallelism
+  // while still launching EVERY (already-capped) spec. Results are written by
+  // position so `items` stays in spec order and 1:1 with the plan.
+  const items: DeployAgentsResult['items'] = new Array(specs.length);
+  const limit = Math.max(1, Math.min(MAX_CONCURRENT_DEPLOY_LAUNCHES, specs.length));
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const i = next;
+      next += 1;
+      if (i >= specs.length) return;
+      items[i] = await launchOne(specs[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: limit }, () => worker()));
 
   let deployed = 0;
   let failed = 0;
-  for (let i = 0; i < settled.length; i += 1) {
-    const spec = specs[i];
-    const entry = settled[i];
-    if (entry.status === 'fulfilled') {
-      // A gate rejection comes back as a fulfilled DelegationResult carrying
-      // `gateRejection` (not a throw) — treat that as a failed launch but let
-      // the rest of the fan-out proceed (partial-failure aggregation).
-      const rejected = entry.value?.gateRejection;
-      if (rejected) {
-        failed += 1;
-        items.push({ index: spec.index, ok: false, error: gateRejectionMessage(rejected) });
-      } else {
-        deployed += 1;
-        items.push({ index: spec.index, ok: true });
-      }
-    } else {
-      failed += 1;
-      items.push({
-        index: spec.index,
-        ok: false,
-        error: entry.reason?.message || String(entry.reason || 'delegation failed'),
-      });
-    }
+  for (const item of items) {
+    if (item.ok) deployed += 1;
+    else failed += 1;
   }
 
   return { deployed, failed, channel: 'web', items };
