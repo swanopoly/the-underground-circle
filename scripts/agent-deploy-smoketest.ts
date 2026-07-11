@@ -38,6 +38,7 @@ console.log('policy constants');
 assert('MAX_AGENTS_PER_DEPLOY === 50', MAX_AGENTS_PER_DEPLOY === 50);
 assert('PER_DEPLOY_COST_CAP_USD === 10', PER_DEPLOY_COST_CAP_USD === 10);
 assert('DEPLOYED_AGENTS_ARE_TRANSIENT === true', DEPLOYED_AGENTS_ARE_TRANSIENT === true);
+assert('MAX_CONCURRENT_DEPLOY_LAUNCHES is a bound in 1..MAX', MAX_CONCURRENT_DEPLOY_LAUNCHES >= 1 && MAX_CONCURRENT_DEPLOY_LAUNCHES <= MAX_AGENTS_PER_DEPLOY);
 
 // ── capDeployCount: clamps 1..MAX ─────────────────────────────────────────────
 console.log('capDeployCount');

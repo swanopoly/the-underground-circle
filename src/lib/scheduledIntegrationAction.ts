@@ -62,7 +62,14 @@ const FLOOR_PATTERNS: ReadonlyArray<{ category: 'pay' | 'delete' | 'login' | 'gr
   { category: 'pay', re: /\b(pay|payment|purchase|buy|check\s?out|place (an? )?order|order (it|now|the)|subscribe|renew|charge|invoice|transfer (money|funds|\$)|send (money|funds|\$)|wire|refund|top\s?up|add funds|billing)\b/i },
   { category: 'delete', re: /\b(delete|remove|destroy|drop|wipe|erase|purge|revoke|deactivate|cancel (the )?(subscription|account|plan)|close (the )?account|uninstall)\b/i },
   { category: 'login', re: /\b(log\s?in|sign\s?in|authenticate|enter (my )?(password|credentials|2fa|otp|mfa)|reset (my )?password|verify (my )?(identity|account))\b/i },
-  { category: 'grant', re: /\b(grant\b|authorize\b|give (access|permission)|change (permissions|roles|access)|share access|add (a |an )?(member|user)\b|(add|invite|assign|promote|make|set)\b[^.\n]{0,40}\b(admin|owner|maintainer|collaborator)s?\b)/i },
+  // grant: broadened after an audit found real slip-throughs —
+  //   • "give the team write access" (only adjacent "give access" was caught, so
+  //      any word between give and access escaped) → `give …{0,30} access/permission`.
+  //   • "add jane@x.com as a collaborator" (the `[^.\n]{0,40}` run breaks at the
+  //      dot in an email, so the role was never reached) → anchor on the trailing
+  //      "as a/an <role>" phrase, which doesn't depend on what precedes it.
+  //   • provision/elevate verbs. Bounded `{0,30}` runs keep this linear (no ReDoS).
+  { category: 'grant', re: /\b(grant\b|authorize\b|(give|provision|elevate)\b[^.\n]{0,30}\b(access|permission|role|admin|owner)s?\b|change (permissions|roles|access)|share access|add (a |an )?(member|user)\b|as an?\s+(admin|owner|maintainer|collaborator|member)s?\b|(add|invite|assign|promote|make|set)\b[^.\n]{0,40}\b(admin|owner|maintainer|collaborator)s?\b)/i },
 ];
 
 /** Returns the floor category a goal hits, or null. Exported for reuse/tests. */

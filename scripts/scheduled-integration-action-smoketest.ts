@@ -59,6 +59,13 @@ function main(): void {
     ['grant the new hires admin access every Monday', 'grant'],
     ['add contractors as admins to the repo nightly', 'grant'],
     ['change permissions for the finance group weekly', 'grant'],
+    // Regression pins for grant slip-throughs found in the audit:
+    ['give the team write access every sprint', 'grant'],        // "give …{gap}… access" (not adjacent)
+    ['give bob admin permissions weekly', 'grant'],
+    ['add jane@x.com as a collaborator nightly', 'grant'],       // email dot broke the {0,40} run
+    ['invite the vendor as an admin each week', 'grant'],
+    ['elevate the intern to owner monthly', 'grant'],
+    ['provision admin access for new hires', 'grant'],
   ];
   for (const [goal, cat] of floorCases) {
     assertEqual(detectScheduledFloorCategory(goal), cat, `(2) detect floor "${goal.slice(0, 36)}…" → ${cat}`);
@@ -72,6 +79,11 @@ function main(): void {
   // safe goals are NOT floor
   assertEqual(detectScheduledFloorCategory("post yesterday's merged PRs to Slack"), null, '(2) safe goal → no floor');
   assertEqual(detectScheduledFloorCategory('summarize and share the weekly metrics'), null, '(2) share is not grant');
+  // Broadened grant pattern must not over-refuse benign goals that merely mention
+  // "give"/"access"/"as a" without an actual permission change.
+  assertEqual(detectScheduledFloorCategory('give the weekly report a short summary'), null, '(2) "give … summary" is not grant');
+  assertEqual(detectScheduledFloorCategory('post the access-review summary to the channel'), null, '(2) "access" in a report is not grant');
+  assertEqual(detectScheduledFloorCategory('list PRs as a bulleted digest'), null, '(2) "as a digest" is not grant');
 
   // ─── (3) goal + recurrence + rate bounds ──────────────────────────────────
   assertEqual(validateScheduledIntegrationAction({ goal: '', recurrence: '0 9 * * *' }).ok, false, '(3) empty goal refused');

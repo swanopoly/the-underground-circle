@@ -16,7 +16,7 @@
  */
 
 import { buildAgentDeployPlan } from '../src/lib/agentDeployPlan';
-import { MAX_AGENTS_PER_DEPLOY } from '../src/lib/agentDeployPolicy';
+import { MAX_AGENTS_PER_DEPLOY, MAX_CONCURRENT_DEPLOY_LAUNCHES } from '../src/lib/agentDeployPolicy';
 import {
   deployAgents,
   type DeployAgentsDeps,
@@ -160,6 +160,39 @@ console.log('orchestrator hard cap');
   );
   assert('80-spec plan capped to MAX at launch', calls.length === MAX_AGENTS_PER_DEPLOY);
   assert('deployed capped to MAX', result.deployed === MAX_AGENTS_PER_DEPLOY);
+}
+
+// ── 1c. Web fan-out is BOUNDED-concurrency, not all-at-once ───────────────────
+console.log('bounded launch concurrency');
+{
+  // A fan-out larger than the concurrency bound must NEVER have more than
+  // MAX_CONCURRENT_DEPLOY_LAUNCHES delegations in flight simultaneously, yet
+  // must still launch EVERY spec and preserve per-spec item order. This pins
+  // the fix for the TOCTOU burst where all N specs would otherwise fire at
+  // once and defeat the per-circle delegation concurrency cap.
+  const N = MAX_CONCURRENT_DEPLOY_LAUNCHES + 4;
+  const plan = buildAgentDeployPlan({ mode: 'uniform', count: N, model: 'claude-sonnet-4-6' });
+  let inFlight = 0;
+  let peak = 0;
+  const order: number[] = [];
+  // A delegate that holds each call open for a tick so overlap is observable.
+  const delegate: NonNullable<DeployAgentsDeps['delegate']> = async (o) => {
+    inFlight += 1;
+    peak = Math.max(peak, inFlight);
+    order.push(Number((o.message.match(/agent (\d+)/) || [])[1]) || -1);
+    await new Promise((r) => setTimeout(r, 5));
+    inFlight -= 1;
+    return {} as any;
+  };
+  const result = await deployAgents(
+    { ...BASE_INPUT, plan },
+    { delegate, spawn: makeSpawnMock().spawn, bridgeAvailable: async () => false },
+  );
+  assert(`all ${N} specs launched`, result.deployed === N && result.items.length === N);
+  assert('peak in-flight never exceeds the bound', peak <= MAX_CONCURRENT_DEPLOY_LAUNCHES);
+  assert('concurrency bound was actually exercised (peak >= 2)', peak >= 2);
+  // items must stay 1:1 and in spec-index order regardless of settle timing.
+  assert('items in spec-index order', result.items.every((it, i) => it.index === i));
 }
 
 // ─── 2. Per-agent resolved model passed through (no Haiku coercion) ───────────

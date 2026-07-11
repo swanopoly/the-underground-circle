@@ -121,14 +121,26 @@ function decodeHtml(value: string): string {
     .replace(/&nbsp;/g, ' ');
 }
 
+// Upper bound for any single field's text before it is passed through the
+// redaction/whitespace regexes. Field-level values (titles, cell text, menu
+// labels, headings) are short in practice; a generous cap keeps a pathological
+// admin page (e.g. a megabyte-long base64 data URI in one cell) from feeding an
+// unbounded string to the per-field regexes.
+const MAX_FIELD_CHARS = 20_000;
+
 function redactText(value: string): string {
+  // Quantifiers are upper-bounded (email local-part/domain/TLD per RFC limits,
+  // and the secret-value run) so an untrusted run of word/@ characters cannot
+  // trigger catastrophic backtracking (ReDoS). The unbounded greedy `+` on the
+  // email local-part previously caused O(n^2) blow-up on long non-email runs.
   return String(value || '')
-    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[redacted_email]')
-    .replace(/\b(?:nonce|token|api[_-]?key|password|secret|bearer)\s*[:=]\s*["']?[A-Za-z0-9._~+/-]{8,}/gi, '$1=[redacted]');
+    .replace(/[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,255}\.[A-Z]{2,24}/gi, '[redacted_email]')
+    .replace(/\b(?:nonce|token|api[_-]?key|password|secret|bearer)\s*[:=]\s*["']?[A-Za-z0-9._~+/-]{8,4096}/gi, '$1=[redacted]');
 }
 
 function stripTags(value: string): string {
-  return redactText(decodeHtml(String(value || '').replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ')))
+  const bounded = String(value || '').slice(0, MAX_FIELD_CHARS);
+  return redactText(decodeHtml(bounded.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ')))
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -153,6 +165,16 @@ function uniqueStrings(values: Array<string | undefined | null>): string[] {
     result.push(cleaned);
   }
   return result;
+}
+
+/**
+ * Resolve a numeric cap option, honoring an explicit `0` (which must mean
+ * "extract none", not "use the default"). Non-finite or negative values clamp
+ * to the default; fractional values floor to an integer.
+ */
+function resolveCap(value: number | undefined, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return fallback;
+  return Math.floor(value);
 }
 
 function extractFirst(pattern: RegExp, source: string): string | undefined {
@@ -434,11 +456,11 @@ export function extractWordPressAdminSourceIntelligence(
     adminpage: extractFirst(/\badminpage\s*=\s*(["'])([^"']+)\1/i, source),
   };
   const heading = stripTags(source.match(/<h1\b[^>]*class=(["'])[^"']*\bwp-heading-inline\b[^"']*\1[^>]*>([\s\S]*?)<\/h1>/i)?.[2] || source.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || '');
-  const menuItems = extractMenuItems(source, adminRoot, options.maxMenuItems || 120);
+  const menuItems = extractMenuItems(source, adminRoot, resolveCap(options.maxMenuItems, 120));
   const postType = globals.typenow || queryParamFromHref(canonicalUrl, 'post_type', adminRoot) || bodyClasses.find((item) => item.startsWith('post-type-'))?.replace(/^post-type-/, '');
   const customPostTypes = extractCustomPostTypes(menuItems);
   const postTypeLabel = customPostTypes.find((item) => item.slug === postType)?.label || heading || undefined;
-  const rows = extractRows(source, adminRoot, options.maxRows || 25);
+  const rows = extractRows(source, adminRoot, resolveCap(options.maxRows, 25));
   const dealerInspire = detectDealerInspire(source, menuItems, postType);
   const nonceFieldNames = uniqueStrings(Array.from(source.matchAll(/\b(?:id|name)=(["'])([^"']*(?:nonce|_wpnonce)[^"']*)\1/gi)).map((match) => match[2]));
   const wpVersion = bodyClasses.find((item) => /^version-\d/i.test(item))?.replace(/^version-/, '').replace(/-/g, '.')

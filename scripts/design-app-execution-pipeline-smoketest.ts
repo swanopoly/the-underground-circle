@@ -49,6 +49,57 @@ assert(photoshopPipeline?.phases.some((phase) => phase.id === 'recover_or_build_
 assert(photoshopPipeline?.proofTools.includes('desktop.photoshop_export_proof'));
 assert(photoshopPipeline?.failClosedRules.some((rule) => /approval|selection|proof/i.test(rule)));
 
+// ── HUNT invariant pin: resolve→observe→approve→mutate→export→verify order,
+// and NO mutation/output/generation runs before approval + observation.
+{
+  const order = (photoshopPipeline?.phases || []).map((phase) => phase.id);
+  const at = (id: string) => order.indexOf(id);
+  // This task exercises every gate (generate + fill mutation + export proof).
+  assert(at('observe_document_inventory') >= 0, 'invariant: an observe phase exists');
+  assert(at('request_design_approval') >= 0, 'invariant: an approval phase exists');
+  assert(at('execute_design_mutations') >= 0, 'invariant: a mutation phase exists');
+  assert(at('export_or_package_outputs') >= 0, 'invariant: an export/package phase exists');
+  assert(at('verify_design_output') >= 0, 'invariant: a verify phase exists');
+  assert(at('observe_document_inventory') < at('execute_design_mutations'), 'invariant: observation precedes any mutation');
+  assert(at('prepare_creative_ai_brief') < at('execute_design_mutations'), 'invariant: creative-AI brief/approval precedes mutation');
+  assert(at('request_design_approval') < at('execute_design_mutations'), 'invariant: design approval precedes mutation');
+  assert(at('execute_design_mutations') < at('export_or_package_outputs'), 'invariant: mutation precedes export/package');
+  assert(at('export_or_package_outputs') < at('verify_design_output'), 'invariant: export precedes verify (proof after)');
+  // Every phase that can generate/mutate/write outputs must fail closed on missing approval.
+  const mustApprove = new Set(['prepare_creative_ai_brief', 'request_design_approval', 'execute_design_mutations', 'export_or_package_outputs']);
+  for (const phase of photoshopPipeline?.phases || []) {
+    if (mustApprove.has(phase.id)) {
+      assert(phase.approvalRequired === true, `invariant: ${phase.id} is approvalRequired`);
+    }
+  }
+  // Verify never claims done without proof evidence.
+  const verify = (photoshopPipeline?.phases || []).find((phase) => phase.id === 'verify_design_output');
+  assert(
+    (verify?.requiredEvidence || []).some((evidence) => /proof|screenshot|file_stat|export/i.test(evidence)),
+    'invariant: verify phase requires proof/export/file evidence before completion',
+  );
+  assert(
+    (verify?.failClosedRules || []).some((rule) => /stop if/i.test(rule)),
+    'invariant: verify phase fails closed on missing/unverifiable proof',
+  );
+}
+
+// ── HUNT invariant pin: prompts/metadata never echo a secret-shaped token or
+// a concrete local path from the task (the builders emit taxonomy, not the task).
+{
+  const sensitiveTask = 'Open /Users/chris/Clients/acmeCorp/hero.psd, remove the background with generative fill (api_key sk-ant-secret-TOKEN-123), and export a PNG proof.';
+  const sensitivePlan = buildDesignAppExecutionPipelinePlan(sensitiveTask);
+  const sensitivePrompt = buildDesignAppExecutionPipelinePromptBlock(sensitiveTask) || '';
+  const sensitiveMetadata = JSON.stringify(sensitivePlan || {});
+  for (const [label, haystack] of [['prompt', sensitivePrompt], ['plan metadata', sensitiveMetadata]] as const) {
+    assert(!haystack.includes('/Users/'), `secret hygiene: ${label} does not echo the local path`);
+    assert(!haystack.includes('acmeCorp'), `secret hygiene: ${label} does not echo the private folder name`);
+    assert(!haystack.includes('hero.psd'), `secret hygiene: ${label} does not echo the file name`);
+    assert(!haystack.includes('sk-ant-'), `secret hygiene: ${label} does not echo the secret-shaped token`);
+    assert(!/api_key/i.test(haystack), `secret hygiene: ${label} does not echo credential wording`);
+  }
+}
+
 const photoshopPrompt = buildDesignAppExecutionPipelinePromptBlock(photoshopTask) || '';
 assert(photoshopPrompt.includes('Design App Execution Pipeline'));
 assert(photoshopPrompt.includes('Required tool sequence'));

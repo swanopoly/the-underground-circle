@@ -52,6 +52,16 @@ export interface MemoryBankCommandResult {
   checkpointId?: string | null;
 }
 
+/**
+ * Per-doc ceiling for a memory-bank doc. `circle_memory.content` has no cap
+ * at the service layer (`sharedMemory.updateMemoryDoc`) and every memory-bank
+ * doc is injected into agent prompts, so an unbounded `/memory-bank append`
+ * loop could inflate a chat/prompt row without limit. Enforced here (the only
+ * write entry point that composes doc content). Generous for a brief / active-
+ * context / progress note, but bounded.
+ */
+export const MEMORY_BANK_DOC_MAX_CHARS = 16_000;
+
 const HELP_TEXT = [
   '**Memory Bank** — three named docs per circle.',
   '',
@@ -174,6 +184,17 @@ async function handleWrite(
   const nextContent = mode === 'replace'
     ? content
     : await appendContent(ctx.circleId, kind, content);
+  // Bound the resulting doc — refuse rather than silently truncate, so the
+  // user knows the write did not fully land (esp. on append).
+  if (nextContent.length > MEMORY_BANK_DOC_MAX_CHARS) {
+    return {
+      success: false,
+      message:
+        `**${MEMORY_DOC_KIND_LABELS[kind]}** would exceed the ${MEMORY_BANK_DOC_MAX_CHARS.toLocaleString()}-char limit ` +
+        `(${mode === 'append' ? 'after appending, ' : ''}would be ${nextContent.length.toLocaleString()}). ` +
+        `Trim it or run \`/memory-bank update ${kind} <shorter content>\` to consolidate.`,
+    };
+  }
   const { checkpointId } = await writeMemoryBankWithCheckpoint(ctx, kind, nextContent);
   const suffix = checkpointId ? `  (checkpoint \`${checkpointId.slice(0, 8)}\` — Restore below undoes this)` : '';
   return {

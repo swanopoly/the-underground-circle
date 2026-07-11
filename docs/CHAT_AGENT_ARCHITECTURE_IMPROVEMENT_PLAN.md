@@ -8,6 +8,48 @@
 
 ## Shipped from this plan
 
+- **P66 — eight-agent breadth sweep across the whole surface (2026-07-10)** ✅ —
+  disjoint-territory review+fix pass (7 editing agents + 1 read-only security
+  audit; none touched ChatTab / openswanToolRuntime / swanbot / agentExecutionCore
+  to avoid churn on the freshly-worked hot files). Real bugs fixed:
+  **integrations (A1)** — `stripSecretsDeep` leaked a secret-shaped key nested
+  past its depth cap (now fails closed); the `messaging-notify` edge's
+  `buildApprovalKey` didn't match the client's canonical key ordering, so every
+  approved post was rejected server-side (fixed + parity-pinned against the real
+  client builder); scheduled-action grant-floor slip-throughs ("give the team
+  write access", "add jane@x.com as a collaborator", elevate/provision) closed.
+  **memory/skills (A3)** — skill bodies + metadata reached the model unfenced
+  (a body with `</skill_body>`/`</untrusted_quoted>` broke out to trusted
+  instructions; a description with `\n` forged table rows) → new pure
+  `skillBodyFence.ts` (fence + 12k cap) wired into the renderer; the credential
+  secret-guard ran ONLY on `/remember` → now also on `appendUserMemory`/
+  `replaceUserMemory` (+ hardened to catch `API_KEY`/`token = …`); memory-bank
+  doc size cap. **chat handoff (A4)** — `groundingSummary`/`preflightSummary`
+  etc. were persisted into chat rows verbatim + unbounded (a 50KB observation
+  with secrets → 100KB metadata) → bounded + scrubbed at the persistence
+  boundary. **deploy (A5)** — Grok/xAI ids slipped through `resolveDeployModel`
+  on the web channel (`openrouter/x-ai/grok-2`) → segment-scoped banned-vendor
+  fail-closed gate; unbounded launch concurrency (all ≤50 specs fired at once,
+  defeating the per-circle cap) → fixed-size worker pool. **WordPress (A7)** —
+  catastrophic ReDoS in `redactText`'s email regex on untrusted page source
+  (~14s/field) → bounded quantifiers; `maxRows:0`/`maxMenuItems:0` ignored →
+  honored. **routing (A2) + design/CAD (A6)** verified correct (fail-visible
+  holds; CAD exec is fixed-path + strict-allowlist, no injection) with new
+  regression pins. Validation: combined typecheck app 0 + 43/43 function checks
+  + full smoke:all exit 0.
+  - **BLOCKER (needs user):** `custom-api-proxy` has the SAME approval-key
+    parity bug as messaging-notify (so every approved `custom_api.request` write
+    is rejected server-side — pre-existing), but the file is root-owned and I
+    can't edit it. Fix = `chown` then one line at ~:181
+    `return JSON.stringify(stableValue({ version: 1, tool, args: args || {} }));`
+    then redeploy. (Task tracked.)
+  - **New backlog (A8 read-only audit, deferred):** BlueBubbles password in a
+    URL query param (imessageService.ts:150 — verify BlueBubbles auth model
+    first); raw `error.message` returned to the model/client in custom-api-proxy
+    + several openswanToolRuntime paths (mostly fail-visible-desirable; a
+    generic sanitization wrapper would harden schema/infra-string leakage).
+    Positive: fencing + secret-scrub controls confirmed broadly present.
+
 - **P65 — backlog wave 2: five-agent disjoint pass closing the P63 findings
   backlog (2026-07-10)** ✅ — **#6** final-round solver consult now gated on a
   next-turn-existing check in BOTH the legacy relay loop (`swanbot.ts`, via a

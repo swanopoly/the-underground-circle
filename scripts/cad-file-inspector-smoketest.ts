@@ -251,6 +251,59 @@ const STEP_FIXTURE = [
   pass('chat descriptions: plain language, bounded, 1-3 sentences');
 }
 
+// ── HUNT invariant pin: pathological input never hangs (ReDoS/unbounded loop) ─
+{
+  const budgetMs = 2000;
+  const cases: Array<[string, () => void]> = [
+    // Unterminated STEP quoted headers (regex has bounded {1,200} — must not backtrack forever).
+    ['step-unterminated-quote', () => inspectCadFileText({ fileName: 'x.step', textContent: 'ISO-10303-21;\nFILE_SCHEMA(((\'' + 'A'.repeat(2_000_000) })],
+    ['step-many-quotes', () => inspectCadFileText({ fileName: 'x.step', textContent: 'ISO-10303-21;\nFILE_NAME(' + "'".repeat(400_000) })],
+    // Many =PRODUCT( hits (global-regex loop advances lastIndex; bounded by 2MB text cap).
+    ['step-many-products', () => inspectCadFileText({ fileName: 'x.step', textContent: 'ISO-10303-21;\n' + '=PRODUCT('.repeat(250_000) })],
+    // Dense DXF group-code pairs (bounded line scan).
+    ['dxf-many-entities', () => inspectCadFileText({ fileName: 'x.dxf', textContent: '0\nSECTION\n2\nENTITIES\n' + '0\nLINE\n'.repeat(300_000) })],
+    // Giant single-line STL (facet substring + line-anchored vertex regex on one huge line).
+    ['stl-one-huge-line', () => inspectCadFileText({ fileName: 'x.stl', textContent: 'solid x facet ' + 'vertex 1 2 3 '.repeat(300_000) })],
+  ];
+  for (const [name, run] of cases) {
+    const started = Date.now();
+    run();
+    const elapsed = Date.now() - started;
+    expect(elapsed < budgetMs, `pathological ${name} completes under ${budgetMs}ms (got ${elapsed}ms) — no ReDoS/hang`);
+  }
+  pass('pathological input is bounded — no ReDoS or unbounded loop');
+}
+
+// ── HUNT invariant pin: file-controlled names (periods, over-long, huge counts)
+// keep the chat description bounded and never leak JSON/undefined/null ──────────
+{
+  const dottedDxf = [
+    '0', 'SECTION', '2', 'TABLES',
+    '0', 'LAYER', '2', 'A.B.C.D.E.F',
+    '0', 'LAYER', '2', 'L'.repeat(400),
+    '0', 'ENDSEC',
+    '0', 'SECTION', '2', 'ENTITIES',
+    '0', 'LINE', '0', 'CIRCLE',
+    '0', 'ENDSEC', '0', 'EOF',
+  ].join('\n');
+  const dottedStep = [
+    'ISO-10303-21;',
+    "FILE_NAME('my.file.v1.2.3.step','2024.01.02',('a'),(''),'p','o','');",
+    "FILE_SCHEMA(('CONFIG_CONTROL_DESIGN v1.2.3 { ... dotted ... }'));",
+    "#1=PRODUCT('p','p','',(#2));",
+  ].join('\n');
+  for (const [label, inspection] of [
+    ['dotted-dxf', inspectCadFileText({ fileName: 'weird.name.with.dots.dxf', textContent: dottedDxf })],
+    ['dotted-step', inspectCadFileText({ fileName: 'x.step', textContent: dottedStep })],
+  ] as const) {
+    const description = describeCadInspectionForChat(inspection);
+    expect(description.length <= 400, `${label}: dotted/over-long names keep description ≤400 chars (got ${description.length})`);
+    expect(!description.includes('undefined') && !description.includes('null'), `${label}: no leaked undefined/null`);
+    expect(!description.includes('{') && !description.includes('}'), `${label}: no JSON braces leak`);
+  }
+  pass('dotted/over-long file-controlled names keep descriptions bounded and clean');
+}
+
 if (failures > 0) {
   console.error(`\n${failures} cad file inspector smoke failure(s)`);
   process.exit(1);

@@ -61,6 +61,26 @@ assert(photoshopPrompt.includes('Firefly'));
 assert(photoshopPrompt.includes('agent.build_app_capability'));
 assert(!photoshopPrompt.includes('/Users/'), 'creative AI prompt does not leak local paths');
 
+// ── HUNT invariant pin: creative-AI plan/prompt echoes taxonomy only — never a
+// concrete local path, private folder, file name, or secret-shaped token.
+{
+  const sensitiveTask = 'In Photoshop open /Users/chris/Clients/acmeCorp/hero.psd and use Firefly to generate four background variations (api_key sk-ant-secret-TOKEN-123), then export a PNG proof.';
+  const sensitivePlanBlock = buildDesignAppCreativeAiPromptBlock(sensitiveTask) || '';
+  const sensitiveRecipeBlock = buildDesignAppCreativeAiRecipePromptBlock(sensitiveTask) || '';
+  const sensitivePlanJson = JSON.stringify(buildDesignAppCreativeAiPlan(sensitiveTask) || {});
+  for (const [label, haystack] of [
+    ['plan prompt', sensitivePlanBlock],
+    ['recipe prompt', sensitiveRecipeBlock],
+    ['plan metadata', sensitivePlanJson],
+  ] as const) {
+    assert(!haystack.includes('/Users/'), `secret hygiene: creative-AI ${label} does not echo the local path`);
+    assert(!haystack.includes('acmeCorp'), `secret hygiene: creative-AI ${label} does not echo the private folder`);
+    assert(!haystack.includes('hero.psd'), `secret hygiene: creative-AI ${label} does not echo the file name`);
+    assert(!haystack.includes('sk-ant-'), `secret hygiene: creative-AI ${label} does not echo the secret-shaped token`);
+    assert(!/api_key/i.test(haystack), `secret hygiene: creative-AI ${label} does not echo credential wording`);
+  }
+}
+
 const indesignTextToImageTask = 'Open this InDesign banner and use Text to Image to generate a futuristic city hero image for the empty frame, then export a proof PDF.';
 const indesignCreative = buildDesignAppCreativeAiPlan(indesignTextToImageTask);
 const indesignRecipes = buildDesignAppCreativeAiRecipePlan(indesignTextToImageTask);

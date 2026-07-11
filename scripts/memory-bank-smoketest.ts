@@ -120,6 +120,36 @@ assertEqual(
   'parser: bogus subcommand → unknown',
 );
 
+// ─── Degenerate parser inputs never throw ──────────────────────────────────
+for (const bad of [null, undefined, 42, {}, [], '/memory-bank    \t  ', '/MB', '/Memory-Bank UPDATE Brief hi']) {
+  try {
+    parseMemoryBankCommand(bad as any);
+    pass(`parser: degenerate input ${JSON.stringify(bad)} did not throw`);
+  } catch (e) {
+    fail(`parser: degenerate input ${JSON.stringify(bad)} threw: ${(e as Error).message}`);
+  }
+}
+
+// ─── Doc-size bound (mirror of handleWrite's MEMORY_BANK_DOC_MAX_CHARS gate) ──
+// LOCKSTEP with src/lib/memoryBankChatCommands.ts: circle_memory.content has
+// no service-layer cap, so handleWrite refuses (does not truncate) a write
+// whose resulting doc would exceed the ceiling. If the constant changes there,
+// change it here.
+const MEMORY_BANK_DOC_MAX_CHARS = 16_000;
+{
+  // Mirror of the append composition (`prev + '\n\n' + addition`) + the gate.
+  const wouldRefuse = (prev: string, addition: string, mode: 'replace' | 'append'): boolean => {
+    const next = mode === 'replace' ? addition : (prev ? prev + '\n\n' + addition : addition);
+    return next.length > MEMORY_BANK_DOC_MAX_CHARS;
+  };
+  assertEqual(wouldRefuse('', 'x'.repeat(100), 'replace'), false, 'bound: small replace allowed');
+  assertEqual(wouldRefuse('', 'x'.repeat(MEMORY_BANK_DOC_MAX_CHARS), 'replace'), false, 'bound: replace exactly at cap allowed');
+  assertEqual(wouldRefuse('', 'x'.repeat(MEMORY_BANK_DOC_MAX_CHARS + 1), 'replace'), true, 'bound: replace over cap refused');
+  // Append: a doc just under the cap + a small addition tips over (incl. separator).
+  assertEqual(wouldRefuse('y'.repeat(MEMORY_BANK_DOC_MAX_CHARS - 1), 'zz', 'append'), true, 'bound: append that overflows is refused (not silently truncated)');
+  assertEqual(wouldRefuse('y'.repeat(100), 'zz', 'append'), false, 'bound: small append allowed');
+}
+
 if (failures > 0) {
   console.error(`\n${failures} memory-bank smoke-test failure(s)`);
   process.exit(1);

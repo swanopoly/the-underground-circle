@@ -274,7 +274,14 @@ function stableValue(value: unknown): unknown {
 }
 
 function buildApprovalKey(tool: string, args: Record<string, unknown>): string {
-  return JSON.stringify({ version: 1, tool, args: stableValue(args || {}) });
+  // Must byte-match the client's buildOpenSwanToolApprovalKey
+  // (src/lib/openswanToolApprovals.ts), which is stableApprovalJson({version,
+  // tool, args}) — i.e. stableValue is applied to the WHOLE wrapper so the
+  // top-level keys are sorted too ({args, tool, version}). Sorting only `args`
+  // while leaving the literal wrapper in insertion order ({version, tool, args})
+  // produced a different string, so the persisted approval key never matched and
+  // EVERY approved post was rejected. Sort the whole object.
+  return JSON.stringify(stableValue({ version: 1, tool, args: args || {} }));
 }
 
 async function requireApprovedToolCall(

@@ -243,6 +243,36 @@ function json(value: unknown): string {
   assert('unknown provider falls back to slack shape', Array.isArray(unknown.blocks));
 }
 
+// ── 9. Approval-key parity contract (edge ⇄ client) ──────────────────────────
+// The messaging-notify + custom-api-proxy edges verify a stored approval by
+// recomputing buildApprovalKey(tool, args) and string-comparing it to the
+// client's persisted toolApprovalKey. If the serializations diverge, the match
+// ALWAYS fails and every approved post/write is rejected server-side. This pins
+// the exact string the edge must produce against the canonical client builder.
+{
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const {
+    buildOpenSwanToolApprovalKey,
+    stableApprovalJson,
+  } = require('../src/lib/openswanToolApprovals') as typeof import('../src/lib/openswanToolApprovals');
+
+  const tool = 'messaging.notify';
+  // Insertion order deliberately "wrong" so key-sorting actually matters.
+  const args = { provider: 'slack', title: 'Deploy', body: 'shipped', fields: [{ value: 'v', label: 'k' }] };
+
+  const clientKey = buildOpenSwanToolApprovalKey(tool, args);
+
+  // FIXED edge formula (what buildApprovalKey now does): stableValue the whole
+  // { version, tool, args } wrapper → top-level keys sorted too.
+  const fixedEdgeKey = stableApprovalJson({ version: 1, tool, args });
+  assert('edge fixed key === client canonical key', fixedEdgeKey === clientKey);
+
+  // OLD buggy edge formula: sort only args, leave the literal wrapper in
+  // insertion order. This MUST differ — the pin fails if anyone reverts.
+  const buggyEdgeKey = JSON.stringify({ version: 1, tool, args: JSON.parse(stableApprovalJson(args)) });
+  assert('old buggy edge key differed from client (regression guard)', buggyEdgeKey !== clientKey);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // eslint-disable-next-line no-console
 console.log(`\nmessaging-notify smoke: ${passed} passed, ${failed} failed`);

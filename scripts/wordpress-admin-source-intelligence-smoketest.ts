@@ -140,6 +140,50 @@ assert(!serialized.includes('SHOULD_NOT_LEAK'), 'redacts API keys/nonces from pa
 assert(!serialized.includes('EMAIL_SHOULD_NOT_LEAK'), 'redacts email protection payloads');
 assert(!serialized.includes('ROW_NONCE_SHOULD_NOT_LEAK'), 'redacts row action nonce values');
 
+// ── ReDoS guard (untrusted source must parse in bounded time) ──────────────
+// A long run of word characters in a single field (title/cell/heading/label)
+// previously drove the redaction email regex into O(n^2) catastrophic
+// backtracking (10-30s per parse). Each of these reachable paths must stay well
+// under a generous time budget regardless of the adjacent-word-char run length.
+const REDOS_BUDGET_MS = 1_000;
+const redosPaths: Array<[string, string]> = [
+  ['long date cell', '<body class="wp-admin"><table><tbody id="the-list"><tr id="post-1"><td class="title column-title"><a class="row-title" href="x">t</a></td><td class="date column-date">' + 'z'.repeat(200_000) + '</td></tr></tbody></table>'],
+  ['long h1 heading', '<body class="wp-admin"><h1>' + 'z'.repeat(200_000) + '</h1></body>'],
+  ['long menu label', '<body class="wp-admin"><ul id="adminmenu"><li><a href="edit.php?post_type=x">' + 'z'.repeat(200_000) + '</a></li></ul>'],
+  ['long base64-ish title', '<body class="wp-admin"><table><tbody id="the-list"><tr id="post-1"><td class="title column-title"><a class="row-title" href="x">' + 'ABCDabcd0123'.repeat(20_000) + '</a></td></tr></tbody></table>'],
+];
+for (const [label, redosHtml] of redosPaths) {
+  const startedAt = Date.now();
+  extractWordPressAdminSourceIntelligence(redosHtml);
+  const elapsed = Date.now() - startedAt;
+  assert(elapsed < REDOS_BUDGET_MS, `parses untrusted "${label}" in bounded time (ReDoS-safe)`, `${elapsed}ms`);
+}
+
+// Redaction of a genuine email must still work after bounding the email regex.
+const emailIntel = extractWordPressAdminSourceIntelligence('<body class="wp-admin"><h1>Contact john.doe@example.com now</h1></body>');
+assert(!JSON.stringify(emailIntel).includes('john.doe@example.com'), 'still redacts a real email address');
+
+// ── Bounds: an explicit 0 cap must mean "extract none", not fall to default ──
+let capFixtureMenu = '<body class="wp-admin"><ul id="adminmenu">';
+for (let index = 0; index < 200; index += 1) capFixtureMenu += `<a href="edit.php?post_type=t${index}">Item ${index}</a>`;
+capFixtureMenu += '</ul>';
+let capFixtureRows = '<table><tbody id="the-list">';
+for (let index = 1; index <= 200; index += 1) capFixtureRows += `<tr id="post-${index}" class="status-publish"><td class="title column-title"><strong><a class="row-title" href="post.php?post=${index}&action=edit">Row ${index}</a></strong></td></tr>`;
+capFixtureRows += '</tbody></table>';
+const capFixture = `<!doctype html><html><body class="wp-admin">${capFixtureMenu}${capFixtureRows}</body></html>`;
+
+const zeroCaps = extractWordPressAdminSourceIntelligence(capFixture, { maxMenuItems: 0, maxRows: 0 });
+assert(zeroCaps.menuItems.length === 0, 'maxMenuItems:0 extracts zero menu items (honors explicit 0)', String(zeroCaps.menuItems.length));
+assert(zeroCaps.rows.length === 0, 'maxRows:0 extracts zero rows (honors explicit 0)', String(zeroCaps.rows.length));
+
+const smallCaps = extractWordPressAdminSourceIntelligence(capFixture, { maxMenuItems: 3, maxRows: 5 });
+assert(smallCaps.menuItems.length <= 3, 'maxMenuItems caps menu items', String(smallCaps.menuItems.length));
+assert(smallCaps.rows.length <= 5, 'maxRows caps rows', String(smallCaps.rows.length));
+
+const defaultCaps = extractWordPressAdminSourceIntelligence(capFixture);
+assert(defaultCaps.menuItems.length <= 120, 'default menu cap still applies', String(defaultCaps.menuItems.length));
+assert(defaultCaps.rows.length <= 25, 'default row cap still applies', String(defaultCaps.rows.length));
+
 function readRepoFile(path: string): string {
   return readFileSync(path, 'utf8');
 }

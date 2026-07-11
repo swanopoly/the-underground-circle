@@ -392,4 +392,43 @@ assert(
   'notice shape holds for oversized ids',
 );
 
+// ─── Bounded + secret-safe persisted metadata (handoff is the persist boundary) ─
+// grounding/preflight summaries are untrusted app-observation text. They (and
+// approval/grant summaries, warnings, task label) MUST be bounded before they
+// land in persisted chat metadata — no verbatim 50KB blobs, no secret pass-through.
+{
+  const secret = 'sk-ant-SECRETKEY1234567890 password=hunter2 Bearer ey.JWT.token';
+  const big = 'X'.repeat(50_000);
+  const boundedCtx = buildChatComputerHandoffContext({
+    task: 'do a thing',
+    entrypoint: 'browser_runtime',
+    adapterId: 'browser_adapter',
+    taskKind: 'browser_task',
+    taskLabel: `label ${big}`,
+    groundingSummary: `grounding ${secret} ${big}`,
+    preflightSummary: `preflight ${secret} ${big}`,
+    approvalSummary: `approval ${secret} ${big}`,
+    grantSummary: `grant ${secret} ${big}`,
+    warnings: [`warn ${big}`],
+    rawWarnings: [`raw ${big}`],
+    blockers: [`blocker ${big}`],
+  });
+  const meta = boundedCtx.metadata;
+  assert((meta.groundingSummary || '').length <= 600, 'grounding summary is bounded in metadata');
+  assert((meta.preflightSummary || '').length <= 600, 'preflight summary is bounded in metadata');
+  assert((meta.approvalSummary || '').length <= 240, 'approval summary is bounded in metadata');
+  assert((meta.grantSummary || '').length <= 240, 'grant summary is bounded in metadata');
+  assert((meta.taskLabel || '').length <= 240, 'task label is bounded in metadata');
+  assert(meta.warnings.every((w) => w.length <= 240), 'each warning item is bounded');
+  assert((meta.rawWarnings || []).every((w) => w.length <= 240), 'each rawWarnings item is bounded');
+  assert(meta.blockers.every((b) => b.length <= 240), 'each blocker item is bounded');
+  // Whole persisted metadata stays compact even under an adversarial 50KB input.
+  assert(JSON.stringify(meta).length < 20_000, 'persisted handoff metadata stays bounded overall');
+  // The oversized blob is truncated (its 10k+ tail never survives verbatim).
+  assert(!JSON.stringify(meta).includes('X'.repeat(10_000)), 'no verbatim oversized blob survives into metadata');
+  // Debug chatLines (the only verbose visible view) are bounded too.
+  assert(boundedCtx.chatLines.every((line) => line.length <= 400), 'debug chatLines stay bounded');
+  console.log('pass: handoff metadata bounds untrusted summaries/warnings and stays compact');
+}
+
 console.log('All chat computer handoff context smoke cases passed.');

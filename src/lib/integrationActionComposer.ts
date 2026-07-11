@@ -477,8 +477,17 @@ function sanitizeQuery(
  * is told not to add auth, but never forward it if it does). Returns the
  * cleaned value; non-plain values pass through untouched.
  */
+const MAX_STRIP_DEPTH = 12;
+
 function stripSecretsDeep(value: unknown, depth = 0): unknown {
-  if (depth > 8) return value;
+  // FAIL CLOSED at the depth cap: a container below the limit is never walked,
+  // so returning it verbatim would let a secret-shaped key nested past the cap
+  // survive into the proposal body (→ approval preview / persisted chat
+  // metadata). Drop the untraversable subtree instead. Scalars are safe to keep
+  // (a bare value carries no key to strip); a dropped object becomes null.
+  if (depth > MAX_STRIP_DEPTH) {
+    return value && typeof value === 'object' ? null : value;
+  }
   if (Array.isArray(value)) return value.map((v) => stripSecretsDeep(v, depth + 1));
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};

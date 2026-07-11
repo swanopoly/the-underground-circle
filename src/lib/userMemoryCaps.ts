@@ -64,6 +64,41 @@ export function checkUserMemoryCap(
   };
 }
 
+export const USER_MEMORY_CREDENTIAL_ERROR = 'memory_credential_blocked';
+
+// Credential noun + assignment. Derived from `looksLikeCredentialMemoryContent`
+// in `conversationalRouter.ts` (which guards only the /remember conversational
+// path). Kept here — pure + dependency-free — so the raw `appendUserMemory` /
+// `replaceUserMemory` writers (tool + UI + /memory-bank flows) can fail closed
+// too, and so it stays smoke-testable.
+//
+// This copy is intentionally a SUPERSET of the router's: it closes two under-
+// block gaps that leak secrets on the raw-writer path (the router should adopt
+// them — see audit report):
+//   1. underscore noun forms: `api[-_\s]?key` / `access[-_\s]?key` catch
+//      `API_KEY = …` (the router's `[-\s]?` missed the underscore);
+//   2. spaced assignment: `[:=]` may be surrounded by spaces, so `token = ghp…`
+//      is caught (the router's `\b(?:…|=|:)` required the operator to be
+//      glued to a word char).
+// Neither regex uses nested/overlapping quantifiers (single `\S{4,}` run), so
+// both are linear / ReDoS-safe on adversarial input.
+const CREDENTIAL_NOUN_RE = /\b(?:password|passcode|passphrase|api[-_\s]?key|access[-_\s]?key|secret|token|private\s+key|seed\s+phrase|recovery\s+(?:code|phrase)|pin\s+(?:code|number)?)\b/i;
+// `is`/`was` need a following word boundary; `:`/`=` (optionally space-wrapped)
+// do not. Two alternatives keep each branch backtracking-free.
+const CREDENTIAL_ASSIGN_RE = /(?:\b(?:is|was)\s+\S{4,}|\s*[:=]\s*\S{4,})/i;
+const CREDENTIAL_BARE_RE = /\b(?:password|passcode|pin)\b\s+\S{4,}/i;
+
+/**
+ * True when `content` looks like a stored secret (a credential noun plus an
+ * assigned value). Pure; never throws. Callers refuse the write and point at
+ * the vault instead of persisting — secrets must never live in memory.
+ */
+export function looksLikeCredentialMemoryContent(content: string): boolean {
+  const text = String(content || '');
+  if (!CREDENTIAL_NOUN_RE.test(text)) return false;
+  return CREDENTIAL_ASSIGN_RE.test(text) || CREDENTIAL_BARE_RE.test(text);
+}
+
 /** One-line summary suitable for the system prompt's memory block. */
 export function describeUserMemoryUsage(currentContent: string): string {
   const current = (currentContent || '').length;

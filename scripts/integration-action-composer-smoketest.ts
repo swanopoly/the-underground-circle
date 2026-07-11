@@ -293,6 +293,28 @@ function main(): void {
     assertEqual(secretQuery.proposal.query?.active, true, '(3) scalar query boolean kept');
   }
 
+  // secret nested DEEPER than the strip recursion cap → must NOT survive.
+  // Regression pin: stripSecretsDeep used to `return value` at the depth limit,
+  // forwarding an un-scrubbed subtree (→ persisted metadata / approval preview).
+  // The fix fails closed by dropping the untraversable subtree.
+  {
+    let inner: unknown = { authorization: 'Bearer DEEP_SECRET_LEAK', api_key: 'sk-deep-leak-0001' };
+    for (let i = 0; i < 15; i += 1) inner = { level: inner };
+    const deep = parseIntegrationActionProposal(
+      JSON.stringify({ method: 'POST', path: '/x', body: inner, summary: 'x' }),
+      { allowedMethods: allowed },
+    );
+    assert(deep.ok, '(3) deeply-nested body still parses');
+    if (deep.ok) {
+      const serialized = JSON.stringify(deep.proposal);
+      assert(
+        !/DEEP_SECRET_LEAK|sk-deep-leak/.test(serialized),
+        '(3) secret nested past the strip cap does NOT survive (fail-closed)',
+        serialized.slice(0, 120),
+      );
+    }
+  }
+
   // unparseable → error
   const garbage = parseIntegrationActionProposal('I refuse to output JSON, sorry.', { allowedMethods: allowed });
   assert(!garbage.ok, '(3) no JSON in reply → error');
