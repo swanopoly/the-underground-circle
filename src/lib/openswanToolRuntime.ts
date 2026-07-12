@@ -59,6 +59,7 @@ import {
   type MessagingField,
   type MessagingProvider,
 } from './messagingNotify';
+import { sanitizeErrorForModel } from './errorSanitizer';
 
 export type OpenSwanToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
 export type OpenSwanRuntimeToolName =
@@ -5667,7 +5668,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const r = await openUrl(String(a.url || ''), { timeoutMs: a.timeoutMs, waitUntil: a.waitUntil, taskContext: a.taskContext });
         if (!r.ok) return browserToolFailureResult(r, 'Browser navigation failed.') as any;
         return { ok: true, resultsText: `Opened ${r.data?.url || a.url}${r.data?.title ? ` — ${r.data.title}` : ''}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'browser.dom_snapshot': {
       try {
@@ -5685,7 +5686,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           ok: true,
           resultsText: `Browser DOM snapshot for ${r.data.title || r.data.url} (${r.data.nodeCount} nodes):\n${fenceUntrustedObservationText(text.slice(0, charCap))}${overflow > 0 ? `\n${truncationMarker(overflow)}` : ''}`,
         } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'browser.wp_admin_source_intelligence': {
       try {
@@ -5739,7 +5740,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             truncation,
           ].filter(Boolean).join('\n'),
         } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'browser.verification_state': {
       try {
@@ -5753,7 +5754,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           } as any;
         }
         return { ok: true, resultsText: `No browser bot verification detected on ${r.data.title || r.data.url || 'current page'}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'browser.click_role': {
       try {
@@ -5766,7 +5767,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const r = await clickRole(a);
         if (!r.ok) return browserToolFailureResult(r, 'Browser click failed.') as any;
         return { ok: true, resultsText: `Clicked browser ${a.role}${a.name ? ` "${a.name}"` : a.selector ? ` selector ${a.selector}` : ''}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'browser.fill_field': {
       try {
@@ -5779,7 +5780,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const r = await fillField({ ...a, role: a.role || 'textbox' });
         if (!r.ok) return browserToolFailureResult(r, 'Browser fill failed.') as any;
         return { ok: true, resultsText: `Filled browser field${a.name ? ` "${a.name}"` : a.selector ? ` ${a.selector}` : ''} (${a.text.length} chars${a.submit ? ', submitted' : ''}).` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'browser.fill_credential_field': {
       try {
@@ -5839,7 +5840,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           ok: true,
           resultsText: `Filled saved ${resolvedField} field for "${item}" without returning the secret to the model${a.submit ? ' and submitted the field' : ''}.`,
         } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'browser.select_option': {
       try {
@@ -5852,7 +5853,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const r = await selectOption({ ...a, role: a.role || 'combobox' });
         if (!r.ok) return browserToolFailureResult(r, 'Browser select failed.') as any;
         return { ok: true, resultsText: `Selected browser option "${a.value}"${a.name ? ` in "${a.name}"` : a.selector ? ` in ${a.selector}` : ''}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'browser.upload_file': {
       try {
@@ -5872,7 +5873,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           ok: true,
           resultsText: `Uploaded ${r.data.fileName} (${r.data.sizeBytes} bytes) through browser ${r.data.method || 'file input'}.`,
         } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'browser.press_key': {
       try {
@@ -5885,7 +5886,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const r = await pressKey(String(a.combo || ''), { taskContext: a.taskContext });
         if (!r.ok) return browserToolFailureResult(r, 'Browser key press failed.') as any;
         return { ok: true, resultsText: `Pressed browser key ${r.data?.combo || a.combo}.` } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'browser.screenshot': {
       try {
@@ -5900,7 +5901,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           mimeType: r.data.mimeType,
           sizeBytes: r.data.sizeBytes,
         } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'browser.close': {
       try {
@@ -5908,7 +5909,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const r = await closeBrowser();
         if (!r.ok) return browserToolFailureResult(r, 'Browser close failed.') as any;
         return { ok: true, resultsText: 'Closed local browser context.' } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }
     case 'fetch_url': {
       const url = String((args as FetchUrlArgs).url || '');
@@ -6070,7 +6071,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           .limit(limit);
         if (a.eventType) q = q.eq('event_type', a.eventType);
         const { data, error } = await q;
-        if (error) return { ok: false, resultsText: `circle_github_events query failed: ${error.message}` } as any;
+        if (error) return { ok: false, resultsText: sanitizeErrorForModel(error, { context: 'GitHub activity query' }) } as any;
         const rows = (data || []) as Array<{ event_type: string; payload: Record<string, any> | null; created_at: string }>;
         if (rows.length === 0) return { ok: true, resultsText: `No GitHub activity in the last ${windowHours}h.` } as any;
         const lines = rows.map((ev) => {
@@ -6135,7 +6136,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           .select('id, title, description, status, priority, assigned_to, due_date, created_at, room_id, goal_id')
           .eq('id', (args as any).taskId)
           .single();
-        if (error) return { ok: false, resultsText: error.message } as any;
+        if (error) return { ok: false, resultsText: sanitizeErrorForModel(error, { context: 'tasks.get' }) } as any;
         if (!data) return { ok: false, resultsText: 'Task not found.' } as any;
         const lines = [
           `Task: ${data.title}`,
@@ -6162,7 +6163,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           created_by: context.userId,
           status: 'todo',
         }).select('id, title').single();
-        if (error) return { ok: false, resultsText: error.message } as any;
+        if (error) return { ok: false, resultsText: sanitizeErrorForModel(error, { context: 'tasks.create' }) } as any;
         return { ok: true, resultsText: `Created task "${data.title}" (id: ${data.id.slice(0, 8)})` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
@@ -6174,7 +6175,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const update: Record<string, unknown> = { status: normalizedStatus, updated_at: new Date().toISOString() };
         if (normalizedStatus === 'done') update.completed_at = new Date().toISOString();
         const { error } = await supabase.from('tasks').update(update).eq('id', a.taskId);
-        if (error) return { ok: false, resultsText: error.message } as any;
+        if (error) return { ok: false, resultsText: sanitizeErrorForModel(error, { context: 'tasks.update_status' }) } as any;
         return { ok: true, resultsText: `Task ${a.taskId.slice(0, 8)} moved to ${normalizedStatus}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
@@ -6185,7 +6186,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           .from('tasks')
           .update({ assigned_to: a.assigneeId, updated_at: new Date().toISOString() })
           .eq('id', a.taskId);
-        if (error) return { ok: false, resultsText: error.message } as any;
+        if (error) return { ok: false, resultsText: sanitizeErrorForModel(error, { context: 'tasks.assign' }) } as any;
         return { ok: true, resultsText: `Task ${String(a.taskId).slice(0, 8)} assigned to ${a.assigneeId}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
@@ -6203,7 +6204,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           delete insert.task_run_id;
           result = await supabase.from('task_comments').insert(insert);
         }
-        if (result.error) return { ok: false, resultsText: result.error.message } as any;
+        if (result.error) return { ok: false, resultsText: sanitizeErrorForModel(result.error, { context: 'tasks.comment' }) } as any;
         return { ok: true, resultsText: `Added comment to task ${String(a.taskId).slice(0, 8)}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
@@ -6222,7 +6223,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           a.filePath,
           a.metadata,
         );
-        if (error) return { ok: false, resultsText: error.message || String(error) } as any;
+        if (error) return { ok: false, resultsText: sanitizeErrorForModel(error, { context: 'tasks.add_artifact' }) } as any;
         return { ok: true, resultsText: `Attached artifact "${a.label}" to task run ${String(a.runId).slice(0, 8)}.` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
@@ -6446,7 +6447,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             `${skill.tags?.length ? ` [${skill.tags.join(', ')}]` : ''}\n` +
             `<skill_body name="${skill.name}" version="${skill.version}">\n${skill.content}\n</skill_body>`,
         } as any;
-      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+      } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'skills.view' }) } as any; }
     }
     case 'skills.manage': {
       try {

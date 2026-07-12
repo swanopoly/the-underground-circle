@@ -19,10 +19,7 @@
 
 import type { Session, User } from '@supabase/supabase-js';
 import { supabase } from './supabase';
-
-// Refresh if the token has ≤60s left. Tokens default to a 1h lifetime so this
-// still leaves plenty of headroom on the common path.
-const REFRESH_THRESHOLD_SECONDS = 60;
+import { shouldRefreshAccessToken } from './authSessionRefreshPolicy';
 
 export async function getFreshAccessToken(): Promise<string | null> {
   try {
@@ -30,25 +27,40 @@ export async function getFreshAccessToken(): Promise<string | null> {
     const session = data.session;
     if (!session?.access_token) return null;
 
-    const expiresAt = session.expires_at ?? 0; // unix seconds
     const nowSec = Math.floor(Date.now() / 1000);
-    const secondsLeft = expiresAt - nowSec;
 
-    // Token still comfortably valid — use it as-is.
-    if (secondsLeft > REFRESH_THRESHOLD_SECONDS) {
+    // Token still comfortably valid — use it as-is. (Decision is pure/testable
+    // in ./authSessionRefreshPolicy.)
+    if (!shouldRefreshAccessToken(session.expires_at, nowSec)) {
       return session.access_token;
     }
 
     // Close to (or past) expiry: force a refresh so the next request lands
     // with a fresh JWT instead of getting rejected with 401.
-    const { data: refreshed, error } = await supabase.auth.refreshSession();
-    if (error || !refreshed.session?.access_token) {
-      // Refresh failed (offline, invalid refresh token, etc). Fall back to the
-      // stale token — the edge function will still 401, but that 401 is
-      // useful signal for the caller to surface.
+    //
+    // refreshSession() can *throw* (AbortError on a backgrounded tab, no-op
+    // web-lock collision) exactly like the getSession/getUser calls this file
+    // documents. If we let that throw hit the outer catch we'd return null and
+    // discard the still-usable stale token below. Contain it here so a thrown
+    // refresh degrades to the same "fall back to the stale token" path as an
+    // error result, rather than nuking the caller's session on a transient
+    // hiccup.
+    let refreshedToken: string | null = null;
+    try {
+      const { data: refreshed, error } = await supabase.auth.refreshSession();
+      if (!error) refreshedToken = refreshed.session?.access_token ?? null;
+    } catch {
+      refreshedToken = null;
+    }
+    if (!refreshedToken) {
+      // Refresh failed or threw (offline, invalid refresh token, backgrounded
+      // tab, etc). Fall back to the stale token — the edge function will still
+      // 401, but that 401 is useful signal for the caller to surface, and a
+      // near-expiry token is still better than forcing a null/logout on a
+      // transient refresh hiccup.
       return session.access_token;
     }
-    return refreshed.session.access_token;
+    return refreshedToken;
   } catch {
     return null;
   }

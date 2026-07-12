@@ -13,6 +13,7 @@ import {
   buildProofOriginDetail,
   extractProofOriginThreadId,
 } from './chatProofReceipts';
+import { assessMissionTaskCompletion } from './missionTaskCompletion';
 import { persistChatMessage } from './chatService';
 
 interface DispatchResult {
@@ -93,12 +94,15 @@ export async function dispatchTaskToAgent(opts: {
       },
     });
     const responseText = structured.response;
-    const completed = shouldMarkMissionTaskComplete({
+    // Proof-before-done: only a run with positive evidence of completion (and no
+    // failure / partial / blocker / empty signal) flips the task to `done`.
+    const completion = assessMissionTaskCompletion({
       response: responseText,
       artifacts: structured.artifacts || [],
       verificationResults: structured.verificationResults || [],
       toolEvents: structured.toolEvents || [],
     });
+    const completed = completion.completed;
 
     await updateMissionTask(taskId, { status: completed ? 'done' : 'in_progress' });
 
@@ -118,6 +122,10 @@ export async function dispatchTaskToAgent(opts: {
         completed,
         task_kind: structured.taskPlan.kind,
         profile: structured.taskPlan.profile,
+        // Why the task was (or was not) marked done — the accountability record
+        // should show a "not done" reason (partial run, blocker, empty reply),
+        // not just silently leave the task in_progress.
+        ...(completed ? {} : { incomplete_reason: completion.reason || 'not_completed' }),
         artifact_count: structured.artifacts?.length || 0,
         artifacts: summarizeArtifacts(structured.artifacts || []),
         verification: summarizeVerification(structured.verificationResults || []),
@@ -186,35 +194,31 @@ async function findMissionOriginThreadId(missionId: string): Promise<string | nu
   return null;
 }
 
+// Bounds so an arbitrarily long mission/task/description (all free-text columns)
+// can't balloon the model prompt. Generous enough for real briefs; a truncated
+// tail is marked with an ellipsis.
+const MAX_TITLE_CHARS = 200;
+const MAX_DETAIL_CHARS = 4000;
+
+function clampPromptField(value: string | null | undefined, max: number): string {
+  const text = String(value || '').trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}…`;
+}
+
 function buildTaskPrompt(taskTitle: string, taskDescription: string | undefined, missionTitle: string): string {
-  let prompt = `You have been assigned a task from mission "${missionTitle}".\n\n`;
-  prompt += `**Task:** ${taskTitle}\n`;
-  if (taskDescription) {
-    prompt += `**Details:** ${taskDescription}\n`;
+  const mission = clampPromptField(missionTitle, MAX_TITLE_CHARS);
+  const task = clampPromptField(taskTitle, MAX_TITLE_CHARS);
+  const details = clampPromptField(taskDescription, MAX_DETAIL_CHARS);
+  let prompt = `You have been assigned a task from mission "${mission}".\n\n`;
+  prompt += `**Task:** ${task}\n`;
+  if (details) {
+    prompt += `**Details:** ${details}\n`;
   }
   prompt += '\nWork like OpenSwan running a tracked mission task.';
   prompt += '\nPrefer concrete deliverables, structured artifacts, and explicit blockers over vague summaries.';
   prompt += '\nIf the task needs follow-up, missing context, approval, or external access, say that directly.';
   return prompt;
-}
-
-function shouldMarkMissionTaskComplete(opts: {
-  response: string;
-  artifacts: SwanBotStructuredArtifact[];
-  verificationResults: OpenSwanVerificationResult[];
-  toolEvents: OpenSwanToolEvent[];
-}): boolean {
-  const failedTools = opts.toolEvents.some((event) => event.status === 'failed' || event.status === 'blocked' || event.status === 'manual_required');
-  if (failedTools) return false;
-
-  const failedVerification = opts.verificationResults.some((result) => !result.ok || result.status === 'manual_required' || result.status === 'blocked');
-  if (failedVerification) return false;
-
-  if (/\b(need more information|need more info|need access|need approval|waiting on|blocked|cannot complete|can't complete|missing context|please provide)\b/i.test(opts.response)) {
-    return false;
-  }
-
-  return true;
 }
 
 function summarizeArtifacts(artifacts: SwanBotStructuredArtifact[]): Array<{ kind: string; title: string }> {

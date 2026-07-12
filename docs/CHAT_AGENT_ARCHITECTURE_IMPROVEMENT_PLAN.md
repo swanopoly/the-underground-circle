@@ -8,6 +8,48 @@
 
 ## Shipped from this plan
 
+- **P67 — six-agent unswept-surface + A8 security sweep (2026-07-11)** ✅ —
+  disjoint wave over surfaces the prior arcs hadn't touched. NOTE: the account
+  hit a session rate limit mid-wave, so 4 of 6 agents died on their FINAL call
+  (no self-report), but they'd already made their edits — I verified the
+  combined tree myself (app typecheck 0 + 43/43 functions + all new/affected
+  smokes green) and cleaned up one dead-agent artifact rather than trusting
+  unreported work. Landed:
+  **(A1 · A8 security)** new `errorSanitizer.ts` (`sanitizeErrorForModel` —
+  bounded, secret-strip, DB/schema-leak strip, preserves the error CLASS so it
+  stays fail-visible) applied at 21 raw-`error.message`→model sites in
+  openswanToolRuntime (browser catches, GitHub query, skills.view); BlueBubbles
+  password kept in the query param (the server's REST API only accepts query
+  auth — moving it would break the integration) but a new `redactBbUrl` scrubs
+  it from every surfaced error. **(A2 · accountability)** new
+  `missionTaskCompletion.ts` (`assessMissionTaskCompletion` /
+  `shouldMarkMissionTaskComplete` — proof-before-done for the mission loop).
+  **(A3 · rooms)** `roomMessageMetadata.ts` now bounds + secret-scrubs agent
+  tool traces persisted into `room_messages.metadata` (the P66 unbounded-
+  verbatim class — dropped raw tool `input`/`result`). **(A4 · billing)** new
+  pure `budgetMath.ts` (`calculateBudgetAlerts`/`checkHardLimit`/recommendations
+  — money math extracted + testable); budgetAlerts wired to it. **(A5 · auth)**
+  hardened `authSession.ts` (a `refreshSession()` throw no longer discards the
+  still-usable stale token — the documented fallback now actually fires) + new
+  pure `authSessionRefreshPolicy.ts`. **(A6 · marketplace)** inline secret-strip
+  (SECRETISH_KEY_RE) + `sanitizeUntrustedForModel` fence + bounded fields on the
+  model-visible integration-context block. New smokes: error-sanitizer,
+  mission-task-completion, room-message-metadata-bounds, budget-alerts,
+  model-pricing, auth-session (I registered A4's two orphaned smokes it died
+  before wiring). Cleanup: deleted A6's orphaned half-refactor
+  `marketplaceIntegrationContextFormat.ts` (imported by nobody; the live secret-
+  strip is the inline path in marketplaceIntegrationContext.ts, smoke-covered).
+
+  **P67 follow-up backlog (from A5's audit, deferred):** many direct
+  `supabase.auth.getUser/getSession` calls WITHOUT `.catch` and not via the
+  `authSession` helpers — hot-path ones to fix first: `buildStream.ts:43`,
+  `heliusTrading.ts:932/1036`, `researchKnowledge.ts:328`, `governance.ts:19/110/180`,
+  `agentAutoConnect.ts:499`, `reporting.ts:21`, `oauthConnect.ts` (×4). Plus
+  A3's reported rooms schema notes (`room_messages` has no user UPDATE policy
+  yet client code `.update()`s it; `project_rooms` RLS uses the recursion-prone
+  inline subquery instead of `get_my_circle_ids()`; `circle_rooms`↔`project_rooms`
+  FK reconciliation).
+
 - **P66 — eight-agent breadth sweep across the whole surface (2026-07-10)** ✅ —
   disjoint-territory review+fix pass (7 editing agents + 1 read-only security
   audit; none touched ChatTab / openswanToolRuntime / swanbot / agentExecutionCore
