@@ -1033,7 +1033,7 @@ async function invokeTradingBotWallet<T>(body: Record<string, any>): Promise<T> 
     tradingBotSessionInvalid = true;
     throw new Error(invalidSessionMessage);
   }
-  const { data: sessionData } = await supabase.auth.getSession();
+  const { data: sessionData } = await supabase.auth.getSession().catch(() => ({ data: { session: null } }));
   const token = sessionData.session?.access_token;
 
   try {
@@ -1663,7 +1663,7 @@ export async function executeFeaturedTrade(tradeId: string, txHash: string, inpu
     .from('featured_trade_executions')
     .insert({
       featured_trade_id: tradeId,
-      user_id: (await supabase.auth.getUser()).data.user?.id,
+      user_id: (await supabase.auth.getUser().catch(() => ({ data: { user: null } }))).data.user?.id,
       tx_hash: txHash,
       input_amount: inputAmount,
       output_amount: outputAmount,

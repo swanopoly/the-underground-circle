@@ -4,7 +4,7 @@
 //   const result = await openOAuthPopup('google', 'calendar,email', session.access_token);
 //   if (result.success) { /* connected! */ }
 
-import { supabase } from './supabase';
+import { safeGetSession } from './authSession';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
@@ -95,7 +95,7 @@ export function openOAuthPopup(
 export async function checkOAuthStatus(
   provider: OAuthProvider
 ): Promise<{ connected: boolean; email: string }> {
-  const { data: { session } } = await supabase.auth.getSession();
+  const { value: session } = await safeGetSession();
   if (!session) return { connected: false, email: '' };
 
   try {
@@ -126,7 +126,7 @@ export async function checkOAuthStatus(
 export async function disconnectOAuth(
   provider: OAuthProvider
 ): Promise<boolean> {
-  const { data: { session } } = await supabase.auth.getSession();
+  const { value: session } = await safeGetSession();
   if (!session) return false;
 
   try {
@@ -167,7 +167,7 @@ export async function fetchCalendarEvents(
   nextEvent: any;
   email: string;
 } | null> {
-  const { data: { session } } = await supabase.auth.getSession();
+  const { value: session } = await safeGetSession();
   if (!session) return null;
 
   try {
@@ -210,7 +210,7 @@ export async function fetchEmails(
   total: number;
   email: string;
 } | null> {
-  const { data: { session } } = await supabase.auth.getSession();
+  const { value: session } = await safeGetSession();
   if (!session) return null;
 
   try {

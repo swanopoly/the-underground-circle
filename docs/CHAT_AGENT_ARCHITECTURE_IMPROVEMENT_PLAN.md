@@ -8,6 +8,26 @@
 
 ## Shipped from this plan
 
+- **P68 — unsafe direct `supabase.auth` call hardening (2026-07-12, solo)** ✅ —
+  the P67/A5 Known-Risk-Area follow-up, done in the main loop (no fan-out).
+  Wrapped the genuinely-UNHANDLED hot-path auth reads so a backgrounded-tab /
+  web-lock auth throw can't crash the flow: `buildStream.ts` +
+  `builderPublish.ts` token reads → `getFreshAccessToken()` (never throws,
+  refreshes near-expiry); `governance.ts` (×3) + `builderPublish.ts` user reads
+  → `safeGetUser()`; `oauthConnect.ts` (×4) session reads → `safeGetSession()`;
+  `reporting.ts` + `heliusTrading.ts` (×2, money path — shape-preserving
+  `.catch(() => ({ data: { … null } }))` idiom to avoid any behavior change
+  beyond not crashing). DISCIPLINE NOTE: the A5 audit was a line-level
+  grep-for-`.catch` heuristic, so ~half its "unsafe" flags were ALREADY handled
+  and I deliberately SKIPPED them rather than churn: `researchKnowledge.ts:328`
+  + `heliusTrading.ts:932` (inside `try/catch`), `heliusTrading.ts:1031` +
+  `agentAutoConnect.ts:499` + `useOptimizedQuery.ts:146` (already have
+  `.catch`), `useAuth.ts` (whole bootstrap is `try`-wrapped). Cold screen-level
+  calls (RoomsTab/OfficeTab/etc.) left for a later low-priority pass. Typecheck
+  (which caught a stray `supabase` ref after an import swap — re-verified clean)
+  + full smoke:all green. No public authSession API change; no secrets touched;
+  no behavior change beyond fail-safety.
+
 - **P67 — six-agent unswept-surface + A8 security sweep (2026-07-11)** ✅ —
   disjoint wave over surfaces the prior arcs hadn't touched. NOTE: the account
   hit a session rate limit mid-wave, so 4 of 6 agents died on their FINAL call
