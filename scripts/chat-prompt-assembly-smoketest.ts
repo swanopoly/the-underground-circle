@@ -87,7 +87,7 @@ function main() {
       'case2: runtime_bundle is FIRST (the legacy unshift)');
     assert(CHAT_PROMPT_SECTION_ORDER[CHAT_PROMPT_SECTION_ORDER.length - 1] === 'last_session',
       'case2: last_session is LAST');
-    assert(CHAT_PROMPT_SECTION_ORDER.length === 34, 'case2: 34 canonical sections (32 + coding-agent P4 codebase_mentions/project_conventions)',
+    assert(CHAT_PROMPT_SECTION_ORDER.length === 35, 'case2: 35 canonical sections (34 + connected_resources cross-dashboard block)',
       `got ${CHAT_PROMPT_SECTION_ORDER.length}`);
     assert(new Set(CHAT_PROMPT_SECTION_ORDER).size === CHAT_PROMPT_SECTION_ORDER.length,
       'case2: no duplicate keys in canonical order');
@@ -115,6 +115,10 @@ function main() {
       'case2: P4 — attachment → codebase_mentions → project_discovery order');
     assert(idx('project_discovery') < idx('project_conventions') && idx('project_conventions') < idx('skills'),
       'case2: P4 — project_discovery → project_conventions → skills order');
+    // Cross-dashboard awareness: connected_resources rides between grounding
+    // and the user profile (circle-state, above the user-supplied material).
+    assert(idx('blackswan_grounding') < idx('connected_resources') && idx('connected_resources') < idx('user_chat_profile'),
+      'case2: connected_resources sits between blackswan_grounding and user_chat_profile');
     assert(idx('missions') < idx('circle_snapshot') && idx('circle_snapshot') < idx('last_session'),
       'case2: missions → snapshot → last_session order');
     // Every key has a stability tag; all current sections live in the turn tail.

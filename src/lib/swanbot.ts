@@ -2710,6 +2710,21 @@ async function buildSystemPromptAsync(
     } catch (e) { console.warn('[SwanBot] Circle snapshot context failed:', e); }
   }
 
+  // Cross-dashboard awareness: what the circle has connected right now
+  // (marketplace integrations, vault site-logins, Google Workspace, provider
+  // keys) so the agent reaches for the right tool/credential instead of
+  // discovering connections by failing. TTL-cached; fails soft to no section.
+  // Gated on moderate+ turns (loadMissions) — trivial chat doesn't need it.
+  if (loadMissions && context.circleId) {
+    try {
+      const resourcesBlock = await withTimeout(import('./connectedResourcesRuntime').then(({ buildConnectedResourcesContextBlock }) => buildConnectedResourcesContextBlock({
+        circleId: context.circleId,
+        connectedProviders: context.connectedProviders,
+      })));
+      if (resourcesBlock) sections.push({ key: 'connected_resources', body: resourcesBlock });
+    } catch (e) { console.warn('[SwanBot] Connected resources context failed:', e); }
+  }
+
   // Load last session context so agent can continue where it left off
   try {
     if (context.circleId) {

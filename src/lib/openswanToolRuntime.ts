@@ -464,7 +464,7 @@ export type OpenSwanToolExecutionArgs = {
   'browser.verification_state': Record<string, never>;
   'browser.click_role': { role: string; name?: string; selector?: string; exact?: boolean; nth?: number; timeoutMs?: number; taskContext?: string };
   'browser.fill_field': { role?: string; name?: string; selector?: string; text: string; submit?: boolean; exact?: boolean; timeoutMs?: number; taskContext?: string };
-  'browser.fill_credential_field': { item: string; credentialField: 'username' | 'email' | 'password'; vault?: string; siteUrl?: string; expectedOrigin?: string; role?: string; name?: string; selector?: string; submit?: boolean; exact?: boolean; nth?: number; timeoutMs?: number; taskContext?: string };
+  'browser.fill_credential_field': { item?: string; credentialId?: string; credentialField: 'username' | 'email' | 'password'; vault?: string; siteUrl?: string; expectedOrigin?: string; role?: string; name?: string; selector?: string; submit?: boolean; exact?: boolean; nth?: number; timeoutMs?: number; taskContext?: string };
   'browser.select_option': { role?: string; name?: string; selector?: string; value: string; exact?: boolean; timeoutMs?: number; taskContext?: string };
   'browser.upload_file': { filePath: string; name?: string; selector?: string; buttonRole?: string; buttonName?: string; buttonSelector?: string; exact?: boolean; timeoutMs?: number; taskContext?: string };
   'browser.press_key': { combo: string; taskContext?: string };
@@ -1097,11 +1097,12 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     name: 'browser.fill_credential_field',
     label: 'Fill Saved Login Field',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
-    description: 'Safely fill a browser username/email/password field from a saved 1Password credential without returning the raw secret to the model. Use for approved login forms after browser.verification_state and browser.dom_snapshot. Never use for OTP, MFA, CAPTCHA, or bot-check fields; pause for the human instead. Approval-gated browser and credential action.',
+    description: 'Safely fill a browser username/email/password field from a saved credential without returning the raw secret to the model — pass credentialId (circle vault entry from vault.resolve_for_task/vault.find; requires login in its allowed actions, an active grant, and an allowed-origin match) or item (1Password). Use for approved login forms after browser.verification_state and browser.dom_snapshot. Never use for OTP, MFA, CAPTCHA, or bot-check fields; pause for the human instead. Approval-gated browser and credential action.',
     inputSchema: {
       type: 'object',
       properties: {
-        item: { type: 'string', description: '1Password item name holding the saved login.' },
+        credentialId: { type: 'string', description: 'Circle vault credential id (from vault.resolve_for_task / vault.find). Preferred when the login lives in the circle vault.' },
+        item: { type: 'string', description: '1Password item name holding the saved login (alternative to credentialId).' },
         vault: { type: 'string', description: 'Optional 1Password vault name. Omit to use the default vault/search scope.' },
         siteUrl: { type: 'string', description: 'Expected site URL for origin binding before the saved credential is fetched and filled.' },
         expectedOrigin: { type: 'string', description: 'Expected browser origin or hostname, e.g. https://example.com or example.com. Overrides siteUrl when provided.' },
@@ -6271,36 +6272,79 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           return { ok: false, resultsText: `${gate.label}: ${gate.pauseInstruction}` } as any;
         }
         const item = String(a.item || '').trim();
-        if (!item) return { ok: false, resultsText: '1Password item required.' } as any;
+        const credentialId = String(a.credentialId || '').trim();
+        if (!item && !credentialId) return { ok: false, resultsText: 'Pass credentialId (circle vault — from vault.resolve_for_task/vault.find) or item (1Password).' } as any;
         const expectedOrigin = normalizeCredentialOriginExpectation(a.expectedOrigin || a.siteUrl);
         const [{ getCredentials: getCreds }, { fillField, verificationState }] = await Promise.all([
           import('./credentialService'),
           import('./browserBridge'),
         ]);
-        if (expectedOrigin) {
+        const credentialLabel = item || `vault credential ${credentialId.slice(0, 8)}`;
+        // Current-page check runs for BOTH paths (the vault path enforces its
+        // own allowed-origins allowlist below, so it always needs the URL).
+        let currentUrl = '';
+        if (expectedOrigin || credentialId) {
           const state = await verificationState();
-          const currentUrl = state.ok && state.data?.url ? state.data.url : '';
+          currentUrl = state.ok && state.data?.url ? state.data.url : '';
           if (!currentUrl) {
-            return { ok: false, resultsText: `Could not verify the current browser origin before filling "${item}". Re-open the expected login page and retry.` } as any;
+            return { ok: false, resultsText: `Could not verify the current browser origin before filling "${credentialLabel}". Re-open the expected login page and retry.` } as any;
           }
-          if (!credentialOriginMatches(currentUrl, expectedOrigin)) {
-            return { ok: false, resultsText: `Current browser page is not on the approved origin for "${item}". Expected ${expectedOrigin.raw}; current page is ${currentUrl}.` } as any;
+          if (expectedOrigin && !credentialOriginMatches(currentUrl, expectedOrigin)) {
+            return { ok: false, resultsText: `Current browser page is not on the approved origin for "${credentialLabel}". Expected ${expectedOrigin.raw}; current page is ${currentUrl}.` } as any;
           }
         }
         const fieldsToTry = credentialField === 'email' ? ['email', 'username'] : [credentialField];
-        const cred = await getCreds({ item, vault: a.vault, fields: fieldsToTry });
-        if (!cred.ok) return { ok: false, resultsText: cred.error || 'Failed to fetch saved credential.' } as any;
         let value = '';
         let resolvedField = credentialField;
-        for (const field of fieldsToTry) {
-          const candidate = cred.fields?.[field];
-          if (typeof candidate === 'string' && candidate.length > 0) {
-            value = candidate;
-            resolvedField = field;
-            break;
+        if (credentialId && !item) {
+          // Circle-vault path (LOCKSTEP with the remote fill_saved_login gates
+          // in computer-use-agent): the entry must allow 'login', carry an
+          // active login-capable automation grant (vault.grant, ask-gated),
+          // and the LIVE page origin must be on its allowed-origins list. The
+          // secret is revealed runtime-side (get_circle_site_credential_secret
+          // RPC, vault-audited) and typed locally — never returned to the model.
+          const vaultAccess = await import('./vaultAgentAccess');
+          const selection = await vaultAccess.selectVaultAutomationEntry(context.circleId, { credentialId });
+          if (!selection.ok || !selection.entry) {
+            return { ok: false, resultsText: `Vault credential not found: ${('error' in selection && selection.error) || credentialId}. Use vault.find or vault.resolve_for_task first.` } as any;
           }
+          const entry = selection.entry;
+          if (!vaultAccess.getVaultEntryAllowedActions(entry).includes('login')) {
+            return { ok: false, resultsText: `Vault credential ${entry.platform}/${entry.label} does not allow the 'login' action. The user can update its allowed actions in the Vault dashboard.` } as any;
+          }
+          const activeLoginGrants = vaultAccess.getVaultAccessGrants(entry)
+            .filter((g) => !vaultAccess.isVaultAccessGrantExpired(g) && g.actions.includes('login'));
+          if (activeLoginGrants.length === 0) {
+            return { ok: false, resultsText: `No active automation grant allows 'login' for ${entry.platform}/${entry.label}. Run vault.grant (approval-gated) for this credential first.` } as any;
+          }
+          const allowedOrigins = vaultAccess.getVaultEntryAllowedOrigins(entry);
+          const currentOrigin = vaultAccess.normalizedOrigin(currentUrl);
+          const originAllowed = allowedOrigins.some((o) => vaultAccess.normalizedOrigin(o) === currentOrigin);
+          if (allowedOrigins.length === 0 || !currentOrigin || !originAllowed) {
+            return { ok: false, resultsText: `Current page (${currentUrl}) is not on the allowed origins for ${entry.platform}/${entry.label} (${allowedOrigins.join(', ') || 'none set'}). Navigate to the credential's login page, or the user can update allowed origins in the Vault dashboard.` } as any;
+          }
+          if (credentialField === 'password') {
+            const { getDecryptedCredential } = await import('./siteAutomation');
+            value = (await getDecryptedCredential(entry.id)) || '';
+            if (!value) return { ok: false, resultsText: `Could not resolve the secret for ${entry.platform}/${entry.label} (reveal failed or empty). The user can verify the entry in the Vault dashboard.` } as any;
+          } else {
+            value = entry.username || '';
+            if (!value) return { ok: false, resultsText: `Vault credential ${entry.platform}/${entry.label} has no saved username. Fill the username manually with browser.fill_field, or the user can add it in the Vault dashboard.` } as any;
+            resolvedField = 'username';
+          }
+        } else {
+          const cred = await getCreds({ item, vault: a.vault, fields: fieldsToTry });
+          if (!cred.ok) return { ok: false, resultsText: cred.error || 'Failed to fetch saved credential.' } as any;
+          for (const field of fieldsToTry) {
+            const candidate = cred.fields?.[field];
+            if (typeof candidate === 'string' && candidate.length > 0) {
+              value = candidate;
+              resolvedField = field;
+              break;
+            }
+          }
+          if (!value) return { ok: false, resultsText: `No ${credentialField} field found for "${item}".` } as any;
         }
-        if (!value) return { ok: false, resultsText: `No ${credentialField} field found for "${item}".` } as any;
         const r = await fillField({
           role: a.role || 'textbox',
           name: a.name,
@@ -6315,7 +6359,7 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         if (!r.ok) return browserToolFailureResult(r, 'Browser credential fill failed.') as any;
         return {
           ok: true,
-          resultsText: `Filled saved ${resolvedField} field for "${item}" without returning the secret to the model${a.submit ? ' and submitted the field' : ''}.`,
+          resultsText: `Filled saved ${resolvedField} field for "${credentialLabel}" without returning the secret to the model${a.submit ? ' and submitted the field' : ''}.`,
         } as any;
       } catch (e: any) { return { ok: false, resultsText: sanitizeErrorForModel(e, { context: 'browser tool' }) } as any; }
     }

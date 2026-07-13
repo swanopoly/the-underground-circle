@@ -539,6 +539,13 @@ function recommendedOptionId(args: {
   return 'stop_and_report';
 }
 
+/** A login/credential wall that a SAVED credential could satisfy — as opposed
+ *  to a human-only gate (captcha / MFA / OTP / 2FA). When only the former is
+ *  present, recovery should point at the vault instead of dead-ending on "ask
+ *  the user". */
+const HUMAN_ONLY_GATE_RE = /\b(mfa|2fa|two[- ]factor|multi[- ]factor|captcha|verification code|one[- ]time|otp|human verification|bot check|cloudflare)\b/i;
+const CREDENTIAL_WALL_RE = /\b(login required|sign ?in required|log ?in required|not (?:signed|logged) in|authentication required|password|credential|saved login|enter your (?:username|email|password))\b/i;
+
 function resumeInstructionFor(args: {
   area: ComputerTaskEvidenceFailureArea;
   contract: ComputerTaskEvidenceContract;
@@ -548,11 +555,21 @@ function resumeInstructionFor(args: {
   connectedAgentAllowed: boolean;
   requiredFreshEvidence: string[];
   gap?: AppAdapterGapContract | null;
+  text?: string;
 }): string {
   const routeNextStep = args.routeDecision?.nextSteps?.[0];
   if (args.userActionRequired) {
     if (routeNextStep) {
       return `Stop automation and follow the app route decision: ${routeNextStep}`;
+    }
+    // A pure credential wall (no human-only gate) can be resolved WITHOUT the
+    // user typing anything: check the circle vault for a saved login and use
+    // the safe fill path. Only fall back to "ask the user" when a human-only
+    // gate is present or no credential path applies.
+    const text = args.text || '';
+    if ((args.contract.kind === 'browser' || args.contract.kind === 'desktop_app' || args.contract.kind === 'hybrid')
+      && CREDENTIAL_WALL_RE.test(text) && !HUMAN_ONLY_GATE_RE.test(text)) {
+      return 'This is a saved-login wall, not a human-only gate. Call vault.resolve_for_task (or vault.find) for a credential matching this site; if one exists with a login grant, sign in via browser.fill_credential_field (local) / fill_saved_login (remote) after approval — the secret is never shown. If no vault credential exists, ask the user to add one in the Vault dashboard (or to sign in manually).';
     }
     return 'Stop automation and ask the user to resolve the approval, login, verification, permission, app install, license, or bridge blocker before retrying.';
   }
@@ -644,6 +661,7 @@ export function diagnoseComputerTaskEvidenceFailure(
         connectedAgentAllowed,
         requiredFreshEvidence,
         gap,
+        text,
       });
   // AR: a switch-and-retry re-grounds on the fallback's surface — it does NOT
   // need the capability_gap buildout smokes, so request normal fresh evidence.

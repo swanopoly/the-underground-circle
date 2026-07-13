@@ -126,6 +126,7 @@ export type ChatPromptSectionKey =
   | 'collab_manifest'
   | 'collab_note'
   | 'blackswan_grounding'
+  | 'connected_resources'
   | 'user_chat_profile'
   | 'memory_user_notes'
   | 'memory_user_profile'
@@ -162,6 +163,10 @@ export const CHAT_PROMPT_SECTION_ORDER: ReadonlyArray<ChatPromptSectionKey> = [
   'collab_manifest',
   'collab_note',
   'blackswan_grounding',
+  // Cross-dashboard awareness: what the circle has connected (marketplace,
+  // vault logins, Google Workspace, provider keys) so the agent reaches for
+  // the right tool/credential instead of discovering connections by failing.
+  'connected_resources',
   'user_chat_profile',
   // User-authored notes precede the inferred profile — openswanMemoryStores'
   // own ordering rule: "user-authored notes first (highest signal)".
@@ -217,6 +222,7 @@ export const CHAT_PROMPT_SECTION_STABILITY: Readonly<
   collab_manifest: 'turn',
   collab_note: 'turn',
   blackswan_grounding: 'turn',
+  connected_resources: 'turn',
   user_chat_profile: 'turn',
   memory_user_notes: 'turn',
   memory_user_profile: 'turn',

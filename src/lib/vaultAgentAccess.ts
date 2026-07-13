@@ -557,9 +557,7 @@ export function buildVaultAgentRunbook(
     '1. Navigate to the login URL and confirm the current hostname matches an allowed origin.',
     '2. If the credential requires approval, ask the user before using it.',
     `3. For remote Computer Use, call fill_saved_login with credential_id="${entry.id}", grantee="${grantee}", grantee_type="${granteeType}", and a short purpose.`,
-    onePasswordItem
-      ? `4. For the local OpenSwan browser, use browser.fill_credential_field with item="${onePasswordItem}", expectedOrigin="${expectedOrigin}", and credentialField=username/email/password. Do not call credentials.get unless the safe browser-fill tool is unavailable.`
-      : '4. For the local OpenSwan browser, use browser.fill_credential_field only when the task or credential metadata supplies the matching 1Password item name; otherwise pause and ask for the safe local credential mapping instead of fetching raw secrets.',
+    `4. For the local OpenSwan browser, use browser.fill_credential_field with credentialId="${entry.id}", expectedOrigin="${expectedOrigin}", and credentialField=username/email/password — it resolves the vault secret runtime-side (login grant + allowed-origin enforced) and types it locally without returning it${onePasswordItem ? ` (item="${onePasswordItem}" via 1Password also works)` : ''}. Do not call credentials.get unless the safe browser-fill tool is unavailable.`,
     '5. Never print, summarize, paste into chat, or store the secret outside the approved vault/browser tool.',
     '6. After login, only perform actions included in the allowed actions list and ask for approval before publish/delete/purchase/send.',
   ].join('\n');
