@@ -37,6 +37,7 @@ import type { ToolParallelPolicy } from './toolBatchParallelism';
 import { buildToolFailureFeedback } from './toolFailureFeedback';
 import { detectRepeatedToolFailure, hashToolInput, type RecentToolCall } from './toolLoopStuckBreaker';
 import { buildSolverConsultationMessage, previewToolInput, shouldConsultSolver } from './toolLoopSolver';
+import { summarizeToolResultForModel } from './toolResultSummaryCore';
 
 /** Bounded recent-call ring size for progress-based stuck detection. Big enough
  *  to hold the last few rounds' calls, small enough to stay cheap. */
@@ -319,6 +320,18 @@ export type AgentRunOptions = {
     /** Tail messages preserved verbatim. Default 20. */
     preserveLast?: number;
   };
+  /**
+   * Deterministic per-tool-result summarization (coding-agent P6). A tool
+   * result whose model-visible text exceeds the threshold (default
+   * TOOL_RESULT_SUMMARY_THRESHOLD_CHARS, 20k chars) is compacted to
+   * head + tail + error-signal lines from the omitted middle
+   * (`toolResultSummaryCore.ts` — pure, smoke-tested) instead of flooding
+   * the context. Distinct from `compaction`, which summarises old HISTORY
+   * with a model; this clamps a single oversized result, deterministically,
+   * the moment it is produced. Default ON; pass `false` to keep the legacy
+   * byte-identical envelopes.
+   */
+  toolResultSummarization?: false | { thresholdChars?: number };
 };
 
 export type AgentRunResult = {
@@ -584,9 +597,17 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     toolParallelPolicyProvider,
     onRoundComplete,
     steering,
+    toolResultSummarization,
   } = opts;
 
   const emit = (e: AgentEvent) => { try { onEvent?.(e); } catch {} };
+
+  // P6 deterministic result clamp — identity for small results and when the
+  // caller opted out, so sub-threshold envelopes stay byte-identical.
+  const summarizeResultText = (text: string): string =>
+    toolResultSummarization === false
+      ? text
+      : summarizeToolResultForModel(text, toolResultSummarization || undefined);
 
   // `advertisedTools` is what the provider sees; it starts as the caller's
   // tool set and only ever GROWS via `resolveAdditionalTools` (T2).
@@ -923,14 +944,17 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
         return {
           type: 'tool_result',
           tool_use_id: use.id,
-          content: buildToolFailureFeedback(use.name, JSON.stringify(modelVisible)),
+          content: buildToolFailureFeedback(use.name, summarizeResultText(JSON.stringify(modelVisible))),
           is_error: true,
         };
       }
+      // P6: sub-threshold results stay byte-identical to the legacy envelope;
+      // an oversized one is deterministically clamped (head + tail + signal
+      // lines) by summarizeResultText before it enters the transcript.
       return {
         type: 'tool_result',
         tool_use_id: use.id,
-        content: JSON.stringify(modelVisible),
+        content: summarizeResultText(JSON.stringify(modelVisible)),
         is_error: false,
       };
     };

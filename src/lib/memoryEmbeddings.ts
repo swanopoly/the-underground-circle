@@ -78,6 +78,33 @@ async function callEmbedProxy(inputs: string[]): Promise<EmbedResponse | null> {
   }
 }
 
+/**
+ * Embed a batch of strings (P4 codebase index reuse). Returns one vector per
+ * input in order, or null on total failure. Inputs are chunked at BATCH_SIZE;
+ * a failed chunk nulls its members rather than failing the whole batch.
+ */
+export async function embedTexts(texts: string[]): Promise<Array<number[] | null> | null> {
+  const inputs = (texts || []).map((t) => (t || '').trim().slice(0, 30000));
+  if (inputs.length === 0) return [];
+  const out: Array<number[] | null> = new Array(inputs.length).fill(null);
+  let anySucceeded = false;
+  for (let i = 0; i < inputs.length; i += BATCH_SIZE) {
+    const chunk = inputs.slice(i, i + BATCH_SIZE);
+    // Preserve positions: empty strings are skipped locally (proxy rejects them).
+    const sendIdx: number[] = [];
+    const send: string[] = [];
+    chunk.forEach((t, j) => { if (t) { sendIdx.push(i + j); send.push(t); } });
+    if (send.length === 0) continue;
+    const res = await callEmbedProxy(send);
+    if (!res) continue;
+    anySucceeded = true;
+    res.embeddings.forEach((vec, j) => {
+      if (Array.isArray(vec) && vec.length === EMBEDDING_DIMS) out[sendIdx[j]] = vec;
+    });
+  }
+  return anySucceeded || inputs.every((t) => !t) ? out : null;
+}
+
 /** Embed a single string. Returns the 1536d vector or null on failure. */
 export async function embedText(text: string): Promise<number[] | null> {
   const trimmed = (text || '').trim();

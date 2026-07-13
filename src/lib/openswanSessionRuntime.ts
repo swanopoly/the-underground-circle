@@ -50,6 +50,7 @@ import {
   type LegacyToolEvent,
   type LegacyToolLoopResult,
 } from './openswanSessionRuntimeAdapters';
+import { createRunAndFixGateState, foldRunAndFixRound, markNudgeSent, planVerificationNudge } from './runAndFixGateCore';
 import { appendOpenSwanTranscriptEvent, buildOpenSwanTranscriptKey, upsertOpenSwanTranscriptHeader, type OpenSwanSessionTranscript } from './openswanTranscripts';
 import { executeOpenSwanVerificationPlan, type OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import { getSwanBotStructuredResponse, executeToolUseLoop, buildStreamableSystemPrompt, type SwanBotContext, type SwanBotStructuredArtifact, type SwanBotStructuredResponse } from './swanbot';
@@ -768,7 +769,7 @@ async function runTypedCoreToolLoop(args: {
   // The auto re-observe read uses the legacy dispatcher directly (NOT the
   // allowed-tools-filtered bridge set) — legacy parity: the observation tool
   // need not be advertised to the model to be auto-dispatched.
-  const onRoundComplete = createLegacyRoundNudgeHook({
+  const legacyRoundNudgeHook = createLegacyRoundNudgeHook({
     toolEvents,
     hasApprovalGate: !!args.toolApprovalGate,
     dispatchObservation: async (observationTool) => {
@@ -776,6 +777,31 @@ async function runTypedCoreToolLoop(args: {
       return { text: obs.text, status: String(obs.status) };
     },
   });
+
+  // Coding-agent P6 run-and-fix verification gate: fold every round's tool
+  // calls into the pure gate state (runAndFixGateCore, smoke-tested); when a
+  // round left edited files unverified — or a verification.* run failed —
+  // append ONE deterministic nudge telling the model to run/fix verification
+  // before finishing. The legacy reliability nudges keep priority (one note
+  // per round), and the gate self-caps per run.
+  let runAndFixState = createRunAndFixGateState();
+  const onRoundComplete: ReturnType<typeof createLegacyRoundNudgeHook> = async (round) => {
+    runAndFixState = foldRunAndFixRound(
+      runAndFixState,
+      (round.toolResults || []).map((r) => ({ name: r.toolName, ok: r.ok })),
+    );
+    const legacy = await legacyRoundNudgeHook(round);
+    const legacyNote = legacy && typeof legacy === 'object' && typeof legacy.appendUserNote === 'string'
+      ? legacy.appendUserNote.trim()
+      : '';
+    if (legacyNote) return legacy;
+    const nudge = planVerificationNudge(runAndFixState);
+    if (nudge.shouldNudge) {
+      runAndFixState = markNudgeSent(runAndFixState);
+      return { appendUserNote: nudge.note };
+    }
+    return legacy;
+  };
 
   const runResult = await runAgent({
     initialMessages: buildSnapshotAwareInitialMessages({

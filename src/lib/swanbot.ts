@@ -2556,6 +2556,20 @@ async function buildSystemPromptAsync(
     sections.push({ key: 'attachment_context', body: (context as any).attachmentContext });
   }
 
+  // Coding-agent P4: resolved @file:/@symbol: mention context from the local
+  // codebase index. The parse is a cheap regex, so the heavy path (DB lookup +
+  // bridge file-head reads, untrusted-fenced inside the builder) only runs
+  // when the message actually contains a mention.
+  try {
+    if (currentMessage && currentMessage.includes('@') && context.userId) {
+      const mentionBlock = await withTimeout(import('./codebaseIndexRuntime').then(({ buildCodebaseMentionContextBlock }) => buildCodebaseMentionContextBlock({
+        message: currentMessage,
+        userId: context.userId,
+      })));
+      if (mentionBlock) sections.push({ key: 'codebase_mentions', body: mentionBlock });
+    }
+  } catch (e) { console.warn('[SwanBot] Codebase mention context failed:', e); }
+
   // Progressive project context discovery — load root context eagerly and
   // only inject deeper directory guidance when those paths actually show up
   // in the active conversation.
@@ -2569,6 +2583,19 @@ async function buildSystemPromptAsync(
       sections.push({ key: 'project_discovery', body: discovery.block });
     }
   } catch (e) { console.warn('[SwanBot] Project context discovery failed:', e); }
+
+  // Coding-agent P4: per-turn project conventions from the ACTIVE local repo
+  // (CLAUDE.md / AGENTS.md / .cursorrules read via the desktop bridge — the
+  // local-disk counterpart of the web-origin discovery above). No-ops fast
+  // when the user never indexed a repo; TTL-cached per root inside the loader.
+  try {
+    if (context.userId) {
+      const conventions = await withTimeout(import('./projectConventions').then(({ loadProjectConventionsBlock }) => loadProjectConventionsBlock({
+        userId: context.userId,
+      })));
+      if (conventions) sections.push({ key: 'project_conventions', body: conventions });
+    }
+  } catch (e) { console.warn('[SwanBot] Project conventions failed:', e); }
 
   // Phase C5 — Block E: skills prompt fragment
   if (loadSkills) {

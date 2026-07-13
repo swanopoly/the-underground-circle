@@ -84,20 +84,50 @@ and every mutating tool stays approval-gated.
   --hard` / `-c` config-injection / `--upload-pack` blocked, commit message is a
   safe argv element. NEXT: wire a bridge `execFile("git", argv)` endpoint (repo-path
   grant enforced) + a `git.run` tool (read auto / write ask).
-- **P4 — Codebase index + semantic search + `@file` mentions.** ✅ pure core DONE:
-  `src/lib/codebaseIndexCore.ts` + smoke `codebase-index-core` (78) — index
-  planning (ignore-dirs, ext→language, size/generated/cap skips) + lexical
-  relevance ranker (fallback + re-ranker). NEXT: crawl via `desktop.file_list` →
-  symbol/summary extract → embed (reuse `memoryEmbeddings`) → `codebase_files` table
-  + `match_codebase_files` RPC → a `codebase.search` tool (semantic + lexical
-  re-rank) + `@file:`/`@symbol:` resolver + per-turn conventions loader.
+- **P4 — Codebase index + semantic search + `@file` mentions.** ✅ DONE + WIRED
+  (2026-07-13). Pure cores: `src/lib/codebaseIndexCore.ts` (smoke
+  `codebase-index-core`, 78), `src/lib/codebaseSymbolCore.ts` (symbol/summary
+  extraction + embed-text builder; smoke `codebase-symbol-core`, 81),
+  `src/lib/codebaseMentionsCore.ts` (`@file:`/`@symbol:` parser + resolver;
+  smoke `codebase-mentions-core`, 107). Wiring:
+  `src/lib/codebaseIndexRuntime.ts` (bridge BFS crawl → plan → extract → embed
+  via `memoryEmbeddings.embedTexts` → owner-scoped `codebase_files` upsert +
+  stale sweep; semantic search via `match_codebase_files` RPC re-ranked
+  lexically, lexical fallback; active-root registry; mention context block
+  with untrusted-fenced file heads). SQL: `20260713_codebase_files.sql`
+  (mirrored as RUN_THIS_SQL §24 — **pending apply**). Tools: `codebase.index`
+  (`ask` — reads local files + sends derived text to the embedding provider)
+  and `codebase.search` (`auto`, pinned). Prompt: `codebase_mentions` +
+  `project_conventions` sections in `chatPromptAssembly.ts`, pushed from
+  `buildSystemPromptAsync`; `src/lib/projectConventions.ts` loads the active
+  repo's CLAUDE.md/AGENTS.md/.cursorrules via the desktop bridge each coding
+  turn (TTL-cached; `openswanContextDiscovery` filename priority reused). NO
+  raw file content is persisted server-side — only paths/symbols/summaries.
 - **P5 — Operationalize plan/execute model split for coding.** Route complex
   coding through `planModelCollaboration()`: strong planner turn → fast executor
   tool loop. Add a coding-capability tier to `modelCapabilities.ts`. Optional
   auto best-of-N for complex coding when ≥2 providers connected.
-- **P6 — Loop upgrades.** Agent-maintained live TODO (a `tasks.*` tool family the
-  model updates mid-run) + deterministic tool-result summarization for large
-  outputs + a run-and-fix verification gate (auto-run tests, feed failures back).
+- **P6 — Loop upgrades.** ✅ DONE + WIRED (2026-07-13), three parts:
+  1. **Live TODO** — `todo.write` tool (NOT `tasks.*`: that namespace is the
+     circle kanban; the live TODO is ephemeral run scaffolding). Pure core
+     `src/lib/agentTodoCore.ts` (full-replacement TodoWrite semantics, single
+     in_progress, caps; smoke `agent-todo-core`, 76) + run-scoped store
+     `src/lib/agentTodoStore.ts` (keyed runId → userId+threadId, LRU-capped,
+     in-memory only). Pinned, `auto`, mode-agnostic.
+  2. **Deterministic tool-result summarization** — pure core
+     `src/lib/toolResultSummaryCore.ts` (head + tail + error-signal lines from
+     the omitted middle, >20k chars; smoke `tool-result-summary-core`, 108),
+     wired into `agentExecutionCore.dispatchOne` success AND failure envelopes
+     (`toolResultSummarization` option, default ON; sub-threshold results stay
+     byte-identical). Edge parity note: `swanbot-continuation.ts` keeps its own
+     16k hard cap for client-returned results — swapping it for this core is a
+     follow-up when the edge fns next redeploy.
+  3. **Run-and-fix verification gate** — pure core
+     `src/lib/runAndFixGateCore.ts` (dirty-tracking fold over each round's
+     calls; nudges 'verification_failed' same-round or 'dirty_unverified'
+     after a round passes with unverified edits; ≤2 nudges/run; smoke
+     `run-and-fix-gate-core`, 85), composed with the legacy round-nudge hook
+     in `openswanSessionRuntime.ts` (legacy reliability nudges keep priority).
 
 ## 4. Guardrails carried through every phase
 Mutating tools (edit/write/shell/git-write) stay approval-gated with a visible

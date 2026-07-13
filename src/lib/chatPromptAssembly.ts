@@ -135,7 +135,9 @@ export type ChatPromptSectionKey =
   | 'turn_retrieval'
   | 'wiki_context'
   | 'attachment_context'
+  | 'codebase_mentions'
   | 'project_discovery'
+  | 'project_conventions'
   | 'skills'
   | 'agent_identity'
   | 'missions'
@@ -171,7 +173,13 @@ export const CHAT_PROMPT_SECTION_ORDER: ReadonlyArray<ChatPromptSectionKey> = [
   'turn_retrieval',
   'wiki_context',
   'attachment_context',
+  // Coding-agent P4: resolved @file/@symbol mention context (codebase index)
+  // sits with the other user-supplied-material sections, before discovery.
+  'codebase_mentions',
   'project_discovery',
+  // Coding-agent P4: the ACTIVE local repo's CLAUDE.md/.cursorrules (via the
+  // desktop bridge) — the local-disk counterpart of project_discovery.
+  'project_conventions',
   'skills',
   'agent_identity',
   'missions',
@@ -218,7 +226,9 @@ export const CHAT_PROMPT_SECTION_STABILITY: Readonly<
   turn_retrieval: 'turn',
   wiki_context: 'turn',
   attachment_context: 'turn',
+  codebase_mentions: 'turn',
   project_discovery: 'turn',
+  project_conventions: 'turn',
   skills: 'turn',
   agent_identity: 'turn',
   missions: 'turn',

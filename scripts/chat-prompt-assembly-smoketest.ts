@@ -87,7 +87,7 @@ function main() {
       'case2: runtime_bundle is FIRST (the legacy unshift)');
     assert(CHAT_PROMPT_SECTION_ORDER[CHAT_PROMPT_SECTION_ORDER.length - 1] === 'last_session',
       'case2: last_session is LAST');
-    assert(CHAT_PROMPT_SECTION_ORDER.length === 32, 'case2: 32 canonical sections',
+    assert(CHAT_PROMPT_SECTION_ORDER.length === 34, 'case2: 34 canonical sections (32 + coding-agent P4 codebase_mentions/project_conventions)',
       `got ${CHAT_PROMPT_SECTION_ORDER.length}`);
     assert(new Set(CHAT_PROMPT_SECTION_ORDER).size === CHAT_PROMPT_SECTION_ORDER.length,
       'case2: no duplicate keys in canonical order');
@@ -109,6 +109,12 @@ function main() {
       'case2: wisdom → retrieval → wiki order');
     assert(idx('skills') < idx('agent_identity') && idx('agent_identity') < idx('missions'),
       'case2: skills → identity → missions order');
+    // Coding-agent P4 neighborhoods: mention context rides with the other
+    // user-supplied material; local-repo conventions follow web discovery.
+    assert(idx('attachment_context') < idx('codebase_mentions') && idx('codebase_mentions') < idx('project_discovery'),
+      'case2: P4 — attachment → codebase_mentions → project_discovery order');
+    assert(idx('project_discovery') < idx('project_conventions') && idx('project_conventions') < idx('skills'),
+      'case2: P4 — project_discovery → project_conventions → skills order');
     assert(idx('missions') < idx('circle_snapshot') && idx('circle_snapshot') < idx('last_session'),
       'case2: missions → snapshot → last_session order');
     // Every key has a stability tag; all current sections live in the turn tail.
