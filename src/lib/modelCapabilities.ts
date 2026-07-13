@@ -146,6 +146,21 @@ export function modelCanDo(modelId: string, cap: ModelCapability): boolean {
 // drive a computer" without re-deriving it from ModelCapability arrays.
 // UNKNOWN ids fail closed: no tool use, no computer use, no vision.
 
+/**
+ * Coding-capability tier (coding-agent P5). Expresses how trustworthy a model
+ * is at AGENTIC CODE WORK — precise multi-file edits, tool-driven
+ * build/debug/review loops — independent of the coarse 'code' capability
+ * string (which nearly every text model carries).
+ *   'strong' — frontier-coder class; safe as the PLANNER for complex coding
+ *              and as an executor.
+ *   'basic'  — fine for small/mechanical edits and as a fast EXECUTOR driving
+ *              a strong model's plan; don't plan complex changes here.
+ *   'none'   — never route coding work here (fail-closed default).
+ * Note: codingTier is about code QUALITY — a 'strong' no-tool reasoner (e.g.
+ * deepseek-r1) can plan but not execute; executors also need `toolUse`.
+ */
+export type ModelCodingTier = 'none' | 'basic' | 'strong';
+
 export interface ModelCapabilityFlags {
   /** Model reliably supports structured tool/function calling. */
   toolUse: boolean;
@@ -162,6 +177,8 @@ export interface ModelCapabilityFlags {
   /** Conservative known-safe max output tokens (a floor, not the provider
    *  ceiling), or null when we have no verified number. */
   maxOutputTokens: number | null;
+  /** Agentic-coding trust tier — see ModelCodingTier. Fail-closed 'none'. */
+  codingTier: ModelCodingTier;
 }
 
 /** Fail-closed defaults for ids we do not recognize. */
@@ -172,6 +189,7 @@ export const UNKNOWN_MODEL_CAPABILITY_FLAGS: ModelCapabilityFlags = Object.freez
   streaming: true,
   imageOnly: false,
   maxOutputTokens: null,
+  codingTier: 'none',
 });
 
 function flagSet(partial: Partial<ModelCapabilityFlags>): ModelCapabilityFlags {
@@ -179,15 +197,22 @@ function flagSet(partial: Partial<ModelCapabilityFlags>): ModelCapabilityFlags {
 }
 
 const IMAGE_ONLY_FLAGS = flagSet({ imageOnly: true, streaming: false });
-const TOOL_CHAT_FLAGS = flagSet({ toolUse: true });
-const TOOL_VISION_FLAGS = flagSet({ toolUse: true, vision: true });
+const TOOL_CHAT_FLAGS = flagSet({ toolUse: true, codingTier: 'basic' });
+const TOOL_VISION_FLAGS = flagSet({ toolUse: true, vision: true, codingTier: 'basic' });
 /** Sonnet-capable Claude: full loop incl. native computer use. */
-const CLAUDE_SONNET_FLAGS = flagSet({ toolUse: true, vision: true, computerUse: true, maxOutputTokens: 8192 });
-/** Other Claude tiers: tools + vision, but not the computer-use loop. */
-const CLAUDE_CHAT_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 8192 });
-const GEMINI_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 8192 });
+const CLAUDE_SONNET_FLAGS = flagSet({ toolUse: true, vision: true, computerUse: true, maxOutputTokens: 8192, codingTier: 'strong' });
+/** Opus/Fable Claude tiers: tools + vision, frontier coders, no computer-use loop. */
+const CLAUDE_CHAT_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 8192, codingTier: 'strong' });
+/** Haiku-class Claude: fast tool executor — basic coding tier. */
+const CLAUDE_FAST_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 8192, codingTier: 'basic' });
+const GEMINI_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 8192, codingTier: 'basic' });
+/** Gemini pro line: frontier coder. */
+const GEMINI_PRO_FLAGS = flagSet({ toolUse: true, vision: true, maxOutputTokens: 8192, codingTier: 'strong' });
 /** Perplexity sonar: search-grounded text, no function calling. */
 const SONAR_FLAGS = flagSet({});
+/** Strong coder over the plain tool-chat base (OpenAI/DeepSeek/Qwen coders). */
+const STRONG_CODER_TOOL_FLAGS = flagSet({ toolUse: true, codingTier: 'strong' });
+const STRONG_CODER_VISION_FLAGS = flagSet({ toolUse: true, vision: true, codingTier: 'strong' });
 
 /** Explicit per-model flags, keyed by normalizeModelId() output. */
 const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
@@ -211,37 +236,38 @@ const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
   'claude-opus-4-8':     CLAUDE_CHAT_FLAGS,
   'claude-opus-4-7':     CLAUDE_CHAT_FLAGS,
   'claude-opus-4-6':     CLAUDE_CHAT_FLAGS,
-  'claude-haiku-4-5':          CLAUDE_CHAT_FLAGS,
-  'claude-haiku-4-5-20251001': CLAUDE_CHAT_FLAGS,
+  'claude-haiku-4-5':          CLAUDE_FAST_FLAGS,
+  'claude-haiku-4-5-20251001': CLAUDE_FAST_FLAGS,
 
   // OpenAI
   'gpt-4o':        TOOL_VISION_FLAGS,
-  'gpt-5.5-pro':   TOOL_VISION_FLAGS,
-  'gpt-5.5':       TOOL_VISION_FLAGS,
-  'gpt-5.4':       TOOL_VISION_FLAGS,
+  'gpt-5.5-pro':   STRONG_CODER_VISION_FLAGS,
+  'gpt-5.5':       STRONG_CODER_VISION_FLAGS,
+  'gpt-5.4':       STRONG_CODER_VISION_FLAGS,
   'gpt-5.4-mini':  TOOL_VISION_FLAGS,
   'gpt-5.4-nano':  TOOL_CHAT_FLAGS,
   'gpt-4.1-nano':  TOOL_VISION_FLAGS,
-  'codex-mini':    TOOL_CHAT_FLAGS,
+  'codex-mini':    STRONG_CODER_TOOL_FLAGS,
 
   // Google
   'gemini-3.5-flash':         GEMINI_FLAGS,
-  'gemini-3.1-pro-preview':   GEMINI_FLAGS,
+  'gemini-3.1-pro-preview':   GEMINI_PRO_FLAGS,
   'gemini-3.1-flash-lite':    GEMINI_FLAGS,
-  'gemini-2.5-pro':           GEMINI_FLAGS,
+  'gemini-2.5-pro':           GEMINI_PRO_FLAGS,
   'gemini-2.5-flash':         GEMINI_FLAGS,
   'gemini-2.5-flash-lite':    GEMINI_FLAGS,
   'gemini-2.5-flash-preview': GEMINI_FLAGS,
 
   // DeepSeek — chat/v3 line supports function calling; the r1 reasoner
-  // line does not, so it stays fail-closed on toolUse.
-  'deepseek-v3':   TOOL_CHAT_FLAGS,
-  'deepseek-v3.2': TOOL_CHAT_FLAGS,
-  'deepseek-r1':   flagSet({}),
+  // line does not, so it stays fail-closed on toolUse. Both lines are
+  // frontier-class coders (r1 = strong PLANNER, no tools → never executor).
+  'deepseek-v3':   STRONG_CODER_TOOL_FLAGS,
+  'deepseek-v3.2': STRONG_CODER_TOOL_FLAGS,
+  'deepseek-r1':   flagSet({ codingTier: 'strong' }),
 
   // Mistral / Qwen / Llama (Groq-hosted etc.)
   'mistral-large-3':  TOOL_CHAT_FLAGS,
-  'qwen-3.5-coder':   TOOL_CHAT_FLAGS,
+  'qwen-3.5-coder':   STRONG_CODER_TOOL_FLAGS,
   'qwen-3.5-flash':   TOOL_CHAT_FLAGS,
   'qwen-3.5-plus':    TOOL_CHAT_FLAGS,
   'llama-4-scout':    TOOL_VISION_FLAGS,
@@ -259,7 +285,8 @@ const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
 const FAMILY_FLAG_PATTERNS: Array<{ pattern: RegExp; flags: ModelCapabilityFlags }> = [
   { pattern: /(^|[-_/.])(flux|sdxl|dall-e|dalle)([-_/.\d]|$)|stable-diffusion|(^|[-_/.])imagen([-_/.\d]|$)/, flags: IMAGE_ONLY_FLAGS },
   { pattern: /^claude-sonnet\b/,                 flags: CLAUDE_SONNET_FLAGS },
-  { pattern: /^claude-(opus|fable|haiku)\b/,     flags: CLAUDE_CHAT_FLAGS },
+  { pattern: /^claude-(opus|fable)\b/,           flags: CLAUDE_CHAT_FLAGS },
+  { pattern: /^claude-haiku\b/,                  flags: CLAUDE_FAST_FLAGS },
   { pattern: /^(gpt-4o|gpt-4\.1|gpt-5)/,         flags: TOOL_VISION_FLAGS },
   { pattern: /^gemini-/,                         flags: GEMINI_FLAGS },
   { pattern: /^(deepseek-v|deepseek-chat)/,      flags: TOOL_CHAT_FLAGS },
@@ -286,6 +313,11 @@ export function getModelCapabilityFlags(modelId: string): ModelCapabilityFlags {
     if (family.pattern.test(norm)) return { ...family.flags };
   }
   return { ...UNKNOWN_MODEL_CAPABILITY_FLAGS };
+}
+
+/** Convenience accessor for the coding tier (coding-agent P5). Fail-closed 'none'. */
+export function getModelCodingTier(modelId: string): ModelCodingTier {
+  return getModelCapabilityFlags(modelId).codingTier;
 }
 
 // ── Intent detection ────────────────────────────────────────────────────────

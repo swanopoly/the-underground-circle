@@ -191,6 +191,7 @@ async function main() {
       streaming: true,
       imageOnly: false,
       maxOutputTokens: null,
+      codingTier: 'none',
     });
     assert.deepEqual(getModelCapabilityFlags(''), unknown);
     // P8: BlackSwan is now a REGISTERED row (deliberate fail-closed tools +
@@ -265,6 +266,31 @@ async function main() {
     a.computerUse = false;
     assert.equal(getModelCapabilityFlags('claude-sonnet-4-6').computerUse, true);
     pass('prefixed registry lookups work and flag objects are mutation-safe');
+  }
+
+  // ── 13. Coding tier (P5): strong/basic/none routing signal ───────────────
+  {
+    const { getModelCodingTier } = await import('../src/lib/modelCapabilities');
+    // Frontier coders are 'strong' — planner-eligible.
+    for (const id of ['claude-sonnet-4-6', 'claude-opus-4-8', 'claude-fable-5', 'gpt-5.5', 'gemini-2.5-pro', 'deepseek-v3.2', 'qwen-3.5-coder', 'codex-mini']) {
+      assert.equal(getModelCodingTier(id), 'strong', `${id} is a strong coder`);
+    }
+    // Fast executors / general chat models are 'basic'.
+    for (const id of ['claude-haiku-4-5', 'gpt-5.4-mini', 'gemini-2.5-flash', 'mistral-large-3', 'qwen-3.5-flash']) {
+      assert.equal(getModelCodingTier(id), 'basic', `${id} is a basic coder`);
+    }
+    // deepseek-r1: strong PLANNER but toolUse stays false — never an executor.
+    const r1 = getModelCapabilityFlags('deepseek-r1');
+    assert.equal(r1.codingTier, 'strong');
+    assert.equal(r1.toolUse, false, 'r1 plans but must not drive a tool loop');
+    // Image-only, sonar, BlackSwan, and unknown ids are 'none' (fail closed).
+    for (const id of ['flux-schnell', 'sonar-pro', 'cswan801/BlackSwan-v5', 'totally-unknown-model-xyz']) {
+      assert.equal(getModelCodingTier(id), 'none', `${id} never routes coding`);
+    }
+    // Family fallbacks: dated haiku snapshots basic; prefixed sonnet strong.
+    assert.equal(getModelCodingTier('claude-haiku-4-5-20251001'), 'basic');
+    assert.equal(getModelCodingTier('openrouter/anthropic/claude-sonnet-4-6'), 'strong');
+    pass('codingTier: strong for frontier coders, basic for fast executors, none fail-closed');
   }
 
   console.log(`All model-capabilities smoke cases passed (${passCount} PASS).`);

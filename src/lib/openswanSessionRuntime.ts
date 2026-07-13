@@ -556,13 +556,32 @@ async function runTypedCoreToolLoop(args: {
   maxToolRounds?: number;
   toolApprovalGate?: LegacyToolApprovalGate;
   onStage?: (stage: OpenSwanRunStage, label: string) => void;
+  /**
+   * Coding-agent P5 plan/execute split. When present, a strong PLANNER model
+   * runs one text-only turn first (no tools) to produce an implementation
+   * plan, which is injected as a handoff note ahead of the user message; the
+   * tool loop then runs on the FAST EXECUTOR (`executorModelId`). Absent ⇒
+   * today's single-model path (byte-identical). Decided by
+   * `codingModelSplitPolicy.decideCodingModelSplit` in the session turn.
+   */
+  codingPlanSplit?: {
+    plannerModelId: string;
+    executorModelId: string;
+    plannerPrompt: string;
+    reason: string;
+  } | null;
 }): Promise<LegacyToolLoopResult> {
   // BlackSwan collaboration split (P8 — the CLAUDE.md contract, previously
   // unwired on this path): the typed loop always carries runtime tools and
   // BlackSwan cannot reliably drive native tool calling, so the loop runs
   // on the tool executor while BlackSwan stays in the prompt as the
   // app-grounding voice. Non-BlackSwan models pass through unchanged.
-  const loopModel = resolveOpenSwanToolLoopModel(args.model, args.allowedToolNames);
+  // P5: when a coding plan/execute split is active the loop runs on the
+  // chosen fast executor (the split decider already required a strong,
+  // non-BlackSwan planner, so the BlackSwan swap never applies here).
+  const loopModel = args.codingPlanSplit
+    ? args.codingPlanSplit.executorModelId
+    : resolveOpenSwanToolLoopModel(args.model, args.allowedToolNames);
   const blackswanGroundingBlock = isBlackSwanModel(args.model)
     ? buildBlackSwanGroundingBlock({
         model: args.model,
@@ -731,6 +750,42 @@ async function runTypedCoreToolLoop(args: {
     return { data, error };
   };
 
+  // P5 plan/execute split: run ONE text-only planner turn on the strong model
+  // before the executor loop. Text-only (no tools) so it cannot mutate state;
+  // the plan becomes a handoff note ahead of the user message. Fails soft — a
+  // planner error just proceeds to the single-model executor path.
+  let planHandoffNote = '';
+  if (args.codingPlanSplit) {
+    try {
+      args.onStage?.('reasoning', `${args.codingPlanSplit.plannerModelId} planning the implementation`);
+      const { data: planData, error: planError } = await invokeSwanbotToolTurn(buildSwanbotToolTurnBody({
+        userMessage: args.codingPlanSplit.plannerPrompt,
+        circleId: args.circleId,
+        userId: args.userId,
+        model: args.codingPlanSplit.plannerModelId,
+        systemPrompt: args.systemPrompt,
+        tools: [],
+        messages: [{ role: 'user', content: args.codingPlanSplit.plannerPrompt }],
+      }));
+      if (!planError && planData) {
+        const planParsed = parseSwanbotToolTurnData(planData);
+        const planText = (planParsed.turn.content || [])
+          .filter((b: any) => b?.type === 'text' && typeof b.text === 'string')
+          .map((b: any) => b.text)
+          .join('\n')
+          .trim();
+        if (planText) {
+          const { buildCodingPlanHandoffNote } = await import('./codingModelSplitPolicy');
+          planHandoffNote = buildCodingPlanHandoffNote({
+            planText,
+            plannerModelId: args.codingPlanSplit.plannerModelId,
+            executorModelId: args.codingPlanSplit.executorModelId,
+          });
+        }
+      }
+    } catch { /* planner is best-effort — fall through to the executor loop */ }
+  }
+
   const provider: AgentProvider = {
     turn: async ({ messages, tools }) => {
       const { data, error } = await invokeSwanbotToolTurn(buildSwanbotToolTurnBody({
@@ -806,10 +861,10 @@ async function runTypedCoreToolLoop(args: {
   const runResult = await runAgent({
     initialMessages: buildSnapshotAwareInitialMessages({
       userMessage: args.userMessage,
-      // BlackSwan grounding rides the volatile context message (same slot
-      // as the circle snapshot) so the frozen/cached system prompt is
-      // untouched (R15/O7 cache discipline).
-      snapshotContextMessage: [blackswanGroundingBlock, args.snapshotContextMessage || '']
+      // BlackSwan grounding + the P5 plan handoff note ride the volatile
+      // context message (same slot as the circle snapshot) so the
+      // frozen/cached system prompt is untouched (R15/O7 cache discipline).
+      snapshotContextMessage: [blackswanGroundingBlock, planHandoffNote, args.snapshotContextMessage || '']
         .filter(Boolean)
         .join('\n\n---\n\n') || null,
     }),
@@ -1074,6 +1129,28 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     // EXECUTION model — the hard subset of the grounded lane escalates to frontier.
     cleanMessage,
   );
+  // Coding-agent P5 plan/execute split: when a COMPLEX build/debug/review turn
+  // lands on a strong-coder model (and the user didn't pin a model), run a
+  // text-only planner turn on that strong model, then drive the tool loop on a
+  // fast executor. Fail-closed to today's single-model path (flag default ON;
+  // the decider gates on intent/complexity/tools/tier/explicit-pick).
+  const { decideCodingModelSplit, buildCodingPlannerPrompt } = await import('./codingModelSplitPolicy');
+  const codingSplitDecision = decideCodingModelSplit({
+    intent: runtimeRoute.intent,
+    complexity: runtimeRoute.complexity,
+    selectedModel: opts.context.model,
+    resolvedModel: resolvedModel || 'claude-haiku-4-5',
+    allowedToolNames: runtimeToolNames,
+    connectedProviders,
+  });
+  const codingPlanSplit = codingSplitDecision.mode === 'plan_then_execute'
+    ? {
+        plannerModelId: codingSplitDecision.plannerModelId!,
+        executorModelId: codingSplitDecision.executorModelId!,
+        plannerPrompt: buildCodingPlannerPrompt({ message: cleanMessage, profile }),
+        reason: codingSplitDecision.reason,
+      }
+    : null;
   const toolBrief = buildOpenSwanToolBrief(
     opts.surface === 'main_chat' ? 'main_chat' : 'room_chat',
     taskPlan,
@@ -1652,6 +1729,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
             maxToolRounds: toolRoundBudget,
             toolApprovalGate: opts.onToolApproval,
             onStage: (stage, label) => emitStage(opts, stage, label),
+            codingPlanSplit,
           })
         : await executeToolUseLoop({
             systemPrompt: systemPromptWithResume,

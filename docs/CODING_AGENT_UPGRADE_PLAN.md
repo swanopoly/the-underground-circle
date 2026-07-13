@@ -103,10 +103,22 @@ and every mutating tool stays approval-gated.
   repo's CLAUDE.md/AGENTS.md/.cursorrules via the desktop bridge each coding
   turn (TTL-cached; `openswanContextDiscovery` filename priority reused). NO
   raw file content is persisted server-side — only paths/symbols/summaries.
-- **P5 — Operationalize plan/execute model split for coding.** Route complex
-  coding through `planModelCollaboration()`: strong planner turn → fast executor
-  tool loop. Add a coding-capability tier to `modelCapabilities.ts`. Optional
-  auto best-of-N for complex coding when ≥2 providers connected.
+- **P5 — Operationalize plan/execute model split for coding.** ✅ DONE + WIRED
+  (2026-07-13). Coding-capability tier added to `modelCapabilities.ts`
+  (`ModelCodingTier` = none/basic/strong on `ModelCapabilityFlags`;
+  `getModelCodingTier`; smoke `model-capabilities` case 13 — frontier coders
+  strong, fast executors basic, fail-closed none). Pure decider
+  `src/lib/codingModelSplitPolicy.ts` (smoke `coding-model-split-policy`, 192):
+  `decideCodingModelSplit` gates a complex build/debug/review turn on a strong,
+  non-user-pinned model into `plan_then_execute` (strong planner → Haiku/Sonnet
+  fast executor, mirroring the live computer-use split), fail-closed to single;
+  `buildCodingPlannerPrompt` / `buildCodingPlanHandoffNote`; `decideAutoBestOfN`
+  (complex coding + text-only + ≥2 providers). Wired into the typed loop
+  (`openswanSessionRuntime.runTypedCoreToolLoop` `codingPlanSplit` param: one
+  text-only planner turn → handoff note ahead of the executor loop, executor
+  drives tools; flag `uc_coding_plan_split` DEFAULT ON, fail-soft). Auto
+  best-of-N wired into the chat send path (`ChatTab`, flag `uc_auto_best_of_n`
+  DEFAULT OFF, cheap sync short-circuit).
 - **P6 — Loop upgrades.** ✅ DONE + WIRED (2026-07-13), three parts:
   1. **Live TODO** — `todo.write` tool (NOT `tasks.*`: that namespace is the
      circle kanban; the live TODO is ephemeral run scaffolding). Pure core

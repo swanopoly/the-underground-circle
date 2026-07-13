@@ -522,6 +522,38 @@ Deno.serve(async (req: Request) => {
     } catch { /* follow-up context is a nice-to-have; never block the run */ }
   }
 
+  // Available saved-login inventory (cross-dashboard wiring): the model can
+  // only call fill_saved_login with a credential_id it knows exists. Without
+  // this block a login wall dead-ended on ask_user even when the vault held a
+  // matching credential. We list the circle's site credentials (the RPC
+  // returns NO secrets — only id/platform/label/site/username/allowed-actions)
+  // through the CALLER's client so RLS applies, and surface only entries whose
+  // allowed_actions include "login". The secret is still revealed server-side
+  // inside fill_saved_login and never enters the model context.
+  let credentialInventory = "";
+  if (userSupabase && body.circleId) {
+    try {
+      const { data: creds } = await userSupabase.rpc("list_circle_site_credentials", {
+        p_circle_id: body.circleId,
+      });
+      const loginable = (Array.isArray(creds) ? creds : [])
+        .filter((c: any) => {
+          const actions = Array.isArray(c?.allowed_actions) ? c.allowed_actions.map((a: any) => String(a).toLowerCase()) : [];
+          return actions.length === 0 || actions.includes("login");
+        })
+        .slice(0, 12);
+      if (loginable.length > 0) {
+        const lines = loginable.map((c: any) => {
+          const origins = Array.isArray(c?.allowed_origins) && c.allowed_origins.length
+            ? ` [origins: ${c.allowed_origins.slice(0, 3).join(", ")}]`
+            : (c?.site_url ? ` [site: ${c.site_url}]` : "");
+          return `- credential_id="${c.id}" — ${c.platform || "site"}/${c.label || "login"}${c.username ? ` (user: ${c.username})` : ""}${origins}`;
+        }).join("\n");
+        credentialInventory = `SAVED LOGINS AVAILABLE (circle vault). When a page requires signing in and it matches one of these, call fill_saved_login with the matching credential_id (after approval) instead of asking the user to type a password — the secret is typed directly into the page and never shown to you. Only these are available:\n${lines}\n\nRules: match the current page's origin to the credential's site/origins before using it; if none match the site you're on, ask the user. Never guess a credential_id.`;
+      }
+    } catch { /* credential inventory is best-effort; never block the run */ }
+  }
+
   // Insert the initial run row so clients can track it in real-time even
   // before completion.
   let runId: string | null = null;
@@ -643,7 +675,7 @@ Deno.serve(async (req: Request) => {
       // context (from the most recent completed run in this circle) so
       // the agent can thread continuity across tasks without requiring
       // the user to restate history.
-      const contextBlocks = [replayBlock, followUpContext].filter(Boolean);
+      const contextBlocks = [replayBlock, followUpContext, credentialInventory].filter(Boolean);
       const userContent = contextBlocks.length
         ? `${contextBlocks.join("\n\n---\n\n")}\n\n---\n\nNew task:\n${body.task}`
         : body.task;

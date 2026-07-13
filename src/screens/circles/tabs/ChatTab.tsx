@@ -8892,6 +8892,74 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
+    // ─── Auto best-of-N (coding-agent P5) — DEFAULT OFF ─────────────────────
+    // When enabled (localStorage uc_auto_best_of_n), a COMPLEX text-only
+    // build/debug/review turn with ≥2 providers connected auto-races the same
+    // task across models and presents the judged winner — the manual /bestof
+    // pattern, triggered automatically. Gated hard: never for tool-runtime
+    // turns, never for /commands (messageStartsWithCommand short-circuits any
+    // slash message straight through to the interceptors below).
+    // Cheap synchronous short-circuit: skip all detection work unless the
+    // opt-in flag is set (default OFF) and this isn't a /command. Keeps the
+    // common path zero-cost.
+    if (
+      !content.trim().startsWith('/')
+      && (() => { try { const v = (globalThis as any)?.localStorage?.getItem?.('uc_auto_best_of_n'); return v === '1' || v === 'true' || v === 'on'; } catch { return false; } })()
+    ) {
+      let autoRace: { race: boolean; models: string[] } | null = null;
+      try {
+        const [{ decideAutoBestOfN }, { detectSmartRoute }] = await Promise.all([
+          import('../../../lib/codingModelSplitPolicy'),
+          import('../../../lib/agenticCodingProfile'),
+        ]);
+        const route = detectSmartRoute(content, 'main_chat');
+        const decision = decideAutoBestOfN({
+          intent: route.intent,
+          complexity: route.complexity,
+          useRuntime: route.useRuntime,
+          messageStartsWithCommand: content.trim().startsWith('/'),
+          connectedProviders: connectedProviderSet,
+        });
+        if (decision.race && decision.models.length >= 2) autoRace = decision;
+      } catch { /* auto best-of-N is best-effort — fall through to normal send */ }
+      if (autoRace) {
+        (async () => {
+          setBotTyping(true);
+          try {
+            const { runBestOfNRace, summarizeBestOfNRace } = await import('../../../lib/bestOfNRace');
+            const { bestOfNMetadata } = await import('../../../lib/persistedChatMetadata');
+            addBotMessage(
+              `🏁 Complex coding task — racing ${autoRace.models.length} models and judging the winner…`,
+              undefined,
+              { localOnly: true },
+            );
+            const result = await runBestOfNRace({
+              models: autoRace.models,
+              task: content,
+              circleId,
+              userId: currentUserId || '',
+            });
+            addBotMessage(result.formattedReport, undefined, {
+              localOnly: true,
+              bestOfN: bestOfNMetadata(summarizeBestOfNRace(result)),
+            });
+          } catch (e: any) {
+            await addRecoverableChatErrorMessage({
+              title: 'Auto best-of-N race failed',
+              task: content,
+              error: e,
+              executionKind: 'bestof_command',
+              source: 'auto_bestof_error',
+              touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/codingModelSplitPolicy.ts', 'src/lib/bestOfNRace.ts'],
+            });
+          } finally {
+            setBotTyping(false);
+          }
+        })();
+        return;
+      }
+    }
+
     // ─── Watch commands — intercept /watch (recurring monitors, plan §6a) ────
     if (lowerContent.startsWith('/watch') && (lowerContent === '/watch' || lowerContent[6] === ' ')) {
       (async () => {
