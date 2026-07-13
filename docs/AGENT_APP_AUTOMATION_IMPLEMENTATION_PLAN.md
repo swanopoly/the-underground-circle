@@ -159,6 +159,30 @@ The whole plan is: **move each app up this ladder** from where it sits today.
    an InDesign template → export proof → post to WordPress" chains through the
    existing plan/approval economy + receipts.
 
+## 6a. TWO runner substrates (refined P72 — a wave of 5 generators surfaced this)
+
+A build wave (AutoCAD/Fusion/Revit/SolidWorks/DaVinci pure generators) proved
+the "script generator" half is uniform, but the RUNNER splits in two — the
+plan's original "one substrate" was too optimistic:
+
+- **Substrate A — headless-CLI execFile** (`appScriptRunner` / `desktop.run_app_script`):
+  spawn a fixed-path binary with argv. Fits: OpenSCAD, FreeCAD, Blender (shipped
+  in cadCodeExecutor), **AutoCAD** (`accoreconsole /i /s`), MATLAB (`-batch`),
+  KiCad (`kicad-cli`), GIMP (`--batch`), After Effects (`aerender`).
+- **Substrate B — in-process app scripting** (needs a connected-agent host on
+  the app's OS; NOT execFile): the script runs *inside a live app* via an
+  add-in / COM / scripting-module. Fits: **Fusion 360** (Scripts & Add-Ins,
+  no headless mode), **Revit** (pyRevit / RevitPythonShell, Windows-only),
+  **SolidWorks** (COM `RunMacro2`, Windows-only), **DaVinci Resolve** (a Python
+  child importing `DaVinciResolveScript`, `RESOLVE_SCRIPT_*` env, connecting to
+  the running app).
+
+The pure GENERATORS (all shipped P72, smoke-tested) are runner-agnostic — the
+same validated-script + safe-embed output feeds either substrate. Wiring
+diverges: Substrate A → `desktop.run_app_script`; Substrate B → a
+`desktop.<app>_run_script` connected-agent-host tool per app (the buildout path
+the design profiles already name). Of the 5, only AutoCAD is Substrate A.
+
 ## 6. The reusable build pattern — "scriptable app adapter"
 
 Every new `executable` app follows the shipped ExtendScript / cad_compile
