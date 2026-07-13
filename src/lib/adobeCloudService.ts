@@ -116,6 +116,10 @@ function clip(value: unknown, max: number): string {
 function isHttpsUrl(value: unknown, max: number): value is string {
   const text = typeof value === 'string' ? value.trim() : '';
   if (!text || text.length > max || /\s/.test(text)) return false;
+  // Reject URLs carrying userinfo (https://user:SECRET@host/…): a credential in
+  // the authority would otherwise ride verbatim into the request body AND the
+  // receipt assetUrls[] (the URL is not run through scrubSecrets). Fail closed.
+  if (/^https:\/\/[^/?#]*@/i.test(text)) return false;
   return /^https:\/\/[^\s]+$/i.test(text);
 }
 

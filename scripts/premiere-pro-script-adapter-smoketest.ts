@@ -223,6 +223,9 @@ function main(): void {
     assert(extendScriptStringLiteral('a\\"b') === '"a\\\\\\"b"', '(6) ES3 escaper handles backslash-then-quote (no forged escape)');
     assert(extendScriptStringLiteral('a\x01b') === null, '(6) ES3 escaper returns null on a control char (fail closed)');
     assert(extendScriptStringLiteral('a\u{1F600}b') === null, '(6) ES3 escaper returns null on a non-BMP char');
+    // P77: raw U+2028/U+2029 terminate an ES3 string literal → must fail closed.
+    assert(extendScriptStringLiteral('a' + String.fromCharCode(0x2028) + 'app.pwned=1') === null, '(6) ES3 escaper rejects U+2028 LINE SEPARATOR (breakout)');
+    assert(extendScriptStringLiteral('a' + String.fromCharCode(0x2029) + 'x') === null, '(6) ES3 escaper rejects U+2029 PARAGRAPH SEPARATOR');
   }
 
   // ─── (7) param bounds + allowlists ────────────────────────────────────────

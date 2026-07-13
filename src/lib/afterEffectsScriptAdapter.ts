@@ -161,7 +161,7 @@ export function validateAfterEffectsPath(
   if (!trimmed) return { ok: false, error: `${label} is empty` };
   if (trimmed.length > 1024) return { ok: false, error: `${label} exceeds 1024 chars` };
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(trimmed)) return { ok: false, error: `${label} contains control characters` };
+  if (/[\x00-\x1f\u2028\u2029]/.test(trimmed)) return { ok: false, error: `${label} contains control characters` };
   if (/[`$;|&><\n]/.test(trimmed)) return { ok: false, error: `${label} contains a shell metacharacter` };
   for (const ch of trimmed) {
     if ((ch.codePointAt(0) ?? 0) > 0xffff) {
@@ -196,7 +196,7 @@ export function validateAfterEffectsLabel(
     return { ok: false, error: `${label} exceeds ${AFTER_EFFECTS_MAX_LABEL_LENGTH} chars` };
   }
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(trimmed)) return { ok: false, error: `${label} contains control characters` };
+  if (/[\x00-\x1f\u2028\u2029]/.test(trimmed)) return { ok: false, error: `${label} contains control characters` };
   if (/[/\\]/.test(trimmed)) return { ok: false, error: `${label} must not contain a path separator` };
   if (/[`$;|&><\n"]/.test(trimmed)) return { ok: false, error: `${label} contains a disallowed metacharacter` };
   for (const ch of trimmed) {
@@ -232,7 +232,7 @@ export function validateAfterEffectsScriptLabel(
   }
   // Control chars + newline: the ES3 escaper cannot encode these safely.
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(trimmed)) return { ok: false, error: `${label} contains control characters` };
+  if (/[\x00-\x1f\u2028\u2029]/.test(trimmed)) return { ok: false, error: `${label} contains control characters` };
   if (/[/\\]/.test(trimmed)) return { ok: false, error: `${label} must not contain a path separator` };
   // Shell metachars stay out (tight allowlist); note `"` is deliberately ALLOWED
   // here because extendScriptStringLiteral escapes it into the literal.
@@ -282,7 +282,10 @@ export function validateAfterEffectsFrame(
 export function extendScriptStringLiteral(value: string): string | null {
   const text = String(value ?? '');
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(text)) return null;
+  // Reject C0 controls AND the ES3 line terminators U+2028/U+2029 — a RAW one
+  // inside a string literal terminates it in ExtendScript (ES3), which would let
+  // a comp/item name break out into executable JSX. Fail closed.
+  if (/[\x00-\x1f\u2028\u2029]/.test(text)) return null;
   for (const ch of text) {
     if ((ch.codePointAt(0) ?? 0) > 0xffff) return null;
   }

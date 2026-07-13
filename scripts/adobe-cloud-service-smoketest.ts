@@ -71,6 +71,8 @@ function main(): void {
   // reject non-https image url + oversized
   assertEq((validateAdobeCloudArgs({ operation: 'background_remove', image: { url: 'http://insecure/x.png' } }) as any).ok, false, '(3) http image rejected (https only)');
   assertEq((validateAdobeCloudArgs({ operation: 'background_remove', image: { url: 'ftp://x' } }) as any).ok, false, '(3) non-http scheme rejected');
+  // P77: a secret in URL userinfo must NOT ride into the body/receipt.
+  assertEq((validateAdobeCloudArgs({ operation: 'background_remove', image: { url: 'https://user:sk-secret1234567890abcd@evil.example/a.png' } }) as any).ok, false, '(3) userinfo URL rejected (credential-leak guard)');
 
   // ─── (4) buildAdobeCloudRequest: correct body, NO auth, null on invalid ───
   if (t2i.ok) {

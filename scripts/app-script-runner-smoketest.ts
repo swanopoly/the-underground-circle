@@ -143,6 +143,13 @@ function main(): void {
   assertEq((validateAppScriptRunRequest({ engine: 'gimp', programText: 'a\u0007b' }) as any).ok, false, '(2d) gimp rejects control char in program');
   assertEq((validateAppScriptRunRequest({ engine: 'gimp', programText: 'x'.repeat(100_001) }) as any).ok, false, '(2d) gimp rejects oversized program');
 
+  // ─── (2e) P77 hardening: option-injection + matlab in-string quote-injection ─
+  assertEq((validateAppScriptRunRequest({ engine: 'matlab', sourcePath: '-rf.m' }) as any).ok, false, '(2e) leading-dash sourcePath rejected (CLI option-injection)');
+  assertEq((validateAppScriptRunRequest({ engine: 'aerender', sourcePath: '/p/p.aep', outputPath: '/p/o.mov', jobParams: { comp: '-output' } }) as any).ok, false, '(2e) leading-dash comp jobParam dropped → comp missing');
+  const mq = validateAppScriptRunRequest({ engine: 'matlab', sourcePath: "/p/x'),system('id.m" });
+  assert(mq.ok, "(2e) matlab path with ' is valid (not a shell metachar)");
+  if (mq.ok) assert(mq.plan.args[1] === "run('/p/x''),system(''id.m')", '(2e) matlab doubles single-quotes so the path cannot inject MATLAB code', mq.plan.args[1]);
+
   // ─── (3) engine gate ──────────────────────────────────────────────────────
   assertEq((validateAppScriptRunRequest({ engine: 'photoshop', sourcePath: '/p/x.py' }) as any).ok, false, '(3) unknown engine rejected');
   assertEq((validateAppScriptRunRequest({ sourcePath: '/p/x.m' }) as any).ok, false, '(3) missing engine rejected');

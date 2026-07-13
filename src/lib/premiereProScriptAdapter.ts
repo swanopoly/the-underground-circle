@@ -190,7 +190,7 @@ export function validatePremiereProPath(
   if (!trimmed) return { ok: false, error: `${label} is empty` };
   if (trimmed.length > 1024) return { ok: false, error: `${label} exceeds 1024 chars` };
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(trimmed)) return { ok: false, error: `${label} contains control characters` };
+  if (/[\x00-\x1f\u2028\u2029]/.test(trimmed)) return { ok: false, error: `${label} contains control characters` };
   if (/[`$;|&><\n]/.test(trimmed)) return { ok: false, error: `${label} contains a shell metacharacter` };
   for (const ch of trimmed) {
     if ((ch.codePointAt(0) ?? 0) > 0xffff) {
@@ -223,7 +223,7 @@ export function validatePremiereProScriptLabel(
   }
   // Control chars + newline: the ES3 escaper cannot encode these safely.
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(trimmed)) return { ok: false, error: `${label} contains control characters` };
+  if (/[\x00-\x1f\u2028\u2029]/.test(trimmed)) return { ok: false, error: `${label} contains control characters` };
   if (/[/\\]/.test(trimmed)) return { ok: false, error: `${label} must not contain a path separator` };
   // Shell metachars stay out (tight allowlist); note `"` is deliberately ALLOWED
   // here because extendScriptStringLiteral escapes it into the literal.
@@ -298,7 +298,7 @@ export function validatePremiereProTime(
 export function extendScriptStringLiteral(value: string): string | null {
   const text = String(value ?? '');
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(text)) return null;
+  if (/[\x00-\x1f\u2028\u2029]/.test(text)) return null;
   for (const ch of text) {
     if ((ch.codePointAt(0) ?? 0) > 0xffff) return null;
   }

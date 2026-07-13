@@ -124,7 +124,10 @@ export const APP_SCRIPT_ENGINE_REGISTRY: Record<AppScriptEngine, AppScriptEngine
     defaultTimeoutMs: 120_000,
     maxTimeoutMs: 600_000,
     isAllowedExtraArg: denyAllExtraArgs,
-    buildArgs: ({ sourcePath }) => ['-batch', `run('${sourcePath}')`],
+    // Double single-quotes so the validated path cannot break out of the
+    // MATLAB char-array and inject a statement (MATLAB escapes ' as ''). The
+    // path is one execFile argv token, but this closes in-MATLAB code injection.
+    buildArgs: ({ sourcePath }) => ['-batch', `run('${sourcePath.replace(/'/g, "''")}')`],
     verifiedInvocation: false,
   },
   // KiCad 7+ modern headless CLI (render_job: flags over an existing board/sch).
@@ -242,8 +245,11 @@ export function isAppScriptEngine(value: unknown): value is AppScriptEngine {
   return typeof value === 'string' && (APP_SCRIPT_ENGINES as readonly string[]).includes(value);
 }
 
-// ── Path validation (LOCKSTEP: cadCodeExecutor.validateCadPath ↔ bridge
-//    validateDesktopPathServer). Keep the reject-set byte-identical. ──────────
+// ── Path validation. Shares the core reject-set with cadCodeExecutor.validateCadPath
+//    ↔ bridge validateDesktopPathServer, but is DELIBERATELY STRICTER: it also
+//    rejects ".." traversal, non-BMP, and a leading "-" (CLI option-injection).
+//    A plan that passes here is still re-checked by the bridge's absolute-path +
+//    file-access-grant + stat gate; the extra strictness only ever fails closed. ─
 function validateRunnerPath(raw: unknown, label: string): { ok: true; path: string } | { ok: false; error: string } {
   if (typeof raw !== 'string') return { ok: false, error: `${label} must be a string` };
   const trimmed = raw.trim();
@@ -260,6 +266,9 @@ function validateRunnerPath(raw: unknown, label: string): { ok: true; path: stri
   // Directory traversal is inert once the bridge enforces its file-access grant,
   // but reject it here too so a plan never *looks* like an escape.
   if (/(^|[\\/])\.\.([\\/]|$)/.test(trimmed)) return { ok: false, error: `${label} must not contain ".." traversal` };
+  // A leading '-' would be read by the target CLI as an OPTION, not a path
+  // (option-injection into kicad-cli/aerender/etc.). Legit targets are absolute.
+  if (trimmed.startsWith('-')) return { ok: false, error: `${label} must not start with "-"` };
   return { ok: true, path: trimmed };
 }
 
@@ -279,6 +288,8 @@ function sanitizeJobValue(raw: unknown): string | null {
     // eslint-disable-next-line no-control-regex
     if (/[\x00-\x1f]/.test(t)) return null;
     if (/[`$;|&><\n]/.test(t)) return null;
+    // A leading '-' would be read as an OPTION by the target CLI, not a value.
+    if (t.startsWith('-')) return null;
     for (const ch of t) if ((ch.codePointAt(0) ?? 0) > 0xffff) return null;
     return t;
   }
