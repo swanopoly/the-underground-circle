@@ -356,6 +356,7 @@ import {
 import type { ComputerTaskAppRouteDecisionInput } from '../../../lib/computerTaskEvidenceRecovery';
 import {
   buildChatFailureRecoveryExecutionPlan,
+  formatActiveChatBlockerContextForPrompt,
   formatChatFailureRecoveryOptionSelection,
   formatChatFailureRecoveryOptionSelectionForPrompt,
   parseChatFailureRecoveryOptionSelection,
@@ -677,6 +678,41 @@ function getMemoryFamily(ref: PromptMemoryReference): 'guidance' | 'pattern' {
 
 function getMemoryFamilyLabel(ref: PromptMemoryReference): string {
   return getMemoryFamily(ref) === 'guidance' ? 'Guidance' : 'Pattern';
+}
+
+function formatMemoryKindLabel(memoryKind: string): string {
+  switch (memoryKind) {
+    case 'fact': return 'known fact';
+    case 'instruction': return 'standing instruction';
+    case 'preference': return 'user preference';
+    case 'decision': return 'past decision';
+    case 'finding': return 'investigation finding';
+    case 'policy': return 'house policy';
+    case 'context': return 'background context';
+    default: return memoryKind;
+  }
+}
+
+function formatMemoryScopeLabel(ref: PromptMemoryReference): string {
+  switch (ref.scope) {
+    case 'org': return 'org-wide';
+    case 'circle': return 'circle-wide';
+    case 'room': return 'this room';
+    case 'user': return 'just you';
+    case 'session': return 'this session';
+    case 'agent': return 'this agent only';
+    default: return String(ref.scope);
+  }
+}
+
+function formatMemoryRecommendationTargetLabel(target: OpenSwanMemoryRecommendation['target']): string {
+  switch (target) {
+    case 'agent_private': return 'private to this agent';
+    case 'circle_shared': return 'shared with the circle';
+    case 'user_private': return 'private to you';
+    case 'promote_existing': return 'promoting existing memory';
+    default: return String(target).replace(/_/g, ' ');
+  }
 }
 
 function mapPersistedRowsToChatMessages(
@@ -9353,12 +9389,38 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       for (let mi = recentMessages.length - 1; mi >= 0; mi--) {
         if (recentMessages[mi].isBot) { lastBotMessageIdx = mi; break; }
       }
-      const chatHistory = recentMessages.map((m, mi) => {
+      const chatHistoryText = recentMessages.map((m, mi) => {
         const who = m.isBot ? agentName : (m.userName || 'User');
         const when = m.timestamp ? m.timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '';
         const ago = m.timestamp ? formatTimeAgo(m.timestamp) : '';
         return `[${who} · ${when}${ago ? ` · ${ago}` : ''}] ${m.content.slice(0, mi === lastBotMessageIdx ? 2000 : 300)}`;
       }).join('\n');
+      // Deeper root cause of the recovery-followup-context bug: when the very
+      // last message is a bot message left in a blocked/needs-input state,
+      // its recovery options / plan preview / evidence gaps only ever existed
+      // as UI render fields on that message — never in `m.content` above — so
+      // a natural-language follow-up about that card had no structured
+      // context to answer from. Additive/no-op when the last bot message has
+      // no active blocker.
+      const lastMessage = recentMessages.length > 0 ? recentMessages[recentMessages.length - 1] : null;
+      const activeBlockerContext = (lastMessage && lastMessage.isBot && lastBotMessageIdx === recentMessages.length - 1)
+        ? formatActiveChatBlockerContextForPrompt({
+          recoveryOptions: lastMessage.recoveryOptions,
+          computerHandoffBlockers: lastMessage.computerHandoff?.blockers,
+          computerHandoffWarnings: lastMessage.computerHandoff?.warnings,
+          preflightSummary: lastMessage.computerHandoff?.preflightSummary,
+          groundingSummary: lastMessage.computerHandoff?.groundingSummary,
+          planPreview: lastMessage.chatAutomationPlanPreview
+            ? {
+              title: lastMessage.chatAutomationPlanPreview.title,
+              routeLabel: lastMessage.chatAutomationPlanPreview.routeLabel,
+              approvalRequired: lastMessage.chatAutomationPlanPreview.approvalRequired,
+              evidenceGaps: lastMessage.chatAutomationPlanPreview.evidencePanel?.freshEvidenceRequired,
+            }
+            : null,
+        })
+        : '';
+      const chatHistory = [chatHistoryText, activeBlockerContext].filter(Boolean).join('\n');
 
       // If replying to a specific message, prepend that context
       const replyContext = replyTo
@@ -11266,7 +11328,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     </Pressable>
                   </View>
                   <Text style={styles.recoveryOptionDetail} numberOfLines={3}>{option.detail}</Text>
-                  <Text style={styles.recoveryOptionPlan} numberOfLines={2}>{executionPlan.userSummary}</Text>
+                  {executionPlan.policy.action === 'continue_recovery' ? (
+                    <Text style={styles.recoveryOptionPlan} numberOfLines={2}>{executionPlan.userSummary}</Text>
+                  ) : null}
                 </View>
               );
             })}
@@ -11294,7 +11358,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                         >
                           <Text style={styles.memoryInfluenceTitle}>{ref.title}</Text>
                           <Text style={styles.messageSourceMeta}>
-                            {getMemoryFamilyLabel(ref).toUpperCase()} • {formatMemoryStateLabel(ref).toUpperCase()} • {String(ref.scope).toUpperCase()} • {String(ref.memoryKind).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryTrustLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}{formatMemorySourceLabel(ref) ? ` • ${formatMemorySourceLabel(ref)!.toUpperCase()}` : ''}{formatArchiveBiasLabel(ref) ? ` • ${formatArchiveBiasLabel(ref)!.toUpperCase()}` : ''}
+                            {getMemoryFamilyLabel(ref).toUpperCase()} • {formatMemoryStateLabel(ref).toUpperCase()} • {formatMemoryScopeLabel(ref).toUpperCase()} • {formatMemoryKindLabel(String(ref.memoryKind)).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryTrustLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}{formatMemorySourceLabel(ref) ? ` • ${formatMemorySourceLabel(ref)!.toUpperCase()}` : ''}{formatArchiveBiasLabel(ref) ? ` • ${formatArchiveBiasLabel(ref)!.toUpperCase()}` : ''}
                           </Text>
                           <Text style={styles.messageSourceSubtitle}>
                             {ref.matchReason ? `${ref.matchReason}. ` : ''}
@@ -11347,7 +11411,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               <View key={recommendation.id} style={[styles.messageSourceCard, styles.memoryInfluenceCard]}>
                 <Text style={styles.memoryInfluenceTitle}>{recommendation.title}</Text>
                 <Text style={styles.messageSourceMeta}>
-                  {recommendation.priority.toUpperCase()} • {recommendation.memoryKind.toUpperCase()} • {recommendation.target.replace(/_/g, ' ').toUpperCase()}
+                  {recommendation.priority.toUpperCase()} • {formatMemoryKindLabel(recommendation.memoryKind).toUpperCase()} • {formatMemoryRecommendationTargetLabel(recommendation.target).toUpperCase()}
                 </Text>
                 <Text style={styles.messageSourceSubtitle}>
                   {recommendation.rationale}
@@ -12123,7 +12187,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   >
                     <Text style={styles.soulMemoryCardTitle} numberOfLines={1}>{ref.title}</Text>
                     <Text style={styles.soulLearningCardMeta}>
-                      {String(ref.memoryKind).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}
+                      {formatMemoryKindLabel(String(ref.memoryKind)).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}
                     </Text>
                     <Text style={styles.soulLearningCardSubtitle} numberOfLines={2}>
                       {ref.retrievalMode === 'startup' ? 'Pinned as startup guidance.' : 'Available on demand for matching tasks.'}

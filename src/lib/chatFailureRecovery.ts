@@ -724,6 +724,63 @@ export function formatChatFailureRecoveryOptionSelectionForPrompt(
   ].filter(Boolean).join('\n');
 }
 
+/**
+ * Deeper-root-cause fix: the plain-text chat history string forwarded to the
+ * model only ever carries each message's rendered bubble text. When the most
+ * recent assistant message rendered a blocked/needs-input computer-task card
+ * (recovery options, a plan preview, or evidence-contract gaps), all of that
+ * structured state lived only in UI render fields — never in the bubble
+ * text — so a natural-language follow-up ("what contract are you referring
+ * to", "why did it fail") had nothing to answer from. This builds a compact,
+ * secret-safe "Active Blocked Task" block from exactly the fields the card
+ * already rendered, so it can be appended to chat history unconditionally.
+ * Returns '' when there is nothing blocked to report (additive/no-op).
+ */
+export interface ActiveChatBlockerContextInput {
+  recoveryOptions?: Pick<ChatFailureRecoveryOption, 'id' | 'label' | 'recommended'>[] | null;
+  computerHandoffBlockers?: string[] | null;
+  computerHandoffWarnings?: string[] | null;
+  preflightSummary?: string | null;
+  groundingSummary?: string | null;
+  planPreview?: {
+    title?: string | null;
+    routeLabel?: string | null;
+    approvalRequired?: boolean | null;
+    evidenceGaps?: string[] | null;
+  } | null;
+}
+
+export function formatActiveChatBlockerContextForPrompt(
+  input: ActiveChatBlockerContextInput | null | undefined,
+): string {
+  if (!input) return '';
+  const options = (input.recoveryOptions || []).filter((option) => option?.id && option?.label);
+  const blockers = unique(input.computerHandoffBlockers || [], 6);
+  const warnings = unique(input.computerHandoffWarnings || [], 6);
+  const evidenceGaps = unique(input.planPreview?.evidenceGaps || [], 6);
+  const preflightSummary = compactSingleLine(input.preflightSummary, 300);
+  const groundingSummary = compactSingleLine(input.groundingSummary, 300);
+  const planTitle = compactSingleLine(input.planPreview?.title, 160);
+  const planRoute = compactSingleLine(input.planPreview?.routeLabel, 160);
+  const hasAnything = options.length > 0 || blockers.length > 0 || warnings.length > 0
+    || evidenceGaps.length > 0 || !!preflightSummary || !!groundingSummary || !!planTitle;
+  if (!hasAnything) return '';
+  return [
+    '## Active Blocked Task',
+    'Your most recent message left a computer/browser/desktop task blocked or awaiting input. If the user\'s next message is a follow-up question about it (e.g. asking what it is blocked on, why it failed, or what the plan/evidence gaps are) rather than a brand-new request, answer using this context — do not say you lack context.',
+    planTitle ? `- plan: ${planTitle}${planRoute ? ` (route: ${planRoute})` : ''}` : '',
+    input.planPreview?.approvalRequired ? '- approval_required: yes' : '',
+    blockers.length > 0 ? `- blockers: ${blockers.join(' | ')}` : '',
+    warnings.length > 0 ? `- warnings: ${warnings.join(' | ')}` : '',
+    preflightSummary ? `- preflight: ${preflightSummary}` : '',
+    groundingSummary ? `- grounding: ${groundingSummary}` : '',
+    evidenceGaps.length > 0 ? `- evidence_gaps: ${evidenceGaps.join(' | ')}` : '',
+    options.length > 0
+      ? `- recovery_options: ${options.map((option) => `[${compactSingleLine(option.id, 60)}] ${compactSingleLine(option.label, 140)}${option.recommended ? ' (recommended)' : ''}`).join(' | ')}`
+      : '',
+  ].filter(Boolean).join('\n');
+}
+
 function normalizeFingerprintPart(value: unknown, max = 800): string {
   return clean(value, max)
     .toLowerCase()
