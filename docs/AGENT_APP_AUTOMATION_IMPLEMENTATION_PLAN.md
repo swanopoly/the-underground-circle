@@ -183,6 +183,25 @@ diverges: Substrate A → `desktop.run_app_script`; Substrate B → a
 `desktop.<app>_run_script` connected-agent-host tool per app (the buildout path
 the design profiles already name). Of the 5, only AutoCAD is Substrate A.
 
+**Substrate A itself has THREE invocation modes** (P73 wave — GIMP/AE/Maya
+generators surfaced this; `appScriptRunner` today only models the first):
+
+1. **script-file**: binary runs a generated file by path — `matlab -batch
+   run('f.m')`, `mayapy f.py`, `accoreconsole /s f.scr`, blender/freecad/openscad.
+   ✅ fits the current `AppScriptRunRequest.sourcePath` contract.
+2. **inline-program**: the program is an argv token, not a file — GIMP
+   `-b "<python-fu>"`. Needs an inline-program engine mode (the generator emits
+   the program string; `buildArgs` places it as the `-b` token). The
+   already-enforced per-token control-char/newline reject keeps it one token.
+3. **render-job**: no script at all — a project + selection flags — aerender
+   `-project X -comp Y -output Z`. Needs a render-job request variant (the
+   generator already emits the validated argv vector directly).
+
+Action for the P2 wiring increment: extend `AppScriptRunRequest` with a
+`mode: 'script_file' | 'inline_program' | 'render_job'` (default `script_file`,
+back-compatible) before adding the gimp/aerender engines; `maya_python` and
+`autocad_core` land as plain script-file engines now.
+
 ## 6. The reusable build pattern — "scriptable app adapter"
 
 Every new `executable` app follows the shipped ExtendScript / cad_compile
