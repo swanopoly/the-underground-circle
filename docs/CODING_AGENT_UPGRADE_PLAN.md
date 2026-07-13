@@ -63,23 +63,30 @@ Primitives first — verification/plan/routing all build on them. Each pure core
 built + smoke-tested BEFORE wiring to the bridge/tool-catalog (the house pattern),
 and every mutating tool stays approval-gated.
 
-- **P1 — Precise file editor (str_replace/multi-edit).** ✅ DONE (pure core):
-  `src/lib/fileEditCore.ts` + smoke `file-edit-core` (41). Exact-match +
-  uniqueness enforcement (non-unique fails closed) + sequential multi-edit +
-  create + unified diff; literal replacement (no `$`/regex reinterpretation).
-  NEXT: wire `desktop.edit_file` bridge tool (read → applyFileEdits → show diff for
-  approval → write via file_write_text) + tool-catalog registration + LOCKSTEP
-  bridge handler.
-- **P2 — Shell/bash tool.** Bridge `execFile`-based (argv array, no shell string;
-  timeout; output tail-cap; cwd within grant). Pure command-shaping/validation
-  core + smoke first, then the gated bridge endpoint. Approval: `ask` for mutating
-  commands. Unlocks test/build/git-via-shell/run-and-fix loops.
-- **P3 — Git tools.** `git diff/status/log/show/blame` (auto) + `add/commit/branch`
-  (ask), via the bridge (execFile "git"). Pairs with P2.
-- **P4 — Codebase index + semantic search + `@file` mentions.** File-tree crawl +
-  docstring/symbol embeddings (reuse `memoryEmbeddings`), a `codebase.search` tool,
-  `@file:`/`@symbol:` resolution, and a per-turn project-conventions loader
-  (CLAUDE.md/.cursorrules). Biggest context-quality lift.
+- **P1 — Precise file editor (str_replace/multi-edit).** ✅ DONE + WIRED:
+  `src/lib/fileEditCore.ts` + smoke `file-edit-core` (41); wired as the
+  **`desktop.edit_file`** tool in `openswanToolRuntime.ts` (reads the file via the
+  bridge → `applyFileEdits` → writes via `file_write_text`, returns a fenced diff;
+  `ask`-gated, `desktop_files` write family, refuses a truncated read, create via
+  empty-oldString). No LOCKSTEP bridge mirror needed — it orchestrates the existing
+  `file_read`/`file_write_text` endpoints with the pure core in between.
+- **P2 — Shell/bash tool.** Pure policy core `src/lib/shellCommandPolicy.ts`
+  (classify read/mutate/blocked, catastrophic-pattern deny, chained-command
+  escalation, timeout clamp, secret-redacted preview) — smoke first, THEN a gated
+  bridge `execFile` endpoint + `local.run_shell` tool. Approval: `ask` for mutating.
+  Unlocks test/build/run-and-fix loops.
+- **P3 — Git tools.** ✅ pure core DONE: `src/lib/gitCommandPolicy.ts` + smoke
+  `git-command-policy` (185) — read verbs→auto, write→ask, force-push / `reset
+  --hard` / `-c` config-injection / `--upload-pack` blocked, commit message is a
+  safe argv element. NEXT: wire a bridge `execFile("git", argv)` endpoint (repo-path
+  grant enforced) + a `git.run` tool (read auto / write ask).
+- **P4 — Codebase index + semantic search + `@file` mentions.** ✅ pure core DONE:
+  `src/lib/codebaseIndexCore.ts` + smoke `codebase-index-core` (78) — index
+  planning (ignore-dirs, ext→language, size/generated/cap skips) + lexical
+  relevance ranker (fallback + re-ranker). NEXT: crawl via `desktop.file_list` →
+  symbol/summary extract → embed (reuse `memoryEmbeddings`) → `codebase_files` table
+  + `match_codebase_files` RPC → a `codebase.search` tool (semantic + lexical
+  re-rank) + `@file:`/`@symbol:` resolver + per-turn conventions loader.
 - **P5 — Operationalize plan/execute model split for coding.** Route complex
   coding through `planModelCollaboration()`: strong planner turn → fast executor
   tool loop. Add a coding-capability tier to `modelCapabilities.ts`. Optional

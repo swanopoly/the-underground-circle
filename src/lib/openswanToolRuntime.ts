@@ -201,6 +201,7 @@ export type OpenSwanRuntimeToolName =
   | 'desktop.file_stat'
   | 'desktop.file_rename'
   | 'desktop.file_write_text'
+  | 'desktop.edit_file'
   | 'desktop.file_copy'
   | 'desktop.file_trash'
   | 'desktop.file_mkdir'
@@ -557,6 +558,7 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.file_stat':         { path: string };
   'desktop.file_rename':       { fromPath: string; toPath: string; overwrite?: boolean };
   'desktop.file_write_text':   { path: string; content: string; append?: boolean; overwrite?: boolean };
+  'desktop.edit_file':         { path: string; oldString?: string; newString?: string; replaceAll?: boolean; edits?: Array<{ oldString: string; newString: string; replaceAll?: boolean }> };
   'desktop.file_copy':         { fromPath: string; toPath: string; overwrite?: boolean };
   'desktop.file_trash':        { path: string };
   'desktop.file_mkdir':        { path: string; recursive?: boolean };
@@ -835,6 +837,7 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.file_stat':         { ok: boolean; resultsText: string };
   'desktop.file_rename':       { ok: boolean; resultsText: string };
   'desktop.file_write_text':   { ok: boolean; resultsText: string };
+  'desktop.edit_file':         { ok: boolean; resultsText: string };
   'desktop.file_copy':         { ok: boolean; resultsText: string };
   'desktop.file_trash':        { ok: boolean; resultsText: string };
   'desktop.file_mkdir':        { ok: boolean; resultsText: string };
@@ -3103,6 +3106,23 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     },
   },
   {
+    name: 'desktop.edit_file',
+    label: 'Edit Local Text File (precise str-replace)',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description: 'Applies exact-string edits to a local text file in approved write roots — the precise code editor (prefer over desktop.file_write_text for existing files). Each oldString must match EXACTLY (whitespace included) and be UNIQUE, or set replaceAll; a non-unique match fails closed asking for more context, so the wrong occurrence is never edited. Pass one { oldString, newString, replaceAll? } or an ordered edits[] array. Create a file with a single empty-oldString edit. Requires local file write verification.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Target file path inside an approved write root.' },
+        oldString: { type: 'string', description: 'Exact substring to replace (single-edit form). Empty string = create a new file whose body is newString.' },
+        newString: { type: 'string', description: 'Replacement text (single-edit form). Inserted literally (no regex/backref interpretation).' },
+        replaceAll: { type: 'boolean', description: 'Replace every occurrence instead of requiring a unique match.' },
+        edits: { type: 'array', description: 'Ordered batch of { oldString, newString, replaceAll? } edits applied sequentially. Use instead of the single-edit fields for multiple changes.', items: { type: 'object' } },
+      },
+      required: ['path'],
+    },
+  },
+  {
     name: 'desktop.file_copy',
     label: 'Copy Local File',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
@@ -3742,6 +3762,7 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     const readOnly = readOnlyTools.has(tool);
     const fileWrite = tool === 'desktop.file_rename'
       || tool === 'desktop.file_write_text'
+      || tool === 'desktop.edit_file'
       || tool === 'desktop.file_copy'
       || tool === 'desktop.file_trash'
       || tool === 'desktop.file_mkdir';
@@ -4053,6 +4074,7 @@ const TOOL_DEPENDENCY_DOMAINS: Partial<Record<OpenSwanRuntimeToolName, { writes?
   // Local desktop files. Generic writes stay 'ask'-gated; bounded image
   // conversion is auto-approved but still declares the same file domain.
   'desktop.file_write_text': { writes: ['desktop_files'] },
+  'desktop.edit_file': { writes: ['desktop_files'] },
   'desktop.file_rename': { writes: ['desktop_files'] },
   'desktop.file_copy': { writes: ['desktop_files'] },
   'desktop.file_trash': { writes: ['desktop_files'] },
@@ -4254,6 +4276,7 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'desktop.clipboard_clear': ['execute'],
   'desktop.file_rename': ['execute'],
   'desktop.file_write_text': ['execute'],
+  'desktop.edit_file': ['execute'],
   'desktop.file_copy': ['execute'],
   'desktop.file_trash': ['execute'],
   'desktop.file_mkdir': ['execute'],
@@ -4473,6 +4496,7 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'desktop.file_stat',
   'desktop.file_rename',
   'desktop.file_write_text',
+  'desktop.edit_file',
   'desktop.file_copy',
   'desktop.file_trash',
   'desktop.file_mkdir',
@@ -5376,6 +5400,7 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'desktop.file_stat':
     case 'desktop.file_rename':
     case 'desktop.file_write_text':
+    case 'desktop.edit_file':
     case 'desktop.file_copy':
     case 'desktop.file_trash':
     case 'desktop.file_mkdir':
@@ -8104,7 +8129,31 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
 	        return { ok: true, resultsText: `${r.data?.append ? 'Appended' : 'Wrote'} ${r.data?.bytes || 0} bytes to ${r.data?.path || filePath}.` } as any;
 	      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
 	    }
-	    case 'desktop.file_copy': {
+	        case 'desktop.edit_file': {
+      try {
+        const { readFile, writeTextFile, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        const { applyFileEdits } = await import('./fileEditCore');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const filePath = String((args as any).path || '');
+        if (!filePath) return { ok: false, resultsText: 'edit_file requires a path.' } as any;
+        const rawEdits = Array.isArray((args as any).edits) && (args as any).edits.length > 0
+          ? (args as any).edits.map((e: any) => ({ oldString: String(e?.oldString ?? ''), newString: String(e?.newString ?? ''), replaceAll: Boolean(e?.replaceAll) }))
+          : [{ oldString: String((args as any).oldString ?? ''), newString: String((args as any).newString ?? ''), replaceAll: Boolean((args as any).replaceAll) }];
+        const isCreate = rawEdits.length === 1 && rawEdits[0].oldString === '';
+        const read = await readFile(filePath, 4_000_000);
+        if (!read.ok && !isCreate) return { ok: false, resultsText: `edit_file: could not read ${filePath} \u2014 ${describeDesktopFailure(read.error, read.errorCode)}` } as any;
+        if (read.ok && read.data?.truncated) return { ok: false, resultsText: `edit_file aborted: ${filePath} is too large to read fully (${read.data?.size} bytes) \u2014 edit a smaller region or use desktop.file_write_text.` } as any;
+        const currentContent = read.ok ? (read.data?.content ?? '') : null;
+        const applied = applyFileEdits(currentContent, rawEdits, { path: filePath });
+        if (!applied.ok) return { ok: false, resultsText: `edit_file failed: ${applied.error}${applied.errorIndex !== undefined ? ` (edit ${applied.errorIndex})` : ''}` } as any;
+        const w = await writeTextFile(filePath, applied.content, { overwrite: true });
+        if (!w.ok) return { ok: false, resultsText: describeDesktopFailure(w.error, w.errorCode) } as any;
+        const summary = applied.created ? `Created ${filePath}` : `Edited ${filePath} (${applied.replacements} replacement${applied.replacements === 1 ? '' : 's'})`;
+        const shownDiff = applied.diff.length > 4000 ? `${applied.diff.slice(0, 4000)}\n\u2026 (diff truncated)` : applied.diff;
+        return { ok: true, resultsText: `${summary}\n\n${fenceUntrustedObservationText(shownDiff)}` } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.file_copy': {
 	      try {
 		        const { copyFile, isDesktopBridgeAvailable } = await import('./desktopBridge');
 		        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
