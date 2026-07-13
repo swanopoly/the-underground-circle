@@ -70,11 +70,15 @@ and every mutating tool stays approval-gated.
   `ask`-gated, `desktop_files` write family, refuses a truncated read, create via
   empty-oldString). No LOCKSTEP bridge mirror needed — it orchestrates the existing
   `file_read`/`file_write_text` endpoints with the pure core in between.
-- **P2 — Shell/bash tool.** Pure policy core `src/lib/shellCommandPolicy.ts`
-  (classify read/mutate/blocked, catastrophic-pattern deny, chained-command
-  escalation, timeout clamp, secret-redacted preview) — smoke first, THEN a gated
-  bridge `execFile` endpoint + `local.run_shell` tool. Approval: `ask` for mutating.
-  Unlocks test/build/run-and-fix loops.
+- **P2 — Shell/bash tool.** ✅ pure core DONE: `src/lib/shellCommandPolicy.ts` +
+  smoke `shell-command-policy` (99) — classifyShellCommand → read(auto) /
+  mutate(ask) / blocked(never): read allowlist incl. test/build/lint, unknown
+  lead → mutate (fail-safe), compound commands escalate to their highest-risk
+  segment, redirection + `$(…)` escalate, catastrophic patterns refused
+  (rm -rf / , curl|sh , sudo , dd of=/dev , fork bomb , force-push , chmod 777 / ),
+  timeout clamp, secret-redacted preview. NEXT: wire a gated bridge `execFile`
+  endpoint (cwd within grant, output tail-cap) + a `local.run_shell` tool
+  (auto/ask per the policy). Unlocks test/build/run-and-fix loops.
 - **P3 — Git tools.** ✅ pure core DONE: `src/lib/gitCommandPolicy.ts` + smoke
   `git-command-policy` (185) — read verbs→auto, write→ask, force-push / `reset
   --hard` / `-c` config-injection / `--upload-pack` blocked, commit message is a
