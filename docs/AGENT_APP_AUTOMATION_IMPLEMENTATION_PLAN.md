@@ -203,9 +203,22 @@ LOCKSTEP shape, so the marginal cost of app N+1 is small:
   server-side. Async job-polling, approval-gated, secret-scrubbed, receipts
   (output asset URL). Highest ROI, no desktop Photoshop needed. Target v2
   (v1 EOL 2026-07-31).
-- **P2 — `desktop.run_app_script` generalized runner.** Generalize `cad_compile`
-  into a whitelisted headless-script substrate (engines: blender/freecad/
-  openscad already; +matlab/gimp/kicad/maya). One primitive, many apps.
+- **P2 — `desktop.run_app_script` generalized runner. ◐ IN PROGRESS.**
+  Increment 1 SHIPPED (2026-07-12): pure `src/lib/appScriptRunner.ts` — the
+  generalized substrate (engine registry + engine-AGNOSTIC security core:
+  LOCKSTEP path validation, source/output extension allowlists, strict
+  per-engine extraArg allowlist, timeout clamp; `validateAppScriptRunRequest` /
+  `buildAppScriptRunSpec` / `describeAppScriptRun`). Seeded engines
+  `matlab` (`-batch`), `kicad_cli`, `autocad_core` (`accoreconsole`) — each
+  `verifiedInvocation:false` + `// VERIFY` until a live bridge run confirms the
+  CLI contract (so nothing wires live prematurely). Smoke: `app-script-runner`
+  (51, security-heavy). Next: (2) bridge LOCKSTEP runner in claude-bridge.js
+  (fixed binary paths, execFile argv, file-access grants) + `desktopBridge.ts`
+  fn; (3) `desktop.run_app_script` tool across the 8 seams (approval-gated
+  local execution) + per-engine script generators; (4) verify each engine on a
+  real install → flip `verifiedInvocation`. Generalizes the shipped
+  `cad_compile` (blender/freecad/openscad); +matlab/gimp/maya/aerender are then
+  new descriptors, not new endpoints.
 - **P3 — AutoCAD adapter.** `accoreconsole` + AutoLISP/`.scr` generator (the
   headline CAD ask). Headless draw/convert/extract; app-native for edits.
 - **P4 — Fusion 360 + Revit (pyRevit) + SolidWorks macro.** The pro-CAD trio,
