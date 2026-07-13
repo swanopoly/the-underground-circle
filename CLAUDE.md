@@ -96,6 +96,7 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | Marketplace prompt context | `src/lib/marketplaceIntegrationContext.ts` |
 | Codebase index/search + @mentions + conventions (coding-agent P4) | `src/lib/codebaseIndexRuntime.ts`, `src/lib/projectConventions.ts`, pure cores `codebaseIndexCore/codebaseSymbolCore/codebaseMentionsCore` |
 | Live TODO + tool-result summarization + run-and-fix gate (coding-agent P6) | `src/lib/agentTodoCore.ts` + `agentTodoStore.ts`, `src/lib/toolResultSummaryCore.ts` (in `agentExecutionCore.ts`), `src/lib/runAndFixGateCore.ts` (in `openswanSessionRuntime.ts`) |
+| Google Workspace tools (Gmail/Docs/Sheets/Drive/Calendar) | `src/lib/googleWorkspaceOps.ts` (pure contracts), `src/lib/googleWorkspaceRuntime.ts` (token+fetch), `gmail.*`/`gdocs.*`/`gsheets.*`/`gdrive.*`/`gcal.*` in `openswanToolRuntime.ts`; OAuth Phase A: `supabase/functions/google-oauth/index.ts` + `src/lib/googleCreds.ts` |
 
 Rule: new routing behavior goes into the relevant owner above. Do not extend
 legacy one-off routers when the planner/runtime owner already exists.

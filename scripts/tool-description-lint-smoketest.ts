@@ -158,8 +158,21 @@ const ALLOWLIST: Record<string, { rules: string[]; reason: string }> = {};
 const AUTO_MUTATION_DOCTRINE_FAMILIES = new Set(['coordination', 'approval', 'workspace', 'memory', 'code']);
 //  (b) read-only reads of an EXTERNAL surface through a guarded path:
 //      custom_api.read (server-side proxy: allowlisted methods, private hosts
-//      blocked, secrets injected server-side) and fetch_url (public GET).
-const AUTO_EXTERNAL_READ_TOOLS = new Set(['custom_api.read', 'fetch_url']);
+//      blocked, secrets injected server-side), fetch_url (public GET), and the
+//      Google Workspace read tools (Phase B): GET-only planners from the pure
+//      googleWorkspaceOps contract core (smoke-pinned URLs, no mutation verbs),
+//      the user's OWN account via their user_google_credentials row (RLS),
+//      content untrusted-fenced. Every Workspace WRITE is a separate
+//      ask-gated tool (gmail.write / gdocs.append / gsheets.write / gcal.write).
+const AUTO_EXTERNAL_READ_TOOLS = new Set([
+  'custom_api.read',
+  'fetch_url',
+  'gmail.read',
+  'gdocs.read',
+  'gsheets.read',
+  'gdrive.read',
+  'gcal.read',
+]);
 //  (c) listed per-tool exceptions with a stable, documented reason.
 const AUTO_MUTATION_TOOL_EXCEPTIONS = new Set([
   'desktop.convert_image', // bounded deterministic local conversion next to the source; approvalKind file_write.
