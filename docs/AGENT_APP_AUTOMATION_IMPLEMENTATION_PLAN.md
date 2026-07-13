@@ -202,6 +202,21 @@ Action for the P2 wiring increment: extend `AppScriptRunRequest` with a
 back-compatible) before adding the gimp/aerender engines; `maya_python` and
 `autocad_core` land as plain script-file engines now.
 
+**DONE (P76, 2026-07-13, committed):** `appScriptRunner` now carries `mode` on
+every engine descriptor and branches validation on it — `programText` (bounds +
+the single-line/no-control-char token check) for inline_program, and
+sanitized/allowlisted `jobParams` (int or bounded metachar-free BMP token, with
+`requiredJobParams`) for render_job. Six engines registered: **matlab /
+autocad_core / maya_python** (script_file), **gimp** (inline_program), **kicad_cli
+/ aerender** (render_job). `AppScriptRunSpec` now exposes `mode` so the bridge
+knows whether to write a generated script first. Smoke: app-script-runner (107,
+was 51). All still `verifiedInvocation:false`. **Remaining to make it usable:**
+(1) `desktop.run_app_script` tool in openswanToolRuntime (approval-gated, refuses
+when `verifiedInvocation:false`); (2) the bridge LOCKSTEP runner in
+`scripts/claude-bridge.js` (fixed per-engine binary paths, execFile array, no
+shell); (3) adapter→runner glue (generate → write/embed → run → stat-verify).
+Steps 1-2 need a live install to flip the gate per engine.
+
 ## 6. The reusable build pattern — "scriptable app adapter"
 
 Every new `executable` app follows the shipped ExtendScript / cad_compile
