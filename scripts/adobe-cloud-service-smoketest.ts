@@ -88,6 +88,16 @@ function main(): void {
     assert((req.body as any).size?.width === 1920, '(4) expand body carries target size');
     assert(!!(req.body as any).image, '(4) expand body carries source image');
   }
+  // Corrected endpoints/body (doc-verified 2026-07-13): the old sensei/cutout
+  // endpoint reached EOL — pin the live v2 shape so it cannot silently regress.
+  if (bg.ok) {
+    const req = buildAdobeCloudRequest(bg.value)!;
+    assert(req.url.endsWith('/v2/remove-background'), '(4) background_remove uses the live v2 endpoint (not EOL sensei/cutout)', req.url);
+    assert(!!(req.body as any).image?.source && (req.body as any).mode === 'cutout', '(4) background_remove body is {image:{source},mode:cutout}');
+    assert(!('input' in (req.body as any)), '(4) background_remove dropped the old input-key body shape');
+  }
+  assert(ADOBE_CLOUD_ENDPOINTS.generative_expand.url.endsWith('/expand-async'), '(4) generative_expand uses the documented async path');
+  assert(!/sensei\/cutout/.test(ADOBE_CLOUD_ENDPOINTS.background_remove.url), '(4) EOL sensei/cutout endpoint fully removed');
   assertEq(buildAdobeCloudRequest({ operation: 'text_to_image' } as AdobeCloudArgs), null, '(4) invalid args → null request');
 
   // ─── (5) receipt: sync outputs → succeeded + asset URLs ───────────────────

@@ -75,9 +75,14 @@ export const APP_SCRIPT_ENGINE_REGISTRY: Record<AppScriptEngine, AppScriptEngine
     buildArgs: ({ sourcePath }) => ['-batch', `run('${sourcePath}')`],
     verifiedInvocation: false,
   },
-  // KiCad 7+ modern headless CLI: `kicad-cli <domain> export <fmt> -o <out> <in>`.
-  // We model the common shape; the source is the board/schematic, output the
-  // export. // VERIFY: exact subcommand per export kind before wiring.
+  // KiCad 7+ modern headless CLI.
+  // // VERIFY — CONFIRMED WRONG (2026-07-13): there is NO bare `export` verb.
+  // Every export needs `<domain> export <fmt>` with the INPUT as the LAST
+  // positional arg, e.g. `pcb export gerbers --output <dir> <board.kicad_pcb>`,
+  // `pcb export step --output <file.step> <board>`, `sch export pdf --output
+  // <file.pdf> <sch>`. gerbers/drill --output is a DIRECTORY; step/pdf/svg a FILE.
+  // This flat buildArgs cannot serve all kinds — needs a per-export-kind branch
+  // (tied to the P2 `mode` work). Source: docs.kicad.org CLI 8.0/9.0.
   kicad_cli: {
     id: 'kicad_cli',
     label: 'KiCad (kicad-cli export)',

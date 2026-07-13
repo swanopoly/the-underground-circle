@@ -249,9 +249,13 @@ function buildExportPdf(input: AutoCadExportPdfInput): AutoCadScriptBuild {
   if (ext !== 'pdf') {
     return { script: '', scriptExtension: 'scr', notes: [`export_pdf aborted — outputPath must end in .pdf (got .${ext || '?'}).`] };
   }
-  // EXPORTPDF (current layout → PDF). // VERIFY the exact prompt sequence: some
-  // releases prompt "Current layout / All layouts", then a filename. We drive
-  // the single-layout default and supply the quoted path.
+  // EXPORTPDF (current layout → PDF).
+  // // VERIFY — CONFIRMED WRONG (2026-07-13): EXPORTPDF is DIALOG-ONLY (no
+  // command-line interface) and will NOT run headless in a .scr even with
+  // FILEDIA 0. Fix before wiring: emit the -EXPORT sequence instead —
+  //   ['-EXPORT','_PDF','_C','_N', scrPathToken(path)]  (_C=current layout,
+  //   _N=single sheet). Left gated so the fix + smoke re-pin land together.
+  //   Source: Autodesk forum "EXPORTPDF has no command-line interface".
   const body = ['EXPORTPDF', scrPathToken(validated.path)];
   notes.push(
     'EXPORTPDF exports the CURRENT layout to a single PDF; open the target layout first if a specific sheet is required.',
@@ -297,9 +301,14 @@ function buildExportDxf(input: AutoCadExportDxfInput): AutoCadScriptBuild {
     }
   }
 
-  // DXFOUT sequence: filename → version → decimal precision.
-  // // VERIFY: some releases prompt Binary/ASCII and the precision only for
-  // certain versions; the quoted path is always the first token.
+  // DXFOUT sequence.
+  // // VERIFY — CONFIRMED WRONG order (2026-07-13): after the filename the next
+  // prompt is decimal PRECISION (0..16); the file version is a sub-option ('V')
+  // chosen AT that prompt — i.e. path → ['V', versionToken] → precision — and the
+  // command should be '_DXFOUT' with FILEDIA/CMDDIA 0 (no hyphen form). The
+  // current [DXFOUT, path, versionToken, precisionToken] sends the version token
+  // where a precision/'V' keyword is expected. Fix + re-pin smoke before wiring.
+  // Source: CAD Forum DXFOUT + Autodesk SAVEAS/DXF prompt sequence.
   const body = ['DXFOUT', scrPathToken(validated.path), versionToken, precisionToken];
   notes.push('DXFOUT writes the DXF for the CURRENT drawing; confirm the intended model/paper space is active.');
   notes.push('Verify the DXF with desktop.file_stat after the run.');
@@ -310,7 +319,11 @@ function buildPurgeAndAudit(input: AutoCadPurgeAndAuditInput): AutoCadScriptBuil
   const notes: string[] = [];
   // -PURGE (hyphen = command-line, no dialog): purge All named objects, confirm
   // No to per-item verification, then optionally Regapps. Then AUDIT + fix.
-  // // VERIFY the exact -PURGE sub-prompts (All / Regapps / verify each Y/N).
+  // // VERIFY — CONFIRMED WRONG (2026-07-13): the Regapps option keyword is 'R',
+  // not the word 'Regapps'; and -PURGE must be REPEATED until 0 objects are
+  // removed (a single pass is insufficient). Prefer '-AUDIT' (hyphen) to
+  // guarantee no dialog headless. Fix + re-pin smoke before wiring.
+  // Source: Autodesk -PURGE help + AUGI drawing-cleanup macros.
   const body: string[] = ['-PURGE', 'All', '', 'N'];
   if (input.purgeRegapps === true) {
     body.push('-PURGE', 'Regapps', '', 'N');

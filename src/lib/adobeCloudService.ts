@@ -5,7 +5,7 @@
 // tools the creative-AI planner already routes to:
 //   - text_to_image      → desktop.firefly_generate_image_asset
 //   - generative_expand  → desktop.photoshop_generative_expand
-//   - background_remove  → (Photoshop/Sensei cutout)
+//   - background_remove  → (Photoshop remove-background v2)
 // (see designAppCreativeAi.ts / designAppAdapterGaps.ts).
 //
 // House pattern (mirrors messagingNotify.ts → messaging-notify edge fn): this
@@ -22,12 +22,18 @@
 // CLOSED with an honest connect hint when absent, and is NOT the consumer
 // default — the firefly.adobe.com browser-UI lane remains the interim path.
 //
-// ENDPOINT VERIFICATION: the endpoint paths in ADOBE_CLOUD_ENDPOINTS are from
-// Adobe developer docs but were NOT freshly verified (the P69 research run's
-// verification phase hit a rate limit). VERIFY each against
-// developer.adobe.com/firefly-services before the edge fn is deployed. The
-// value of this module — validation, bounds, receipt parsing, secret-scrub — is
-// correct regardless of the exact URLs, which are isolated in one constant.
+// ENDPOINT VERIFICATION (verified 2026-07-13 against developer.adobe.com):
+//   - text_to_image     /v3/images/generate       CONFIRMED (sync; async twin
+//                                                  /v3/images/generate-async exists).
+//   - generative_expand /v3/images/expand-async    Adobe documents the ASYNC path
+//                                                  (returns jobId + statusUrl; the
+//                                                  receipt parser already polls it).
+//   - background_remove /v2/remove-background       CORRECTED — the old
+//                                                  image.adobe.io/sensei/cutout
+//                                                  endpoint reached EOL 2025-10-15.
+// A live IMS-authenticated run must still confirm scopes + exact body before the
+// edge fn deploys; the value of this module (validation, bounds, receipt parsing,
+// secret-scrub) is correct regardless of the exact URLs, isolated in one constant.
 
 import { scrubSecrets } from './messagingNotify';
 
@@ -61,8 +67,8 @@ export const ADOBE_CLOUD_OPERATION_GAP_TOOL: Record<AdobeCloudOperation, string>
 // Isolated so a correction is a one-line change and never touches logic/tests.
 export const ADOBE_CLOUD_ENDPOINTS: Record<AdobeCloudOperation, { method: 'POST'; url: string }> = {
   text_to_image: { method: 'POST', url: 'https://firefly-api.adobe.io/v3/images/generate' },
-  generative_expand: { method: 'POST', url: 'https://firefly-api.adobe.io/v3/images/expand' },
-  background_remove: { method: 'POST', url: 'https://image.adobe.io/sensei/cutout' },
+  generative_expand: { method: 'POST', url: 'https://firefly-api.adobe.io/v3/images/expand-async' },
+  background_remove: { method: 'POST', url: 'https://image.adobe.io/v2/remove-background' },
 };
 
 // ── Bounds (an asset request is not a document) ──────────────────────────────
@@ -229,7 +235,9 @@ export function buildAdobeCloudRequest(args: AdobeCloudArgs): AdobeCloudRequestS
       };
       break;
     case 'background_remove':
-      body = { input: a.image, output: { mediaType: 'image/png' } };
+      // Photoshop remove-background v2: { image: { source: {url|uploadId} },
+      // mode, output } — same source-ref shape as expand (verified 2026-07-13).
+      body = { image: { source: a.image }, mode: 'cutout', output: { mediaType: 'image/png' } };
       break;
     default:
       return null;

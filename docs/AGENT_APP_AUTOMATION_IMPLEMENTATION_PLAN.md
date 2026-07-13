@@ -329,10 +329,48 @@ UNVERIFIED web extracts, corroborated against known Adobe developer surfaces
   developer/automation API; reportedly exploring Claude integration. Do NOT
   plan against this until confirmed.
 
-**NOT covered by this run** (rate limit killed the non-Adobe angles): AutoCAD /
+**NOT covered by that run** (rate limit killed the non-Adobe angles): AutoCAD /
 Fusion / Revit / SolidWorks / Rhino / DaVinci / MATLAB / Office / Figma API
-specifics, and computer-use model reliability numbers. §4/§7 rows for those are
-engineering-knowledge best-estimates — **re-run verification after the reset**
-(`Workflow({scriptPath, resumeFromRunId:"wf_ef1c3bc5-dd3"})` caches the
-completed search/fetch and only re-runs the failed verify/synthesis) before
-committing build effort to a specific non-Adobe API.
+specifics, and computer-use model reliability numbers. §4/§7 rows for those were
+engineering-knowledge best-estimates — see the verification ledger below, which
+resolved most of them.
+
+### 10a. Verification ledger — READ-ONLY doc-verification wave (2026-07-13)
+
+Seven agents (5 read-only verify + resulting corrections) confirmed each shipped
+adapter's invocation/endpoint against **current official docs** (the pass that
+had failed on rate-limit above). Each contract stays `verifiedInvocation:false`
+until a *live install run* confirms it — doc-verification raises confidence and
+fixes wrong guesses, it does not flip the install gate.
+
+| Contract | Verdict | Action |
+|---|---|---|
+| MATLAB `matlab -batch "run('f.m')"` | ✅ CONFIRMED (no `-nodisplay`/`-nosplash`) | none |
+| Maya `mayapy` + `standalone.initialize/uninitialize`, `cmds.file` export | ✅ CONFIRMED (`'FBX export'` string fragile — prefer `FBXExport` MEL) | note kept |
+| Blender `-b <file> -P <script>`, `wm.obj_export`, `export_scene.fbx/gltf`, `wm.save_as_mainfile` | ✅ CONFIRMED — code already 4.x-correct in `cadCodeExecutor` | none |
+| GIMP 2.10 `-i -d -f --batch-interpreter=python-fu-eval -b` + `pdb.*` names | ✅ CONFIRMED for 2.10 | — |
+| GIMP **3.0** | ⚠️ CONFIRMED BREAKING — `pdb.<proc>()` attribute API removed → `Gimp.get_pdb().lookup_procedure('gimp-image-flatten')`+config/run or object methods; hyphenated names; `Gimp.*` GI namespace. Needs a separate 3.0 shape. | file header already predicts this |
+| AE `aerender -project -comp -output -s -e` | ✅ CONFIRMED (only nuance: `-sound` takes `on/off`; not in emitted argv) | — |
+| AE ExtendScript (`renderQueue`, `outputModule().applyTemplate`, 1-indexed) | ✅ CONFIRMED (re-fetch OutputModule handle after each mutation) | — |
+| DaVinci scripting API + env vars + `AddRenderJob/StartRendering` | ✅ CONFIRMED; **external scripting effectively Studio-only** (free = console-typed only) | file's fail-closed blockers already handle it |
+| Substrate A/B split for **Fusion / Revit / SolidWorks** | ✅ CONFIRMED — none has a headless CLI; all need an in-process/COM host (Substrate B). Revit desktop = IronPython 2.7-only (pin engine or add Py3 mode before wiring; `pyrevit run` is a GUI wrapper, not headless). | note in-file |
+| **AutoCAD** `EXPORTPDF` / `DXFOUT` order / `-PURGE Regapps` | ❌ CONFIRMED WRONG → `-EXPORT _PDF _C _N`; precision-then-`V`-version; `-PURGE` uses `R` + repeat-until-0. | annotated in `autocadScriptAdapter.ts`, fix at wiring |
+| **KiCad** generic `['export','--output',out,src]` | ❌ CONFIRMED WRONG → per-kind `<domain> export <fmt> --output <out> <in-last>`; gerbers/drill out = dir. | annotated in `appScriptRunner.ts`, fix with `mode` work |
+| **Adobe** `background_remove` `sensei/cutout` | ❌ CONFIRMED EOL (2025-10-15) → **`https://image.adobe.io/v2/remove-background`**, body `{image:{source},mode,output}`. | **FIXED in `adobeCloudService.ts`** + pinned in smoke |
+| **Adobe** `generative_expand` `/v3/images/expand` | ⚠️ Adobe documents the async path `/v3/images/expand-async`. | **FIXED** (receipt parser already polls) |
+| Adobe `text_to_image` `/v3/images/generate`, IMS S2S OAuth `ims/token/v3` + `client_credentials` | ✅ CONFIRMED (JWT flow deprecated → S2S OAuth; output URLs valid ~1h) | none |
+
+**Rule going forward:** doc-verified ≠ install-verified. A contract's
+`verifiedInvocation` flips to `true` only after a live run on a real install
+through the bridge. The Adobe endpoint fix is the exception worth applying
+immediately because the old endpoint is *confirmed dead*, not merely unverified.
+
+### 10b. Adapter inventory (pure foundations, all gated `verifiedInvocation:false`)
+
+Adobe cloud (Firefly/PS REST) · OpenSCAD/FreeCAD/Blender (`cadCodeExecutor`) ·
+AutoCAD · Fusion 360 · Revit · SolidWorks · DaVinci Resolve · GIMP · After
+Effects · Maya · **Acrobat** (JS via osascript `do script`) · **Premiere Pro**
+(ExtendScript; UXP is the forward target) · **Rhino** (`rhinocode` CLI, drives a
+running Rhino — not headless on macOS). Each ships a self-contained pure
+generator + smoke (safe-embed + per-field allowlist + ≥1 blocked injection) and
+a named operation-gap tool for the buildout layer. None is wired to the bridge.
