@@ -43,13 +43,13 @@
 // paths that reach a Rhino command string: the path is emitted as a Python
 // literal AND, inside Python, wrapped in `chr(34)` quotes when concatenated into
 // a `_-Export` / `_-Import` command — so it never terminates the command line
-// early. The `run_python_script` body is NOT a free-form escape hatch: it is
-// restricted to a conservative rhinoscriptsyntax-statement allowlist (rs.* / def
-// / import rhinoscriptsyntax / print / bounded control words) with a hard reject
-// of dangerous tokens (os./sys./subprocess/eval/exec/open/import-of-anything-
-// -else/dunder/backtick/etc). On any validation failure the builder DROPS the
-// request with an explanatory note and a fail-closed script stub — it never
-// throws and never emits a half-validated mutation.
+// early. SECURITY (2026-07-13): a free-form `run_python_script` op was REMOVED —
+// a substring/lead allowlist cannot durably confine arbitrary Python (an audit
+// showed breakpoint()/help()/type()/comprehensions/nested-calls reach executable
+// positions), so this generator no longer accepts a user Python body at all; the
+// remaining ops embed only validated paths/enums as escaped literals. On any
+// validation failure the builder DROPS the request with an explanatory note and a
+// fail-closed script stub — it never throws and never emits a half-validated mutation.
 //
 // APPROVAL/PROOF (docs/apps/rhino.md approval & evidence rules): exports and any
 // state-changing script WRITE files / mutate the model, so the wiring layer must
@@ -62,13 +62,11 @@
 
 export type RhinoOperation =
   | 'export_format'
-  | 'run_python_script'
   | 'batch_convert'
   | 'extract_geometry_report';
 
 export const RHINO_OPERATIONS: readonly RhinoOperation[] = [
   'export_format',
-  'run_python_script',
   'batch_convert',
   'extract_geometry_report',
 ] as const;
@@ -91,11 +89,6 @@ export const RHINO_SCRIPT_EXTENSION = 'py' as const;
 
 /** The ONLY source container this generator opens: native Rhino .3dm. */
 const RHINO_SCENE_INPUT_EXTENSIONS: readonly string[] = ['3dm'];
-
-// A run_python_script body has a hard length cap so an oversized/obfuscated blob
-// cannot slip past the token scan by sheer volume, and so the emitted literal
-// stays bounded.
-export const RHINO_SCRIPT_BODY_MAX = 4000;
 
 // ── Path validation (pure mirror of mayaScriptAdapter.validateMayaPath) ───────
 // LOCKSTEP intent: byte-identical reject-set to mayaScriptAdapter.validateMayaPath
@@ -149,85 +142,6 @@ function normalizeExportFormat(raw: unknown): RhinoExportFormat | null {
   return (RHINO_EXPORT_FORMATS as readonly string[]).includes(value) ? (value as RhinoExportFormat) : null;
 }
 
-/**
- * Validate a run_python_script BODY. This is the load-bearing gate for the one
- * op that carries free-ish user code, so it is deliberately strict: the body is
- * scanned line-by-line and MUST be built only from a conservative
- * rhinoscriptsyntax vocabulary. Anything that could touch the OS, the network,
- * the filesystem outside Rhino, or Python's dynamic-exec machinery is rejected.
- * Never throws; returns ok:false + reason on any rejection.
- *
- * The point is NOT to be a full Python sandbox (it cannot be) — it is to make
- * the ONLY thing this op can emit be a bounded rhinoscriptsyntax snippet, and to
- * fail closed on anything outside that vocabulary. The result string, when ok,
- * is emitted as a Python literal and `exec`-free: it is written into the script
- * verbatim ONLY after passing this scan (see buildRhinoScript for how it is
- * placed inside a function body, never via eval/exec).
- */
-function validateScriptBody(raw: unknown): { ok: true; body: string } | { ok: false; error: string } {
-  if (typeof raw !== 'string') return { ok: false, error: 'script body must be a string' };
-  const body = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  if (!body.trim()) return { ok: false, error: 'script body is empty' };
-  if (body.length > RHINO_SCRIPT_BODY_MAX) {
-    return { ok: false, error: `script body exceeds ${RHINO_SCRIPT_BODY_MAX} chars` };
-  }
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(body)) {
-    return { ok: false, error: 'script body contains control characters (only newline/tab allowed)' };
-  }
-  for (const ch of body) {
-    if ((ch.codePointAt(0) ?? 0) > 0xffff) {
-      return { ok: false, error: 'script body contains characters outside the basic multilingual plane' };
-    }
-  }
-  // Hard-reject dangerous tokens anywhere in the body. Word-boundary so `rs.` and
-  // rhinoscriptsyntax names are unaffected; `__` catches every dunder.
-  const forbidden: Array<[RegExp, string]> = [
-    [/__[A-Za-z0-9_]*__/, 'dunder attribute'],
-    [/\beval\b/, 'eval'],
-    [/\bexec\b/, 'exec'],
-    [/\bcompile\b/, 'compile'],
-    [/\bopen\b/, 'open()'],
-    [/\bos\b/, 'os module'],
-    [/\bsys\b/, 'sys module'],
-    [/\bsubprocess\b/, 'subprocess'],
-    [/\bsocket\b/, 'socket'],
-    [/\bshutil\b/, 'shutil'],
-    [/\bpathlib\b/, 'pathlib'],
-    [/\bimportlib\b/, 'importlib'],
-    [/\brequests\b/, 'requests'],
-    [/\burllib\b/, 'urllib'],
-    [/\bglobals\b/, 'globals()'],
-    [/\blocals\b/, 'locals()'],
-    [/\bgetattr\b/, 'getattr'],
-    [/\bsetattr\b/, 'setattr'],
-    [/\bvars\b/, 'vars()'],
-    [/\binput\b/, 'input()'],
-    [/[`$;|&<>]/, 'shell metacharacter'],
-    [/\\x[0-9a-fA-F]{2}/, 'hex escape'],
-  ];
-  for (const [re, label] of forbidden) {
-    if (re.test(body)) return { ok: false, error: `script body contains a forbidden token (${label})` };
-  }
-  // Every non-blank, non-comment line must start with an allowlisted lead token.
-  // This is what keeps the body inside the rhinoscriptsyntax vocabulary. The only
-  // permitted import is rhinoscriptsyntax itself.
-  const allowedLead =
-    /^(rs\.|rs\b|print\(|print\b|import\s+rhinoscriptsyntax\b|from\s+rhinoscriptsyntax\b|def\s+[A-Za-z_][A-Za-z0-9_]*\s*\(|return\b|if\b|elif\b|else\b|for\b|while\b|in\b|and\b|or\b|not\b|pass\b|continue\b|break\b|True\b|False\b|None\b|[A-Za-z_][A-Za-z0-9_]*\s*=(?!=)|[0-9"'([{])/;
-  const lines = body.split('\n');
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    if (!allowedLead.test(line)) {
-      return {
-        ok: false,
-        error: `script body line is outside the rhinoscriptsyntax allowlist: "${line.slice(0, 48)}"`,
-      };
-    }
-  }
-  return { ok: true, body };
-}
-
 // ── Public request/result contracts ──────────────────────────────────────────
 
 export interface RhinoExportFormatInput {
@@ -237,13 +151,6 @@ export interface RhinoExportFormatInput {
   outputPath: string;
   /** STEP / STL / OBJ / DWG — must match the outputPath extension. */
   format: RhinoExportFormat;
-}
-
-export interface RhinoRunPythonScriptInput {
-  /** Absolute .3dm model to open read-only (validated). */
-  modelPath: string;
-  /** rhinoscriptsyntax snippet (allowlist-validated; NO os/sys/exec/etc). */
-  scriptBody: string;
 }
 
 export interface RhinoBatchConvertInput {
@@ -264,7 +171,6 @@ export interface RhinoExtractGeometryReportInput {
 
 export type RhinoOperationInput =
   | RhinoExportFormatInput
-  | RhinoRunPythonScriptInput
   | RhinoBatchConvertInput
   | RhinoExtractGeometryReportInput;
 
@@ -465,15 +371,6 @@ export function validateRhinoArgs(op: unknown, input: unknown): RhinoArgsValidat
     return { ok: true, normalized: { modelPath: model.path, outputPath: out.path, format }, notes };
   }
 
-  if (operation === 'run_python_script') {
-    const scriptBody = validateScriptBody(record.scriptBody);
-    if (!scriptBody.ok) {
-      notes.push(`run_python_script ${scriptBody.error}.`);
-      return { ok: false, notes };
-    }
-    return { ok: true, normalized: { modelPath: model.path, scriptBody: scriptBody.body }, notes };
-  }
-
   // operation === 'extract_geometry_report'
   const out = validateRhinoPath(record.outputPath);
   if (!out.ok) {
@@ -553,36 +450,6 @@ export function buildRhinoScript(op: unknown, input: unknown): RhinoScriptResult
     return { script, scriptExtension: RHINO_SCRIPT_EXTENSION, outputHint: outputPath, notes, ok: true };
   }
 
-  if (operation === 'run_python_script') {
-    const scriptBody = values.scriptBody;
-    // The body already passed the rhinoscriptsyntax allowlist scan. It is placed
-    // verbatim inside the _main() function body (indented) — NEVER via eval/exec.
-    // rhinoscriptsyntax (rs) is already imported by the preamble.
-    const indentedBody = scriptBody
-      .split('\n')
-      .map((line) => (line.length ? `    ${line}` : ''))
-      .join('\n');
-    const script = [
-      ...SCRIPT_BANNER,
-      '# Operation: run_python_script. The body is restricted to an rhinoscriptsyntax',
-      '# allowlist (rs.* / def / print / control words); os/sys/exec/open/subprocess',
-      '# and dunders are rejected at validation. If it MUTATES the model or writes a',
-      '# file it must be approval-gated + proof-verified. // VERIFY the rs.* calls.',
-      ...preambleLines(modelLiteral),
-      '    # ---- user rhinoscriptsyntax body (allowlist-validated) ----',
-      indentedBody,
-      '    # ---- end user body ----',
-      ...scriptTrailerLines('"ran rhinoscriptsyntax body"'),
-    ].join('\n');
-    notes.push(
-      `Run via RhinoCode: rhinocode script ${'<staged-script>.py'} (Rhino 8 >=8.11, StartScriptServer running) — it opens ${values.modelPath} then runs the validated rhinoscriptsyntax body.`,
-      'The body is allowlist-validated (rhinoscriptsyntax vocabulary only; no os/sys/exec/open/subprocess/dunders) but any state-changing or file-writing snippet still needs approval + proof.',
-      'It never saves over the source .3dm unless the body explicitly does so — treat body-driven writes as review/high risk.',
-      `NOT wired: the ${RHINO_INVOCATION.commandTemplate} invocation is doc-verified only (verifiedInvocation:false). Use ${RHINO_OPERATION_GAP_TOOL} to build the runner before executing.`,
-    );
-    return { script, scriptExtension: RHINO_SCRIPT_EXTENSION, notes, ok: true };
-  }
-
   // operation === 'extract_geometry_report'
   const outputPath = values.outputPath;
   const reportFormat = values.reportFormat; // 'txt' | 'json'
@@ -652,9 +519,6 @@ export function describeRhinoOperation(op: unknown, input: unknown): string {
   if (operation === 'batch_convert') {
     const format = normalizeExportFormat(record.format);
     return `Batch-convert the Rhino .3dm to ${format ? format.toUpperCase() : 'another format'} (RhinoCode CLI, approval-gated)`;
-  }
-  if (operation === 'run_python_script') {
-    return 'Run an allowlisted rhinoscriptsyntax snippet in Rhino (RhinoCode CLI, approval-gated)';
   }
   const reportExt = extensionOf(String(record.outputPath ?? ''));
   return `Extract a read-only Rhino geometry report${reportExt === 'json' || reportExt === 'txt' ? ` (${reportExt.toUpperCase()})` : ''} (RhinoCode CLI)`;

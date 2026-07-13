@@ -6,18 +6,18 @@
  *   - model/output PATH allowlist (control/shell-metachar/non-BMP/traversal reject)
  *   - model extension allowlist (.3dm only) + per-op output-extension↔format agreement
  *   - export/convert FORMAT enum allowlist (hostile format dropped)
- *   - run_python_script BODY allowlist: rhinoscriptsyntax vocabulary only; os/sys/
- *     subprocess/eval/exec/open/import-of-other/dunder/shell-metachar all rejected
+ *   - run_python_script op REMOVED (2026-07-13): a free-form Python body cannot be
+ *     durably allowlisted in a pure generator — verified rejected as an unknown op
  *   - SAFE embedding: a path containing quotes/backslash/non-ASCII never lands raw
  *     in the generated Python — only as an escaped `pythonStringLiteral`; the export
  *     command additionally wraps the path in chr(34) quotes (double containment)
- *   - a concrete INJECTION (shell + Python-breakout shaped path AND a body-level
- *     os.system breakout) is rejected and never appears in the emitted stub
+ *   - a concrete INJECTION (shell + Python-breakout shaped path) is rejected and
+ *     never appears in the emitted stub
  *   - RhinoCode invocation descriptor pins: verifiedInvocation:false, doc source,
  *     operation-gap tool, macOS-not-headless constraint
- *   - per-operation script-shape pins (export_format, run_python_script,
- *     batch_convert, extract_geometry_report) incl. fail-closed guards + VERIFY banner
- *   - bounds (long paths, oversized script body)
+ *   - per-operation script-shape pins (export_format, batch_convert,
+ *     extract_geometry_report) incl. fail-closed guards + VERIFY banner
+ *   - bounds (long paths)
  *   - degenerate inputs NEVER throw (null/garbage → fail-closed stub, ok:false)
  *
  * Run: npx tsx scripts/rhino-script-adapter-smoketest.ts
@@ -30,7 +30,6 @@ import {
   RHINO_INVOCATION,
   RHINO_OPERATION_GAP_TOOL,
   RHINO_OPERATIONS,
-  RHINO_SCRIPT_BODY_MAX,
   validateRhinoArgs,
 } from '../src/lib/rhinoScriptAdapter';
 
@@ -74,14 +73,14 @@ function assertRealScriptPins(script: string, label: string) {
 
 // ── Operation + format enums are stable ──────────────────────────────────────
 {
-  expect(RHINO_OPERATIONS.length === 4, 'four operations exposed');
+  expect(RHINO_OPERATIONS.length === 3, 'three operations exposed');
   expect(
     RHINO_OPERATIONS.includes('export_format') &&
-      RHINO_OPERATIONS.includes('run_python_script') &&
       RHINO_OPERATIONS.includes('batch_convert') &&
       RHINO_OPERATIONS.includes('extract_geometry_report'),
-    'operation set is export_format / run_python_script / batch_convert / extract_geometry_report',
+    'operation set is export_format / batch_convert / extract_geometry_report',
   );
+  expect(!(RHINO_OPERATIONS as readonly string[]).includes('run_python_script'), 'run_python_script op is NOT exposed (removed 2026-07-13)');
   expect(RHINO_EXPORT_FORMATS.join(',') === 'step,stl,obj,dwg', 'export formats are step,stl,obj,dwg');
   pass('operation + format enums are the documented sets');
 }
@@ -202,60 +201,21 @@ function assertRealScriptPins(script: string, label: string) {
   pass('concrete path injection blocked: shell-breakout rejected + quote/backslash JSON-escaped, never raw');
 }
 
-// ── run_python_script: happy path (allowlisted rhinoscriptsyntax body) ───────
+// ── run_python_script was REMOVED (2026-07-13) — verify it is now REJECTED ────
+// A pure JS generator cannot durably allowlist arbitrary Python (an audit showed
+// breakpoint()/help()/type()/comprehensions/nested-calls reached executable
+// positions), so the free-form-body op is gone. Any request for it must fail
+// closed as an unknown op — never a script that opens the model or runs a body.
 {
-  const body = [
-    'import rhinoscriptsyntax as rs',
-    'objs = rs.AllObjects()',
-    'for o in objs:',
-    '    rs.ObjectName(o)',
-    'print(len(objs))',
-  ].join('\n');
-  const r = buildRhinoScript('run_python_script', { modelPath: '/Users/demo/m.3dm', scriptBody: body });
-  expect(r.ok === true, 'allowlisted rhinoscriptsyntax body builds');
-  expect(r.script.includes('rs.AllObjects()'), 'the validated body is embedded in the script');
-  expect(r.script.includes('# ---- user rhinoscriptsyntax body'), 'body is fenced inside a labeled block');
-  expect(!r.script.includes('eval(') && !r.script.includes('exec('), 'body is NOT run via eval/exec (placed as literal function body)');
-  assertRealScriptPins(r.script, 'run_python_script');
-  pass('run_python_script: allowlisted body embedded verbatim (no eval/exec) + open/unit/try pins');
-}
-
-// ── CONCRETE INJECTION #2: a hostile run_python_script body is BLOCKED ────────
-// This is the load-bearing BODY case: a body that tries to reach the OS / exec /
-// filesystem must be rejected by the allowlist and never appear in the emitted stub.
-{
-  const hostileBodies: Array<[string, string]> = [
-    ['import os\nos.system("rm -rf ~")', 'os.system'],
-    ['import subprocess\nsubprocess.run(["id"])', 'subprocess'],
-    ['exec("import os; os.system(\'id\')")', 'exec'],
-    ['eval("2+2")', 'eval'],
-    ['open("/etc/passwd").read()', 'open'],
-    ['__import__("os").system("id")', 'dunder __import__'],
-    ['x = ().__class__.__bases__', 'dunder attribute chain'],
-    ['import sys\nsys.exit(1)', 'sys module'],
-    ['rs.MessageBox("ok"); import os', 'trailing shell metachar/import via ;'],
-    ['import socket\ns = socket.socket()', 'socket'],
-  ];
-  for (const [body, label] of hostileBodies) {
-    const v = validateRhinoArgs('run_python_script', { modelPath: '/tmp/m.3dm', scriptBody: body });
-    expect(v.ok === false, `hostile body rejected: ${label}`);
-    const built = buildRhinoScript('run_python_script', { modelPath: '/tmp/m.3dm', scriptBody: body });
-    expect(built.ok === false, `hostile body yields fail-closed stub: ${label}`);
-    expect(built.script.includes('FAIL-CLOSED STUB'), `hostile body (${label}) yields a fail-closed stub`);
-    // The hostile body must never appear verbatim in the emitted stub. (Note:
-    // the stub's plain-text rejection reason may name the rejected category word,
-    // e.g. "(subprocess)", but that is an inert message string printed to stdout,
-    // never an executable statement — so we assert on executable call FRAGMENTS.)
-    expect(!scriptContainsRaw(built.script, body), `hostile body (${label}) never lands in the emitted script`);
-    const dangerousFragments = ['os.system', 'subprocess.run', 'subprocess.Popen', '__import__(', 'exec(', 'eval(', 'socket.socket', '.__class__', '.__bases__'];
-    for (const frag of dangerousFragments) {
-      expect(!built.script.includes(frag), `no executable dangerous fragment "${frag}" from (${label}) present in stub`);
-    }
-  }
-  // A body line that is NOT rhinoscriptsyntax vocabulary (bare arbitrary call) is rejected.
-  const notRs = buildRhinoScript('run_python_script', { modelPath: '/tmp/m.3dm', scriptBody: 'do_something_bad()' });
-  expect(notRs.ok === false, 'non-rhinoscriptsyntax lead token rejected by the allowlist');
-  pass('concrete body injection blocked: os/sys/subprocess/eval/exec/open/dunder/socket all rejected, never embedded');
+  const anyBody = 'rs.AllObjects()\nimport os\nos.system("id")';
+  const v = validateRhinoArgs('run_python_script', { modelPath: '/tmp/m.3dm', scriptBody: anyBody });
+  expect(v.ok === false, 'run_python_script is rejected as an unknown operation');
+  const built = buildRhinoScript('run_python_script', { modelPath: '/tmp/m.3dm', scriptBody: anyBody });
+  expect(built.ok === false, 'run_python_script yields a fail-closed stub (op removed)');
+  expect(built.script.includes('FAIL-CLOSED STUB'), 'removed op yields a fail-closed stub');
+  expect(!built.script.includes('import rhinoscriptsyntax as rs'), 'removed op never imports rhinoscriptsyntax / opens a model');
+  expect(!built.script.includes('os.system') && !built.script.includes('__import__('), 'no user Python body reaches the emitted stub');
+  pass('run_python_script op removed — rejected as unknown op, fail-closed stub, no body ever emitted');
 }
 
 // ── batch_convert: happy path + safe embedding ───────────────────────────────
@@ -311,11 +271,7 @@ function assertRealScriptPins(script: string, label: string) {
   expect(r.ok === false, 'over-1024-char output path rejected');
   const longModel = buildRhinoScript('export_format', { modelPath: '/tmp/' + 'a'.repeat(2000) + '.3dm', outputPath: '/tmp/o.step', format: 'step' });
   expect(longModel.ok === false, 'over-1024-char model path rejected');
-  const bigBody = 'rs.AllObjects()\n'.repeat(500); // > RHINO_SCRIPT_BODY_MAX chars
-  expect(bigBody.length > RHINO_SCRIPT_BODY_MAX, 'fixture body actually exceeds the cap');
-  const bigBodyResult = buildRhinoScript('run_python_script', { modelPath: '/tmp/m.3dm', scriptBody: bigBody });
-  expect(bigBodyResult.ok === false, 'oversized script body rejected');
-  pass('bounds: path ≤1024 on model+output, script body ≤ RHINO_SCRIPT_BODY_MAX enforced');
+  pass('bounds: path ≤1024 on model+output paths enforced');
 }
 
 // ── degenerate inputs NEVER throw ────────────────────────────────────────────
@@ -327,9 +283,7 @@ function assertRealScriptPins(script: string, label: string) {
     ['export_format', 'not an object'],
     ['export_format', 42],
     ['export_format', {}],
-    ['run_python_script', {}],
-    ['run_python_script', { modelPath: '/tmp/m.3dm' }], // missing body
-    ['run_python_script', { modelPath: '/tmp/m.3dm', scriptBody: 123 }], // non-string body
+    ['run_python_script', { modelPath: '/tmp/m.3dm', scriptBody: 'rs.X()' }], // REMOVED op -> handled as unknown, never throws
     ['batch_convert', {}],
     ['extract_geometry_report', {}],
     ['extract_geometry_report', { modelPath: null, outputPath: null }],
@@ -370,7 +324,7 @@ function assertRealScriptPins(script: string, label: string) {
 {
   expect(/STEP/i.test(describeRhinoOperation('export_format', { modelPath: '/tmp/m.3dm', outputPath: '/tmp/o.step', format: 'step' })), 'export description names the format');
   expect(/convert/i.test(describeRhinoOperation('batch_convert', { modelPath: '/tmp/m.3dm', outputPath: '/tmp/o.obj', format: 'obj' })), 'batch_convert description mentions conversion');
-  expect(/rhinoscriptsyntax|snippet|script/i.test(describeRhinoOperation('run_python_script', { modelPath: '/tmp/m.3dm', scriptBody: 'rs.AllObjects()' })), 'run_python_script description mentions the script');
+  expect(describeRhinoOperation('run_python_script', {}).length > 0, 'removed run_python_script op still yields a safe generic description (never throws)');
   expect(/report/i.test(describeRhinoOperation('extract_geometry_report', { modelPath: '/tmp/m.3dm', outputPath: '/tmp/r.txt' })), 'report description mentions the report');
   const generic = describeRhinoOperation('bogus', {});
   expect(generic.length > 0 && generic.length < 120, 'unknown op yields a bounded generic line');
