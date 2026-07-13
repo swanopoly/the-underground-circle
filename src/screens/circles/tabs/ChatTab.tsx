@@ -1103,21 +1103,6 @@ function describeLastTaskModel(messages: ChatMessage[]): string {
   return `I do not have model metadata for the last assistant message. Surface: \`${surface}\`.`;
 }
 
-function getRecoveryOptionActorLabel(actor: ChatFailureRecoveryOption['actor']): string {
-  switch (actor) {
-    case 'openswan':
-      return 'OpenSwan';
-    case 'connected_agent':
-      return 'Connected agent';
-    case 'llm':
-      return 'LLM';
-    case 'user':
-      return 'User';
-    default:
-      return 'Stop';
-  }
-}
-
 function getRecoveryOptionAccent(option: ChatFailureRecoveryOption): string {
   if (option.actor === 'connected_agent') return '#22c55e';
   if (option.actor === 'openswan') return '#38bdf8';
@@ -1348,20 +1333,6 @@ function findPriorUserPromptForMessage(messages: ChatMessage[], botMessageId: st
     return text.slice(0, 4000);
   }
   return null;
-}
-
-function getRecoveryOptionPolicyBadges(option: ChatFailureRecoveryOption): string[] {
-  const plan = buildChatFailureRecoveryExecutionPlan(option);
-  const policy = plan.policy;
-  const badges: string[] = [];
-  if (policy.requiresApproval) badges.push('APPROVAL');
-  if (policy.requiresFreshEvidence) badges.push('FRESH EVIDENCE');
-  if (policy.userActionRequired) badges.push('USER STEP');
-  if (policy.allowConnectedAgent) badges.push('CONNECTED AGENT');
-  if (policy.allowRuntimePatch) badges.push('PATCH');
-  if (policy.maxAttempts > 0) badges.push(`${policy.maxAttempts} TRY`);
-  if (policy.safetyMode === 'stop') badges.push('NO RETRY');
-  return badges.slice(0, 4);
 }
 
 function getRecoveryReliabilityFromArchive(
@@ -11230,7 +11201,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             {item.recoveryOptions.slice(0, 5).map((option) => {
               const color = getRecoveryOptionAccent(option);
               const executionPlan = buildChatFailureRecoveryExecutionPlan(option);
-              const policyBadges = getRecoveryOptionPolicyBadges(option);
               const actionIntent = buildChatRecoveryActionIntent(option, {
                 sourceSurface: item.source?.surface || null,
                 platform: Platform.OS,
@@ -11248,9 +11218,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                       <Text style={[styles.recoveryOptionTitle, { color }]} numberOfLines={2}>
                         {option.label}
                       </Text>
-                      <Text style={styles.recoveryOptionMeta}>
-                        {[getRecoveryOptionActorLabel(option.actor).toUpperCase(), option.recommended ? 'RECOMMENDED' : '', ...policyBadges].filter(Boolean).join(' • ')}
-                      </Text>
+                      {option.recommended ? (
+                        <Text style={styles.recoveryOptionMeta}>Recommended</Text>
+                      ) : null}
                     </View>
                     <Pressable
                       accessibilityRole="button"

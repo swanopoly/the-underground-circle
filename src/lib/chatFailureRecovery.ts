@@ -298,6 +298,22 @@ export function resolveChatFailureRecoveryOptionFollowup(
   if (parseChatFailureRecoveryOptionSelection(message)) return null;
   const text = normalizeOptionFollowupText(message);
   if (!text) return null;
+
+  // A user retyping an option's exact on-card label (e.g. tapping-then-typing
+  // "Resolve the contract blocker") should always resolve, even when the label
+  // itself contains none of the generic recovery keywords below.
+  const directLabelMatch = options.find((option) => {
+    const labelText = normalizeOptionFollowupText(option.label);
+    return labelText.length > 3 && (text === labelText || text.includes(labelText));
+  });
+  if (directLabelMatch) {
+    return {
+      option: directLabelMatch,
+      confidence: 0.97,
+      reason: 'matched recovery option label text exactly',
+    };
+  }
+
   if (!/\b(option|choice|recommended|suggested|best|default|retry|try again|rerun|fresh evidence|fix|repair|patch|connected agent|codex|claude code|unblock|permission|mfa|captcha|approve|switch|route|model|provider|bridge|stop|report|details|go ahead|do it|continue)\b|#\s*[1-5]/.test(text)) {
     return null;
   }

@@ -26,6 +26,7 @@ import {
   startChatFailureRecovery,
   stripChatFailureRecoveryOptionsText,
   summarizeChatFailureRecoveryOptionForArchive,
+  type ChatFailureRecoveryOption,
 } from '../src/lib/chatFailureRecovery';
 import {
   buildAgentFailureRecoveryPolicy,
@@ -326,6 +327,12 @@ async function main() {
   const repairFollowup = resolveChatFailureRecoveryOptionFollowup('let codex repair the runtime', recoveryOptions);
   assert(repairFollowup?.option.id === 'let_connected_agent_repair', 'natural follow-up selects connected-agent repair option');
   assert(!resolveChatFailureRecoveryOptionFollowup('what model did you use?', recoveryOptions), 'natural follow-up ignores unrelated chat');
+  const contractBlockerOptions: ChatFailureRecoveryOption[] = [
+    { id: 'resolve_contract_blocker', label: 'Resolve the contract blocker', detail: 'Stop automation and follow the app route decision.', actor: 'user', recommended: true, source: 'evidence_contract' },
+    { id: 'user_unblock', label: 'I will unblock it', detail: 'Ask the user to unblock the task before any automated retry.', actor: 'user', recommended: false, source: 'evidence_contract' },
+  ];
+  const exactLabelFollowup = resolveChatFailureRecoveryOptionFollowup('Resolve the contract blocker', contractBlockerOptions);
+  assert(exactLabelFollowup?.option.id === 'resolve_contract_blocker', 'retyping an option label with no generic keywords still resolves that option');
   const selectedOptionText = formatChatFailureRecoveryOptionSelection(recoveryOptions[0], {
     messageId: 'bot-failure-1',
     runId: 'run-1',
