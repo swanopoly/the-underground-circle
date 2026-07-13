@@ -55,13 +55,18 @@ const tooManyResults = Array.from({ length: SWANBOT_MAX_CLIENT_TOOL_RESULTS + 1 
 }));
 fail(validateSwanBotResumeToolResults(tooManyResults, ['tool_0']), /too many toolResults/, 'too many result rows rejected');
 
+// Oversized client tool results are now SUMMARIZED (head + tail + error-signal
+// lines), not hard-truncated — parity with the client loop's
+// toolResultSummaryCore (LOCKSTEP: supabase/functions/_shared/tool-result-summary.ts).
+// The summary keeps the tail, stays under the legacy char cap, and carries the
+// summarization marker instead of the old truncation marker.
 const longText = `A${'x'.repeat(SWANBOT_MAX_CLIENT_TOOL_RESULT_CONTENT_CHARS * 2)}TAIL`;
 const capped = ok(validateSwanBotResumeToolResults([
   { tool_use_id: 'tool_a', content: longText },
 ], ['tool_a']));
-assert(capped[0].content.length <= SWANBOT_MAX_CLIENT_TOOL_RESULT_CONTENT_CHARS, 'long result content capped');
-assert.match(capped[0].content, /client tool result truncated from/, 'cap includes truncation marker');
-assert(!capped[0].content.includes('TAIL'), 'cap removes long payload tail');
+assert(capped[0].content.length <= SWANBOT_MAX_CLIENT_TOOL_RESULT_CONTENT_CHARS, 'summarized result stays under the char budget');
+assert.match(capped[0].content, /tool result summarized/, 'oversized result carries the summarization marker');
+assert(capped[0].content.includes('TAIL'), 'summarization preserves the payload tail (unlike the old hard truncation)');
 
 const circular: Record<string, unknown> = {};
 circular.self = circular;
