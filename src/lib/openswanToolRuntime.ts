@@ -254,6 +254,7 @@ export type OpenSwanRuntimeToolName =
   //    the circle kanban; the live TODO is ephemeral run scaffolding. ──
   | 'codebase.index'
   | 'codebase.search'
+  | 'coordination.file_status'
   | 'todo.write'
   // ── Phase-3 mass-agent deploy (runtime-only; not a planner tool). Lets the
   //    driving model fan a task out to a swarm of TRANSIENT agents. Gated
@@ -617,6 +618,7 @@ export type OpenSwanToolExecutionArgs = {
   'context.search':     { query: string; section?: string };
   'codebase.index':     { rootPath: string; maxFiles?: number };
   'codebase.search':    { query: string; limit?: number };
+  'coordination.file_status': { path?: string };
   'todo.write':         { todos: Array<{ content: string; status?: 'pending' | 'in_progress' | 'completed' }> };
   [key: string]: Record<string, unknown>;
 };
@@ -908,6 +910,7 @@ export type OpenSwanToolExecutionResultMap = {
   'context.search':     { ok: boolean; resultsText: string };
   'codebase.index':     { ok: boolean; resultsText: string };
   'codebase.search':    { ok: boolean; resultsText: string };
+  'coordination.file_status': { ok: boolean; resultsText: string };
   'todo.write':         { ok: boolean; resultsText: string };
   fetch_url: { ok: boolean; content: string; status?: number; statusText?: string; error?: string };
   list_circle_members: { ok: true; resultsText: string };
@@ -2622,6 +2625,24 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
   },
   // ─── Live TODO scratchpad (coding-agent P6) ───────────────────────────────
   {
+    name: 'coordination.file_status',
+    label: 'Multi-Agent File Status',
+    surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
+    disclosure: 'pinned',
+    description:
+      'Multi-agent coordination: shows which files are currently leased by other ' +
+      'agents (who + intent + time left) so you can avoid a file another agent is ' +
+      'editing; pass a path to check just that file. Read-only awareness — ' +
+      'desktop.edit_file already auto-refuses a write to a file held by another agent.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Optional: check just this file path instead of listing all active leases.' },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'todo.write',
     label: 'Update Live TODO List',
     surfaces: ['main_chat', 'room_chat', 'office', 'task_run'],
@@ -4173,6 +4194,16 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
     };
   }
 
+  if (tool === 'coordination.file_status') {
+    return {
+      family: 'knowledge',
+      approvalMode: 'auto',
+      mutatesState: false,
+      externalSideEffect: false,
+      summary: 'Lists active multi-agent file leases (who is editing what) — read-only awareness.',
+    };
+  }
+
   if (tool === 'codebase.index') {
     // Crawling reads local files AND sends derived symbol/summary text to the
     // embedding provider — an explicit external side effect the user approves.
@@ -4383,6 +4414,7 @@ const TOOL_DEPENDENCY_DOMAINS: Partial<Record<OpenSwanRuntimeToolName, { writes?
   'context.search': { reads: ['circle_tasks', 'circle_missions', 'circle_goals', 'circle_rooms'] },
   'codebase.index': { reads: ['desktop_files'], writes: ['codebase_index'] },
   'codebase.search': { reads: ['codebase_index'] },
+  'coordination.file_status': { reads: ['agent_locks'] },
   'todo.write': { writes: ['agent_todo'] },
   // Kanban tasks.
   'tasks.create': { writes: ['circle_tasks'] },
@@ -4970,6 +5002,7 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   // in-loop moves; codebase.index stays loop-eligible but ask-gated.
   'codebase.index',
   'codebase.search',
+  'coordination.file_status',
   'todo.write',
 ]);
 
@@ -5754,6 +5787,7 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'tools.search':
     case 'context.search':
     case 'codebase.index':
+    case 'coordination.file_status':
     case 'codebase.search':
     case 'todo.write':
     case 'gmail.read':
@@ -6978,6 +7012,23 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
             `${langs ? `\nBy language: ${langs}.` : ''}` +
             `\nActive codebase root set — codebase.search, @file/@symbol mentions, and project conventions now use this repo.`,
         } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'coordination.file_status': {
+      try {
+        const coord = await import('./agentFileCoordination');
+        let repoRoot: string | undefined;
+        try {
+          const { getActiveCodebaseRoot } = await import('./codebaseIndexRuntime');
+          repoRoot = (await getActiveCodebaseRoot(context.userId)) || undefined;
+        } catch { /* fall back to the bridge-relative registry */ }
+        const target = String((args as { path?: string })?.path || '').trim();
+        const leases = await coord.listLeases(repoRoot);
+        if (target) {
+          const hit = leases.find((l) => l.path === target || l.path.endsWith(`/${target}`));
+          return { ok: true, resultsText: hit ? `HELD: ${hit.path} - ${hit.ownerLabel}${hit.intent ? ` (${hit.intent})` : ''}, ${Math.max(0, Math.round((hit.expiresAt - Date.now()) / 1000))}s left.` : `FREE: ${target} is not leased by any agent.` } as any;
+        }
+        return { ok: true, resultsText: `Active multi-agent file leases:\n${await coord.describeActiveTerritory(repoRoot)}` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'codebase.search': {
@@ -8707,23 +8758,31 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
 	    }
 	        case 'desktop.edit_file': {
       try {
-        const { readFile, writeTextFile, isDesktopBridgeAvailable } = await import('./desktopBridge');
-        const { applyFileEdits } = await import('./fileEditCore');
+        const { isDesktopBridgeAvailable } = await import('./desktopBridge');
         if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
         const filePath = String((args as any).path || '');
         if (!filePath) return { ok: false, resultsText: 'edit_file requires a path.' } as any;
         const rawEdits = Array.isArray((args as any).edits) && (args as any).edits.length > 0
           ? (args as any).edits.map((e: any) => ({ oldString: String(e?.oldString ?? ''), newString: String(e?.newString ?? ''), replaceAll: Boolean(e?.replaceAll) }))
           : [{ oldString: String((args as any).oldString ?? ''), newString: String((args as any).newString ?? ''), replaceAll: Boolean((args as any).replaceAll) }];
-        const isCreate = rawEdits.length === 1 && rawEdits[0].oldString === '';
-        const read = await readFile(filePath, 4_000_000);
-        if (!read.ok && !isCreate) return { ok: false, resultsText: `edit_file: could not read ${filePath} \u2014 ${describeDesktopFailure(read.error, read.errorCode)}` } as any;
-        if (read.ok && read.data?.truncated) return { ok: false, resultsText: `edit_file aborted: ${filePath} is too large to read fully (${read.data?.size} bytes) \u2014 edit a smaller region or use desktop.file_write_text.` } as any;
-        const currentContent = read.ok ? (read.data?.content ?? '') : null;
-        const applied = applyFileEdits(currentContent, rawEdits, { path: filePath });
-        if (!applied.ok) return { ok: false, resultsText: `edit_file failed: ${applied.error}${applied.errorIndex !== undefined ? ` (edit ${applied.errorIndex})` : ''}` } as any;
-        const w = await writeTextFile(filePath, applied.content, { overwrite: true });
-        if (!w.ok) return { ok: false, resultsText: describeDesktopFailure(w.error, w.errorCode) } as any;
+        // Multi-agent coordination: advisory lease (refuse if another agent holds
+        // this file) + content-hash CAS (refuse if it changed under us), then write + release.
+        const coord = await import('./agentFileCoordination');
+        let repoRoot: string | undefined;
+        try {
+          const { getActiveCodebaseRoot } = await import('./codebaseIndexRuntime');
+          repoRoot = (await getActiveCodebaseRoot(context.userId)) || undefined;
+        } catch { /* no indexed root - fall back to the bridge-relative registry */ }
+        coord.configureCoordination({ repoRoot, ownerLabel: `openswan:${String(context.userId || 'agent').slice(0, 12)}` });
+        const g = await coord.guardedApplyEdits(filePath, rawEdits, { intent: 'edit_file', repoRoot });
+        if (!g.ok) {
+          const hint = g.status === 'held_by_other'
+            ? ' Another agent holds this file - check coordination.file_status, pick another file, or wait for the lease to expire.'
+            : g.status === 'conflict' ? ' The file changed on disk since it was read - re-read it and re-apply your edit.'
+            : g.status === 'read_error' ? ' Read a smaller region or use desktop.file_write_text.' : '';
+          return { ok: false, resultsText: `edit_file ${g.status}: ${g.reason}.${hint}` } as any;
+        }
+        const applied = g.edit!;
         const summary = applied.created ? `Created ${filePath}` : `Edited ${filePath} (${applied.replacements} replacement${applied.replacements === 1 ? '' : 's'})`;
         const shownDiff = applied.diff.length > 4000 ? `${applied.diff.slice(0, 4000)}\n\u2026 (diff truncated)` : applied.diff;
         return { ok: true, resultsText: `${summary}\n\n${fenceUntrustedObservationText(shownDiff)}` } as any;

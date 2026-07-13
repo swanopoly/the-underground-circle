@@ -79,14 +79,22 @@ release(path)              # on completion, error, or timeout
   exposes `claimFile / heartbeat / releaseFile / verifyUnchanged / listLeases /
   guardedEdit`. A stable per-session `ownerId`. Fails soft to CAS-only.
 
-## Wiring (DEFERRED — see below)
-The final step wires coordination into the mutating file tools:
-`desktop.edit_file` and `desktop.file_write_text` call `guardedEdit` (claim → CAS
-→ write → release), and a new read-only `coordination.file_status` tool surfaces
-active leases. **This requires editing `openswanToolRuntime.ts`, which a second
-agent currently has uncommitted changes in — so it is intentionally NOT done yet
-to avoid clobbering that work** (the very problem this system solves). It lands as
-a small surgical pass the moment that file is free.
+## Wiring (DONE)
+`desktop.edit_file` now routes every edit through `guardedApplyEdits` (acquire an
+advisory lease → read+hash → applyFileEdits → CAS re-verify unchanged → write →
+release). It **refuses without writing** if another agent holds an active lease on
+the file (`held_by_other`) or if the file changed on disk since it was read
+(`conflict`), returning a clear message telling the model to check
+`coordination.file_status`, pick another file, or re-read. The repo root for the
+registry is resolved from the active codebase index (`getActiveCodebaseRoot`);
+with no indexed root it falls back to the bridge-relative registry (CAS still
+enforced). A new read-only `coordination.file_status` tool (pinned, `auto`)
+surfaces the active leases (who is editing what + intent + time left) for
+proactive planning. External agents use the `scripts/agent-coordination.ts` CLI
+against the same registry. (`desktop.file_write_text` — the whole-file blob write
+— is intentionally NOT auto-guarded: it has no read baseline to CAS against; the
+guarded path is `desktop.edit_file`. A future step can add an optional
+`baselineHash` to file_write_text.)
 
 ## Future hardening
 - Atomic lock via an `O_EXCL` create endpoint on the bridge (removes the JSON
