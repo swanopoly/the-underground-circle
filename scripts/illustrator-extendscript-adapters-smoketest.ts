@@ -296,6 +296,7 @@ type BridgeJsxFns = {
 
 const bridgeFns = new Function(`
 ${extractBridgeConstLine('ILLUSTRATOR_DEFAULT_SCALE_PERCENT')}
+${extractBridgeTopLevel('jsxLiteral')}
 ${extractBridgeTopLevel('illustratorJsxPrelude')}
 ${extractBridgeTopLevel('illustratorDocumentStatusJsxBody')}
 ${extractBridgeTopLevel('illustratorExportProofJsxBody')}

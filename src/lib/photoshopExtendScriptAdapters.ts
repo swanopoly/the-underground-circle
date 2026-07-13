@@ -134,6 +134,14 @@ export const PHOTOSHOP_COLOR_MODE_CHANGE_MODES: Record<PhotoshopColorMode, strin
 
 // ─── Scalar validators (LOCKSTEP(scripts/claude-bridge.js): endpoint 400s) ─
 
+// Safe ExtendScript string/JSON embed: JSON.stringify + escape the ES3 line
+// terminators U+2028/U+2029 (which JSON.stringify emits RAW) so an embedded
+// value cannot break out of the generated string literal. LOCKSTEP with
+// claude-bridge.js jsxLiteral.
+function jsxLiteral(value: unknown): string {
+  return JSON.stringify(value === undefined ? '' : value).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+}
+
 export function normalizePhotoshopBridgeAppName(value: unknown): PhotoshopParamCheck<string> {
   const appName = String(value ?? 'Photoshop').trim() || 'Photoshop';
   if (!PHOTOSHOP_BRIDGE_APP_NAME_PATTERN.test(appName)) {
@@ -152,7 +160,7 @@ export function normalizePhotoshopTargetDocumentName(value: unknown): PhotoshopP
 
 export function normalizePhotoshopLayerNameParam(value: unknown): PhotoshopParamCheck<string> {
   const name = value == null ? '' : String(value).trim();
-  if (name.length > 160 || /[\x00-\x1f]/.test(name)) {
+  if (name.length > 160 || /[\x00-\x1f\u2028\u2029]/.test(name)) {
     return { ok: false, error: 'layerName must be <= 160 chars and cannot contain control chars.' };
   }
   return { ok: true, value: name };
@@ -175,7 +183,7 @@ export function normalizePhotoshopPixelDimension(value: unknown, label: string):
 export function normalizePhotoshopRequiredLayerNameParam(value: unknown, label: string): PhotoshopParamCheck<string> {
   const name = value == null ? '' : String(value).trim();
   if (!name) return { ok: false, error: `${label} is required (exact layer name).` };
-  if (name.length > 160 || /[\x00-\x1f]/.test(name)) {
+  if (name.length > 160 || /[\x00-\x1f\u2028\u2029]/.test(name)) {
     return { ok: false, error: `${label} must be <= 160 chars and cannot contain control chars.` };
   }
   return { ok: true, value: name };
@@ -184,7 +192,7 @@ export function normalizePhotoshopRequiredLayerNameParam(value: unknown, label: 
 /** Optional name (newName/referenceLayerName): '' when absent, same bounds as layer names. */
 export function normalizePhotoshopOptionalNameParam(value: unknown, label: string): PhotoshopParamCheck<string> {
   const name = value == null ? '' : String(value).trim();
-  if (name.length > 160 || /[\x00-\x1f]/.test(name)) {
+  if (name.length > 160 || /[\x00-\x1f\u2028\u2029]/.test(name)) {
     return { ok: false, error: `${label} must be <= 160 chars and cannot contain control chars.` };
   }
   return { ok: true, value: name };
@@ -226,8 +234,8 @@ export function photoshopExtendScriptJsxPrelude(
   { expectedDocumentName, sourceDocumentPath }: { expectedDocumentName?: string | null; sourceDocumentPath?: string | null },
 ): string {
   return `
-var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
-var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
+var sourceDocumentPath = ${jsxLiteral(String(sourceDocumentPath ?? ''))};
 
 function normalizeDocName(value) {
   return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
@@ -554,9 +562,9 @@ function photoshopApplyAdjustmentLayerJsxBody(
   { layerName, kind, kindEventId, preserveExisting }: { layerName: string; kind: string; kindEventId: string; preserveExisting: boolean },
 ): string {
   return `
-  var layerName = ${JSON.stringify(String(layerName ?? ''))};
-  var kind = ${JSON.stringify(String(kind ?? ''))};
-  var kindEventId = ${JSON.stringify(String(kindEventId ?? ''))};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+  var kind = ${jsxLiteral(String(kind ?? ''))};
+  var kindEventId = ${jsxLiteral(String(kindEventId ?? ''))};
   var preserveExisting = ${preserveExisting === false ? 'false' : 'true'};
 
   function stringifyAdjustmentResult(value) {
@@ -700,8 +708,8 @@ export function validatePhotoshopApplySelectionOrMaskParams(
  */
 function photoshopApplySelectionOrMaskJsxBody({ layerName, mode }: { layerName: string; mode: PhotoshopSelectionMaskMode }): string {
   const head = `
-  var layerName = ${JSON.stringify(String(layerName ?? ''))};
-  var mode = ${JSON.stringify(String(mode ?? ''))};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+  var mode = ${jsxLiteral(String(mode ?? ''))};
 
   function stringifySelectionResult(value) {
     var boundsJson = "null";
@@ -907,9 +915,9 @@ function photoshopResizeCanvasOrImageJsxBody(
   const widthLiteral = widthPx == null ? 0 : Math.trunc(widthPx);
   const heightLiteral = heightPx == null ? 0 : Math.trunc(heightPx);
   const head = `
-  var op = ${JSON.stringify(String(op ?? ''))};
-  var widthPxParam = ${JSON.stringify(widthLiteral)};
-  var heightPxParam = ${JSON.stringify(heightLiteral)};
+  var op = ${jsxLiteral(String(op ?? ''))};
+  var widthPxParam = ${jsxLiteral(widthLiteral)};
+  var heightPxParam = ${jsxLiteral(heightLiteral)};
 
   function stringifyResizeResult(value) {
     return "{" + [
@@ -1132,11 +1140,11 @@ function photoshopManageLayersJsxBody(
   },
 ): string {
   const head = `
-  var action = ${JSON.stringify(String(action ?? ''))};
-  var layerName = ${JSON.stringify(String(layerName ?? ''))};
-  var newName = ${JSON.stringify(String(newName ?? ''))};
-  var position = ${JSON.stringify(String(position ?? ''))};
-  var referenceLayerName = ${JSON.stringify(String(referenceLayerName ?? ''))};
+  var action = ${jsxLiteral(String(action ?? ''))};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+  var newName = ${jsxLiteral(String(newName ?? ''))};
+  var position = ${jsxLiteral(String(position ?? ''))};
+  var referenceLayerName = ${jsxLiteral(String(referenceLayerName ?? ''))};
 
   function stringifyManageResult(value) {
     return "{" + [
@@ -1407,12 +1415,12 @@ function photoshopTransformLayerJsxBody(
   const scalePercentLiteral = scalePercent == null ? 100 : Number(scalePercent);
   const rotateDegreesLiteral = rotateDegrees == null ? 0 : Number(rotateDegrees);
   const head = `
-  var layerName = ${JSON.stringify(String(layerName ?? ''))};
-  var op = ${JSON.stringify(String(op ?? ''))};
-  var deltaXParam = ${JSON.stringify(deltaXLiteral)};
-  var deltaYParam = ${JSON.stringify(deltaYLiteral)};
-  var scalePercentParam = ${JSON.stringify(scalePercentLiteral)};
-  var rotateDegreesParam = ${JSON.stringify(rotateDegreesLiteral)};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+  var op = ${jsxLiteral(String(op ?? ''))};
+  var deltaXParam = ${jsxLiteral(deltaXLiteral)};
+  var deltaYParam = ${jsxLiteral(deltaYLiteral)};
+  var scalePercentParam = ${jsxLiteral(scalePercentLiteral)};
+  var rotateDegreesParam = ${jsxLiteral(rotateDegreesLiteral)};
 
   function stringifyTransformResult(value) {
     function boundsJson(bounds) {
@@ -1593,7 +1601,7 @@ function photoshopConvertColorModeJsxBody(
   { mode, changeModeConstant }: { mode: PhotoshopColorMode; changeModeConstant: string },
 ): string {
   return `
-  var mode = ${JSON.stringify(String(mode ?? ''))};
+  var mode = ${jsxLiteral(String(mode ?? ''))};
 
   function stringifyConvertResult(value) {
     return "{" + [

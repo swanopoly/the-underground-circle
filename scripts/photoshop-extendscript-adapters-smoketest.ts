@@ -78,6 +78,19 @@ assert.equal(levels.jsx.includes('= "Hero "Main" Layer"'), false, 'raw unescaped
 assert.ok(levels.jsx.includes('var preserveExisting = true;'), 'preserveExisting defaults to true');
 assert.ok(levels.jsx.includes('"adjustment_layer_not_created"'), 'adjustment jsx verifies the layer-count delta');
 assertNeverSavesOrDeletes(levels.jsx, 'apply_adjustment_layer');
+// P78: a raw U+2028/U+2029 in a name is an ES3 string-literal breakout vector.
+// Defense-in-depth: the tightened validator rejects it (fail closed, no jsx) —
+// and even if it slipped through, jsxLiteral would escape it. Build the char via
+// fromCharCode so this source file carries no raw line-separator byte.
+{
+  const LS = String.fromCharCode(0x2028);
+  const bad = buildPhotoshopApplyAdjustmentLayerJsx({
+    appName: 'Adobe Photoshop 2025', targetDocumentName: 'd.psd',
+    layerName: 'a' + LS + 'app.pwned=1', kind: 'levels',
+  });
+  assert.equal(bad.jsx, '', 'P78: a layerName with a U+2028 line separator is rejected (no jsx emitted)');
+  assert.ok(bad.errors.some((e) => e.includes('layerName')), 'P78: the tightened validator rejects the U+2028 layerName');
+}
 
 for (const kind of PHOTOSHOP_ADJUSTMENT_LAYER_KINDS) {
   const built = buildPhotoshopApplyAdjustmentLayerJsx({ kind });
@@ -704,6 +717,7 @@ type BridgeJsxFns = {
 };
 
 const bridgeFns = new Function(`
+${extractBridgeTopLevel('jsxLiteral', 'function')}
 ${extractBridgeTopLevel('PHOTOSHOP_CANVAS_ANCHOR_POSITIONS', 'const')}
 ${extractBridgeTopLevel('photoshopJsxPrelude', 'function')}
 ${extractBridgeTopLevel('photoshopFindLayerByExactNameJsx', 'function')}

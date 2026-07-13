@@ -3180,7 +3180,7 @@ end tell`;
       readJsonBody(req, 2048, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
         const name = String(parsed?.name || '').trim();
-        if (!name || name.length > 120 || /[\x00-\x1f]/.test(name)) {
+        if (!name || name.length > 120 || /[\x00-\x1f\u2028\u2029]/.test(name)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'shortcut name is required and must be <= 120 chars' }));
           return;
@@ -3534,7 +3534,7 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
           return;
         }
-        if (menuPath.length < 2 || menuPath.length > 6 || menuPath.some((part) => part.length > 80 || /[\x00-\x1f]/.test(part))) {
+        if (menuPath.length < 2 || menuPath.length > 6 || menuPath.some((part) => part.length > 80 || /[\x00-\x1f\u2028\u2029]/.test(part))) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'menuPath must contain 2-6 labels, each <= 80 chars.' }));
           return;
@@ -3738,7 +3738,7 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
           return;
         }
-        if (!layerName || layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+        if (!layerName || layerName.length > 160 || /[\x00-\x1f\u2028\u2029]/.test(layerName)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'layerName must be 1-160 chars and cannot contain control characters.' }));
           return;
@@ -4285,7 +4285,7 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
           return;
         }
-        if (linkQuery.length > 240 || /[\x00-\x1f]/.test(linkQuery)) {
+        if (linkQuery.length > 240 || /[\x00-\x1f\u2028\u2029]/.test(linkQuery)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'linkQuery must be <= 240 chars and cannot contain control characters.' }));
           return;
@@ -4397,7 +4397,7 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
           return;
         }
-        if (pdfStyle.length > 180 || /[\x00-\x1f]/.test(pdfStyle)) {
+        if (pdfStyle.length > 180 || /[\x00-\x1f\u2028\u2029]/.test(pdfStyle)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'pdfStyle must be <= 180 chars and cannot contain control characters.' }));
           return;
@@ -4692,7 +4692,7 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
           return;
         }
-        if (!layerName || layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+        if (!layerName || layerName.length > 160 || /[\x00-\x1f\u2028\u2029]/.test(layerName)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'layerName must be 1-160 chars and cannot contain control characters.' }));
           return;
@@ -5043,7 +5043,7 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'targetDocumentName must be <= 260 chars and cannot contain NUL.' }));
           return;
         }
-        if (layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+        if (layerName.length > 160 || /[\x00-\x1f\u2028\u2029]/.test(layerName)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'layerName must be <= 160 chars and cannot contain control chars.' }));
           return;
@@ -5109,7 +5109,7 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'targetDocumentName must be <= 260 chars and cannot contain NUL.' }));
           return;
         }
-        if (layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+        if (layerName.length > 160 || /[\x00-\x1f\u2028\u2029]/.test(layerName)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'layerName must be <= 160 chars and cannot contain control chars.' }));
           return;
@@ -5286,12 +5286,12 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'layerName is required (exact layer name).' }));
           return;
         }
-        if (layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+        if (layerName.length > 160 || /[\x00-\x1f\u2028\u2029]/.test(layerName)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'layerName must be <= 160 chars and cannot contain control chars.' }));
           return;
         }
-        if (newName.length > 160 || /[\x00-\x1f]/.test(newName)) {
+        if (newName.length > 160 || /[\x00-\x1f\u2028\u2029]/.test(newName)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'newName must be <= 160 chars and cannot contain control chars.' }));
           return;
@@ -5301,7 +5301,7 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'position must be one of top, bottom, above, below.' }));
           return;
         }
-        if (referenceLayerName.length > 160 || /[\x00-\x1f]/.test(referenceLayerName)) {
+        if (referenceLayerName.length > 160 || /[\x00-\x1f\u2028\u2029]/.test(referenceLayerName)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'referenceLayerName must be <= 160 chars and cannot contain control chars.' }));
           return;
@@ -5411,7 +5411,7 @@ end tell`;
           res.end(JSON.stringify({ ok: false, error: 'layerName is required (exact layer name).' }));
           return;
         }
-        if (layerName.length > 160 || /[\x00-\x1f]/.test(layerName)) {
+        if (layerName.length > 160 || /[\x00-\x1f\u2028\u2029]/.test(layerName)) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: 'layerName must be <= 160 chars and cannot contain control chars.' }));
           return;
@@ -6855,6 +6855,15 @@ function shellSingleQuote(s) {
 }
 /* UC_SMOKE_EXTRACT_END shellSingleQuote */
 
+function jsxLiteral(value) {
+  // JSON.stringify is the right ES string escaper EXCEPT it emits U+2028 /
+  // U+2029 RAW, and those are ExtendScript (ES3) LINE TERMINATORS: a raw one
+  // terminates the generated string literal and lets a name/path break out
+  // into executable JSX. Escape them to their inert form. Use for EVERY user
+  // value embedded into generated jsx (strings AND structured arrays/objects).
+  return JSON.stringify(value === undefined ? '' : value).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+}
+
 function escapeAppleScriptString(s) {
   return String(s ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
@@ -7694,7 +7703,7 @@ function validateDesktopUrlServer(raw) {
   if (!['http', 'https', 'file', 'mailto'].includes(scheme)) {
     return { ok: false, error: `url scheme "${scheme}:" not allowed — use http, https, file, or mailto` };
   }
-  if (/[\x00-\x1f]/.test(trimmed)) return { ok: false, error: 'url contains control characters' };
+  if (/[\x00-\x1f\u2028\u2029]/.test(trimmed)) return { ok: false, error: 'url contains control characters' };
   return { ok: true, url: trimmed, scheme };
 }
 
@@ -7703,7 +7712,7 @@ function validateDesktopPathServer(raw) {
   const trimmed = raw.trim();
   if (!trimmed) return { ok: false, error: 'path is empty' };
   if (trimmed.length > 1024) return { ok: false, error: 'path exceeds 1024 chars' };
-  if (/[\x00-\x1f]/.test(trimmed)) return { ok: false, error: 'path contains control characters' };
+  if (/[\x00-\x1f\u2028\u2029]/.test(trimmed)) return { ok: false, error: 'path contains control characters' };
   if (/[`$;|&><\n]/.test(trimmed)) return { ok: false, error: 'path contains shell metacharacter' };
   return { ok: true, path: trimmed };
 }
@@ -7865,7 +7874,7 @@ function expandDesktopPath(raw) {
 function safeAttachmentFilename(raw) {
   const fallback = 'chat-attachment.bin';
   const base = path.basename(String(raw || fallback))
-    .replace(/[\x00-\x1f]/g, '')
+    .replace(/[\x00-\x1f\u2028\u2029]/g, '')
     .replace(/[/:\\]/g, '_')
     .replace(/[^A-Za-z0-9._ ()@+#-]+/g, '_')
     .replace(/\s+/g, ' ')
@@ -8349,7 +8358,7 @@ function buildMenuClickScript({ appName, menuPath }) {
     ? menuPath.map((part) => String(part || '').trim()).filter(Boolean)
     : [];
   if (cleanPath.length < 2 || cleanPath.length > 6) return null;
-  if (cleanPath.some((part) => part.length > 80 || /[\x00-\x1f]/.test(part))) return null;
+  if (cleanPath.some((part) => part.length > 80 || /[\x00-\x1f\u2028\u2029]/.test(part))) return null;
   if (appName && !/^[A-Za-z0-9 .\-_()]+$/.test(appName)) return null;
   const resolved = appName ? resolveInstalledMacApp(appName) : null;
   const targetName = resolved?.name || String(appName || '').trim();
@@ -8423,8 +8432,8 @@ function buildInDesignDocumentStatusScript({ appName, expectedDocumentName, sour
   });
   const jsx = `
 (function () {
-  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
-  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${jsxLiteral(String(sourceDocumentPath ?? ''))};
 
   function normalizeDocName(value) {
     return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
@@ -8679,7 +8688,7 @@ if application "${escapeAppleScriptString(targetName)}" is running then
   end tell
   return _ucResult
 else
-  return ${JSON.stringify(notRunning)}
+  return ${jsxLiteral(notRunning)}
 end if
 `,
   };
@@ -8709,10 +8718,10 @@ function buildInDesignTextInventoryScript({ appName, query, expectedDocumentName
   });
   const jsx = `
 (function () {
-  var query = ${JSON.stringify(String(query ?? ''))};
-  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
-  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
-  var maxItems = ${JSON.stringify(Math.max(1, Math.min(80, Math.trunc(Number(maxItems || 30)))))};
+  var query = ${jsxLiteral(String(query ?? ''))};
+  var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${jsxLiteral(String(sourceDocumentPath ?? ''))};
+  var maxItems = ${jsxLiteral(Math.max(1, Math.min(80, Math.trunc(Number(maxItems || 30)))))};
 
   function normalizeDocName(value) {
     return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
@@ -9015,7 +9024,7 @@ if application "${escapeAppleScriptString(targetName)}" is running then
   end tell
   return _ucResult
 else
-  return ${JSON.stringify(notRunning)}
+  return ${jsxLiteral(notRunning)}
 end if
 `,
   };
@@ -9037,9 +9046,9 @@ function buildInDesignBatchUpdateTextLayersScript({ appName, updates, expectedDo
     .filter((update) => update.fieldName);
   const jsx = `
 (function () {
-  var updates = ${JSON.stringify(safeUpdates)};
-  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
-  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  var updates = ${jsxLiteral(safeUpdates)};
+  var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${jsxLiteral(String(sourceDocumentPath ?? ''))};
   if (!updates || updates.length < 1) throw new Error("Missing text layer updates");
 
   function normalizeDocName(value) {
@@ -9402,10 +9411,10 @@ function buildInDesignSetLayerStateScript({ appName, layerName, action, expected
   if (!targetName || !/indesign/i.test(targetName)) return null;
   const jsx = `
 (function () {
-  var layerName = ${JSON.stringify(String(layerName ?? ''))};
-  var action = ${JSON.stringify(String(action ?? ''))};
-  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
-  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+  var action = ${jsxLiteral(String(action ?? ''))};
+  var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${jsxLiteral(String(sourceDocumentPath ?? ''))};
   if (!layerName) throw new Error("Missing layerName");
   if (!/^(show|hide|lock|unlock)$/.test(action)) throw new Error("Invalid layer action");
 
@@ -9656,10 +9665,10 @@ function buildInDesignUpdateTextLayerScript({ appName, fieldName, replacementTex
   if (!targetName || !/indesign/i.test(targetName)) return null;
   const jsx = `
 (function () {
-  var fieldName = ${JSON.stringify(String(fieldName ?? ''))};
-  var replacementText = ${JSON.stringify(String(replacementText ?? ''))};
-  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
-  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  var fieldName = ${jsxLiteral(String(fieldName ?? ''))};
+  var replacementText = ${jsxLiteral(String(replacementText ?? ''))};
+  var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${jsxLiteral(String(sourceDocumentPath ?? ''))};
   if (!fieldName) throw new Error("Missing fieldName");
 
   function normalizeDocName(value) {
@@ -10042,9 +10051,9 @@ function buildInDesignBatchFindChangeScript({ appName, pairs, expectedDocumentNa
     .filter((pair) => pair.findText);
   const jsx = `
 (function () {
-  var pairs = ${JSON.stringify(safePairs)};
-  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
-  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  var pairs = ${jsxLiteral(safePairs)};
+  var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${jsxLiteral(String(sourceDocumentPath ?? ''))};
   if (!pairs || pairs.length < 1) throw new Error("Missing Find/Change pairs");
 
   function normalizeDocName(value) {
@@ -10303,10 +10312,10 @@ function buildInDesignFindChangeScript({ appName, findText, changeText, expected
   if (!targetName || !/indesign/i.test(targetName)) return null;
   const jsx = `
 (function () {
-		  var findText = ${JSON.stringify(String(findText ?? ''))};
-		  var changeText = ${JSON.stringify(String(changeText ?? ''))};
-		  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
-		  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+		  var findText = ${jsxLiteral(String(findText ?? ''))};
+		  var changeText = ${jsxLiteral(String(changeText ?? ''))};
+		  var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
+		  var sourceDocumentPath = ${jsxLiteral(String(sourceDocumentPath ?? ''))};
 		  if (!findText) throw new Error("Missing findText");
 		  function normalizeDocName(value) {
 		    return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
@@ -10589,9 +10598,9 @@ function buildInDesignExportProofScript({ appName, outputPath, expectedDocumentN
   if (!targetName || !/indesign/i.test(targetName)) return null;
   const jsx = `
 (function () {
-  var outputPath = ${JSON.stringify(String(outputPath ?? ''))};
-  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
-  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  var outputPath = ${jsxLiteral(String(outputPath ?? ''))};
+  var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${jsxLiteral(String(sourceDocumentPath ?? ''))};
   if (!outputPath) throw new Error("Missing outputPath");
 
   function normalizeDocName(value) {
@@ -10729,10 +10738,10 @@ function buildInDesignRelinkAssetScript({ appName, assetPath, linkQuery, expecte
   if (!targetName || !/indesign/i.test(targetName)) return null;
   const jsx = `
 (function () {
-  var assetPath = ${JSON.stringify(String(assetPath ?? ''))};
-  var linkQuery = ${JSON.stringify(String(linkQuery ?? ''))};
-  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
-  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  var assetPath = ${jsxLiteral(String(assetPath ?? ''))};
+  var linkQuery = ${jsxLiteral(String(linkQuery ?? ''))};
+  var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${jsxLiteral(String(sourceDocumentPath ?? ''))};
   if (!assetPath) throw new Error("Missing assetPath");
 
   function normalizeDocName(value) {
@@ -10993,9 +11002,9 @@ function buildInDesignPackageDocumentScript({
   if (!targetName || !/indesign/i.test(targetName)) return null;
   const jsx = `
 (function () {
-  var outputFolderPath = ${JSON.stringify(String(outputFolderPath ?? ''))};
-  var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
-  var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+  var outputFolderPath = ${jsxLiteral(String(outputFolderPath ?? ''))};
+  var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
+  var sourceDocumentPath = ${jsxLiteral(String(sourceDocumentPath ?? ''))};
   var includeIdml = ${includeIdml ? 'true' : 'false'};
   var includePdf = ${includePdf ? 'true' : 'false'};
   var copyFonts = ${copyFonts ? 'true' : 'false'};
@@ -11006,7 +11015,7 @@ function buildInDesignPackageDocumentScript({
   var ignorePreflightErrors = ${ignorePreflightErrors ? 'true' : 'false'};
   var createReport = ${createReport ? 'true' : 'false'};
   var forceSave = ${forceSave ? 'true' : 'false'};
-  var pdfStyle = ${JSON.stringify(String(pdfStyle ?? ''))};
+  var pdfStyle = ${jsxLiteral(String(pdfStyle ?? ''))};
   if (!outputFolderPath) throw new Error("Missing outputFolderPath");
 
   function normalizeDocName(value) {
@@ -11234,7 +11243,7 @@ if application "${escapeAppleScriptString(targetName)}" is running then
   end tell
   return _ucResult
 else
-  return ${JSON.stringify(notRunning)}
+  return ${jsxLiteral(notRunning)}
 end if
 `,
   };
@@ -11244,8 +11253,8 @@ end if
 // is a byte-identical, smoke-tested copy of this prelude — keep both in step.
 function photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath }) {
   return `
-var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
-var sourceDocumentPath = ${JSON.stringify(String(sourceDocumentPath ?? ''))};
+var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
+var sourceDocumentPath = ${jsxLiteral(String(sourceDocumentPath ?? ''))};
 
 function normalizeDocName(value) {
   return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
@@ -11741,8 +11750,8 @@ function buildPhotoshopLayerInventoryScript({ appName, query, expectedDocumentNa
   const jsx = `
 (function () {
 ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
-  var query = ${JSON.stringify(String(query ?? ''))};
-  var maxItems = Math.max(1, Math.min(120, Number(${JSON.stringify(Number(maxItems || 40))}) || 40));
+  var query = ${jsxLiteral(String(query ?? ''))};
+  var maxItems = Math.max(1, Math.min(120, Number(${jsxLiteral(Number(maxItems || 40))}) || 40));
 
   function stringifyInventory(value) {
     return "{" + [
@@ -11820,8 +11829,8 @@ function buildPhotoshopSetLayerStateScript({ appName, layerName, action, expecte
   const jsx = `
 (function () {
 ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
-  var layerName = ${JSON.stringify(String(layerName ?? ''))};
-  var action = ${JSON.stringify(String(action ?? ''))};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+  var action = ${jsxLiteral(String(action ?? ''))};
   if (!layerName) throw new Error("Missing layerName");
   if (!/^(show|hide|lock|unlock)$/.test(action)) throw new Error("Invalid layer action");
 
@@ -12006,8 +12015,8 @@ function buildPhotoshopUpdateTextLayerScript({ appName, layerName, replacementTe
   const jsx = `
 (function () {
 ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
-  var layerName = ${JSON.stringify(String(layerName ?? ''))};
-  var replacementText = ${JSON.stringify(String(replacementText ?? ''))};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+  var replacementText = ${jsxLiteral(String(replacementText ?? ''))};
 
   function layerNamesJson(values) {
     var out = [];
@@ -12124,8 +12133,8 @@ function buildPhotoshopPlaceAssetScript({ appName, assetPath, layerName, expecte
   const jsx = `
 (function () {
 ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
-  var assetPath = ${JSON.stringify(String(assetPath ?? ''))};
-  var layerName = ${JSON.stringify(String(layerName ?? ''))};
+  var assetPath = ${jsxLiteral(String(assetPath ?? ''))};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
 
   function stringifyResult(value) {
     return "{" + [
@@ -12191,9 +12200,9 @@ function buildPhotoshopExportProofScript({ appName, outputPath, format, quality,
   const jsx = `
 (function () {
 ${photoshopJsxPrelude({ expectedDocumentName, sourceDocumentPath })}
-  var outputPath = ${JSON.stringify(String(outputPath ?? ''))};
-  var format = ${JSON.stringify(String(format || 'png').toLowerCase())};
-  var quality = Math.max(1, Math.min(12, Number(${JSON.stringify(Number(quality || 10))}) || 10));
+  var outputPath = ${jsxLiteral(String(outputPath ?? ''))};
+  var format = ${jsxLiteral(String(format || 'png').toLowerCase())};
+  var quality = Math.max(1, Math.min(12, Number(${jsxLiteral(Number(quality || 10))}) || 10));
 
   function stringifyResult(value) {
     return "{" + [
@@ -12313,9 +12322,9 @@ function photoshopFindLayerByExactNameJsx() {
 // keep this JSX body byte-identical with the pure module's copy.
 function photoshopApplyAdjustmentLayerJsxBody({ layerName, kind, kindEventId, preserveExisting }) {
   return `
-  var layerName = ${JSON.stringify(String(layerName ?? ''))};
-  var kind = ${JSON.stringify(String(kind ?? ''))};
-  var kindEventId = ${JSON.stringify(String(kindEventId ?? ''))};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+  var kind = ${jsxLiteral(String(kind ?? ''))};
+  var kindEventId = ${jsxLiteral(String(kindEventId ?? ''))};
   var preserveExisting = ${preserveExisting === false ? 'false' : 'true'};
 
   function stringifyAdjustmentResult(value) {
@@ -12413,8 +12422,8 @@ ${photoshopApplyAdjustmentLayerJsxBody({
 // non-destructive path it was asked for; there is no pixel-deleting mode.
 function photoshopApplySelectionOrMaskJsxBody({ layerName, mode }) {
   const head = `
-  var layerName = ${JSON.stringify(String(layerName ?? ''))};
-  var mode = ${JSON.stringify(String(mode ?? ''))};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+  var mode = ${jsxLiteral(String(mode ?? ''))};
 
   function stringifySelectionResult(value) {
     var boundsJson = "null";
@@ -12549,9 +12558,9 @@ function photoshopResizeCanvasOrImageJsxBody({ op, widthPx, heightPx, anchor }) 
   const widthLiteral = widthPx == null ? 0 : Math.trunc(widthPx);
   const heightLiteral = heightPx == null ? 0 : Math.trunc(heightPx);
   const head = `
-  var op = ${JSON.stringify(String(op ?? ''))};
-  var widthPxParam = ${JSON.stringify(widthLiteral)};
-  var heightPxParam = ${JSON.stringify(heightLiteral)};
+  var op = ${jsxLiteral(String(op ?? ''))};
+  var widthPxParam = ${jsxLiteral(widthLiteral)};
+  var heightPxParam = ${jsxLiteral(heightLiteral)};
 
   function stringifyResizeResult(value) {
     return "{" + [
@@ -12722,11 +12731,11 @@ function photoshopCollectLayersByExactNameJsx() {
 // branch.
 function photoshopManageLayersJsxBody({ action, layerName, newName, position, referenceLayerName }) {
   const head = `
-  var action = ${JSON.stringify(String(action ?? ''))};
-  var layerName = ${JSON.stringify(String(layerName ?? ''))};
-  var newName = ${JSON.stringify(String(newName ?? ''))};
-  var position = ${JSON.stringify(String(position ?? ''))};
-  var referenceLayerName = ${JSON.stringify(String(referenceLayerName ?? ''))};
+  var action = ${jsxLiteral(String(action ?? ''))};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+  var newName = ${jsxLiteral(String(newName ?? ''))};
+  var position = ${jsxLiteral(String(position ?? ''))};
+  var referenceLayerName = ${jsxLiteral(String(referenceLayerName ?? ''))};
 
   function stringifyManageResult(value) {
     return "{" + [
@@ -12902,12 +12911,12 @@ function photoshopTransformLayerJsxBody({ layerName, op, deltaX, deltaY, scalePe
   const scalePercentLiteral = scalePercent == null ? 100 : Number(scalePercent);
   const rotateDegreesLiteral = rotateDegrees == null ? 0 : Number(rotateDegrees);
   const head = `
-  var layerName = ${JSON.stringify(String(layerName ?? ''))};
-  var op = ${JSON.stringify(String(op ?? ''))};
-  var deltaXParam = ${JSON.stringify(deltaXLiteral)};
-  var deltaYParam = ${JSON.stringify(deltaYLiteral)};
-  var scalePercentParam = ${JSON.stringify(scalePercentLiteral)};
-  var rotateDegreesParam = ${JSON.stringify(rotateDegreesLiteral)};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+  var op = ${jsxLiteral(String(op ?? ''))};
+  var deltaXParam = ${jsxLiteral(deltaXLiteral)};
+  var deltaYParam = ${jsxLiteral(deltaYLiteral)};
+  var scalePercentParam = ${jsxLiteral(scalePercentLiteral)};
+  var rotateDegreesParam = ${jsxLiteral(rotateDegreesLiteral)};
 
   function stringifyTransformResult(value) {
     function boundsJson(bounds) {
@@ -13037,7 +13046,7 @@ ${photoshopTransformLayerJsxBody({ layerName, op, deltaX, deltaY, scalePercent, 
 // only — reversible until save, and the script never saves.
 function photoshopConvertColorModeJsxBody({ mode, changeModeConstant }) {
   return `
-  var mode = ${JSON.stringify(String(mode ?? ''))};
+  var mode = ${jsxLiteral(String(mode ?? ''))};
 
   function stringifyConvertResult(value) {
     return "{" + [
@@ -13243,7 +13252,7 @@ if application "${escapeAppleScriptString(targetName)}" is running then
   end tell
   return _ucResult
 else
-  return ${JSON.stringify(notRunning)}
+  return ${jsxLiteral(notRunning)}
 end if
 `,
   };
@@ -13286,7 +13295,7 @@ function illustratorNotRunningJson(targetName, kind) {
 // of this prelude — keep both in step.
 function illustratorJsxPrelude({ expectedDocumentName }) {
   return `
-var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
 
 function normalizeDocName(value) {
   return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
@@ -13491,8 +13500,8 @@ function illustratorExportProofJsxBody({ outputPath, format, scalePercent }) {
     ? String(Math.trunc(scalePercent == null ? ILLUSTRATOR_DEFAULT_SCALE_PERCENT : scalePercent))
     : 'null';
   const head = `
-  var outputPath = ${JSON.stringify(String(outputPath ?? ''))};
-  var format = ${JSON.stringify(String(format ?? ''))};
+  var outputPath = ${jsxLiteral(String(outputPath ?? ''))};
+  var format = ${jsxLiteral(String(format ?? ''))};
 
   function stringifyExportResult(value) {
     return "{" + [

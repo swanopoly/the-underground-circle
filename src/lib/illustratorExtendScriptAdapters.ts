@@ -61,6 +61,14 @@ export const ILLUSTRATOR_MAX_STATUS_DOCUMENTS = 12;
 
 // ─── Scalar validators (LOCKSTEP(scripts/claude-bridge.js): endpoint 400s) ─
 
+// Safe ExtendScript string/JSON embed: JSON.stringify + escape the ES3 line
+// terminators U+2028/U+2029 (which JSON.stringify emits RAW) so an embedded
+// value cannot break out of the generated string literal. LOCKSTEP with
+// claude-bridge.js jsxLiteral.
+function jsxLiteral(value: unknown): string {
+  return JSON.stringify(value === undefined ? '' : value).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+}
+
 export function normalizeIllustratorBridgeAppName(value: unknown): IllustratorParamCheck<string> {
   const appName = String(value ?? 'Illustrator').trim() || 'Illustrator';
   if (!ILLUSTRATOR_BRIDGE_APP_NAME_PATTERN.test(appName)) {
@@ -113,7 +121,7 @@ export function validateIllustratorOutputPathParam(raw: unknown): IllustratorPar
   if (!trimmed) return { ok: false, error: 'outputPath is empty' };
   if (trimmed.length > 1024) return { ok: false, error: 'outputPath exceeds 1024 chars' };
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f]/.test(trimmed)) return { ok: false, error: 'outputPath contains control characters' };
+  if (/[\x00-\x1f\u2028\u2029]/.test(trimmed)) return { ok: false, error: 'outputPath contains control characters' };
   if (/[`$;|&><\n]/.test(trimmed)) return { ok: false, error: 'outputPath contains shell metacharacter' };
   const ext = extensionOf(trimmed);
   if (!(ILLUSTRATOR_EXPORT_PROOF_FORMATS as readonly string[]).includes(ext)) {
@@ -143,7 +151,7 @@ export function illustratorExtendScriptJsxPrelude(
   { expectedDocumentName }: { expectedDocumentName?: string | null },
 ): string {
   return `
-var expectedDocumentName = ${JSON.stringify(String(expectedDocumentName ?? ''))};
+var expectedDocumentName = ${jsxLiteral(String(expectedDocumentName ?? ''))};
 
 function normalizeDocName(value) {
   return String(value || "").toLowerCase().replace(/\\.[^.]+$/, "").replace(/^\\s+|\\s+$/g, "");
@@ -459,8 +467,8 @@ function illustratorExportProofJsxBody(
     ? String(Math.trunc(scalePercent == null ? ILLUSTRATOR_DEFAULT_SCALE_PERCENT : scalePercent))
     : 'null';
   const head = `
-  var outputPath = ${JSON.stringify(String(outputPath ?? ''))};
-  var format = ${JSON.stringify(String(format ?? ''))};
+  var outputPath = ${jsxLiteral(String(outputPath ?? ''))};
+  var format = ${jsxLiteral(String(format ?? ''))};
 
   function stringifyExportResult(value) {
     return "{" + [
