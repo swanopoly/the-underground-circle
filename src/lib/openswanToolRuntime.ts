@@ -60,6 +60,7 @@ import {
   type MessagingProvider,
 } from './messagingNotify';
 import { sanitizeErrorForModel } from './errorSanitizer';
+import { stripPersistedChatBotPrefix } from './persistedChatMetadata';
 
 export type OpenSwanToolSurface = 'main_chat' | 'room_chat' | 'office' | 'task_run';
 export type OpenSwanRuntimeToolName =
@@ -6847,7 +6848,11 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         if (!data || data.length === 0) return { ok: true, resultsText: 'No recent messages found.' } as any;
         // T10: concise (default) == legacy 180-char excerpts; detailed allows 600 chars per message.
         const excerptCap = resolveResponseFormat((args as any).response_format) === 'detailed' ? 600 : 180;
-        const lines = (data as any[]).map((row, index) => `${index + 1}. ${(row.user?.display_name || row.user?.username || 'Unknown')}: ${String(row.content || '').replace(/\s+/g, ' ').slice(0, excerptCap)}`);
+        // Bot rows append `BOT_META_MARKER` + a JSON metadata blob onto
+        // `content` (see persistedChatMetadata.ts). Strip it before this
+        // reaches the model as a tool result, or the raw JSON leaks in as if
+        // it were the bot's own prior words.
+        const lines = (data as any[]).map((row, index) => `${index + 1}. ${(row.user?.display_name || row.user?.username || 'Unknown')}: ${stripPersistedChatBotPrefix(String(row.content || '')).replace(/\s+/g, ' ').slice(0, excerptCap)}`);
         return { ok: true, resultsText: lines.join('\n') } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
@@ -6888,9 +6893,12 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         // Cap each excerpt so one long message can't eat the context window.
         // T10: concise (default) trims excerpts to 400 chars; detailed keeps the legacy 1200-char cap.
         const excerptCap = resolveResponseFormat(a.response_format) === 'detailed' ? 1200 : 400;
+        // Same marker-strip as messages.list above — bot rows carry a
+        // trailing BOT_META_MARKER + JSON blob on `content` that must not
+        // reach the model verbatim.
         const lines = (data as any[]).map((row, index) =>
           `${index + 1}. [${row.created_at}]${row.is_bot ? ' (bot)' : ''} thread ${String(row.thread_id || '').slice(0, 8)}: ` +
-          fenceUntrustedObservationText(String(row.content || '').slice(0, excerptCap)));
+          fenceUntrustedObservationText(stripPersistedChatBotPrefix(String(row.content || '')).slice(0, excerptCap)));
         return { ok: true, resultsText: `${data.length} transcript match(es) for "${query}":\n${lines.join('\n')}` } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }

@@ -7,6 +7,23 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.95.3';
 import { getAuthenticatedUser } from '../_shared/edge.ts';
 
+// Bot-authored `messages.content` rows carry a `[[UC_CHAT_META]]`-prefixed
+// JSON metadata blob (recovery options, plan, findings, etc.) appended after
+// the visible text — see BOT_META_MARKER in src/lib/persistedChatMetadata.ts,
+// the single source of truth for this marker string. This MCP resource is
+// read directly by MCP clients (LLM apps) as conversation context, so an
+// unstripped marker would leak a raw JSON blob into a model prompt.
+// Deliberately NOT importing that module here: it has no Deno-runtime
+// dependencies (all its imports are `import type`), but pulling its full
+// type surface into `deno check` surfaces pre-existing type errors never
+// exercised before nothing imported it into a Deno context. Duplicating just
+// the marker constant keeps this fix isolated and Deno-clean.
+const BOT_META_MARKER = '\n[[UC_CHAT_META]]';
+function stripBotMetaMarker(content: string): string {
+  const index = content.indexOf(BOT_META_MARKER);
+  return index >= 0 ? content.slice(0, index) : content;
+}
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-circle-invite-code',
@@ -130,11 +147,17 @@ Deno.serve(async (req: Request) => {
             .order('created_at', { ascending: false })
             .limit(50);
           
+          const cleanedMessages = (messages || []).map((m: any) =>
+            m.is_bot && typeof m.content === 'string'
+              ? { ...m, content: stripBotMetaMarker(m.content) }
+              : m
+          );
+
           result = {
             contents: [{
               uri,
               mimeType: 'application/json',
-              text: JSON.stringify(messages, null, 2)
+              text: JSON.stringify(cleanedMessages, null, 2)
             }]
           };
         }
