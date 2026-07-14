@@ -781,6 +781,57 @@ export function formatActiveChatBlockerContextForPrompt(
   ].filter(Boolean).join('\n');
 }
 
+export interface CompletedChatTaskContextInput {
+  outcomeSignal?: { verdict: string; signal?: string } | null;
+  computerFindings?: {
+    items?: Array<{ title: string; url?: string | null; price?: string | null; rating?: string | null }> | null;
+  } | null;
+  artifacts?: Array<{ kind: string; title: string }> | null;
+  browserPlans?: Array<{ task: string; status: string; backendLabel?: string }> | null;
+}
+
+// Sibling to formatActiveChatBlockerContextForPrompt: the completed-task
+// counterpart. A bot message that finished (or partially finished) a
+// computer/browser/design task carries its structured results — findings,
+// artifacts, browser plan outcomes — only as UI render fields on that
+// message, never in `m.content`. A natural-language follow-up like "what did
+// you find" about the last completed task otherwise has no structured data
+// to answer from. Additive/no-op when the last bot message has no completed
+// task data.
+export function formatCompletedChatTaskContextForPrompt(
+  input: CompletedChatTaskContextInput | null | undefined,
+): string {
+  if (!input) return '';
+  const findings = unique(
+    (input.computerFindings?.items || []).map((item) => compactSingleLine(
+      [item.title, item.price, item.rating].filter(Boolean).join(' · '),
+      160,
+    )),
+    8,
+  );
+  const artifactSummaries = unique(
+    (input.artifacts || []).map((artifact) => compactSingleLine(`${artifact.kind}: ${artifact.title}`, 140)),
+    6,
+  );
+  const planSummaries = unique(
+    (input.browserPlans || [])
+      .filter((plan) => plan.status === 'completed' || plan.status === 'failed')
+      .map((plan) => compactSingleLine(`${plan.task} (${plan.status}${plan.backendLabel ? `, ${plan.backendLabel}` : ''})`, 200)),
+    6,
+  );
+  const verdict = compactSingleLine(input.outcomeSignal?.verdict, 40);
+  const hasAnything = findings.length > 0 || artifactSummaries.length > 0 || planSummaries.length > 0;
+  if (!hasAnything) return '';
+  return [
+    '## Last Completed Task Result',
+    'Your most recent message completed or partially completed a computer/browser/design task and carried structured results that exist only as UI card data, not in this transcript. If the user\'s next message is a follow-up about it (e.g. asking what you found, what the result was, or to list what was extracted) answer using this context — do not say you lack it.',
+    verdict ? `- outcome: ${verdict}` : '',
+    findings.length > 0 ? `- findings: ${findings.join(' | ')}` : '',
+    artifactSummaries.length > 0 ? `- artifacts: ${artifactSummaries.join(' | ')}` : '',
+    planSummaries.length > 0 ? `- browser_tasks: ${planSummaries.join(' | ')}` : '',
+  ].filter(Boolean).join('\n');
+}
+
 function normalizeFingerprintPart(value: unknown, max = 800): string {
   return clean(value, max)
     .toLowerCase()

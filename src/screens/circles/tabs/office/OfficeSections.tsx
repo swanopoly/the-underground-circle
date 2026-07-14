@@ -320,7 +320,7 @@ export function OfficeWorkspaceSection({
         <View style={styles.editToolbar}>
           <View style={styles.editToolbarHeader}>
             <Text style={styles.editLabel}>
-              {placingType ? `TAP FLOOR — PLACING: ${placingType.toUpperCase()}` : selectedFurnitureId ? 'DRAG TO MOVE · CORNERS TO RESIZE · TAP DELETE TO REMOVE' : 'SELECT ITEM BELOW, TAP TO PLACE · DRAG TO MOVE'}
+              {placingType ? `TAP FLOOR — PLACING: ${(FURNITURE_CATALOG.find((f: any) => f.type === placingType)?.name || placingType).toUpperCase()}` : selectedFurnitureId ? 'DRAG TO MOVE · CORNERS TO RESIZE · TAP DELETE TO REMOVE' : 'SELECT ITEM BELOW, TAP TO PLACE · DRAG TO MOVE'}
             </Text>
             <View style={styles.editToolbarActions}>
               {placingType && (

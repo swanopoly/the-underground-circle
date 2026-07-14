@@ -357,6 +357,7 @@ import type { ComputerTaskAppRouteDecisionInput } from '../../../lib/computerTas
 import {
   buildChatFailureRecoveryExecutionPlan,
   formatActiveChatBlockerContextForPrompt,
+  formatCompletedChatTaskContextForPrompt,
   formatChatFailureRecoveryOptionSelection,
   formatChatFailureRecoveryOptionSelectionForPrompt,
   parseChatFailureRecoveryOptionSelection,
@@ -9420,7 +9421,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             : null,
         })
         : '';
-      const chatHistory = [chatHistoryText, activeBlockerContext].filter(Boolean).join('\n');
+      // Sibling case: the last bot message did NOT end in a blocker but did
+      // complete (or partially complete) a computer/browser/design task —
+      // its findings/artifacts/browser-plan-outcomes/outcome verdict only
+      // ever existed as UI render fields on that message too, so a natural
+      // follow-up like "what did you find" had nothing structured to answer
+      // from. Mutually exclusive with activeBlockerContext above (a blocked
+      // task already gets its own context) and additive/no-op otherwise.
+      const completedTaskContext = (!activeBlockerContext && lastMessage && lastMessage.isBot && lastBotMessageIdx === recentMessages.length - 1)
+        ? formatCompletedChatTaskContextForPrompt({
+          outcomeSignal: lastMessage.outcomeSignal,
+          computerFindings: lastMessage.computerFindings,
+          artifacts: lastMessage.artifacts,
+          browserPlans: lastMessage.browserPlans,
+        })
+        : '';
+      const chatHistory = [chatHistoryText, activeBlockerContext, completedTaskContext].filter(Boolean).join('\n');
 
       // If replying to a specific message, prepend that context
       const replyContext = replyTo
