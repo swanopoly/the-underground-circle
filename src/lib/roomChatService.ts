@@ -3,7 +3,7 @@ import { runOpenSwanSessionTurn, type OpenSwanRunCallbacks } from './openswanSes
 import { loadFiles, sendAgentMessage, sendMessage } from '../screens/circles/tabs/rooms/roomRepository';
 import { type AgenticCodingProfile } from './agenticCodingProfile';
 import { resolveSessionCodingProfile, type SessionCodingProfile } from './chatSessionProfile';
-import { buildRoomAgentMessageMetadata } from './roomMessageMetadata';
+import { buildRoomAgentMessageMetadata, formatRoomAgentBlockerContextForPrompt } from './roomMessageMetadata';
 
 type RoomChatMessage = {
   content: string;
@@ -159,6 +159,17 @@ export async function sendRoomStructuredChatMessage({
     : '';
   const specialContext = await buildSpecialContext(roomId, cleanContent, availableFiles);
 
+  // The last agent message's structured state (blockers, pending browser
+  // plans, failed checks) lives only in `room_messages.metadata` — the
+  // `recentContext` above only ever serializes `message.content`. Thread it
+  // through so a follow-up about a blocked/pending task doesn't get answered
+  // with "I don't have that context". No-op when nothing is blocked/pending.
+  const lastAgentMessage = [...recentMessages].reverse().find((message) => message.metadata?.bot);
+  const blockerContext = lastAgentMessage
+    ? formatRoomAgentBlockerContextForPrompt(lastAgentMessage.metadata as any)
+    : '';
+  const blockerContextBlock = blockerContext ? `\n\n${blockerContext}` : '';
+
   // Pass the user's model selection through unchanged. Anthropic short ids
   // ('claude-...') run on the platform Claude path; provider-prefixed ids
   // ('openrouter/...', 'huggingface/...', 'replicate/...') get routed inside
@@ -173,7 +184,7 @@ export async function sendRoomStructuredChatMessage({
     context: {
       userId,
       circleId,
-      chatHistory: recentContext + fileContext + specialContext,
+      chatHistory: recentContext + fileContext + specialContext + blockerContextBlock,
       ...(normalizedModel ? { model: normalizedModel } : {}),
     },
     surface: 'room_chat',

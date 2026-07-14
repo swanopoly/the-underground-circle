@@ -178,6 +178,75 @@ function compactTaskPlan(plan: OpenSwanTaskPlan | undefined): OpenSwanTaskPlan |
   } as OpenSwanTaskPlan;
 }
 
+// ─── Blocked/pending task context for the next agent turn ───────────────────
+//
+// Sibling to chat's formatActiveChatBlockerContextForPrompt /
+// formatCompletedChatTaskContextForPrompt (src/lib/chatFailureRecovery.ts).
+// Room chat's own transcript builder (`recentContext` in roomChatService.ts)
+// only ever serializes `message.content`, so a blocked/pending task's
+// structured state — mode-outcome blockers, a still-open browser plan, failed
+// verification checks, the task-plan summary — that lives only in
+// `room_messages.metadata` (this module's own persisted shape) never reaches
+// the model on the next turn. A follow-up like "what's it blocked on" then
+// gets answered with "I don't have that context" even though the room's own
+// persisted metadata already has the answer. Additive/no-op: returns '' when
+// the last agent message carried no blocker-shaped state.
+export interface RoomAgentBlockerContextInput {
+  task_plan?: { summary?: string } | null;
+  modeOutcomeSummary?: { headline?: string; bulletPoints?: string[]; blockers?: string[] } | null;
+  browserPlans?: Array<{ task?: string; status?: string; backendLabel?: string }> | null;
+  verification_results?: Array<{ check?: unknown; status?: string; ok?: boolean; summary?: string }> | null;
+}
+
+function uniqueLines(values: Array<unknown>, max: number): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const cleaned = boundedText(value, LINE_MAX);
+    if (!cleaned || seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    out.push(cleaned);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+export function formatRoomAgentBlockerContextForPrompt(
+  input: RoomAgentBlockerContextInput | null | undefined,
+): string {
+  if (!input || typeof input !== 'object') return '';
+  const blockers = uniqueLines(input.modeOutcomeSummary?.blockers || [], 6);
+  const pendingBrowserPlans = uniqueLines(
+    (Array.isArray(input.browserPlans) ? input.browserPlans : [])
+      .filter((plan) => plan && plan.status && plan.status !== 'completed' && plan.status !== 'failed')
+      .map((plan) => `${plan?.task || 'task'} (${plan?.status}${plan?.backendLabel ? `, ${plan.backendLabel}` : ''})`),
+    6,
+  );
+  const failedChecks = uniqueLines(
+    (Array.isArray(input.verification_results) ? input.verification_results : [])
+      .filter((result) => result && (result.ok === false || result.status === 'failed' || result.status === 'fail'))
+      .map((result) => {
+        const check = result?.check;
+        const label = typeof check === 'string' ? check : (check as any)?.label || (check as any)?.id || 'check';
+        return `${label}: ${result?.summary || 'failed'}`;
+      }),
+    6,
+  );
+  const hasAnything = blockers.length > 0 || pendingBrowserPlans.length > 0 || failedChecks.length > 0;
+  if (!hasAnything) return '';
+  const planSummary = boundedText(input.task_plan?.summary, 300);
+  const headline = boundedText(input.modeOutcomeSummary?.headline, 200);
+  return [
+    '## Active Room Task',
+    'The most recent agent message in this room left a task blocked, pending, or partially failing. If the next message is a follow-up about it (e.g. what it is blocked on, whether it finished, or what failed) rather than a brand-new request, answer using this context — do not say you lack context.',
+    planSummary ? `- plan: ${planSummary}` : '',
+    headline ? `- outcome: ${headline}` : '',
+    blockers.length > 0 ? `- blockers: ${blockers.join(' | ')}` : '',
+    pendingBrowserPlans.length > 0 ? `- pending_browser_tasks: ${pendingBrowserPlans.join(' | ')}` : '',
+    failedChecks.length > 0 ? `- failed_checks: ${failedChecks.join(' | ')}` : '',
+  ].filter(Boolean).join('\n');
+}
+
 export function buildRoomAgentMessageMetadata(
   structured: RoomAgentStructuredPayload,
   artifacts: SwanBotStructuredArtifact[],

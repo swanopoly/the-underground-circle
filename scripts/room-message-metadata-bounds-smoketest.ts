@@ -17,7 +17,7 @@
  * Run: npm run smoke:room-message-metadata-bounds
  */
 
-import { buildRoomAgentMessageMetadata } from '../src/lib/roomMessageMetadata';
+import { buildRoomAgentMessageMetadata, formatRoomAgentBlockerContextForPrompt } from '../src/lib/roomMessageMetadata';
 
 let failures = 0;
 function fail(message: string) { failures += 1; console.error('FAIL:', message); }
@@ -157,6 +157,48 @@ function expect(condition: unknown, message: string) { if (!condition) fail(mess
   const plain = buildRoomAgentMessageMetadata({ usage: { model: 'claude-haiku-4-5' } }, []);
   expect(plain.model === 'claude-haiku-4-5', 'usage model surfaced when no marketplace routing');
   pass('routing/model chip preserved');
+}
+
+// ── formatRoomAgentBlockerContextForPrompt: no-op on ordinary messages ───────
+{
+  expect(formatRoomAgentBlockerContextForPrompt(null) === '', 'null input is no-op');
+  expect(formatRoomAgentBlockerContextForPrompt(undefined) === '', 'undefined input is no-op');
+  const ordinary = buildRoomAgentMessageMetadata(
+    {
+      usage: { model: 'claude-sonnet-4-6' },
+      modeOutcomeSummary: { headline: 'Done', bulletPoints: ['did the thing'], blockers: [] },
+      browserPlans: [{ planId: 'p1', task: 'Look something up', status: 'completed', backendLabel: 'Browserbase' } as any],
+      verificationResults: [{ check: 'typecheck', status: 'passed', ok: true, executed: true, summary: 'ok' } as any],
+    },
+    [],
+  );
+  expect(formatRoomAgentBlockerContextForPrompt(ordinary as any) === '', 'completed task with no blockers/failures is no-op');
+  pass('formatRoomAgentBlockerContextForPrompt: no-op for ordinary/completed messages');
+}
+
+// ── formatRoomAgentBlockerContextForPrompt: surfaces blocked/pending state ───
+{
+  const blocked = buildRoomAgentMessageMetadata(
+    {
+      usage: { model: 'claude-sonnet-4-6' },
+      taskPlan: { summary: 'Book the flight and hotel for the offsite' } as any,
+      modeOutcomeSummary: {
+        headline: 'Blocked on approval',
+        bulletPoints: ['staged booking'],
+        blockers: ['Waiting on user to approve the card charge'],
+      },
+      browserPlans: [{ planId: 'p2', task: 'Book flight', status: 'awaiting_approval', backendLabel: 'Browserbase' } as any],
+      verificationResults: [{ check: { id: 'booking_confirmed', label: 'booking_confirmed' }, status: 'failed', ok: false, executed: true, summary: 'no confirmation email yet' } as any],
+    },
+    [],
+  );
+  const block = formatRoomAgentBlockerContextForPrompt(blocked as any);
+  expect(block.startsWith('## Active Room Task'), 'blocked task produces Active Room Task block');
+  expect(block.includes('Waiting on user to approve the card charge'), 'blocker text surfaced');
+  expect(block.includes('Book flight'), 'pending browser plan surfaced');
+  expect(block.includes('no confirmation email yet'), 'failed verification check surfaced');
+  expect(block.includes('Book the flight and hotel for the offsite'), 'task plan summary surfaced as supporting context');
+  pass('formatRoomAgentBlockerContextForPrompt: surfaces blockers/pending plans/failed checks');
 }
 
 if (failures > 0) {
