@@ -716,6 +716,41 @@ function formatMemoryRecommendationTargetLabel(target: OpenSwanMemoryRecommendat
   }
 }
 
+// Shared with the two computer-task launch call sites below (the
+// clarifier's chatHistoryTail and executeComputerTaskWithAgent's
+// chatHistory): same context-threading gap as the conversational reply
+// path — a blocked/completed task's structured state only ever lived on
+// the last bot message's UI render fields, so this lane "re-asks
+// questions the user already answered." Mirrors the field mapping used
+// at the conversational chatHistory construction site; a no-op (returns
+// '') when the last message isn't a bot message or has nothing to report.
+function buildTaskLaunchContextSuffix(messages: ChatMessage[]): string {
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+  if (!lastMessage || !lastMessage.isBot) return '';
+  const activeBlockerContext = formatActiveChatBlockerContextForPrompt({
+    recoveryOptions: lastMessage.recoveryOptions,
+    computerHandoffBlockers: lastMessage.computerHandoff?.blockers,
+    computerHandoffWarnings: lastMessage.computerHandoff?.warnings,
+    preflightSummary: lastMessage.computerHandoff?.preflightSummary,
+    groundingSummary: lastMessage.computerHandoff?.groundingSummary,
+    planPreview: lastMessage.chatAutomationPlanPreview
+      ? {
+        title: lastMessage.chatAutomationPlanPreview.title,
+        routeLabel: lastMessage.chatAutomationPlanPreview.routeLabel,
+        approvalRequired: lastMessage.chatAutomationPlanPreview.approvalRequired,
+        evidenceGaps: lastMessage.chatAutomationPlanPreview.evidencePanel?.freshEvidenceRequired,
+      }
+      : null,
+  });
+  if (activeBlockerContext) return activeBlockerContext;
+  return formatCompletedChatTaskContextForPrompt({
+    outcomeSignal: lastMessage.outcomeSignal,
+    computerFindings: lastMessage.computerFindings,
+    artifacts: lastMessage.artifacts,
+    browserPlans: lastMessage.browserPlans,
+  });
+}
+
 function mapPersistedRowsToChatMessages(
   rows: any[],
   currentUserId: string | undefined,
@@ -3138,7 +3173,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   // re-asks questions the user already answered in chat.
                   appResolutionName: computerPlan.computerRequestRoute?.appResolution?.best?.displayName || null,
                   hasAttachments: attachments.length > 0,
-                  chatHistoryTail: messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n').slice(-1500),
+                  chatHistoryTail: [
+                    messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n'),
+                    buildTaskLaunchContextSuffix(messages),
+                  ].filter(Boolean).join('\n').slice(-1500),
                   isLaunchOnly: false,
                 });
                 if (clarification) {
@@ -3389,7 +3427,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               audit,
               grantedIds,
               businessModelPlan,
-              chatHistory: messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n'),
+              chatHistory: [
+                messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n'),
+                buildTaskLaunchContextSuffix(messages),
+              ].filter(Boolean).join('\n'),
               sessionArchiveContext: await loadSessionArchiveContext() || undefined,
               replyTo: replyTo?.content,
               readyCapabilityBuildout: options?.readyCapabilityBuildout || null,
