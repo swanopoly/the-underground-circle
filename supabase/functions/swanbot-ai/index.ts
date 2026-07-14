@@ -20,6 +20,20 @@ import {
   shouldAttachContextManagement,
   stripUnsupportedCompactionEdits,
 } from "../../../src/lib/anthropicContextManagement.ts";
+// Bot-authored `messages.content` rows carry a `[[UC_CHAT_META]]`-prefixed
+// JSON metadata blob (recovery options, plan, findings, etc.) appended after
+// the visible text — see BOT_META_MARKER in src/lib/persistedChatMetadata.ts,
+// the single source of truth for this marker string. Deliberately NOT
+// importing that module here: it has no Deno-runtime dependencies (all its
+// imports are `import type`), but pulling its full type surface into `deno
+// check` surfaces ~120 pre-existing type errors never exercised before
+// nothing imported it into a Deno context. Duplicating just the marker
+// constant keeps this fix isolated and Deno-clean.
+const BOT_META_MARKER = "\n[[UC_CHAT_META]]";
+function stripBotMetaMarker(content: string): string {
+  const index = content.indexOf(BOT_META_MARKER);
+  return index >= 0 ? content.slice(0, index) : content;
+}
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -4417,7 +4431,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       for (const m of context.recentMessages.slice(-10)) {
         conversationMessages.push({
           role: m.is_bot ? "assistant" : "user",
-          content: m.is_bot ? m.content : `[${m.user?.display_name || m.user?.username || "User"}]: ${m.content}`,
+          content: m.is_bot ? stripBotMetaMarker(m.content) : `[${m.user?.display_name || m.user?.username || "User"}]: ${m.content}`,
         });
       }
     }
