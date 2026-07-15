@@ -18,12 +18,63 @@ Usage:
 
 import json
 import os
+import re
 import time
 import random
 import argparse
 from pathlib import Path
 
 DATA_DIR = Path(__file__).parent / "training_data"
+
+# Live OpenSwan tool catalog (the actual tool names/labels/descriptions the
+# model sees at runtime). TOOL_SCENARIOS below is a small, hand-maintained
+# list that has drifted badly out of sync with this catalog (as of 2026-07,
+# TOOL_SCENARIOS covers ~11 legacy tool names — create_task, hf_generate_image,
+# search_web, etc. — none of which exist in the current ~199-tool catalog).
+# load_tool_catalog() parses the real catalog straight out of
+# openswanToolRuntime.ts (best-effort regex — no TS toolchain available here)
+# so every real tool automatically gets at least baseline synthetic coverage
+# instead of silently having zero, even as the catalog keeps growing.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TOOL_RUNTIME_PATH = REPO_ROOT / "src" / "lib" / "openswanToolRuntime.ts"
+
+
+def load_tool_catalog():
+    """Best-effort parse of TOOL_DEFINITIONS (+ the standalone
+    TEAM_DEPLOY_AGENTS_TOOL_DEFINITION) out of openswanToolRuntime.ts.
+
+    Returns a list of (name, label, description) tuples. Returns [] if the
+    file is missing or its shape has changed enough that the regex no longer
+    matches — callers should treat catalog-derived scenarios as additive and
+    keep working with an empty catalog.
+    """
+    try:
+        src = TOOL_RUNTIME_PATH.read_text()
+    except OSError:
+        return []
+
+    catalog = []
+    # Split the file on each object's `name: '...'` line so we don't need to
+    # balance braces; each chunk runs from one `name:` to the next.
+    name_positions = [m.start() for m in re.finditer(r"\n\s*name: '([^']+)',", src)]
+    names = re.findall(r"\n\s*name: '([^']+)',", src)
+    for i, (pos, name) in enumerate(zip(name_positions, names)):
+        end = name_positions[i + 1] if i + 1 < len(name_positions) else len(src)
+        chunk = src[pos:end]
+
+        label_match = re.search(r"label: '([^']+)',", chunk)
+        label = label_match.group(1) if label_match else name
+
+        # description is either `description: '...'` / `description: "..."`
+        # on one line, or `description:\n    '...'` wrapped to the next line.
+        desc_match = re.search(
+            r"description:\s*\n?\s*['\"]((?:[^'\"\\]|\\.)*)['\"]", chunk
+        )
+        description = desc_match.group(1) if desc_match else label
+
+        catalog.append((name, label, description))
+
+    return catalog
 
 BLACKSWAN_SYSTEM = """You are BlackSwan — the AI agent for The Underground Circle. You help dev teams stay accountable, ship code, and build together. You have access to tools and use them proactively when they help the user."""
 
@@ -145,9 +196,41 @@ def make_tool_use_example(tool, scenario, think=True):
     }
 
 
-def generate_multi_turn_tool_example(think=True):
+def build_catalog_scenarios(min_desc_len=20):
+    """Derive baseline scenario prompts for every real tool in
+    openswanToolRuntime.ts's TOOL_DEFINITIONS that TOOL_SCENARIOS doesn't
+    already hand-cover.
+
+    As of 2026-07, TOOL_SCENARIOS only covers ~11 legacy tool names
+    (create_task, hf_generate_image, search_web, list_tasks, ...) — NONE of
+    which exist in the current ~199-tool live catalog (tasks.create,
+    browser.*, desktop.*, gmail.*, vault.*, rooms.*, missions.*, etc.). This
+    function closes that gap programmatically: every tool the model can
+    actually call gets at least two synthetic scenario prompts derived from
+    its own label/description, so newly added tools automatically get
+    baseline training coverage instead of silently having zero. Hand-written
+    TOOL_SCENARIOS entries always take priority when a tool name is covered
+    by both.
+    """
+    catalog = load_tool_catalog()
+    scenarios = {}
+    for name, label, description in catalog:
+        if name in TOOL_SCENARIOS:
+            continue
+        first_sentence = description.split(". ")[0].strip().rstrip(".")
+        if len(first_sentence) < min_desc_len:
+            first_sentence = label
+        lede = first_sentence[0].lower() + first_sentence[1:] if first_sentence else label.lower()
+        scenarios[name] = [
+            f"Can you {lede}?",
+            f"I need help with this — {label.lower()}.",
+        ]
+    return scenarios
+
+
+def generate_multi_turn_tool_example(scenarios_dict, think=True):
     """Generate a multi-turn example where BlackSwan uses multiple tools."""
-    tools = random.sample(list(TOOL_SCENARIOS.keys()), min(3, len(TOOL_SCENARIOS)))
+    tools = random.sample(list(scenarios_dict.keys()), min(3, len(scenarios_dict)))
     think_prefix = "<think>\nThe user needs help with multiple things. Let me address each one.\n</think>\n\n" if think else ""
 
     conversations = [
@@ -155,12 +238,20 @@ def generate_multi_turn_tool_example(think=True):
     ]
 
     for i, tool in enumerate(tools):
-        scenario = random.choice(TOOL_SCENARIOS[tool])
+        scenario = random.choice(scenarios_dict[tool])
         if i == 0:
             conversations.append({"from": "human", "value": scenario})
             conversations.append({"from": "gpt", "value": f"{think_prefix if i == 0 else ''}I'll handle that.\n\n[Using {tool}]\n\nDone! What else do you need?"})
         else:
-            conversations.append({"from": "human", "value": f"Also, {scenario.lower()}"})
+            # Only decapitalize the first letter for the "Also, ..." clause —
+            # lowercasing the whole scenario (the pre-existing behavior) also
+            # mangled proper nouns/tool-specific terms later in the sentence.
+            # The pronoun "I" stays capitalized regardless of position.
+            if scenario.startswith("I "):
+                lede = scenario
+            else:
+                lede = scenario[:1].lower() + scenario[1:] if scenario else scenario
+            conversations.append({"from": "human", "value": f"Also, {lede}"})
             think_follow = f"<think>\nNow they need {tool}. Let me do that.\n</think>\n\n" if think else ""
             conversations.append({"from": "gpt", "value": f"{think_follow}On it.\n\n[Using {tool}]\n\nDone!"})
 
@@ -177,13 +268,19 @@ def main():
     output_path = DATA_DIR / "blackswan_tool_use.jsonl"
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    catalog_scenarios = build_catalog_scenarios()
+    all_scenarios = {**catalog_scenarios, **TOOL_SCENARIOS}
+    print(f"Hand-written TOOL_SCENARIOS: {len(TOOL_SCENARIOS)} tools")
+    print(f"Catalog-derived scenarios (openswanToolRuntime.ts): {len(catalog_scenarios)} tools")
+    print(f"Combined scenario pool: {len(all_scenarios)} tools\n")
+
     examples = []
 
     # Single-tool examples (70%)
     single_count = int(args.count * 0.7)
     for i in range(single_count):
-        tool = random.choice(list(TOOL_SCENARIOS.keys()))
-        scenario = random.choice(TOOL_SCENARIOS[tool])
+        tool = random.choice(list(all_scenarios.keys()))
+        scenario = random.choice(all_scenarios[tool])
         think = random.random() < args.think_ratio
         examples.append(make_tool_use_example(tool, scenario, think=think))
 
@@ -191,7 +288,7 @@ def main():
     multi_count = args.count - single_count
     for i in range(multi_count):
         think = random.random() < args.think_ratio
-        examples.append(generate_multi_turn_tool_example(think=think))
+        examples.append(generate_multi_turn_tool_example(all_scenarios, think=think))
 
     random.shuffle(examples)
 
@@ -210,7 +307,7 @@ def main():
     for ex in examples:
         for turn in ex["conversations"]:
             if turn["from"] == "gpt":
-                for tool in TOOL_SCENARIOS:
+                for tool in all_scenarios:
                     if tool in turn["value"]:
                         tool_counts[tool] = tool_counts.get(tool, 0) + 1
     print("\n  Tool distribution:")
