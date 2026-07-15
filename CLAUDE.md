@@ -1,7 +1,7 @@
 # CLAUDE.md - The Underground Circle
 
 > Project context for Claude Code, OpenSwan, Codex, Gemini, and other agents.
-> Last reviewed: 2026-05-11
+> Last reviewed: 2026-07-13
 
 Start with `AGENTS.md`. `docs/AGENTS_ROADMAP.md` is canonical for ownership,
 phase status, SQL status, and runtime rules. This file is a current app review
@@ -99,6 +99,8 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | Google Workspace tools (Gmail/Docs/Sheets/Drive/Calendar) | `src/lib/googleWorkspaceOps.ts` (pure contracts), `src/lib/googleWorkspaceRuntime.ts` (token+fetch), `gmail.*`/`gdocs.*`/`gsheets.*`/`gdrive.*`/`gcal.*` in `openswanToolRuntime.ts`; OAuth Phase A: `supabase/functions/google-oauth/index.ts` + `src/lib/googleCreds.ts` |
 | Cross-dashboard awareness (what's connected: marketplace/vault/Google/keys) | `src/lib/connectedResourcesDigest.ts` (pure, secret-safe) + `src/lib/connectedResourcesRuntime.ts` → `connected_resources` prompt section in `swanbot.ts` |
 | Vault credential → browser login | `browser.fill_credential_field` (`credentialId` = circle vault via `vaultAgentAccess`, or `item` = 1Password) in `openswanToolRuntime.ts`; remote `fill_saved_login` in `supabase/functions/computer-use-agent/index.ts`; login-wall recovery pointer in `src/lib/computerTaskEvidenceRecovery.ts` |
+| Local shell/git execution (coding-agent P2/P3) | `local.run_shell` + `git.run` in `openswanToolRuntime.ts` (read auto / mutate ask / catastrophic refused); pure cores `shellCommandPolicy.ts`, `gitCommandPolicy.ts`, `localExecPlanCore.ts`; bridge `POST /desktop/exec_file` (execFile argv, write-scoped grant) in `scripts/claude-bridge.js`; exec-aware run-and-fix gate in `runAndFixGateCore.ts`; v2 chat parity via `dispatchCodingClientTool` in `swanbot.ts` + the `coding` clientOnly group in `swanbot-v2-ai` (deploy pending) |
+| Context dial + receipt (`/context` lean/standard/max) | `src/lib/contextDepthPolicy.ts` (pure: depth transform — 'standard' is identity — floor compose, receipt, storage); wired at the complexity-floor + policy chokepoints in `swanbot.ts buildSystemPromptAsync`; command handled in `ChatTab.tsx`, registered in `chatCommandRegistry.ts` |
 
 Rule: new routing behavior goes into the relevant owner above. Do not extend
 legacy one-off routers when the planner/runtime owner already exists.

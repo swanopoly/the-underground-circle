@@ -1,7 +1,8 @@
 # AI Agents & Tools: Comprehensive Reference Wiki
 
-> **Last Updated:** April 2, 2026
+> **Last Updated:** July 13, 2026 (model lineup refreshed; most narrative sections still reflect the April 2, 2026 research pass)
 > **Scope:** CLI-based AI coding agents, AI agent frameworks & SDKs, Model Context Protocol (MCP), and AI model comparisons.
+> **Staleness note:** model tables in Section 4 date quickly — treat the linked provider docs as the source of truth for specs and pricing.
 
 ---
 
@@ -125,8 +126,8 @@ Switch models on the fly with `/model opus`, `/model sonnet`, or `/model haiku`.
 - CLAUDE.md is advisory (~80% compliance); use hooks for guaranteed behavior
 
 **Model Strategy:**
-- Start with Sonnet 4.6 for most work
-- Escalate to Opus 4.6 when you hit reasoning limits or need Agent Teams
+- Start with Sonnet 5 for most work
+- Escalate to Fable 5 (or Opus 4.8) when you hit reasoning limits or need Agent Teams
 - Use Haiku 4.5 for high-volume pipelines and simple tasks
 
 **Workflow Tips:**
@@ -1044,21 +1045,29 @@ Key priorities for the MCP specification in 2026:
 
 **Docs:** [platform.claude.com/docs/en/about-claude/models/overview](https://platform.claude.com/docs/en/about-claude/models/overview)
 
+**Current lineup (as of July 2026):** the Claude 5 family — **Fable 5**
+(`claude-fable-5`) and **Sonnet 5** (`claude-sonnet-5`) — plus **Opus 4.8**
+(`claude-opus-4-8`) and **Haiku 4.5** (`claude-haiku-4-5`). Specs and pricing
+for the 5-family move fast; check the docs link above rather than trusting a
+snapshot table.
+
+**Roles:**
+- **Fable 5:** frontier reasoning, Agent Teams, hardest architecture/debugging work
+- **Sonnet 5:** day-to-day coding and production agent workloads, best cost/performance
+- **Opus 4.8:** previous-generation frontier; also powers Claude Code fast mode (faster output, same Opus quality)
+- **Haiku 4.5:** high-volume pipelines, classification, extraction, simple formatting
+
+**Historical snapshot (April 2, 2026 — retained for reference):**
+
 | Model | Context Window | Max Output | Input $/1M | Output $/1M | Knowledge Cutoff |
 |-------|---------------|------------|------------|-------------|-----------------|
 | **Opus 4.6** | 1,000,000 | 32,768 | $5.00 | $25.00 | Early 2026 |
 | **Sonnet 4.6** | 200,000 | 16,384 | $3.00 | $15.00 | Early 2026 |
 | **Haiku 4.5** | 200,000 | 8,192 | $1.00 | $5.00 | Mid 2025 |
 
-**Benchmarks:**
 - **SWE-bench Verified:** Opus 4.6 = 80.8%, Sonnet 4.6 = 79.6%, Haiku 4.5 = 73.3%
 - **GPQA Diamond:** Opus 4.6 leads by 17.2 points over Sonnet (largest gap on any benchmark)
 - **OSWorld-Verified:** Opus 4.6 = 72.7%, Sonnet 4.6 = 72.5%
-
-**Best Use Cases:**
-- **Opus 4.6:** Complex reasoning, advanced scientific analysis, large-scale architecture decisions, Agent Teams, subtle bug hunting
-- **Sonnet 4.6:** Day-to-day coding, production workloads, best cost/performance ratio
-- **Haiku 4.5:** High-volume pipelines, classification, extraction, simple formatting (12x cheaper than Sonnet)
 
 ---
 

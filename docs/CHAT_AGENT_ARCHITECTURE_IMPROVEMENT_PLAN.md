@@ -8,6 +8,52 @@
 
 ## Shipped from this plan
 
+- **P70 — SwanBot UX sweep: 8 pure cores from a 46-agent discovery (2026-07-14, multi-agent)** ✅ —
+  fanned out 8 UX-dimension finders (latency, failure-UX, approval friction,
+  discoverability, response quality, continuity, v2-loop, memory flow) with
+  adversarial verification → 36 confirmed findings
+  (`docs/SWANBOT_UX_FINDING_BACKLOG_2026-07-14.md`), then 8 parallel builders each
+  shipping one pure core + smoke (1,194 assertions total). WIRED this pass:
+  (1) `chatStopMessageCore` — dead-end stop/cap/tool-fail strings (incl. ones
+  addressed to the MODEL, shown verbatim) → friendly user copy via
+  `swanBotV2ClientToolStopMessage` + the `Tool-use call failed.` site;
+  (2) `capabilityOverviewCore` — "what can you do" now renders the real catalog
+  (was a stale 10-item list hiding ~90% of the product), + first-run starter
+  chips on the empty chat (was image-only);
+  (3) `memoryIntentCore` — bare `/remember`//`/forget` + natural-language
+  "note that…/forget that…" actually save/forget & confirm (prompt previously
+  told the model to reply "Saved" without saving);
+  (4) `slashCommandCorrectionCore` — typo'd slash commands get a did-you-mean
+  instead of silently going to the LLM;
+  (5) `clientToolBatchCore` — independent client-tool READS in a v2 batch run
+  concurrently (were strictly serial up to 40 deep); writes stay ordered;
+  (6) `approvalPreviewCore` — approval cards now describe WHAT will run
+  (secret-redacted) + a staleness classifier, via `maybeRequestToolApproval`;
+  (7) `userActionReceiptCore` — execution-stream summaries render "Created room
+  X"/"Ran npm test — passed" instead of raw 1200-char JSON;
+  plus the v2 client-tool serializer now gives grounding fields (a11y tree, DOM,
+  screen text) a 12k budget instead of blinding the model at 2k (total cap
+  raised to the edge's 16k).
+  BUILT + smoke-passing but NOT yet wired (needs a UI status-thread through the
+  streaming lane): (8) `toolActivityLabelCore` — live "Running tests…"/"Reading
+  the screen…" during tool loops. The remaining ~28 findings in the backlog doc
+  are the roadmap for later passes.
+- **P69 — user context dial + transparency receipt (`/context`, 2026-07-14, solo)** ✅ —
+  context loading was sized ONLY by message-complexity heuristics; the user had
+  no control, and tail sections (`last_session` — previous sessions + persistent
+  knowledge) were the first casualties of small clip budgets. New pure core
+  `src/lib/contextDepthPolicy.ts` (smoke `context-depth-policy`, 97): a
+  three-level dial — `lean` (caps budgets, drops wisdom/missions) / `standard`
+  (IDENTITY transform — no-preference path is byte-identical, smoke-pinned) /
+  `max` (floors complexity at 'complex', boosts extras to 16k chars, retrieval
+  to 5k/20 — "as much context as possible when the user wants it"). Session
+  fallback + web-persistent storage (`uc_context_depth`). Wired at the two
+  chokepoints in `buildSystemPromptAsync` (floor composition + policy
+  transform), so all lanes (stream/batch/v2) honor it. Also the CONTEXT
+  RECEIPT: `assembleChatPromptExtras` telemetry recorded per turn and rendered
+  by `/context` as "what I loaded last turn" (human-labeled sections + chars +
+  clip note + upgrade tip). `/context [lean|standard|max]` handled in ChatTab,
+  registered in `chatCommandRegistry` for autocomplete/help.
 - **P68 — unsafe direct `supabase.auth` call hardening (2026-07-12, solo)** ✅ —
   the P67/A5 Known-Risk-Area follow-up, done in the main loop (no fan-out).
   Wrapped the genuinely-UNHANDLED hot-path auth reads so a backgrounded-tab /

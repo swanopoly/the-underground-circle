@@ -4,6 +4,8 @@
 
 > **Overall grade: C** — strong individual subsystems wired together by aspirational documentation rather than verified contracts.
 
+> ⚠️ **Point-in-time snapshot.** Multiple shipped phases (P64–P68, coding-agent P1/P4/P6, Google Workspace Phase B) have landed since 2026-06-29 and at least some findings are already fixed (e.g. `buildBlackSwanGroundingBlock` was flagged as dead code but is now called from `swanbot.ts` and `openswanSessionRuntime.ts`). Re-verify any finding against current code before acting on it.
+
 **Finding totals:** 125 — 🔴 2 critical · 🟠 14 high · 🟡 56 medium · 🔵 44 low · ⚪ 9 info
 
 ## Scoreboard

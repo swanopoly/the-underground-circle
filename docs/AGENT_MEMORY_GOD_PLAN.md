@@ -1,7 +1,8 @@
 # Agent Memory — God Plan
 
 > A strategic plan for memory capture, routing, retrieval, and injection
-> into OpenSwan and the SOULs. Last updated: 2026-04-15.
+> into OpenSwan and the SOULs. Last updated: 2026-04-15; §1 status
+> re-audited 2026-07-13 (nearly all gaps shipped — see §1).
 
 ---
 
@@ -41,22 +42,26 @@ on real files.
 | Soul-routing *inference*               | `decideSoulMemoryRouting()` in `agentSoulMemory.ts:182–271` (built only) |
 | FTS index on memory content            | `idx_memory_entries_fts`                                                 |
 
-### What's missing or broken ❌
+### Gaps from the 2026-04-15 audit — status as of 2026-07-13 ✅
 
-| Gap                                                        | Evidence                                                                                         |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| **Soul routing never called on writes**                    | `agentMemory.ts:199` hard-codes scope; `decideSoulMemoryRouting` imported but not invoked        |
-| **No semantic/vector retrieval**                           | No `embedding` column on memory_entries; retrieval is keyword + recency only                     |
-| **`memoryConsolidation` module missing**                   | Imported at `agentMemory.ts:150`, file not found in repo                                         |
-| **Live builder has no capture**                            | `build-stream/index.ts` never writes `memory_entries`                                            |
-| **No automated session-memory decay**                      | CLAUDE.md claims a cron; SQL not found                                                           |
-| **SOULs are static**                                       | `soulTemplates.ts` has system prompts but no dynamic memory section                              |
-| **No "why did the agent say this?" trace**                 | `memory_access_log` table exists but nothing writes to it today                                  |
-| **Turn-time retrieval isn't wired**                        | `retrieveRelevantMemories()` exists (`memoryService.ts:160–227`) but no caller in the hot path   |
+Every gap below except live-builder capture has since shipped. Kept for
+history; do not treat this as an open backlog.
 
-**Summary:** the plumbing is 70% there. The two highest-leverage fixes
-are *wire the Soul router on writes* and *add embeddings*. Everything
-else builds on those.
+| Gap (2026-04-15)                            | Status now                                                                                        |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Soul routing never called on writes         | ✅ Shipped — `decideSoulMemoryRouting` invoked on the write path (`agentMemory.ts:328`)             |
+| No semantic/vector retrieval                | ✅ Shipped — `src/lib/memoryEmbeddings.ts` (`embedAndStoreMemory`) + embedding-backed retrieval     |
+| `memoryConsolidation` module missing        | ✅ Shipped — `src/lib/memoryConsolidation.ts` exists; dynamically imported from `agentMemory.ts`    |
+| **Live builder has no capture**             | ❌ Still open — `build-stream/index.ts` never writes `memory_entries`                               |
+| No automated session-memory decay           | ✅ Shipped — `20260418_soul_wisdom_cron.sql` weekly pg_cron distillation                            |
+| SOULs are static                            | ✅ Shipped — `memory_soul_links` + `soul_wisdom` tables (`20260416`/`20260418` migrations)          |
+| No "why did the agent say this?" trace      | ✅ Shipped — `memory_access_log` written from `memoryActions.ts`, `memoryService.ts`, run system    |
+| Turn-time retrieval isn't wired             | ✅ Shipped — `retrieveForTurn` called in the hot path (`swanbot.ts:2531`)                           |
+
+**Summary (current):** the four-pillar loop is wired end to end. The one
+remaining capture gap is the live builder; everything else in this plan's
+§1 is shipped and the later sections describe the rationale behind what
+now exists.
 
 ---
 

@@ -1,6 +1,6 @@
 # Phase CA-8 — Hermes Delta Rollout
 
-**Canonical rollout of the top-10 items from [`AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md`](./AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md).** Every agent touching UC should read this before starting Hermes-adjacent work so we don't build parallel stacks.
+**Canonical rollout of the top-10 items from [`archive/AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md`](./archive/AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md) (archived — this doc is the live record).** Every agent touching UC should read this before starting Hermes-adjacent work so we don't build parallel stacks.
 
 Cross-referenced from: [`AGENTS_ROADMAP.md`](./AGENTS_ROADMAP.md) · [`AGENT_RUNTIME_INTEGRATION_PLAN.md`](./AGENT_RUNTIME_INTEGRATION_PLAN.md) · [`CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md`](./CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md) · [`CLINE_RESEARCH_AND_MAPPING_2026-04-22.md`](./CLINE_RESEARCH_AND_MAPPING_2026-04-22.md).
 
@@ -86,7 +86,7 @@ Each sub-phase names its exact code paths, SQL impact, smoke-test file, and road
 ### CA-8i · `skill_manage` sub-file actions · **task #83 · SHIPPED 2026-04-23**
 
 - **Problem.** Sub-file writes (`references/api.md`, etc.) had no tool action — agents could only touch the primary SKILL.md body, not the supporting files CA-8c made addressable.
-- **Files shipped.** `src/lib/agentTools/manageLibrarySkill.ts` (added `write_file` / `remove_file` actions) + `src/lib/skillLibraryWrite.ts` (applies the approved mutations to `circle_skill_files`) + `scripts/skill-subfile-smoketest.ts`.
+- **Files shipped.** `src/lib/agentTools/manageLibrarySkill.ts` (added `write_file` / `remove_file` actions; that module was later consolidated into the `skills.manage` tool in `src/lib/openswanToolRuntime.ts` — the actions live there now) + `src/lib/skillLibraryWrite.ts` (applies the approved mutations to `circle_skill_files`) + `scripts/skill-subfile-smoketest.ts`.
 - **Contract.** Both actions require a safe `relpath` (no leading slash, no `..` segments, no null bytes, no Windows drive prefix, ≤200 chars, must contain at least one alphanumeric). `write_file` also requires non-empty `content`; MIME inferred from extension (.md→text/markdown, .json→application/json, .yml/.yaml, .sh, .ts/.tsx, .js/.jsx, else text/plain). Both file an `agent_approvals` row with `action_type: skill.write_file` / `skill.remove_file`; `applyApprovedSkillAction` re-verifies the parent skill still exists (guards against delete-between-propose-and-approve races), then upserts on `(skill_id, relpath)` or deletes by the same key. 40+ smoke assertions on the safe-relpath rejection matrix + MIME inference.
 
 ### CA-8j · Session lineage columns · **task #84 · SHIPPED 2026-04-23**
@@ -100,7 +100,7 @@ Each sub-phase names its exact code paths, SQL impact, smoke-test file, and road
 
 ## Conflicts resolved (locked)
 
-From [AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md §5](./AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md#part-5--conflicts-with-existing-plans). Agents MUST follow these rulings.
+From [archive/AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md §5](./archive/AGENT_RUNTIME_DELTA_PLAN_2026-04-22.md#part-5--conflicts-with-existing-plans). Agents MUST follow these rulings.
 
 1. **Two memory regimes.** Shared `circle_memory` keeps HITL compaction at 4K-token threshold. Per-user `user_memory` adopts Hermes caps (2,200 / 1,375 chars) and agent-self-consolidate error envelope.
 2. **Subagent visibility is split.** Chat transcript → summary only (Hermes contract). Run Ledger → full child event tree (operator debugging).

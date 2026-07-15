@@ -15,7 +15,7 @@ Three structural seams gate the cascade:
    (`getOpenSwanToolsForSurface`) exists but `openswanSessionRuntime` still runs
    the old loop.
 2. **v2 edge function is done but not default** — `swanbot-v2-ai` currently has
-   73 source-derived tools (48 client-delegated) and a readiness gate
+   79 source-derived tools (54 client-delegated) and a readiness gate
    (`swanbotOpenSwanReadiness.ts`), but v1 is still primary.
 3. **Chat still has six sequential routers** — Phase 1b
    (`ChatTab.sendMessage` -> `buildChatAutomationPlan` + single executor) hasn't
@@ -943,7 +943,7 @@ Pre-S1 gates + Phase 3 maturity items, per "build SwanBot as best as possible":
   `deriveSwanbotV2ToolParityFromSource()` in `swanbotOpenSwanReadiness.ts`
   parses the `swanbot-v2-ai` TOOLS array (Deno edge fn can't be imported
   from tsx) and the readiness smoke asserts EXACT match both directions.
-  Real counts re-pinned: **73 total / 48 client-delegated / 25 server**.
+  Real counts re-pinned: **79 total / 54 client-delegated / 25 server** (2026-07-14: +6 coding-agent client tools).
   Catalog growth or shrink now fails `smoke:swanbot-openswan-readiness`
   until the constants are re-pinned deliberately.
 - **R15 VERIFIED ALREADY SHIPPED** (was unrecorded) — `swanbot-v2-ai`

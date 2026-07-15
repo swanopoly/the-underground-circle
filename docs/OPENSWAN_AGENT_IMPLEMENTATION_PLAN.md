@@ -262,7 +262,10 @@ Give OpenSwan typed, auditable tools rather than generic text-only reasoning.
 - typed OpenSwan tool/runtime planning exists
 - tool events are persisted into run metadata and shared run surfaces
 - browser and internal app tool paths are integrated
-- full shell/build/test adapter remains future work
+- shell/git execution shipped 2026-07-13 (`local.run_shell` / `git.run` tools
+  over the bridge `exec_file` endpoint; policy cores `shellCommandPolicy.ts` /
+  `gitCommandPolicy.ts` via `localExecPlanCore.ts`) — see
+  `docs/CODING_AGENT_UPGRADE_PLAN.md` P2/P3
 - formal toolset-by-surface policy remains future work
 
 ## Section C: Verification Runtime

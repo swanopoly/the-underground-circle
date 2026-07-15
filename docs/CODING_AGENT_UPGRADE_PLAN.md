@@ -70,20 +70,49 @@ and every mutating tool stays approval-gated.
   `ask`-gated, `desktop_files` write family, refuses a truncated read, create via
   empty-oldString). No LOCKSTEP bridge mirror needed — it orchestrates the existing
   `file_read`/`file_write_text` endpoints with the pure core in between.
-- **P2 — Shell/bash tool.** ✅ pure core DONE: `src/lib/shellCommandPolicy.ts` +
-  smoke `shell-command-policy` (99) — classifyShellCommand → read(auto) /
-  mutate(ask) / blocked(never): read allowlist incl. test/build/lint, unknown
-  lead → mutate (fail-safe), compound commands escalate to their highest-risk
-  segment, redirection + `$(…)` escalate, catastrophic patterns refused
-  (rm -rf / , curl|sh , sudo , dd of=/dev , fork bomb , force-push , chmod 777 / ),
-  timeout clamp, secret-redacted preview. NEXT: wire a gated bridge `execFile`
-  endpoint (cwd within grant, output tail-cap) + a `local.run_shell` tool
-  (auto/ask per the policy). Unlocks test/build/run-and-fix loops.
-- **P3 — Git tools.** ✅ pure core DONE: `src/lib/gitCommandPolicy.ts` + smoke
-  `git-command-policy` (185) — read verbs→auto, write→ask, force-push / `reset
-  --hard` / `-c` config-injection / `--upload-pack` blocked, commit message is a
-  safe argv element. NEXT: wire a bridge `execFile("git", argv)` endpoint (repo-path
-  grant enforced) + a `git.run` tool (read auto / write ask).
+- **P2 — Shell/bash tool.** ✅ DONE + WIRED (2026-07-13). Pure cores:
+  `src/lib/shellCommandPolicy.ts` (smoke `shell-command-policy`, 99 —
+  classifyShellCommand → read(auto) / mutate(ask) / blocked(never), compound/
+  redirection/`$(…)` escalation, catastrophic patterns refused, timeout clamp,
+  secret-redacted preview) + `src/lib/localExecPlanCore.ts` (smoke
+  `local-exec-plan-core`, 49 — argv validation/bounds, policy composition,
+  tail-biased result formatter). Wiring: bridge `POST /desktop/exec_file`
+  (execFile ARGV — never a shell; write-scoped grant on cwd, argv bounds,
+  hard binary blocklist, 4MB buffer + 64KB tail-cap, non-zero exit = data
+  not error) + `desktopBridge.execFileOnBridge` + the **`local.run_shell`**
+  tool (pinned; static policy floor 'ask', args-aware fast path in
+  `maybeRequestToolApproval` auto-passes read-classified commands and refuses
+  blocked ones via the SAME core the executor re-runs). Run-and-fix gate is
+  exec-aware: `classifyExecCallForGate` in `runAndFixGateCore.ts` counts a
+  test/build/lint run through the shell as verification (round-hook now
+  forwards tool `input`; smoke `run-and-fix-gate-core` 96). LIVE-BRIDGE pass
+  pending: restart `npm run bridge` to pick up the endpoint, then exercise
+  read/mutate/blocked + timeout paths end-to-end. Edge parity: CODE-SIDE DONE
+  2026-07-14 — v2 catalog carries all 6 coding client tools (see below);
+  awaiting `supabase functions deploy swanbot-v2-ai`.
+- **P3 — Git tools.** ✅ DONE + WIRED (2026-07-13). Pure core:
+  `src/lib/gitCommandPolicy.ts` + smoke `git-command-policy` (185) — read
+  verbs→auto, write→ask, force-push / `reset --hard` / `-c` config-injection /
+  `--upload-pack` blocked, commit message is its own argv element. Wiring:
+  same `exec_file` bridge endpoint + `localExecPlanCore.planGitRunExec`
+  (prepends the git binary) + the **`git.run`** tool (pinned; read auto /
+  write ask via the same args-aware gate path; repoPath must sit inside the
+  write-scoped grant). Gate awareness: only WORKTREE-changing verbs
+  (checkout/stash/reset/…) re-dirty the run-and-fix state — commit after a
+  green run stays clean. Same live-bridge + edge-parity follow-ups as P2.
+- **v2 chat-path parity (2026-07-14).** The default chat loop (`swanbot-v2-ai`)
+  now advertises all six coding client tools — `desktop.edit_file`,
+  `local.run_shell`, `git.run`, `codebase.search`, `todo.write`,
+  `coordination.file_status` — as a `clientOnly` group (new `coding`
+  TOOL_GROUP; selected in build/design modes + coding-keyword turns). The
+  client routes them through `dispatchCodingClientTool` in `swanbot.ts` →
+  `executeOpenSwanRuntimeTool`, so the constraint floor, args-aware shell/git
+  approval, and file leases apply identically to the typed loop; long output
+  survives the client-tool serializer's 2k-per-string clip as chunked
+  `parts[]` (head+tail preserved). Parity nets updated: dispatcher-parity
+  parser recognizes the new prefixes, readiness pins re-set to 79 total / 54
+  client-delegated (docs re-pinned). PENDING: `supabase functions deploy
+  swanbot-v2-ai` to make it live.
 - **P4 — Codebase index + semantic search + `@file` mentions.** ✅ DONE + WIRED
   (2026-07-13). Pure cores: `src/lib/codebaseIndexCore.ts` (smoke
   `codebase-index-core`, 78), `src/lib/codebaseSymbolCore.ts` (symbol/summary
