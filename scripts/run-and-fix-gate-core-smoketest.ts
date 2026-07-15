@@ -25,6 +25,7 @@ import {
   CODE_MUTATION_TOOL_NAMES,
   VERIFICATION_TOOL_PREFIX,
   MAX_VERIFICATION_NUDGES_PER_RUN,
+  classifyExecCallForGate,
   createRunAndFixGateState,
   foldRunAndFixRound,
   planVerificationNudge,
@@ -194,6 +195,38 @@ function main(): void {
   assertEq(foldRunAndFixRound(s0, undefined).dirty, false, '(14) degenerate calls leave dirty untouched');
   const s14 = foldRunAndFixRound(s0, [null, 42, {}, { name: 7 }, { name: '' }, { name: 'desktop.edit_file', ok: true }] as any);
   assertEq(s14.dirty, true, '(14) junk entries skipped; the valid edit still dirties');
+
+  // ─── (16) exec-aware classification (P2/P3: local.run_shell / git.run) ───
+  {
+    const dirty = foldRunAndFixRound(s0, [{ name: 'desktop.edit_file', ok: true }]);
+    // npm test through the shell IS a verification: passing run clears dirty.
+    const green = foldRunAndFixRound(dirty, [{ name: 'local.run_shell', ok: true, input: { argv: ['npm', 'test'], cwd: '~' } }]);
+    assertEq(green.dirty, false, '(16) passing npm test via run_shell clears dirty');
+    assertEq(green.lastVerificationOk, true, '(16) shell test run records verification ok');
+    // Failing test run (non-zero exit → ok:false) keeps dirty + records failure.
+    const red = foldRunAndFixRound(dirty, [{ name: 'local.run_shell', ok: false, input: { argv: ['npx', 'vitest'], cwd: '~' } }]);
+    assertEq(red.dirty, true, '(16) failing shell test keeps dirty');
+    // npx is not a verification lead — a FAILING npx call is not a verification
+    // record at all (tight matcher); vitest directly IS.
+    const redDirect = foldRunAndFixRound(dirty, [{ name: 'local.run_shell', ok: false, input: { argv: ['vitest'], cwd: '~' } }]);
+    assertEq(redDirect.lastVerificationOk, false, '(16) failing vitest records verification failure');
+    // Neutral reads neither verify nor dirty.
+    const neutral = foldRunAndFixRound(s0, [{ name: 'local.run_shell', ok: true, input: { argv: ['ls', '-la'], cwd: '~' } }]);
+    assertEq(neutral.dirty, false, '(16) ls does not dirty');
+    assertEq(neutral.lastVerificationRound, null, '(16) ls is not a verification');
+    // Unknown commands fail safe to mutation (dirty).
+    const unknown = foldRunAndFixRound(s0, [{ name: 'local.run_shell', ok: true, input: { argv: ['python', 'gen.py'], cwd: '~' } }]);
+    assertEq(unknown.dirty, true, '(16) unknown shell command fails safe to dirty');
+    // git worktree changers dirty; commit after a green run does NOT re-dirty.
+    const coDirty = foldRunAndFixRound(s0, [{ name: 'git.run', ok: true, input: { verb: 'checkout', repoPath: '~' } }]);
+    assertEq(coDirty.dirty, true, '(16) git checkout dirties the worktree');
+    const committed = foldRunAndFixRound(green, [{ name: 'git.run', ok: true, input: { verb: 'commit', message: 'x', repoPath: '~' } }]);
+    assertEq(committed.dirty, false, '(16) git commit after a green run stays clean');
+    // classifyExecCallForGate is total + null for other tools.
+    assertEq(classifyExecCallForGate('tasks.list', {}), null, '(16) non-exec tools return null');
+    const degenerate = classifyExecCallForGate('local.run_shell', undefined);
+    assert(degenerate !== null && degenerate.isMutation && !degenerate.isVerification, '(16) degenerate exec input fails safe to mutation');
+  }
 
   // ─── (15) degenerate / undefined never throws ─────────────────────────────
   try {

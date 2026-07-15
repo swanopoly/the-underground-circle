@@ -1,3 +1,5 @@
+import { isCacheableTurnResult } from './turnCachePolicyCore';
+
 export type SwanBotTurnDedupeKind = 'text' | 'structured';
 
 export type SwanBotTurnDedupeContext = {
@@ -94,7 +96,13 @@ export function runSwanBotTurnWithDuplicateGuard<T>(
     (value) => {
       if (inFlightSwanBotTurns.get(key)?.promise === promise) {
         inFlightSwanBotTurns.delete(key);
-        completedSwanBotTurns.set(key, { settledAt: Date.now(), value });
+        // Only cache a GENUINE success. A failure/recovery/empty result was
+        // previously cached for the full TTL, so immediately retrying a failed
+        // message replayed the identical failure and the retry was a silent
+        // no-op (backlog finding #6). Not caching it lets the retry re-run.
+        if (isCacheableTurnResult(value)) {
+          completedSwanBotTurns.set(key, { settledAt: Date.now(), value });
+        }
       }
     },
     () => {

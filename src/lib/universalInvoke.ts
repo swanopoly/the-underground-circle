@@ -26,10 +26,13 @@ import { useUserApiKeys, invokeLLMProxy, type LLMProvider, type LLMProxyResponse
 import { invokeHfInference } from './hfService';
 import {
   resolveProviderRoutes,
-  isTransientProviderError,
   type ProviderRoute,
   type RouteResolutionOptions,
 } from './crossProviderRouter';
+// Audit: class-specific advance decision so an auth error moves to a DIFFERENT
+// provider instead of aborting the whole fallback chain. Aliased to avoid the
+// name clash with providerHealthRegistry's classifyProviderError below.
+import { shouldAdvanceAfterError, classifyProviderError as classifyProviderErrorForAdvance } from './providerErrorAdvanceCore';
 import { recordProviderOutcomeNow, classifyProviderError } from './providerHealthRegistry';
 import { getProviderRoutingMode, preferenceForMode } from './billingPriority';
 
@@ -102,7 +105,8 @@ export async function executeRouteChain(
   const fallbackChain: UniversalInvokeResult['fallbackChain'] = [];
   let lastError: unknown = null;
 
-  for (const route of routes) {
+  for (let i = 0; i < routes.length; i += 1) {
+    const route = routes[i];
     try {
       const result = await invokeOneRoute(route, req);
       // P29: record success so the health registry can prefer this provider.
@@ -110,14 +114,23 @@ export async function executeRouteChain(
       return { ...result, servedBy: route, fallbackChain };
     } catch (err) {
       lastError = err;
-      const transient = isTransientProviderError(err);
       const reason = (err as any)?.message || String(err);
       // P29: record the failure class so a flaky provider cools down for the
       // next turn's PRE-selection. This does NOT suppress the error below.
       recordProviderOutcomeNow(route.provider, { ok: false, errorClass: classifyProviderError(err) });
       fallbackChain.push({ route, reason });
-      // Structural errors bubble immediately — fallback won't help.
-      if (!transient) break;
+      // Advance decision (audit): an AUTH error on this provider aborts the
+      // chain only if no DIFFERENT provider remains (the same key just
+      // re-fails); rate-limit/overload/transient advance while any route
+      // remains (a same-provider different-model retry is legit). This
+      // replaces the old "structural → break" that killed the whole chain on
+      // a recoverable auth error when another provider could have answered.
+      const differentProviderRemains = routes.slice(i + 1).some((r) => r.provider !== route.provider);
+      const anyRouteRemains = i + 1 < routes.length;
+      if (!shouldAdvanceAfterError(
+        classifyProviderErrorForAdvance(err),
+        { differentProviderRemains, anyRouteRemains },
+      )) break;
     }
   }
 

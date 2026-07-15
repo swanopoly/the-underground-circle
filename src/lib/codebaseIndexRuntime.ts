@@ -34,6 +34,7 @@ import {
   MAX_INDEXED_FILES,
   type RankableFile,
 } from './codebaseIndexCore';
+import { planIncrementalReindex } from './incrementalReindexCore';
 import {
   extractCodebaseSymbols,
   extractCodebaseSummary,
@@ -146,6 +147,9 @@ export interface IndexCodebaseResult {
   byLanguage: Record<string, number>;
   truncatedCrawl: boolean;
   staleRemoved: number;
+  /** Files left untouched because their signature was unchanged since the last
+   *  index (incremental reindex) — they kept their stored row + embedding. */
+  reused?: number;
   error?: string;
 }
 
@@ -188,9 +192,48 @@ export async function indexCodebase(args: {
     size_bytes: number | null; embedding: string | null;
     embedding_model: string | null; embedded_at: string | null; indexed_at: string;
   };
+  // Incremental reindex (audit): re-read+re-embed ONLY files whose signature
+  // (size) changed, whose row lost its embedding, or whose embedding_model is
+  // stale — instead of embedding the whole repo every run (the embedding call
+  // is the $ + latency cost). Falls back to a FULL reindex if the existing-row
+  // fetch fails, so it can never index LESS than the old path by mistake.
+  const sizeByPath = new Map(crawl.entries.map((e) => [e.path, e.size]));
+  const fileByPath = new Map(plan.toIndex.map((f) => [f.path, f]));
+  let toProcess = plan.toIndex;
+  let reused = 0;
+  try {
+    const { data: existingRows } = await supabase
+      .from('codebase_files')
+      .select('path, size_bytes, embedding_model, embedded_at')
+      .eq('user_id', args.userId)
+      .eq('repo_root', repoRoot);
+    if (Array.isArray(existingRows) && existingRows.length > 0) {
+      const existing = existingRows.map((r: any) => ({
+        path: r.path as string,
+        size_bytes: typeof r.size_bytes === 'number' ? r.size_bytes : undefined,
+        embedding_present: r.embedded_at != null, // proxy — avoids pulling the vector
+        embedding_model: typeof r.embedding_model === 'string' ? r.embedding_model : undefined,
+      }));
+      const crawled = plan.toIndex.map((f) => ({ path: f.path, sizeBytes: sizeByPath.get(f.path) }));
+      const reindexPlan = planIncrementalReindex(crawled, existing, { embeddingModel: EMBEDDING_MODEL });
+      reused = reindexPlan.toReuse.length;
+      toProcess = reindexPlan.toReindex
+        .map((e) => fileByPath.get(e.path))
+        .filter((f): f is (typeof plan.toIndex)[number] => Boolean(f));
+    }
+  } catch { /* fetch failed → keep the full plan (toProcess = plan.toIndex) */ }
+
+  // Nothing changed since the last index — skip all read/embed/upsert work.
+  if (toProcess.length === 0) {
+    return {
+      ok: true, repoRoot, indexed: 0, embedded: 0, skipped: plan.skipped.length,
+      byLanguage: plan.byLanguage, truncatedCrawl: crawl.truncated, staleRemoved: 0, reused,
+    };
+  }
+
   const rows: Row[] = [];
   const embedInputs: string[] = [];
-  for (const file of plan.toIndex) {
+  for (const file of toProcess) {
     const abs = `${repoRoot}/${file.path}`;
     const read = await readFile(abs, INDEX_READ_HEAD_BYTES);
     const content = read.ok ? (read.data?.content ?? '') : '';
@@ -268,6 +311,7 @@ export async function indexCodebase(args: {
     byLanguage: plan.byLanguage,
     truncatedCrawl: crawl.truncated,
     staleRemoved,
+    reused,
   };
 }
 

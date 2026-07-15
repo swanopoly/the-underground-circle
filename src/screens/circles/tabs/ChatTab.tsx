@@ -188,8 +188,12 @@ import { computerFindingsMetadata, type PersistedComputerFindings } from '../../
 import { buildAgentMonitorTaskFromComputerUseState } from '../../../lib/agentMonitorState';
 import {
   getMatchingChatSlashCommands,
+  CHAT_SLASH_COMMANDS,
   type ChatSlashCommand,
 } from '../../../lib/chatSlashCommands';
+import { buildEmptyChatSuggestions } from '../../../lib/capabilityOverviewCore';
+import { matchStopResolution as matchChatStopResolution } from '../../../lib/chatStopMessageCore';
+import { guardChatSend } from '../../../lib/chatSendGuardCore';
 import ChatArtifacts from '../../../components/chat/ChatArtifacts';
 // V2 Builder adds copy/download/publish toolbar, device frames, and an
 // iframe runtime error overlay. Lives in tabs/chat/ because the components/
@@ -198,6 +202,8 @@ import ChatBuildStudio from './chat/ChatBuildStudioV2';
 import ChatBotIdentityRow from '../../../components/chat/ChatBotIdentityRow';
 import CodingWorkbenchPreview from '../../../components/chat/CodingWorkbenchPreview';
 import ChatInlineRichText from '../../../components/chat/ChatInlineRichText';
+import ChatMarkdownBody from '../../../components/chat/ChatMarkdownBody';
+import { hasRenderableMarkdown } from '../../../lib/markdownSegmentCore';
 import ChatMessageDetailsDisclosure from '../../../components/chat/ChatMessageDetailsDisclosure';
 import AgentReceiptCard from '../../../components/AgentReceiptCard';
 import { buildAgentReceipt, shouldRenderReceipt } from '../../../lib/agentReceipt';
@@ -433,6 +439,9 @@ const REACTIONS_LIST = ['🔥', '💪', '👊', '💯', '⚡', '🎯'];
 const BLACKSWAN_ID = 'blackswan';
 const LOGIN_NEON = '#b8ff61';
 const CHAT_SURFACE_MAX_WIDTH = 1680;
+// First-run starter prompts, computed once from the pure capability catalog
+// (deterministic + bounded) so the empty chat surfaces real, tappable examples.
+const EMPTY_CHAT_STARTERS = buildEmptyChatSuggestions({ max: 5 });
 const SESSION_FALLBACK_TITLE = 'OpenSwan Session';
 // Auto is the default — the runtime resolver in serviceProfileSouls
 // picks Haiku for casual / status / clarifying turns, Sonnet for
@@ -1764,60 +1773,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return null;
     }
   }, [selectedModel, sessionProfile, connectedProviderSet]);
-  const autoResolvedModel = useMemo(() => {
-    if (selectedModel !== 'auto') return null;
-    try {
-      const draft = (input || '').trim();
-      const route = draft.length > 0
-        ? analyzeMessageRouting(draft, 'main_chat').route
-        : null;
-      const providerSetForTurn = looksLikeActionRequest(draft)
-        ? new Set(Array.from(connectedProviderSet).filter((p) => p !== 'blackswan'))
-        : connectedProviderSet;
-      return resolveModelForProfile(
-        (sessionProfile as any) || 'senior',
-        null,
-        route?.intent,
-        providerSetForTurn,
-        route?.complexity,
-        // P8: app-domain questions can route to the app-trained BlackSwan.
-        { appGroundedHint: looksLikeAppGroundedMessage(draft) },
-        // P27: raw message → BlackSwan reliability guard escalates the hard
-        // subset of the grounded lane (multi-step/technical/ambiguous) to frontier.
-        draft,
-      );
-    } catch {
-      return null;
-    }
-  }, [selectedModel, input, sessionProfile, connectedProviderSet]);
-  // P11 transparency: WHY Auto picked that model — Cursor shows the id, we
-  // show the reason ("app question → app-trained BlackSwan"). Anti-drift
-  // matrix in smoke:blackswan-auto-routing guarantees this explainer can
-  // never disagree with the real router.
-  const autoModelReason = useMemo(() => {
-    if (selectedModel !== 'auto') return null;
-    try {
-      const draft = (input || '').trim();
-      const route = draft.length > 0
-        ? analyzeMessageRouting(draft, 'main_chat').route
-        : null;
-      const providerSetForTurn = looksLikeActionRequest(draft)
-        ? new Set(Array.from(connectedProviderSet).filter((p) => p !== 'blackswan'))
-        : connectedProviderSet;
-      return explainAutoModelChoice(
-        spiritIdForProfile((sessionProfile as any) || 'senior'),
-        null,
-        route?.intent,
-        route?.complexity,
-        undefined,
-        undefined,
-        providerSetForTurn,
-        { appGroundedHint: looksLikeAppGroundedMessage(draft) },
-      ).reason;
-    } catch {
-      return null;
-    }
-  }, [selectedModel, input, sessionProfile, connectedProviderSet]);
   const [codingWorkbenchPrompt, setCodingWorkbenchPrompt] = useState<string | null>(null);
   const [codingWorkbenchTick, setCodingWorkbenchTick] = useState(0);
   // Live streaming state for /build-page — filled by subscribeBuildStream()
@@ -4025,6 +3980,20 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [activeSubagent, setActiveSubagent] = useState<{ name: string; icon: string; color: string } | null>(null);
   const [activeDelegatedSubagents, setActiveDelegatedSubagents] = useState<OpenSwanDelegatedAgentDescriptor[]>([]);
   const [currentRunStep, setCurrentRunStep] = useState<string>('');
+  // Live progress: let the async SwanBot turn pipeline (swanbot.ts) push
+  // "Reading the screen…" / "Running tests…" labels to the typing indicator
+  // during v2 tool loops. Fail-soft sink; cleared on unmount.
+  useEffect(() => {
+    let active = true;
+    const sink = (label: string) => { if (active) setCurrentRunStep(label); };
+    import('../../../lib/swanbotActivitySink')
+      .then((m) => { if (active) m.setSwanBotActivitySink(sink); })
+      .catch(() => {});
+    return () => {
+      active = false;
+      import('../../../lib/swanbotActivitySink').then((m) => m.clearSwanBotActivitySink(sink)).catch(() => {});
+    };
+  }, []);
   const [memoryToast, setMemoryToast] = useState<{ message: string; type: 'saved' | 'updated' | 'conflict' | 'forgotten' } | null>(null);
   // User behavior profile
   const profileRef = useRef<UserChatProfile | null>(null);
@@ -5479,6 +5448,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const addBotMessage = (content: string, artifacts?: SwanBotStructuredArtifact[], extra?: ChatBotMessageExtra) => {
     const msgId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const messageThreadId = activeThreadId;
+    // One-tap recovery: if a turn ended on a stop/cap/failure message and the
+    // caller didn't already attach chips, surface Continue / Try again so the
+    // user taps a button instead of re-typing. Single choke point → every lane
+    // (stream/batch/v2) benefits. matchStopResolution is pure + smoke-pinned.
+    let autoQuickReplies = extra?.quickReplies;
+    if (!autoQuickReplies && content) {
+      const stop = matchChatStopResolution(content);
+      if (stop) autoQuickReplies = stop.quickReplies;
+    }
     const messageSource: ChatMessageSource = extra?.source || {
       actor: agentName,
       surface: extra?.localOnly ? 'main_chat_local' : 'main_chat',
@@ -5515,7 +5493,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       computerPreflightBlockers: extra?.computerPreflightBlockers,
       computerFindings: extra?.computerFindings,
       bestOfN: extra?.bestOfN,
-      quickReplies: extra?.quickReplies,
+      quickReplies: autoQuickReplies,
       taskPlan: extra?.taskPlan,
       toolEvents: extra?.toolEvents,
       verificationResults: extra?.verificationResults,
@@ -6795,6 +6773,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const requestedContent = (overrideText || input).trim();
     const hasPendingAttachments = attachments.length > 0 || stagedFiles.length > 0;
     const content = requestedContent || (hasPendingAttachments ? 'Open the attached file.' : '');
+    // Pre-send guard: a friendly hint instead of silently swallowing an empty
+    // send. Only 'block' is enforced (an empty message with no attachment);
+    // confirm/send both proceed so no new hoop is added to normal sends.
+    const sendGuard = guardChatSend(requestedContent, { hasAttachment: hasPendingAttachments });
+    if (sendGuard.action === 'block') {
+      addBotMessage(sendGuard.hint, undefined, { localOnly: true });
+      return;
+    }
     if (!content) return;
     const effectiveChatMode = options?.modeOverride || chatMode;
     const effectivePlanActMode: 'plan' | 'act' = effectiveChatMode === 'plan' ? 'plan' : 'act';
@@ -8395,46 +8381,63 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       return;
     }
 
-    if (lowerContent.startsWith('/remember ')) {
-      const what = content.slice(10).trim();
-      if (!what) { addBotMessage('Usage: `/remember <something to remember>`'); return; }
-      try {
-        const { rememberFromChat } = await import('../../../lib/memoryService');
-        const mem = await rememberFromChat(circleId, currentUserId || '', what);
-        addBotMessage(mem ? `Remembered: "${what.slice(0, 80)}"` : 'Failed to save memory.');
-        if (mem) setMemoryToast({ message: `Saved: "${what.slice(0, 50)}"`, type: 'saved' });
-      } catch (e: any) {
-        await addRecoverableChatErrorMessage({
-          title: 'Memory command failed',
-          task: `Remember from chat: ${what.slice(0, 160)}`,
-          error: e,
-          executionKind: 'memory_command',
-          source: 'memory_remember_command_error',
-          touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/memoryService.ts'],
-        });
+    // Unified memory intent (2026-07-14 UX core): `/remember [X]`, `/forget [X]`
+    // (bare form shows usage instead of falling through to the LLM), AND
+    // explicit natural language — "note that…", "remember that…", "forget
+    // that…" — actually saves/forgets and confirms, instead of the model
+    // replying "Saved." without saving. Conservative: natural language only
+    // fires on an explicit lead with real content and not a question.
+    {
+      const { parseMemoryCommand, detectMemoryIntent, MEMORY_COMMAND_USAGE } =
+        await import('../../../lib/memoryIntentCore');
+      const cmd = parseMemoryCommand(content);
+      let memAction: { kind: 'remember' | 'forget'; what: string } | null = null;
+      if (cmd) {
+        if (cmd.action === 'help') { addBotMessage(MEMORY_COMMAND_USAGE, undefined, { localOnly: true }); return; }
+        memAction = { kind: cmd.action, what: cmd.content };
+      } else {
+        const intent = detectMemoryIntent(content);
+        if (intent.kind !== 'none' && intent.confidence === 'explicit' && intent.content.length >= 4 && !content.trim().endsWith('?')) {
+          memAction = { kind: intent.kind, what: intent.content };
+        }
       }
-      return;
-    }
-
-    if (lowerContent.startsWith('/forget ')) {
-      const what = content.slice(8).trim();
-      if (!what) { addBotMessage('Usage: `/forget <keyword to forget>`'); return; }
-      try {
-        const { forgetFromChat } = await import('../../../lib/memoryService');
-        const { forgotten } = await forgetFromChat(circleId, currentUserId || '', what);
-        addBotMessage(forgotten > 0 ? `Forgot ${forgotten} memor${forgotten === 1 ? 'y' : 'ies'} matching "${what}".` : `No memories found matching "${what}".`);
-        if (forgotten > 0) setMemoryToast({ message: `Forgot ${forgotten} memor${forgotten === 1 ? 'y' : 'ies'}`, type: 'forgotten' });
-      } catch (e: any) {
-        await addRecoverableChatErrorMessage({
-          title: 'Memory command failed',
-          task: `Forget chat memory matching: ${what.slice(0, 160)}`,
-          error: e,
-          executionKind: 'memory_command',
-          source: 'memory_forget_command_error',
-          touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/memoryService.ts'],
-        });
+      if (memAction) {
+        const what = memAction.what;
+        if (memAction.kind === 'remember') {
+          try {
+            const { rememberFromChat } = await import('../../../lib/memoryService');
+            const mem = await rememberFromChat(circleId, currentUserId || '', what);
+            addBotMessage(mem ? `Remembered: "${what.slice(0, 80)}"` : 'Failed to save memory.');
+            if (mem) setMemoryToast({ message: `Saved: "${what.slice(0, 50)}"`, type: 'saved' });
+          } catch (e: any) {
+            await addRecoverableChatErrorMessage({
+              title: 'Memory command failed',
+              task: `Remember from chat: ${what.slice(0, 160)}`,
+              error: e,
+              executionKind: 'memory_command',
+              source: 'memory_remember_command_error',
+              touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/memoryService.ts'],
+            });
+          }
+          return;
+        }
+        try {
+          const { forgetFromChat } = await import('../../../lib/memoryService');
+          const { forgotten } = await forgetFromChat(circleId, currentUserId || '', what);
+          addBotMessage(forgotten > 0 ? `Forgot ${forgotten} memor${forgotten === 1 ? 'y' : 'ies'} matching "${what}".` : `No memories found matching "${what}".`);
+          if (forgotten > 0) setMemoryToast({ message: `Forgot ${forgotten} memor${forgotten === 1 ? 'y' : 'ies'}`, type: 'forgotten' });
+        } catch (e: any) {
+          await addRecoverableChatErrorMessage({
+            title: 'Memory command failed',
+            task: `Forget chat memory matching: ${what.slice(0, 160)}`,
+            error: e,
+            executionKind: 'memory_command',
+            source: 'memory_forget_command_error',
+            touched: ['src/screens/circles/tabs/ChatTab.tsx', 'src/lib/memoryService.ts'],
+          });
+        }
+        return;
       }
-      return;
     }
 
     if (lowerContent === '/memories' || lowerContent === '/memory') {
@@ -8723,6 +8726,48 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           addBotMessage(`Could not run that integration command: ${e?.message || 'unknown error'}.`, undefined, { localOnly: true });
         } finally {
           setBotTyping(false);
+        }
+      })();
+      return;
+    }
+
+    // ─── Context dial — /context [lean|standard|max] ─────────────────────────
+    // User-controlled context depth plus a transparency receipt of what the
+    // last turn actually loaded. Policy + receipt live in contextDepthPolicy.ts.
+    if (lowerContent === '/context' || lowerContent.startsWith('/context ')) {
+      (async () => {
+        try {
+          const {
+            parseContextDepth, resolveStoredContextDepth, setStoredContextDepth,
+            describeContextDepthSetting, buildContextReceipt, getLastContextReceipt,
+          } = await import('../../../lib/contextDepthPolicy');
+          const arg = content.trim().slice('/context'.length).trim();
+          if (!arg || arg.toLowerCase() === 'show') {
+            const current = resolveStoredContextDepth();
+            addBotMessage(
+              `${describeContextDepthSetting(current)}\n\n${buildContextReceipt(getLastContextReceipt())}`,
+              undefined,
+              { localOnly: true },
+            );
+            return;
+          }
+          const parsed = parseContextDepth(arg);
+          if (!parsed) {
+            addBotMessage(
+              'Usage: `/context` shows the current setting and what I loaded last turn · `/context max` always load everything · `/context lean` fast turns · `/context standard` automatic.',
+              undefined,
+              { localOnly: true },
+            );
+            return;
+          }
+          const persisted = setStoredContextDepth(parsed);
+          addBotMessage(
+            `${describeContextDepthSetting(parsed)}${persisted ? '' : '\n(Set for this session — it resets when the app restarts on this device.)'}`,
+            undefined,
+            { localOnly: true },
+          );
+        } catch (e: any) {
+          addBotMessage(`Context command failed: ${e?.message || e}`, undefined, { localOnly: true });
         }
       })();
       return;
@@ -9234,6 +9279,48 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
     } catch (localCmdErr) {
       console.warn('[ChatTab] local SwanBot command failed:', localCmdErr);
+    }
+
+    // ─── Did-you-mean for unrecognized slash commands (2026-07-14 UX core) ──
+    // A '/'-prefixed message that survived every intercept above is an unknown
+    // or typo'd command. Instead of silently sending "/reserach ai" to the LLM
+    // as plain chat, offer the nearest real commands. Exact matches fall
+    // through untouched (they're valid commands handled downstream).
+    if (content.trim().startsWith('/')) {
+      try {
+        const { suggestSlashCommand, buildDidYouMean } = await import('../../../lib/slashCommandCorrectionCore');
+        const known = CHAT_SLASH_COMMANDS.flatMap((c) => [c.command, ...(c.aliases || [])]);
+        const sugg = suggestSlashCommand(content, known);
+        if (sugg.isSlash && !sugg.exact && sugg.suggestions.length > 0) {
+          addBotMessage(buildDidYouMean(content, sugg.suggestions), undefined, { localOnly: true });
+          return;
+        }
+      } catch (correctionErr) {
+        console.warn('[ChatTab] slash correction failed:', correctionErr);
+      }
+    }
+
+    // ─── Clarify-before-guessing (2026-07-14 accuracy core) ─────────────────
+    // For a genuinely ambiguous ACTION request ("delete them", "send it",
+    // "deploy") with no disambiguating context, ask ONE crisp question with
+    // tappable options instead of guessing wrong. Deliberately conservative:
+    // passing hasActiveThreadContext (an ongoing conversation) makes it fire
+    // ~never, so it only catches contextless coin-flips. Not for slash cmds.
+    if (!content.trim().startsWith('/')) {
+      try {
+        const { decideChatClarify } = await import('../../../lib/chatClarifyGateCore');
+        const clarify = decideChatClarify(content, {
+          hasActiveThreadContext: messages.length >= 2,
+          hasAttachment: attachments.length > 0 || stagedFiles.length > 0,
+          mode: chatMode,
+        });
+        if (clarify.shouldClarify) {
+          addBotMessage(clarify.question, undefined, { localOnly: true, quickReplies: clarify.options });
+          return;
+        }
+      } catch (clarifyErr) {
+        console.warn('[ChatTab] clarify gate failed:', clarifyErr);
+      }
     }
 
     // ─── Web Search routing (Phase 0 + auto-detect) ────────────────────────
@@ -10996,7 +11083,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       </View>
     ) : null;
 
-    const bodyTextBlock = (
+    // Render block-level markdown (code fences, headings, bullets, quotes) as
+    // real UI instead of raw ``` / # / - markers, delegating plain-text runs to
+    // ChatInlineRichText so @mentions + **bold** keep their styling. Falls back
+    // to the single ChatInlineRichText (byte-identical) when there's no markdown.
+    const bodyTextBlock = hasRenderableMarkdown(bodyContent) ? (
+      <ChatMarkdownBody
+        content={bodyContent}
+        accentColor={accentColor}
+        textColor={messageDensity === 'compact' ? '#bbb' : '#ccc'}
+      />
+    ) : (
       <ChatInlineRichText
         content={bodyContent}
         accentColor={accentColor}
@@ -11711,6 +11808,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           resizeMode="contain"
         />
       </View>
+      {/* First-run discoverability (2026-07-14 UX core): tappable starter
+          prompts drawn from the real capability catalog, so the primary
+          surface no longer shows just an image. Tapping sends it. */}
+      <Text style={styles.emptyStarterHint}>Try one of these, or just tell me what you need:</Text>
+      <View style={styles.emptyStarterWrap}>
+        {EMPTY_CHAT_STARTERS.map((starter) => (
+          <Pressable
+            key={starter}
+            style={[styles.emptyStarterChip, { borderColor: accentColor + '55' }]}
+            onPress={() => sendMessage(starter)}
+            accessibilityRole="button"
+          >
+            <Text style={[styles.emptyStarterChipText, { color: accentColor }]} numberOfLines={2}>{starter}</Text>
+          </Pressable>
+        ))}
+      </View>
+      <Pressable onPress={() => sendMessage('what can you do?')} accessibilityRole="button">
+        <Text style={styles.emptyStarterMore}>See everything I can do →</Text>
+      </Pressable>
     </ScrollView>
   );
 
@@ -11874,7 +11990,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   }
 
   return (
-    <View style={{ flex: 1, flexDirection: 'row', backgroundColor: '#000' }}>
+    <View style={{ flex: 1, flexDirection: 'row', backgroundColor: '#0A0A0A' }}>
       {Platform.OS === 'web' && globalFileDragActive ? (
         <View pointerEvents="none" style={styles.globalDropOverlay}>
           <View style={styles.globalDropCard}>
@@ -12026,7 +12142,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         currentUserId={currentUserId}
         refreshToken={threadListRefreshToken}
         onThreadUpdated={handleThreadMetaChanged}
-        selectedModel={selectedModel}
         sessionProfile={sessionProfile}
         delegationMode={sessionDelegationMode}
         onSessionProfileChange={handleSessionProfileChange}
@@ -12036,8 +12151,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           setShowOpenSwanConsole(true);
         }}
         onOpenRunHistory={() => setShowRunHistory(true)}
-        resolvedAutoModel={autoResolvedModel}
-        autoModelReason={autoModelReason}
         onOpenThread={handleSelectThread}
       />
       {showReopenBuilderPill ? (
@@ -15667,12 +15780,31 @@ function EnhancedInput({
     if (!autoResolvedModel) return null;
     return autoModelDisplayName(autoResolvedModel);
   }, [autoResolvedModel]);
+  const autoModelReason = useMemo(() => {
+    if (selectedModel !== 'auto') return null;
+    try {
+      const draft = (input || '').trim();
+      const route = draft.length > 0
+        ? analyzeMessageRouting(draft, 'main_chat').route
+        : null;
+      const providerSetForTurn = looksLikeActionRequest(draft)
+        ? new Set(Array.from(connectedProviderSet).filter((provider) => provider !== 'blackswan'))
+        : connectedProviderSet;
+      return explainAutoModelChoice(
+        spiritIdForProfile((sessionProfile as any) || 'senior'),
+        null,
+        route?.intent,
+        route?.complexity,
+        undefined,
+        undefined,
+        providerSetForTurn,
+        { appGroundedHint: looksLikeAppGroundedMessage(draft) },
+      ).reason;
+    } catch {
+      return null;
+    }
+  }, [selectedModel, input, sessionProfile, connectedProviderSet]);
   const soulActions = getMainChatSessionActions(sessionProfile || 'senior');
-  const controlStatusLabel = currentRunStep?.trim()
-    || (runStatus === 'running' ? 'thinking'
-      : runStatus === 'delegated' ? 'delegating'
-      : runStatus === 'waiting_approval' ? 'awaiting approval'
-      : 'ready');
   const accordionCategories = PROMPT_CATEGORIES.map((category) => ({
     key: category.title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''),
     category,
@@ -16277,13 +16409,20 @@ function EnhancedInput({
           {showModePicker && (
             <AnimatedPopup style={[styles.dropdownPanel, styles.dropdownPanelControlCenter, ...(Platform.OS === 'web' ? [{ boxShadow: '0 8px 32px rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)' } as any] : [])]}>
               <Text style={styles.dropdownTitle}>OpenSwan Control Panel</Text>
-              <View style={styles.controlCenterStatusBand}>
-                <View style={styles.controlCenterStatusHeader}>
-                  <View style={[styles.liveMiniDot, { backgroundColor: runStatus === 'idle' ? '#22c55e' : runStatus === 'waiting_approval' ? '#f59e0b' : '#6366f1' }]} />
-                  <Text style={styles.controlCenterStatusLabel}>STATUS</Text>
+              {selectedModel === 'auto' && (autoResolvedShortLabel || autoModelReason) ? (
+                <View style={styles.controlAutoRouteBand}>
+                  <View style={styles.controlCenterStatusHeader}>
+                    <View style={[styles.liveMiniDot, { backgroundColor: '#f59e0b' }]} />
+                    <Text style={styles.controlCenterStatusLabel}>AUTO ROUTE</Text>
+                  </View>
+                  <Text style={styles.controlAutoRouteValue} numberOfLines={1}>
+                    Auto{autoResolvedShortLabel ? ` -> ${autoResolvedShortLabel}` : ''}
+                  </Text>
+                  {autoModelReason ? (
+                    <Text style={styles.controlAutoRouteReason} numberOfLines={2}>{autoModelReason}</Text>
+                  ) : null}
                 </View>
-                <Text style={styles.controlCenterStatusValue} numberOfLines={2}>{controlStatusLabel}</Text>
-              </View>
+              ) : null}
               <Pressable
                 onPress={() => openControlPanelWith('')}
                 accessibilityRole="button"
@@ -16891,7 +17030,7 @@ const checkInStyles = StyleSheet.create({
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   title: { color: '#fff', fontSize: 13, fontWeight: '700' },
   close: { color: '#666', fontSize: 16, padding: 4 },
-  input: { backgroundColor: '#000000', borderWidth: 1, borderRadius: 12, color: '#fff', fontSize: 13, padding: 10, minHeight: 60, textAlignVertical: 'top' },
+  input: { backgroundColor: '#0A0A0A', borderWidth: 1, borderRadius: 12, color: '#fff', fontSize: 13, padding: 10, minHeight: 60, textAlignVertical: 'top' },
   footer: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 },
   charCount: { color: '#555', fontSize: 11 },
   submitBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 12 },
@@ -16906,8 +17045,8 @@ const checkInStyles = StyleSheet.create({
 
 const styles = StyleSheet.create({
   // Core layout
-  container: { flex: 1, backgroundColor: '#000000' },
-  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  container: { flex: 1, backgroundColor: '#0A0A0A' },
+  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0A0A0A' },
   loadingPulse: { alignItems: 'center' },
   loadingText: { fontSize: 28, letterSpacing: 6, fontWeight: '800' },
 
@@ -16952,6 +17091,11 @@ const styles = StyleSheet.create({
   // Empty state
   emptyContainer: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 20, maxWidth: CHAT_SURFACE_MAX_WIDTH, alignSelf: 'center', width: '100%' },
   heroSection: { alignItems: 'center', justifyContent: 'center', paddingTop: 40, paddingBottom: 40 },
+  emptyStarterHint: { fontSize: 13, color: '#9aa0a6', marginTop: 8, marginBottom: 12, textAlign: 'center' },
+  emptyStarterWrap: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, maxWidth: 560 },
+  emptyStarterChip: { borderWidth: 1, borderRadius: 16, paddingVertical: 8, paddingHorizontal: 14, margin: 3, maxWidth: 260 },
+  emptyStarterChipText: { fontSize: 13, fontWeight: '500' },
+  emptyStarterMore: { fontSize: 13, color: '#9aa0a6', marginTop: 16, textDecorationLine: 'underline' },
   heroSectionWeb: {},
   heroBotAvatar: {
     justifyContent: 'center',
@@ -17974,7 +18118,7 @@ const styles = StyleSheet.create({
     maxWidth: CHAT_SURFACE_MAX_WIDTH,
     alignSelf: 'center',
     width: '100%',
-    backgroundColor: '#000000cc',
+    backgroundColor: '#0A0A0ACC',
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(10px)' } as any : {}),
   },
   quickBarScroll: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingVertical: 10 },
@@ -18001,7 +18145,7 @@ const styles = StyleSheet.create({
   },
   scrollArrowLeft: {
     left: 0,
-    backgroundColor: '#000000f0',
+    backgroundColor: '#0A0A0AF0',
     borderRightWidth: 1,
     borderRightColor: '#ffffff10',
     borderTopRightRadius: 8,
@@ -18009,7 +18153,7 @@ const styles = StyleSheet.create({
   },
   scrollArrowRight: {
     right: 0,
-    backgroundColor: '#000000f0',
+    backgroundColor: '#0A0A0AF0',
     borderLeftWidth: 1,
     borderLeftColor: '#ffffff10',
     borderTopLeftRadius: 8,
@@ -18023,7 +18167,7 @@ const styles = StyleSheet.create({
 
   // Enhanced crypto panel
   enhancedCryptoPanel: {
-    backgroundColor: '#000000f0',
+    backgroundColor: '#0A0A0AF0',
     borderTopWidth: 1,
     padding: 20,
     maxWidth: CHAT_SURFACE_MAX_WIDTH,
@@ -18140,7 +18284,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     width: '100%',
     overflow: 'hidden',
-    backgroundColor: '#000000f5',
+    backgroundColor: '#0A0A0AF5',
   },
   enhancedMentionItem: {
     flexDirection: 'row',
@@ -18173,7 +18317,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderTopWidth: 1,
-    backgroundColor: '#000000f0',
+    backgroundColor: '#0A0A0AF0',
     maxWidth: CHAT_SURFACE_MAX_WIDTH,
     alignSelf: 'center',
     width: '100%',
@@ -18205,7 +18349,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     width: '100%',
     borderTopWidth: 1,
-    backgroundColor: '#000000f0',
+    backgroundColor: '#0A0A0AF0',
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(8px)' } as any : {}),
   },
   typingDot: { width: 10, height: 10, borderRadius: 5 },
@@ -18215,7 +18359,7 @@ const styles = StyleSheet.create({
   enhancedInputBar: {
     borderTopWidth: 1,
     padding: 16,
-    backgroundColor: '#000000f5',
+    backgroundColor: '#0A0A0AF5',
     maxWidth: CHAT_SURFACE_MAX_WIDTH,
     alignSelf: 'center',
     width: '100%',
@@ -18528,17 +18672,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#111827',
     ...(Platform.OS === 'web' ? { boxShadow: '2px 2px 0px rgba(99,102,241,0.08), 0 8px 20px rgba(0,0,0,0.4)', transform: 'translateY(-1px)' } as any : {}),
   },
-  controlCenterStatusBand: {
-    marginHorizontal: 10,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#232336',
-    backgroundColor: '#111521',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 6,
-  },
   controlCenterStatusHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -18551,11 +18684,28 @@ const styles = StyleSheet.create({
     letterSpacing: 0.9,
     fontFamily: 'monospace',
   },
-  controlCenterStatusValue: {
-    color: '#e5eefc',
+  controlAutoRouteBand: {
+    marginHorizontal: 10,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: '#f59e0b33',
+    backgroundColor: '#17110a',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 5,
+  },
+  controlAutoRouteValue: {
+    color: '#f8fafc',
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: '900',
     fontFamily: 'monospace',
+  },
+  controlAutoRouteReason: {
+    color: '#94a3b8',
+    fontSize: 11,
+    lineHeight: 15,
+    fontWeight: '700',
   },
   controlCenterStatsRow: {
     flexDirection: 'row',

@@ -199,6 +199,9 @@ export const CHAT_COMMAND_REGISTRY: ChatCommandDefinition[] = [
   // /screen — one-tap observation of the frontmost (or named) app: state,
   // windows, what changed since the last look, suggested next step (P19).
   { id: 'screen', routeId: 'hf_tools', command: '/screen', insertText: '/screen ', title: "What's on my screen", description: 'Look at the frontmost app (or `/screen <app>`): running state, open windows, what changed since my last look, and a suggested next step.', category: 'ai_tools', keywords: ['observe', 'window', 'desktop', 'next step', 'look'] },
+  // /context — the user-controlled context dial + transparency receipt.
+  // Intercepted in ChatTab; policy lives in contextDepthPolicy.ts.
+  { id: 'context', routeId: 'help', command: '/context', insertText: '/context ', title: 'Context depth', description: 'Control how much context I load each turn: `/context` shows the current setting + what I loaded last turn, `/context max` always loads everything (memory, sessions, missions, codebase), `/context lean` keeps turns fast, `/context standard` returns to automatic.', category: 'general', keywords: ['memory', 'context', 'depth', 'remember', 'full context', 'load everything', 'receipt'] },
   { id: 'build-page', routeId: 'build_page', command: '/build-page', insertText: '/build-page ', title: 'Build Page', description: 'Generate a webpage.', category: 'ai_tools', aliases: ['/build'], keywords: ['html', 'web'] },
   { id: 'code', routeId: 'hf_tools', command: '/code', insertText: '/code ', title: 'Code', description: 'Generate code from a prompt.', category: 'ai_tools', keywords: ['programming', 'build'] },
   { id: 'speak', routeId: 'hf_tools', command: '/speak', insertText: '/speak ', title: 'Speak', description: 'Convert text to speech.', category: 'ai_tools', keywords: ['audio', 'tts'] },

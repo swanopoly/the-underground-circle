@@ -10,8 +10,27 @@ export type SwanBotClientToolDispatchResult = {
   error?: string;
 };
 
-export const SWANBOT_CLIENT_TOOL_RESULT_MAX_CHARS = 12_000;
+// Total payload cap — aligned to the edge fn's per-client-result ceiling
+// (SWANBOT_MAX_CLIENT_TOOL_RESULT_CONTENT_CHARS = 16k in swanbot-continuation.ts),
+// so we never build a payload the edge would just re-truncate.
+export const SWANBOT_CLIENT_TOOL_RESULT_MAX_CHARS = 16_000;
 export const SWANBOT_CLIENT_TOOL_RESULT_STRING_MAX_CHARS = 2_000;
+// Grounding fields (a11y tree, DOM/HTML snapshot, screen/page text) ARE the
+// model's eyes on the screen — clipping them to 2k blinded computer-use turns
+// (discarded ~75% of a real a11y tree). Give those specific keys a much larger
+// budget while ordinary string fields stay tight; the total cap above still holds.
+export const SWANBOT_CLIENT_TOOL_RESULT_GROUNDING_STRING_MAX_CHARS = 12_000;
+const GROUNDING_TEXT_KEYS: ReadonlySet<string> = new Set([
+  'text', 'tree', 'a11y', 'a11ytree', 'accessibilitytree', 'ax', 'axtree',
+  'dom', 'domsnapshot', 'snapshot', 'html', 'markdown', 'rendered',
+  'pagetext', 'screentext', 'outerhtml',
+]);
+function stringBudgetForKey(key: string | null): number {
+  if (key && GROUNDING_TEXT_KEYS.has(key.toLowerCase())) {
+    return SWANBOT_CLIENT_TOOL_RESULT_GROUNDING_STRING_MAX_CHARS;
+  }
+  return SWANBOT_CLIENT_TOOL_RESULT_STRING_MAX_CHARS;
+}
 
 const SWANBOT_CLIENT_TOOL_RESULT_ARRAY_MAX_ITEMS = 40;
 const SWANBOT_CLIENT_TOOL_RESULT_OBJECT_MAX_KEYS = 60;
@@ -33,9 +52,10 @@ function clipSwanBotClientToolValue(
   value: unknown,
   depth = 0,
   seen = new WeakSet<object>(),
+  stringBudget: number = SWANBOT_CLIENT_TOOL_RESULT_STRING_MAX_CHARS,
 ): unknown {
   if (typeof value === 'string') {
-    return clipString(value, SWANBOT_CLIENT_TOOL_RESULT_STRING_MAX_CHARS);
+    return clipString(value, stringBudget);
   }
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
@@ -58,7 +78,7 @@ function clipSwanBotClientToolValue(
     if (Array.isArray(value)) {
       const clipped = value
         .slice(0, SWANBOT_CLIENT_TOOL_RESULT_ARRAY_MAX_ITEMS)
-        .map((item) => clipSwanBotClientToolValue(item, depth + 1, seen));
+        .map((item) => clipSwanBotClientToolValue(item, depth + 1, seen, stringBudget));
       if (value.length > SWANBOT_CLIENT_TOOL_RESULT_ARRAY_MAX_ITEMS) {
         clipped.push({ __truncated_items: value.length - SWANBOT_CLIENT_TOOL_RESULT_ARRAY_MAX_ITEMS });
       }
@@ -68,7 +88,8 @@ function clipSwanBotClientToolValue(
     const entries = Object.entries(value as Record<string, unknown>);
     const out: Record<string, unknown> = {};
     for (const [key, child] of entries.slice(0, SWANBOT_CLIENT_TOOL_RESULT_OBJECT_MAX_KEYS)) {
-      out[key] = clipSwanBotClientToolValue(child, depth + 1, seen);
+      // Grounding-text keys (a11y tree, DOM, screen text) get the larger budget.
+      out[key] = clipSwanBotClientToolValue(child, depth + 1, seen, stringBudgetForKey(key));
     }
     if (entries.length > SWANBOT_CLIENT_TOOL_RESULT_OBJECT_MAX_KEYS) {
       out.__truncated_keys = entries.length - SWANBOT_CLIENT_TOOL_RESULT_OBJECT_MAX_KEYS;

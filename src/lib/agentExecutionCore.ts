@@ -36,6 +36,7 @@ import { partitionParallelSafeBatch } from './toolBatchParallelism';
 import type { ToolParallelPolicy } from './toolBatchParallelism';
 import { buildToolFailureFeedback } from './toolFailureFeedback';
 import { detectRepeatedToolFailure, hashToolInput, type RecentToolCall } from './toolLoopStuckBreaker';
+import { detectOscillatingFailure } from './oscillationDetectorCore';
 import { buildSolverConsultationMessage, previewToolInput, shouldConsultSolver } from './toolLoopSolver';
 import { summarizeToolResultForModel } from './toolResultSummaryCore';
 
@@ -164,8 +165,10 @@ export type AgentRoundCompleteHook = (ctx: {
   /** 1-indexed provider-turn counter for the round that just completed. */
   iteration: number;
   maxIterations: number;
-  /** This round's dispatched tools, in original tool_use order. */
-  toolResults: Array<{ toolName: string; ok: boolean; resultText?: string }>;
+  /** This round's dispatched tools, in original tool_use order. `input` is
+   *  the raw tool input — the run-and-fix gate uses it to classify
+   *  local.run_shell / git.run calls as verification vs mutation. */
+  toolResults: Array<{ toolName: string; ok: boolean; resultText?: string; input?: unknown }>;
   messages: readonly AgentMessage[];
 }) => { appendUserNote?: string } | void | Promise<{ appendUserNote?: string } | void>;
 
@@ -1018,6 +1021,29 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     // is how Anthropic's Messages API expects the follow-up to be shaped.
     messages.push({ role: 'user', content: toolResultBlocks });
 
+    // Oscillation stop (audit): the pre-dispatch guard above only catches the
+    // SAME single call repeating. This catches cross-round A-B-A-B failure
+    // thrash — alternating failing tools that make no progress, which that
+    // guard misses. Only fires after a round that had a failure, only when a
+    // next provider turn exists to otherwise consume the result, and the pure
+    // detector ignores exact-repeat (handled above) and any round with a
+    // success. The transcript is well-formed here (tool_use/tool_result closed
+    // by the push above), so the hard-stop is resumable — same shape as the
+    // exact-repeat stop.
+    if (iteration < maxIterations
+      && toolResultBlocks.some((b) => b?.type === 'tool_result' && b.is_error === true)) {
+      const osc = detectOscillatingFailure(
+        recentToolCalls.map((c) => ({ name: c.name, ok: c.ok, argsKey: c.inputHash })),
+      );
+      if (osc.stuck) {
+        const note = `stopped: ${osc.reason} — the last several tool attempts are cycling without progress; re-observe or ask the user before trying a different approach.`;
+        emit({ kind: 'loop_stopped_no_progress', iteration, reason: osc.reason });
+        lastText = note;
+        emit({ kind: 'final_response', iteration, text: lastText });
+        return { text: lastText, messages, iterations: iteration, stopReason: 'end_turn', hitMaxIterations: false };
+      }
+    }
+
     // Resumable-checkpoint boundary (R12): the round is complete and the
     // history is consistent (tool_use/tool_result pairs closed). Snapshot
     // so later mutation of `messages` doesn't alias into the handler.
@@ -1051,6 +1077,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
           return {
             toolName: use.name,
             ok: !tr?.is_error,
+            input: use.input,
             ...(typeof tr?.content === 'string' ? { resultText: tr.content } : {}),
           };
         });

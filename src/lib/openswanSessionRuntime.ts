@@ -51,6 +51,7 @@ import {
   type LegacyToolLoopResult,
 } from './openswanSessionRuntimeAdapters';
 import { createRunAndFixGateState, foldRunAndFixRound, markNudgeSent, planVerificationNudge } from './runAndFixGateCore';
+import { buildUserActionReceipt } from './userActionReceiptCore';
 import { appendOpenSwanTranscriptEvent, buildOpenSwanTranscriptKey, upsertOpenSwanTranscriptHeader, type OpenSwanSessionTranscript } from './openswanTranscripts';
 import { executeOpenSwanVerificationPlan, type OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import { getSwanBotStructuredResponse, executeToolUseLoop, buildStreamableSystemPrompt, type SwanBotContext, type SwanBotStructuredArtifact, type SwanBotStructuredResponse } from './swanbot';
@@ -843,7 +844,7 @@ async function runTypedCoreToolLoop(args: {
   const onRoundComplete: ReturnType<typeof createLegacyRoundNudgeHook> = async (round) => {
     runAndFixState = foldRunAndFixRound(
       runAndFixState,
-      (round.toolResults || []).map((r) => ({ name: r.toolName, ok: r.ok })),
+      (round.toolResults || []).map((r) => ({ name: r.toolName, ok: r.ok, input: r.input })),
     );
     const legacy = await legacyRoundNudgeHook(round);
     const legacyNote = legacy && typeof legacy === 'object' && typeof legacy.appendUserNote === 'string'
@@ -1858,7 +1859,10 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
                 : action.status === 'blocked'
                   ? 'blocked'
                   : 'failed',
-          summary: action.output_preview || action.title,
+          // User-facing receipt ("Created room X", "Ran npm test — passed")
+          // instead of a raw 1200-char JSON output_preview blob.
+          summary: buildUserActionReceipt(action.tool_name, action.output_preview, action.status === 'completed')
+            || action.title,
         })),
         verificationResults: [],
       });

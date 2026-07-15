@@ -54,6 +54,27 @@ import {
   type ChatPromptSectionInput,
   type ChatPromptSectionKey,
 } from './chatPromptAssembly';
+// User-controlled context dial (/context lean|standard|max) + the per-turn
+// context receipt. Pure module; 'standard' is an identity transform so the
+// no-preference path stays byte-identical.
+import {
+  applyContextDepthToPolicy,
+  composeComplexityFloors,
+  recordContextReceipt,
+  resolveContextDepthComplexityFloor,
+  resolveStoredContextDepth,
+  type ChatContextDepth,
+} from './contextDepthPolicy';
+// SwanBot UX cores (2026-07-14 fan-out): user-facing stop copy + read-batch
+// parallelization for the v2 client-tool loop. Pure, smoke-pinned.
+import { resolveChatStopMessage, humanizeStopText } from './chatStopMessageCore';
+import { partitionClientToolBatch } from './clientToolBatchCore';
+import { toolActivityLabel } from './toolActivityLabelCore';
+import { emitSwanBotActivity } from './swanbotActivitySink';
+import { buildFailureRecovery } from './failureRecoveryCopyCore';
+// Audit-driven prompt cores: conversational complexity floor + model-window budget.
+import { resolveConversationComplexityFloor } from './conversationComplexityFloorCore';
+import { resolveModelContextBudget, getModelContextWindow } from './modelContextBudgetCore';
 import { buildBlackSwanGroundingBlock, isBlackSwanModel, isLocalOllamaBlackSwan, planBlackSwanEndpointFailover } from './blackswanRouting';
 // Pure csv/table helpers (no react-native) — see the LOCKSTEP note on
 // SwanBotStructuredArtifact below.
@@ -714,22 +735,30 @@ export async function saveSessionToMemory(circleId: string, userId: string): Pro
  * Build a "last session" context string for the agent's system prompt.
  * Loads the most recent session memory + any persistent findings/decisions.
  */
-export async function getLastSessionContext(circleId: string, userId?: string): Promise<string> {
+export async function getLastSessionContext(
+  circleId: string,
+  userId?: string,
+  opts?: { depth?: ChatContextDepth },
+): Promise<string> {
   try {
+    // Context dial: at 'max' this continuity block widens (more sessions,
+    // longer excerpts, more durable knowledge) — the 16k extras budget can
+    // afford it. standard/lean keep today's exact slices.
+    const deep = opts?.depth === 'max';
     const { loadMemories } = await import('./agentRunSystem');
     // Load last session summary — bound to this user
     const sessionMemories = await loadMemories({
       circleId,
       userId,
       scopes: ['session'],
-      limit: 5, // bumped from 3 to include CC session memories
+      limit: deep ? 10 : 5, // bumped from 3 to include CC session memories
     });
     // Load persistent findings/decisions — user-private + circle-shared
     const durableMemories = await loadMemories({
       circleId,
       userId,
       scopes: ['circle', 'user'],
-      limit: 10,
+      limit: deep ? 18 : 10,
     });
 
     const parts: string[] = [];
@@ -743,16 +772,16 @@ export async function getLastSessionContext(circleId: string, userId?: string): 
     // Show active agent sessions first — so agent knows what's happening across all sessions
     if (agentSessions.length > 0) {
       const agentLines = agentSessions
-        .slice(0, 3)
-        .map((m: any) => m.content.slice(0, 500))
+        .slice(0, deep ? 5 : 3)
+        .map((m: any) => m.content.slice(0, deep ? 900 : 500))
         .join('\n---\n');
       parts.push(`## Active Agent Sessions (${agentSessions.length})\n${agentLines}`);
     }
 
     // Show previous chat session context
     if (chatSessions.length > 0) {
-      const recentSessions = chatSessions.slice(0, 2);
-      parts.push(`## Previous Sessions\n${recentSessions.map((m: any) => m.content.slice(0, 700)).join('\n---\n')}`);
+      const recentSessions = chatSessions.slice(0, deep ? 4 : 2);
+      parts.push(`## Previous Sessions\n${recentSessions.map((m: any) => m.content.slice(0, deep ? 1200 : 700)).join('\n---\n')}`);
       if (chatSessions.length > recentSessions.length) {
         parts.push(`(${chatSessions.length - recentSessions.length} earlier sessions also in memory)`);
       }
@@ -771,8 +800,8 @@ export async function getLastSessionContext(circleId: string, userId?: string): 
 
     if (durableMemories.length > 0) {
       const lines = durableMemories
-        .slice(0, 8)
-        .map(m => `- [${m.memory_kind}] ${m.title}: ${m.content.slice(0, 150)}`);
+        .slice(0, deep ? 14 : 8)
+        .map(m => `- [${m.memory_kind}] ${m.title}: ${m.content.slice(0, deep ? 260 : 150)}`);
       parts.push(`## Persistent Knowledge\n${lines.join('\n')}`);
     }
 
@@ -1059,11 +1088,11 @@ async function callSwanBotV2(
   }
 }
 
+// User-facing stop copy comes from the pure chatStopMessageCore (smoke-pinned):
+// friendly, never model-directed, and it carries quickReplies/canContinue so the
+// chat UI can offer a Continue/Try-again button instead of a text dead end.
 function swanBotV2ClientToolStopMessage(reason: 'continuation_failed' | 'continuation_cap'): string {
-  if (reason === 'continuation_cap') {
-    return 'SwanBot v2 reached its client-tool continuation limit before it could produce a final answer. I stopped instead of falling back to legacy SwanBot so the same desktop or browser actions are not repeated. Ask me to continue and I will start from fresh evidence.';
-  }
-  return 'I ran the local SwanBot tool step, but the v2 continuation did not finish. I stopped instead of retrying through legacy SwanBot so I do not repeat a desktop or browser action. Ask me to continue after a fresh observation if you want me to proceed.';
+  return resolveChatStopMessage(reason).message;
 }
 
 type V2Response =
@@ -1156,8 +1185,12 @@ async function executeClientToolCalls(
   if (calls.length === 0) return [];
   const bridge = await import('./desktopBridge');
   const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
-  const out: Array<{ tool_use_id: string; content: string; is_error?: boolean }> = [];
-  for (const call of calls) {
+
+  // One call's full dispatch (bridge call + a11y cache + recording observer +
+  // verification-gate framing), unchanged from the legacy loop body.
+  const runOne = async (
+    call: { id: string; name: string; input: unknown },
+  ): Promise<{ tool_use_id: string; content: string; is_error?: boolean }> => {
     try {
       const result = await dispatchOneClientTool(bridge, call, context);
       // UC-4: cache the last-read a11y tree so an immediately-following
@@ -1186,7 +1219,7 @@ async function executeClientToolCalls(
           }));
         }
       } catch { /* observer failures must never break tool flow */ }
-      out.push({
+      return {
         tool_use_id: call.id,
         // Observe→act→VERIFY: same in-loop nudge as executeToolUseLoop, now on
         // the v2 client-delegated path (where desktop/browser tools run).
@@ -1196,9 +1229,9 @@ async function executeClientToolCalls(
           result.ok ? 'success' : 'error',
         ),
         is_error: !result.ok,
-      });
+      };
     } catch (err: any) {
-      out.push({
+      return {
         tool_use_id: call.id,
         content: appendAppActionVerificationGate(
           serializeSwanBotClientToolError(err),
@@ -1206,10 +1239,35 @@ async function executeClientToolCalls(
           'error',
         ),
         is_error: true,
-      });
+      };
+    }
+  };
+
+  // Latency win: side-effect-free reads (a11y tree, screenshot, list_*,
+  // dom_snapshot, codebase.search, …) in the same batch run CONCURRENTLY;
+  // any write/unknown call stays a serial singleton, and group order is the
+  // original call order — so write ordering is byte-for-byte preserved.
+  // The partitioner is pure + smoke-pinned (clientToolBatchCore).
+  const { groups } = partitionClientToolBatch(calls);
+  const byId = new Map<string, { tool_use_id: string; content: string; is_error?: boolean }>();
+  for (const group of groups) {
+    // Live progress label so the user sees "Reading the screen…" / "Running
+    // tests…" instead of a static spinner during a multi-tool loop.
+    const lead = calls.find((c) => c.id === group[0].id);
+    if (lead) emitSwanBotActivity(group.length > 1 ? `Running ${group.length} steps…` : toolActivityLabel(lead.name, lead.input));
+    if (group.length === 1) {
+      const r = await runOne(lead!);
+      byId.set(group[0].id, r);
+    } else {
+      const settled = await Promise.all(
+        group.map((g) => runOne(calls.find((c) => c.id === g.id)!)),
+      );
+      settled.forEach((r) => byId.set(r.tool_use_id, r));
     }
   }
-  return out;
+  // Return in the ORIGINAL call order (edge fn matches tool_result by id, but
+  // stable order keeps transcripts/telemetry faithful).
+  return calls.map((c) => byId.get(c.id)).filter(Boolean) as Array<{ tool_use_id: string; content: string; is_error?: boolean }>;
 }
 
 async function dispatchOneClientTool(
@@ -1218,6 +1276,22 @@ async function dispatchOneClientTool(
   context?: { circleId: string; userId: string; runId: string },
 ): Promise<{ ok: boolean; data?: unknown; error?: string }> {
   const input = (call.input || {}) as Record<string, any>;
+  // Coding-agent tools (P1–P6 v2 parity): routed through the SAME runtime
+  // chokepoint the typed loop uses (executeOpenSwanRuntimeTool → constraint
+  // floor + args-aware approval + coordination leases) instead of duplicating
+  // gates here. Intercepted BEFORE the desktop dispatcher so desktop.edit_file
+  // reaches the lease-guarded executor, not the raw bridge write. This switch
+  // deliberately has no fallback branch (the parity parser bounds its scan at
+  // the main switch's fallback) — non-matches fall through to normal routing.
+  switch (call.name) {
+    case 'desktop.edit_file':
+    case 'local.run_shell':
+    case 'git.run':
+    case 'codebase.search':
+    case 'todo.write':
+    case 'coordination.file_status':
+      return dispatchCodingClientTool(call, context);
+  }
   const desktopResult = await dispatchSwanBotDesktopClientTool(bridge, call);
   if (desktopResult) return desktopResult;
 
@@ -1275,6 +1349,61 @@ async function dispatchOneClientTool(
     default:
       return { ok: false, error: `Unknown client tool "${call.name}"` };
   }
+}
+
+/**
+ * Coding-agent client tools (v2 parity) run through the runtime chokepoint,
+ * so read-classified shell/git commands auto-pass, mutations file an
+ * `agent_run_approvals` row against the continuation run (same table the WP
+ * gate uses), blocked commands are refused, and desktop.edit_file gets the
+ * multi-agent lease + content-hash guard — identical behavior to the typed
+ * OpenSwan loop.
+ */
+async function dispatchCodingClientTool(
+  call: { id: string; name: string; input: unknown },
+  context?: { circleId: string; userId: string; runId: string },
+): Promise<{ ok: boolean; data?: unknown; error?: string }> {
+  try {
+    const runtime = await import('./openswanToolRuntime');
+    const result = await runtime.executeOpenSwanRuntimeTool(
+      call.name as never,
+      (call.input || {}) as never,
+      {
+        circleId: context?.circleId || '',
+        userId: context?.userId || '',
+        runId: context?.runId || undefined,
+        surface: 'main_chat',
+      } as never,
+    );
+    const r = result as { ok?: boolean; resultsText?: string };
+    const text = typeof r.resultsText === 'string' ? r.resultsText : '';
+    if (r.ok === false) return { ok: false, error: text || `${call.name} failed` };
+    return { ok: true, data: { parts: chunkSwanBotClientToolText(text || `${call.name} ok`) } };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || String(err) };
+  }
+}
+
+/**
+ * The client-tool serializer clips every STRING field to 2k chars, which
+ * would drop the tail of long test/build output (where the failures live).
+ * An array of ≤1.9k chunks rides under the per-string clip while staying
+ * inside the 12k total payload cap (with headroom for JSON escaping); over
+ * budget, keep head + tail with an omission marker.
+ */
+function chunkSwanBotClientToolText(text: string): string[] {
+  const CHUNK = 1_900;
+  const MAX_PARTS = 5;
+  const budget = CHUNK * MAX_PARTS - 80;
+  let body = text;
+  if (body.length > budget) {
+    const headLen = Math.floor(budget * 0.35);
+    const tailLen = budget - headLen;
+    body = `${text.slice(0, headLen)}\n… [${text.length - budget} chars omitted] …\n${text.slice(-tailLen)}`;
+  }
+  const parts: string[] = [];
+  for (let i = 0; i < body.length; i += CHUNK) parts.push(body.slice(i, i + CHUNK));
+  return parts.length ? parts : [''];
 }
 
 type SwanBotClientToolApprovalContext = {
@@ -2364,9 +2493,21 @@ async function buildSystemPromptAsync(
   const route = currentMessage
     ? analyzeMessageRouting(currentMessage, 'main_chat').route
     : null;
+  // Context dial: the user's stored depth preference composes with the lane
+  // floor — at 'max' every turn classifies at least 'complex' so no section
+  // family is skipped by the message heuristic.
+  const contextDepth = resolveStoredContextDepth();
+  // Conversational floor (audit): a bare mid-task follow-up ("yes", "go") would
+  // classify 'trivial' and strip memory/retrieval/missions/skills exactly when
+  // the agent should act. Deriving a floor from the recent conversation keeps
+  // continuity; it only ever RAISES the tier (null / no-op on an opening turn).
+  const conversationFloor = resolveConversationComplexityFloor(context.conversationMessages, route?.complexity || 'moderate');
   const complexity = applyChatPromptComplexityFloor(
     route?.complexity || 'moderate',
-    context.promptComplexityFloor,
+    composeComplexityFloors(
+      composeComplexityFloors(context.promptComplexityFloor, resolveContextDepthComplexityFloor(contextDepth)),
+      conversationFloor,
+    ),
   );
   const responseIntent = route?.intent || 'question';
   const base = buildSystemPrompt(context, data, responseIntent);
@@ -2446,7 +2587,16 @@ async function buildSystemPromptAsync(
   //               bounded by retrievalBudget/Count and MAX_EXTRAS_CHARS below)
   //   moderate → + SOUL wisdom + missions
   //   complex  → + attachments + full retrieval budget
-  const contextPolicy = resolveChatPromptContextPolicy(complexity);
+  // Dial transform: 'standard' returns the tier policy untouched (identity);
+  // 'lean' caps budgets for speed; 'max' loads every family with expanded
+  // budgets ("as much context as possible when the user wants it").
+  // Model-aware budget (audit): scale the extras/retrieval budget to the
+  // model's actual context window — a 1M-window model can take far more
+  // context, a small model less. Identity no-op on unknown/standard models.
+  const contextPolicy = resolveModelContextBudget(
+    applyContextDepthToPolicy(resolveChatPromptContextPolicy(complexity), contextDepth),
+    { modelContextWindow: getModelContextWindow(context.model), approxBasePromptChars: base.length },
+  );
   const {
     loadProfile, loadMemory, loadWisdom, loadRetrieval, loadMissions, loadSkills,
     retrievalBudget, retrievalCount,
@@ -2456,58 +2606,72 @@ async function buildSystemPromptAsync(
   const withTimeout = <T>(p: Promise<T>, ms = 3000): Promise<T | null> =>
     Promise.race([p, new Promise<null>(r => setTimeout(() => r(null), ms))]);
 
-  if (loadProfile) {
+  // ── Parallel context fan-out (P72 — latency finding #0) ─────────────────
+  // These loaders were awaited strictly one-after-another, so every turn paid
+  // the SUM of their round trips (1-4s; a hung loader added its full 3s
+  // timeout) before the model request was even sent. They are independent —
+  // section ordering is decided by KEY in chatPromptAssembly, not push order,
+  // so pushing from concurrent tasks is byte-identical output. Only real
+  // dependencies: spiritId feeds memory/wisdom/retrieval/skills, and the
+  // runtime bundle needs the identity result — spiritId resolves ONCE up
+  // front (it was previously resolved twice, serially), and the bundle stays
+  // inside the identity task. Every task keeps its own try/catch + timeout,
+  // so Promise.all never rejects and one slow loader no longer delays the
+  // rest. Wall clock: sum(loaders) → max(loaders).
+
+  // Phase 2/3 — resolve the active SOUL once; feeds four loaders below.
+  let activeSoulKey: string | null = null;
+  let contextSpiritIdResolved: string | null = null;
+  try {
+    contextSpiritIdResolved = await resolveContextSpiritId(context);
+    activeSoulKey = contextSpiritIdResolved ? `soul:${contextSpiritIdResolved}` : null;
+  } catch (e) { console.warn('[SwanBot] Soul resolution failed:', e); }
+
+  // identity/spirit are produced by the identity loader and consumed by the
+  // runtime bundle (built AFTER the wave), so they live in outer scope.
+  let identity: any = null;
+  let spirit: { id: string; name: string; tagline: string } | null = null;
+
+  const contextTasks: Array<Promise<void>> = [];
+  const addContextTask = (fn: () => Promise<void>): void => { contextTasks.push(fn()); };
+
+  if (loadProfile) addContextTask(async () => {
     try {
       const { loadUserProfile, generateProfileContext } = await import('./userChatProfile');
       const profile = await withTimeout(loadUserProfile());
       const profileCtx = profile ? generateProfileContext(profile) : null;
       if (profileCtx) sections.push({ key: 'user_chat_profile', body: profileCtx });
     } catch (e) { console.warn('[SwanBot] Profile load failed:', e); }
-  }
+  });
 
   // Load memory hierarchy for this circle (Phase 0/Phase 1 startup bundle)
-  if (loadMemory) {
+  if (loadMemory) addContextTask(async () => {
     try {
       if (context.circleId) {
-        const contextSpiritId = await resolveContextSpiritId(context);
         const stores = context.memoryStores || await withTimeout(import('./openswanMemoryStores').then(({ buildOpenSwanMemoryStores }) => buildOpenSwanMemoryStores({
           circleId: context.circleId,
           userId: context.userId,
           query: currentMessage || '',
           agentId: context.agentId,
           agentName: context.agentName,
-          spiritId: contextSpiritId,
+          spiritId: contextSpiritIdResolved,
           surface: 'main_chat',
           limit: 8,
         })));
         // Recalled content is untrusted (rule 5) — a circle member, a prior
         // session, or a connected agent may have written into user notes,
-        // runtime memory, or the working-memory bundle (which also carries
-        // cross-agent bridge context). Fence each so the model treats them as
-        // data, not instructions (the v1 prompt already explains the tag; the
-        // separate retrieveForTurn block is fenced at its source).
-        // X1 (P43): user-authored notes are a first-class fenced section on
-        // EVERY lane now — previously they only reached the v2 lane (via a
-        // chatHistory injection, retired with this) because the batch lane's
-        // memoryContext plumbing was dead. Highest-signal source, so it
-        // precedes the inferred profile (canonical order).
+        // runtime memory, or the working-memory bundle. Fence each so the model
+        // treats them as data, not instructions.
         if (stores?.userNotes) sections.push({ key: 'memory_user_notes', body: wrapUntrusted(stores.userNotes) });
         if (stores?.userProfile) sections.push({ key: 'memory_user_profile', body: wrapUntrusted(stores.userProfile) });
         if (stores?.runtimeMemory) sections.push({ key: 'memory_runtime', body: wrapUntrusted(stores.runtimeMemory) });
         if (stores?.workingMemory) sections.push({ key: 'memory_working', body: wrapUntrusted(stores.workingMemory, { heading: '## Working Memory' }) });
       }
     } catch (e) { console.warn('[SwanBot] Memory context failed:', e); }
-  }
-
-  // Phase 2/3 — resolve the active SOUL once, use it for both blocks.
-  let activeSoulKey: string | null = null;
-  try {
-    const spiritId = await resolveContextSpiritId(context);
-    activeSoulKey = spiritId ? `soul:${spiritId}` : null;
-  } catch (e) { console.warn('[SwanBot] Soul resolution failed:', e); }
+  });
 
   // Phase 3 — Block B: pre-distilled SOUL wisdom
-  if (loadWisdom) {
+  if (loadWisdom) addContextTask(async () => {
     try {
       if (context.circleId && activeSoulKey) {
         const { loadSoulWisdomWithFallback, formatSoulWisdomBlock } = await import('./memoryService');
@@ -2522,10 +2686,10 @@ async function buildSystemPromptAsync(
         if (wisdomBlock) sections.push({ key: 'soul_wisdom', body: wisdomBlock });
       }
     } catch (e) { console.warn('[SwanBot] Soul wisdom load failed:', e); }
-  }
+  });
 
   // Phase 2 — Block C: turn-time semantic retrieval
-  if (loadRetrieval) {
+  if (loadRetrieval) addContextTask(async () => {
     try {
       if (context.circleId && currentMessage?.trim()) {
         const { retrieveForTurn } = await import('./memoryService');
@@ -2543,10 +2707,11 @@ async function buildSystemPromptAsync(
         if (retrieval?.formatted) sections.push({ key: 'turn_retrieval', body: retrieval.formatted });
       }
     } catch (e) { console.warn('[SwanBot] Turn retrieval failed:', e); }
-  }
+  });
 
   // Wiki / knowledge base — only load for moderate+ complexity and when
-  // the message touches knowledge topics. Keeps simple chat lean.
+  // the message touches knowledge topics. Keeps simple chat lean. (Sync — no
+  // await, so it stays inline rather than joining the wave.)
   if (loadWisdom && context.wikiContext) {
     sections.push({ key: 'wiki_context', body: `## Internal Wiki Context\nUse this as trusted internal reference context.\n${context.wikiContext}` });
   }
@@ -2560,45 +2725,51 @@ async function buildSystemPromptAsync(
   // codebase index. The parse is a cheap regex, so the heavy path (DB lookup +
   // bridge file-head reads, untrusted-fenced inside the builder) only runs
   // when the message actually contains a mention.
-  try {
-    if (currentMessage && currentMessage.includes('@') && context.userId) {
-      const mentionBlock = await withTimeout(import('./codebaseIndexRuntime').then(({ buildCodebaseMentionContextBlock }) => buildCodebaseMentionContextBlock({
-        message: currentMessage,
-        userId: context.userId,
-      })));
-      if (mentionBlock) sections.push({ key: 'codebase_mentions', body: mentionBlock });
-    }
-  } catch (e) { console.warn('[SwanBot] Codebase mention context failed:', e); }
+  addContextTask(async () => {
+    try {
+      if (currentMessage && currentMessage.includes('@') && context.userId) {
+        const mentionBlock = await withTimeout(import('./codebaseIndexRuntime').then(({ buildCodebaseMentionContextBlock }) => buildCodebaseMentionContextBlock({
+          message: currentMessage,
+          userId: context.userId,
+        })));
+        if (mentionBlock) sections.push({ key: 'codebase_mentions', body: mentionBlock });
+      }
+    } catch (e) { console.warn('[SwanBot] Codebase mention context failed:', e); }
+  });
 
   // Progressive project context discovery — load root context eagerly and
   // only inject deeper directory guidance when those paths actually show up
   // in the active conversation.
-  try {
-    const discovery = await withTimeout(import('./openswanContextDiscovery').then(({ discoverOpenSwanProjectContext }) => discoverOpenSwanProjectContext({
-      currentMessage,
-      chatHistory: context.chatHistory,
-      conversationMessages: context.conversationMessages,
-    })));
-    if (discovery?.block) {
-      sections.push({ key: 'project_discovery', body: discovery.block });
-    }
-  } catch (e) { console.warn('[SwanBot] Project context discovery failed:', e); }
+  addContextTask(async () => {
+    try {
+      const discovery = await withTimeout(import('./openswanContextDiscovery').then(({ discoverOpenSwanProjectContext }) => discoverOpenSwanProjectContext({
+        currentMessage,
+        chatHistory: context.chatHistory,
+        conversationMessages: context.conversationMessages,
+      })));
+      if (discovery?.block) {
+        sections.push({ key: 'project_discovery', body: discovery.block });
+      }
+    } catch (e) { console.warn('[SwanBot] Project context discovery failed:', e); }
+  });
 
   // Coding-agent P4: per-turn project conventions from the ACTIVE local repo
   // (CLAUDE.md / AGENTS.md / .cursorrules read via the desktop bridge — the
   // local-disk counterpart of the web-origin discovery above). No-ops fast
   // when the user never indexed a repo; TTL-cached per root inside the loader.
-  try {
-    if (context.userId) {
-      const conventions = await withTimeout(import('./projectConventions').then(({ loadProjectConventionsBlock }) => loadProjectConventionsBlock({
-        userId: context.userId,
-      })));
-      if (conventions) sections.push({ key: 'project_conventions', body: conventions });
-    }
-  } catch (e) { console.warn('[SwanBot] Project conventions failed:', e); }
+  addContextTask(async () => {
+    try {
+      if (context.userId) {
+        const conventions = await withTimeout(import('./projectConventions').then(({ loadProjectConventionsBlock }) => loadProjectConventionsBlock({
+          userId: context.userId,
+        })));
+        if (conventions) sections.push({ key: 'project_conventions', body: conventions });
+      }
+    } catch (e) { console.warn('[SwanBot] Project conventions failed:', e); }
+  });
 
   // Phase C5 — Block E: skills prompt fragment
-  if (loadSkills) {
+  if (loadSkills) addContextTask(async () => {
     try {
       if (context.circleId && activeSoulKey) {
         const skillsBlock = context.resolvedSkillsPromptBlock
@@ -2614,50 +2785,41 @@ async function buildSystemPromptAsync(
         if (skillsBlock) sections.push({ key: 'skills', body: skillsBlock });
       }
     } catch (e) { console.warn('[SwanBot] Skills block failed:', e); }
-  }
+  });
 
   // Load stable agent identity context so Office-saved spirit/soul settings
-  // survive session churn and provider-main restoration.
-  let identity: any = null;
-  let spirit: { id: string; name: string; tagline: string } | null = null;
-  try {
-    if (context.agentId || context.agentName) {
-      const { getAgentIdentityKey, loadAgentIdentities } = await import('./agentIdentity');
-      const { getSpiritById } = await import('./agentSpirits');
-      const identities = await loadAgentIdentities();
-      const identityKey = getAgentIdentityKey({ id: context.agentId || '', name: context.agentName || '' });
-      identity = identities.get(identityKey);
-      if (identity) {
-        spirit = identity.spiritId ? (getSpiritById(identity.spiritId) || null) : null;
-        const identityLines = ['## Agent Identity'];
-        if (spirit) {
-          identityLines.push(`Spirit: ${spirit.name} (${spirit.id})`);
-          identityLines.push(`Spirit tagline: ${spirit.tagline}`);
+  // survive session churn and provider-main restoration. Assigns the outer
+  // identity/spirit consumed by the runtime bundle after the wave.
+  addContextTask(async () => {
+    try {
+      if (context.agentId || context.agentName) {
+        const { getAgentIdentityKey, loadAgentIdentities } = await import('./agentIdentity');
+        const { getSpiritById } = await import('./agentSpirits');
+        const identities = await loadAgentIdentities();
+        const identityKey = getAgentIdentityKey({ id: context.agentId || '', name: context.agentName || '' });
+        identity = identities.get(identityKey);
+        if (identity) {
+          spirit = identity.spiritId ? (getSpiritById(identity.spiritId) || null) : null;
+          const identityLines = ['## Agent Identity'];
+          if (spirit) {
+            identityLines.push(`Spirit: ${spirit.name} (${spirit.id})`);
+            identityLines.push(`Spirit tagline: ${spirit.tagline}`);
+          }
+          if (identity.soulPrompt?.trim()) {
+            identityLines.push('Saved Soul Prompt:');
+            identityLines.push(identity.soulPrompt.trim().slice(0, 1200));
+          }
+          if (identity.boundAiProvider || identity.boundModel) {
+            identityLines.push(`Preferred runtime: ${(identity.boundAiProvider || 'unknown')} / ${(identity.boundModel || 'unknown')}`);
+          }
+          if (identityLines.length > 1) sections.push({ key: 'agent_identity', body: identityLines.join('\n') });
         }
-        if (identity.soulPrompt?.trim()) {
-          identityLines.push('Saved Soul Prompt:');
-          identityLines.push(identity.soulPrompt.trim().slice(0, 1200));
-        }
-        if (identity.boundAiProvider || identity.boundModel) {
-          identityLines.push(`Preferred runtime: ${(identity.boundAiProvider || 'unknown')} / ${(identity.boundModel || 'unknown')}`);
-        }
-        if (identityLines.length > 1) sections.push({ key: 'agent_identity', body: identityLines.join('\n') });
       }
-    }
-  } catch (e) { console.warn('[SwanBot] Agent identity context failed:', e); }
-
-  const runtimeBundle = buildOpenSwanRuntimeContextBundle({
-    context,
-    data,
-    activeSoulKey,
-    identity,
-    spirit,
+    } catch (e) { console.warn('[SwanBot] Agent identity context failed:', e); }
   });
-  // Canonical ordering places runtime_bundle FIRST (the legacy unshift).
-  if (runtimeBundle) sections.push({ key: 'runtime_bundle', body: runtimeBundle });
 
   // Load active missions for this circle (skip for trivial/simple messages)
-  if (loadMissions) {
+  if (loadMissions) addContextTask(async () => {
     try {
       if (context.circleId) {
         const { getMissions, getMissionTasks, missionProgress, formatDeadline, isOverdue } = await import('./missions');
@@ -2667,8 +2829,13 @@ async function buildSystemPromptAsync(
           // Mission/task titles are member-authored — untrusted (rule 5).
           // Fence the data lines; our guidance line stays outside the fence.
           const missionLines: string[] = [];
-          for (const m of activeMissions.slice(0, 5)) {
-            const tasks = await getMissionTasks(m.id);
+          // Per-mission task fetches run concurrently (was a serial for-loop
+          // with NO timeout — a single slow query stalled the whole turn).
+          const perMission = await Promise.all(activeMissions.slice(0, 5).map(async (m) => {
+            const tasks = (await withTimeout(getMissionTasks(m.id))) || [];
+            return { m, tasks };
+          }));
+          for (const { m, tasks } of perMission) {
             const progress = missionProgress(tasks);
             const done = tasks.filter(t => t.status === 'done').length;
             const overdue = isOverdue(m);
@@ -2687,7 +2854,7 @@ async function buildSystemPromptAsync(
         }
       }
     } catch (e) { console.warn('[SwanBot] Mission loading failed:', e); }
-  }
+  });
 
   // Circle Context Snapshot — compact pre-built index (counts + top items)
   // so the turn STARTS oriented on circle state instead of burning sequential
@@ -2702,20 +2869,20 @@ async function buildSystemPromptAsync(
   //   - Fail-safe: build error/timeout (~1.5s) ⇒ no block, turn unchanged.
   //   - Suppressed when the typed-core OpenSwan runtime injects the same
   //     snapshot as a user-role context message (omitCircleContextSnapshot).
-  if (loadMissions && context.circleId && !context.omitCircleContextSnapshot) {
+  if (loadMissions && context.circleId && !context.omitCircleContextSnapshot) addContextTask(async () => {
     try {
       const { buildCircleSnapshotContextMessage } = await import('./circleSnapshotContextInjection');
-      const snapshotBlock = await buildCircleSnapshotContextMessage(context.circleId);
+      const snapshotBlock = await buildCircleSnapshotContextMessage(context.circleId!);
       if (snapshotBlock) sections.push({ key: 'circle_snapshot', body: snapshotBlock });
     } catch (e) { console.warn('[SwanBot] Circle snapshot context failed:', e); }
-  }
+  });
 
   // Cross-dashboard awareness: what the circle has connected right now
   // (marketplace integrations, vault site-logins, Google Workspace, provider
   // keys) so the agent reaches for the right tool/credential instead of
   // discovering connections by failing. TTL-cached; fails soft to no section.
   // Gated on moderate+ turns (loadMissions) — trivial chat doesn't need it.
-  if (loadMissions && context.circleId) {
+  if (loadMissions && context.circleId) addContextTask(async () => {
     try {
       const resourcesBlock = await withTimeout(import('./connectedResourcesRuntime').then(({ buildConnectedResourcesContextBlock }) => buildConnectedResourcesContextBlock({
         circleId: context.circleId,
@@ -2723,15 +2890,36 @@ async function buildSystemPromptAsync(
       })));
       if (resourcesBlock) sections.push({ key: 'connected_resources', body: resourcesBlock });
     } catch (e) { console.warn('[SwanBot] Connected resources context failed:', e); }
-  }
+  });
 
   // Load last session context so agent can continue where it left off
-  try {
-    if (context.circleId) {
-      const lastSession = await getLastSessionContext(context.circleId, context.userId);
-      if (lastSession) sections.push({ key: 'last_session', body: lastSession });
-    }
-  } catch (e) { console.warn('[SwanBot] Session context failed:', e); }
+  addContextTask(async () => {
+    try {
+      if (context.circleId) {
+        const lastSession = await getLastSessionContext(context.circleId, context.userId, { depth: contextDepth });
+        if (lastSession) sections.push({ key: 'last_session', body: lastSession });
+      }
+    } catch (e) { console.warn('[SwanBot] Session context failed:', e); }
+  });
+
+  // Barrier: await the whole concurrent context wave. Each task already fails
+  // soft to no section, so Promise.all never rejects; the turn's context is
+  // complete once every independent loader settles. This collapses ~12 serial
+  // network round-trips (1-4s of dead air before the model request) into one
+  // wave whose wall-clock is the SLOWEST single loader, not their sum.
+  await Promise.all(contextTasks);
+
+  // Runtime bundle needs the identity/spirit resolved by the identity task
+  // above, so it's built AFTER the wave. Canonical ordering in the assembler
+  // places runtime_bundle FIRST regardless of this push position.
+  const runtimeBundle = buildOpenSwanRuntimeContextBundle({
+    context,
+    data,
+    activeSoulKey,
+    identity,
+    spirit,
+  });
+  if (runtimeBundle) sections.push({ key: 'runtime_bundle', body: runtimeBundle });
 
   // W5 (P38): canonical ordering + adaptive budget clip + cache boundary all
   // live in the pure chatPromptAssembly seam — byte-identical to the legacy
@@ -2740,6 +2928,14 @@ async function buildSystemPromptAsync(
   // those keys here instead of receiving message-derived duplicates.
   const dedupedSections = omitChatPromptSections(sections, context.omitPromptSections);
   const assembled = assembleChatPromptExtras(dedupedSections, { maxExtrasChars: contextPolicy.maxExtrasChars });
+  // Context receipt for /context transparency — session-scoped, fail-soft.
+  recordContextReceipt({
+    depth: contextDepth,
+    complexity,
+    rendered: assembled.rendered,
+    clipped: assembled.clipped,
+    maxExtrasChars: contextPolicy.maxExtrasChars,
+  });
   return composeChatSystemPrompt(base, assembled.text);
 }
 
@@ -3039,8 +3235,13 @@ const localCommands: CmdHandler[] = [
     },
   },
   {
-    match: /^(help|commands|what can you do)\s*[?!]?$/i,
-    handler: async () => `🦢 **Here's what I got:**\n\n📋 **"my tasks"** — your open tasks\n📊 **"status"** — circle stats\n🔥 **"streak"** — your streak\n🏆 **"leaderboard"** — rankings\n✅ **"who checked in"** — today's check-ins\n📅 **"daily plan"** — plan your day\n📝 **"create task [title]"** — make a task\n📚 **"/wiki [topic]"** — search the Wiki\n🔬 **"/research [topic]"** — search the curated research corpus\n🔎 **"search wiki [topic]"** — same thing\n\nOr just talk to me directly — I can use the wiki and research corpus when it helps.`,
+    match: /^(help|commands|what can you do|what can you do\?|what can i do|capabilities)\s*[?!]?$/i,
+    // Grounded, current capability tour from the pure catalog (smoke-pinned)
+    // instead of a stale hardcoded 10-item list that hid ~90% of the product.
+    handler: async () => {
+      const { buildCapabilityOverview } = await import('./capabilityOverviewCore');
+      return buildCapabilityOverview();
+    },
   },
   {
     match: /^(?:\/research|search research|research)\s+(.+)$/i,
@@ -3193,7 +3394,9 @@ async function getSwanBotResponseImpl(
     const localResponse = await tryHandleLocalSwanBotCommand(cleaned, context);
     if (localResponse) return localResponse;
   } catch (err: any) {
-    return `Something broke: ${err.message}`;
+    // Friendly, secret-redacted recovery copy instead of a raw exception.
+    const rec = buildFailureRecovery(err, { context: 'command' });
+    return `${rec.message} ${rec.action}`.trim();
   }
 
   const spiritId = await resolveContextSpiritId(context);
@@ -4094,7 +4297,9 @@ export async function executeToolUseLoop(opts: {
     }
 
     if (error || !data) {
-      return { response: data?.response || 'Tool-use call failed.', toolEvents, routing: routingInfo, incomplete: true };
+      // Never surface the bare "Tool-use call failed." dead end (or a
+      // model-directed edge note) — humanize it with a recovery action.
+      return { response: humanizeStopText(data?.response, 'tool_use_failed'), toolEvents, routing: routingInfo, incomplete: true };
     }
 
     if (!routingInfo && (data.provider_routed || data.routing_fallback)) {

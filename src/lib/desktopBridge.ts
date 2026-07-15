@@ -1354,6 +1354,61 @@ export async function copyFile(
   };
 }
 
+export interface DesktopExecFileOutcome {
+  exitCode: number | null;
+  signal: string | null;
+  timedOut: boolean;
+  outputOverflow: boolean;
+  durationMs: number;
+  stdout: string;
+  stderr: string;
+  truncatedStdout: boolean;
+  truncatedStderr: boolean;
+}
+
+/**
+ * Coding-agent exec surface (CODING_AGENT_UPGRADE_PLAN P2/P3). Runs ONE
+ * binary via the bridge's execFile ARGV endpoint — never a shell string —
+ * inside a WRITE-scoped session grant for `cwd`. Approval/refusal policy is
+ * decided by the caller via `localExecPlanCore` BEFORE this is invoked; a
+ * non-zero exit comes back as data (`exitCode`), not a transport failure.
+ */
+export async function execFileOnBridge(
+  argv: string[],
+  rawCwd: string,
+  options: { timeoutMs?: number; reason?: string } = {},
+): Promise<DesktopResult<DesktopExecFileOutcome>> {
+  const v = validateDesktopPath(rawCwd);
+  if (!v.ok) return { ok: false, error: v.error, errorCode: 'invalid_input' };
+  const grantHeaders = await ensureLocalFileGrantHeaders(
+    [v.path],
+    'write',
+    options.reason || `Run ${String(argv?.[0] || 'command')} in ${v.path}`,
+  );
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<DesktopExecFileOutcome>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/exec_file', {
+    argv,
+    cwd: v.path,
+    timeoutMs: options.timeoutMs,
+  }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<DesktopExecFileOutcome>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      exitCode: typeof d?.exitCode === 'number' ? d.exitCode : null,
+      signal: d?.signal ? String(d.signal) : null,
+      timedOut: Boolean(d?.timedOut),
+      outputOverflow: Boolean(d?.outputOverflow),
+      durationMs: Number(d?.durationMs) || 0,
+      stdout: String(d?.stdout || ''),
+      stderr: String(d?.stderr || ''),
+      truncatedStdout: Boolean(d?.truncatedStdout),
+      truncatedStderr: Boolean(d?.truncatedStderr),
+    },
+  };
+}
+
 export async function trashFile(
   rawPath: string,
 ): Promise<DesktopResult<{ path: string; trashPath: string; kind: 'file' | 'directory' }>> {

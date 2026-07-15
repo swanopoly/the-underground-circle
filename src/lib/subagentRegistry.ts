@@ -63,6 +63,8 @@ import {
   type SubagentRole,
 } from './subagentCapabilities';
 import { getPluginSubagentRoles } from './pluginRegistry';
+import { sizeDelegationSpecs } from './delegationSizingCore';
+import { selectSignaledSpecialists, rankSpecialistsByPriority } from './specialistSelectionCore';
 
 // ── Subagent Definitions ────────────────────────────────────────────────────
 
@@ -300,7 +302,30 @@ export function planSubagentDelegation(
     );
   }
 
-  return specs.slice(0, 4);
+  // Expansion (audit): auto-delegate the dormant Security/DevOps/Designer-class
+  // specialists when the message clearly signals their domain — capped and
+  // conservative, so only strong signals unlock them.
+  const signaled = selectSignaledSpecialists({
+    message,
+    taskPlan,
+    capabilities: listSubagentCapabilities(),
+    alreadySelected: specs.map((s) => s.subagent.role),
+  });
+  for (const sig of signaled) {
+    addSubagentSpec(
+      specs,
+      sig.role,
+      `Cover the ${sig.role} concern for this task:\n\n${message}`,
+      `Signaled by: ${sig.matched.slice(0, 4).join(', ')}.`,
+      sig.priority === 'high' ? 'high' : 'medium',
+    );
+  }
+
+  // Priority-aware order so a high-priority signaled specialist survives the
+  // cap, then Optimization (audit): size the fan-out to task complexity — a
+  // one-line task runs coder-only instead of firing 3-4 specialist LLM runs.
+  const ordered = rankSpecialistsByPriority(specs);
+  return sizeDelegationSpecs({ message, taskPlan, specs: ordered }).kept.slice(0, 4);
 }
 
 export interface ParallelDelegationResult {

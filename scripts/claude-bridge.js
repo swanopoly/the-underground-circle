@@ -2312,7 +2312,7 @@ const server = http.createServer(async (req, res) => {
       supported: process.platform === 'darwin',
       tools: process.platform === 'darwin'
         ? ['launch', 'focus', 'type', 'keys', 'running_apps', 'installed_apps', 'app_installed', 'browser_tabs', 'window_state', 'observe_app', 'clipboard', 'clipboard_write', 'clipboard_clear',
-           'file_list', 'file_read', 'file_search', 'file_stat', 'file_write', 'file_rename', 'file_write_text', 'file_copy', 'file_trash', 'file_mkdir', 'shortcuts_list', 'shortcuts_run', 'window_manage', 'mouse_move', 'mouse_click', 'mouse_down', 'mouse_up', 'mouse_drag', 'mouse_scroll',
+           'file_list', 'file_read', 'file_search', 'file_stat', 'file_write', 'file_rename', 'file_write_text', 'file_copy', 'file_trash', 'file_mkdir', 'exec_file', 'shortcuts_list', 'shortcuts_run', 'window_manage', 'mouse_move', 'mouse_click', 'mouse_down', 'mouse_up', 'mouse_drag', 'mouse_scroll',
            'paste_text', 'notes_create', 'applescript', 'convert_image', 'cad_compile', 'design_export',
            'menu_click', 'indesign_find_change', 'indesign_batch_find_change', 'indesign_document_status', 'indesign_text_inventory', 'indesign_set_layer_state', 'indesign_update_text_layer', 'indesign_batch_update_text_layers', 'indesign_relink_asset', 'indesign_export_proof', 'indesign_package_document',
            'photoshop_document_status', 'photoshop_layer_inventory', 'photoshop_set_layer_state', 'photoshop_update_text_layer', 'photoshop_place_asset', 'photoshop_export_proof',
@@ -3078,6 +3078,94 @@ end tell`;
           fs.mkdirSync(dirPath, { recursive });
           res.writeHead(200, CORS);
           res.end(JSON.stringify({ ok: true, path: dirPath, kind: 'directory', existed: false }));
+        } catch (err) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));
+        }
+      });
+      return;
+    }
+
+    // ── Coding-agent exec endpoint (CODING_AGENT_UPGRADE_PLAN P2/P3) ──────
+    // Runs ONE binary via execFile ARGV — never a shell, so pipes/&&/
+    // redirection inside args are inert text to the child. The app-side
+    // policy cores (shellCommandPolicy / gitCommandPolicy via
+    // localExecPlanCore) decide auto/ask and refuse catastrophic commands
+    // BEFORE this endpoint is called; the checks here are defense-in-depth
+    // only: write-scoped session grant on cwd, argv bounds, and a hard
+    // blocklist of privilege/disk binaries that no coding loop ever needs.
+    if (url === '/desktop/exec_file' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 640 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const argv = Array.isArray(parsed?.argv) ? parsed.argv : null;
+        if (!argv || argv.length === 0 || argv.length > 256
+            || argv.some((a) => typeof a !== 'string' || a.length > 2048 || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(a))) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'argv must be 1-256 strings, each <= 2048 chars, with no control characters' }));
+          return;
+        }
+        const binary = String(argv[0] || '').trim();
+        const binaryName = binary.split('/').pop().toLowerCase();
+        const EXEC_BLOCKED_BINARIES = new Set([
+          'sudo', 'doas', 'su', 'shutdown', 'reboot', 'halt', 'poweroff',
+          'mkfs', 'diskutil', 'dd', 'launchctl', 'nvram', 'csrutil', 'fdisk',
+        ]);
+        if (!binary || EXEC_BLOCKED_BINARIES.has(binaryName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `binary "${binaryName || '(empty)'}" is refused by the exec endpoint` }));
+          return;
+        }
+        const cwdValidated = validateDesktopPathServer(parsed?.cwd || '');
+        if (!cwdValidated.ok) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: `cwd: ${cwdValidated.error}` })); return; }
+        try {
+          const cwd = expandDesktopPath(cwdValidated.path);
+          // Executing a process can write anything the user can — require the
+          // WRITE-scoped session grant for the working directory, same floor
+          // as the file-write endpoints.
+          const grant = requireLocalFileAccessGrant(req, parsedUrl, cwd, 'write');
+          if (!grant.ok) { res.writeHead(grant.status, CORS); res.end(JSON.stringify({ ok: false, error: grant.error })); return; }
+          const cwdStat = fs.statSync(cwd);
+          if (!cwdStat.isDirectory()) throw new Error('cwd is not a directory');
+          const timeoutMs = Math.max(1000, Math.min(600000, Number(parsed?.timeoutMs) || 120000));
+          const startedAt = Date.now();
+          execFile(binary, argv.slice(1), { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
+            const durationMs = Date.now() - startedAt;
+            const timedOut = Boolean(err && err.killed && durationMs >= timeoutMs - 100);
+            const outputOverflow = Boolean(err && err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER');
+            // A numeric err.code means the process RAN and exited non-zero —
+            // that is data for the coding loop (test failures etc.), not an
+            // endpoint failure. Only spawn-level errors report ok:false.
+            if (err && typeof err.code !== 'number' && !timedOut && !outputOverflow) {
+              res.writeHead(200, CORS);
+              res.end(JSON.stringify({ ok: false, error: `spawn failed: ${err.code || err.message || String(err)}`, durationMs }));
+              return;
+            }
+            // Tail-biased cap: keep a small head + big tail (errors end-load).
+            const cap = (text) => {
+              const s = String(text || '');
+              if (s.length <= 64 * 1024) return { text: s, truncated: false };
+              return {
+                text: `${s.slice(0, 2 * 1024)}\n… [${s.length - 64 * 1024} chars omitted] …\n${s.slice(-62 * 1024)}`,
+                truncated: true,
+              };
+            };
+            const so = cap(stdout);
+            const se = cap(stderr);
+            res.writeHead(200, CORS);
+            res.end(JSON.stringify({
+              ok: true,
+              exitCode: err && typeof err.code === 'number' ? err.code : (timedOut || outputOverflow ? null : 0),
+              signal: err && err.signal ? String(err.signal) : null,
+              timedOut,
+              outputOverflow,
+              durationMs,
+              stdout: so.text,
+              stderr: se.text,
+              truncatedStdout: so.truncated,
+              truncatedStderr: se.truncated,
+            }));
+          });
         } catch (err) {
           res.writeHead(400, CORS);
           res.end(JSON.stringify({ ok: false, error: err.message || String(err) }));

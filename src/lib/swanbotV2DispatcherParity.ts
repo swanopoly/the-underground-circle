@@ -104,20 +104,24 @@ export function parseDesktopDispatcherToolNames(dispatcherSource: string): strin
 
 /**
  * Extract the inline client-tool case labels handled by `dispatchOneClientTool`
- * in `swanbot.ts` — the browser/workspace/verification/credentials/wp families.
- * Scoped to the `dispatchOneClientTool` switch body so unrelated `case` labels
- * elsewhere in the file are not counted.
+ * in `swanbot.ts` — the browser/workspace/verification/credentials/wp families
+ * plus the coding-agent set (local/git/codebase/todo/coordination and the
+ * lease-guarded `desktop.edit_file`, which is intercepted BEFORE the desktop
+ * dispatcher so it never reaches the raw bridge write path). Scoped to the
+ * `dispatchOneClientTool` switch body so unrelated `case` labels elsewhere in
+ * the file are not counted.
  */
 export function parseInlineClientToolNames(swanbotSource: string): string[] {
   const fnIdx = swanbotSource.indexOf('async function dispatchOneClientTool');
   if (fnIdx < 0) throw new Error('parseInlineClientToolNames: dispatchOneClientTool not found');
   // Bound the scan to the function body: from the fn start to the first
-  // `default:` return that closes the switch.
+  // `default:` return that closes the switch. (The coding-tool pre-switch
+  // deliberately has NO default so this bound still lands on the main switch.)
   const afterFn = swanbotSource.slice(fnIdx);
   const defaultIdx = afterFn.indexOf('default:');
   const body = defaultIdx >= 0 ? afterFn.slice(0, defaultIdx) : afterFn;
   const names = new Set<string>();
-  const re = /case\s+'((?:browser|workspace|verification|credentials|wp)\.[a-z0-9_]+)'/g;
+  const re = /case\s+'((?:browser|workspace|verification|credentials|wp|local|git|codebase|todo|coordination)\.[a-z0-9_]+|desktop\.edit_file)'/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(body))) names.add(m[1]);
   return Array.from(names);

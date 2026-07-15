@@ -141,9 +141,11 @@ export interface SwanBotOpenSwanReadinessSnapshot {
 // Expected counts are pinned against the live `swanbot-v2-ai` TOOLS array by
 // the readiness smoke via deriveSwanbotV2ToolParityFromSource — if the edge
 // catalog grows or shrinks, the smoke fails until these are re-pinned here.
-// (Re-pinned 2026-06-26: v2 exposes 73 tools, 48 of them client-delegated.)
-export const SWANBOT_OPENSWAN_EXPECTED_TOOL_TOTAL = 73;
-export const SWANBOT_OPENSWAN_EXPECTED_CLIENT_DELEGATED_TOOLS = 48;
+// (Re-pinned 2026-07-14: +6 coding-agent client tools — edit_file, run_shell,
+// git.run, codebase.search, todo.write, coordination.file_status — v2 now
+// exposes 79 tools, 54 of them client-delegated.)
+export const SWANBOT_OPENSWAN_EXPECTED_TOOL_TOTAL = 79;
+export const SWANBOT_OPENSWAN_EXPECTED_CLIENT_DELEGATED_TOOLS = 54;
 export const SWANBOT_OPENSWAN_DEFAULT_MIN_TELEMETRY_RUNS = 50;
 
 export const SWANBOT_OPENSWAN_REQUIRED_SMOKES: SwanBotOpenSwanSmokeCheck[] = [

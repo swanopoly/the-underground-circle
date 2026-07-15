@@ -42,6 +42,72 @@ export const CODE_MUTATION_TOOL_NAMES: ReadonlySet<string> = new Set([
  *  (e.g. verification.typecheck, verification.tests, verification.lint). */
 export const VERIFICATION_TOOL_PREFIX = 'verification.';
 
+// ── Exec-aware classification (coding-agent P2/P3) ─────────────────────────────
+// `local.run_shell` and `git.run` calls are classified by their INPUT, not
+// their name: a test/build/lint run through the shell IS a verification (its
+// non-zero exit already reports ok:false), while a working-tree-changing
+// command dirties the workspace. The verification matcher is deliberately
+// TIGHT (false "verified-clean" is the only dangerous direction) and the
+// mutation matcher deliberately LOOSE (a spurious dirty just costs one nudge).
+
+/** Bare binaries whose successful run counts as verification. */
+const VERIFICATION_SHELL_LEADS: ReadonlySet<string> = new Set([
+  'pytest', 'tsc', 'eslint', 'prettier', 'ruff', 'mypy', 'flake8', 'jest', 'vitest',
+]);
+/** Package-manager / toolchain subcommands that count as verification. */
+const VERIFICATION_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
+  npm: new Set(['test', 'run']),
+  pnpm: new Set(['test', 'run']),
+  yarn: new Set(['test', 'run']),
+  bun: new Set(['test', 'run']),
+  cargo: new Set(['test', 'check', 'clippy', 'build']),
+  go: new Set(['test', 'vet', 'build']),
+};
+/** Read-only leads that neither verify nor dirty the workspace. */
+const NEUTRAL_SHELL_LEADS: ReadonlySet<string> = new Set([
+  'ls', 'cat', 'pwd', 'echo', 'printf', 'which', 'type', 'find', 'grep', 'rg', 'ag',
+  'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'stat', 'file', 'tree', 'du', 'df',
+  'date', 'whoami', 'id', 'uname', 'env', 'printenv', 'realpath', 'dirname',
+  'basename', 'diff', 'cmp', 'jq', 'yq', 'ps', 'true', 'false', 'test',
+]);
+/** git verbs that change the WORKING TREE (invalidate a previous test pass).
+ *  commit/add/tag/fetch touch index/refs only — a commit after a green run
+ *  must NOT re-dirty the workspace. */
+const GIT_WORKTREE_MUTATING_VERBS: ReadonlySet<string> = new Set([
+  'checkout', 'switch', 'restore', 'stash', 'merge', 'rebase', 'cherry-pick',
+  'revert', 'reset', 'rm', 'mv', 'pull',
+]);
+
+/**
+ * Classify an exec-tool call for the gate. Returns null for every other tool
+ * (callers fall back to the static name-based sets). Total: degenerate input
+ * yields the fail-safe { isMutation: true, isVerification: false } for a
+ * recognized exec tool.
+ */
+export function classifyExecCallForGate(
+  toolName: unknown,
+  input: unknown,
+): { isMutation: boolean; isVerification: boolean } | null {
+  if (toolName === 'git.run') {
+    const verb = input && typeof input === 'object' && typeof (input as { verb?: unknown }).verb === 'string'
+      ? ((input as { verb: string }).verb).trim().toLowerCase()
+      : '';
+    return { isMutation: GIT_WORKTREE_MUTATING_VERBS.has(verb), isVerification: false };
+  }
+  if (toolName !== 'local.run_shell') return null;
+  const argv = input && typeof input === 'object' && Array.isArray((input as { argv?: unknown }).argv)
+    ? ((input as { argv: unknown[] }).argv).filter((a): a is string => typeof a === 'string')
+    : [];
+  const lead = (argv[0] || '').split('/').pop()!.trim().toLowerCase();
+  const sub = (argv[1] || '').trim().toLowerCase();
+  if (!lead) return { isMutation: true, isVerification: false }; // degenerate → fail-safe dirty
+  const isVerification = VERIFICATION_SHELL_LEADS.has(lead)
+    || Boolean(VERIFICATION_SUBCOMMANDS[lead]?.has(sub));
+  if (isVerification) return { isMutation: false, isVerification: true };
+  if (NEUTRAL_SHELL_LEADS.has(lead)) return { isMutation: false, isVerification: false };
+  return { isMutation: true, isVerification: false }; // unknown command → fail-safe dirty
+}
+
 /** Hard cap on nudges per run — the gate reminds, it does not nag forever. */
 export const MAX_VERIFICATION_NUDGES_PER_RUN = 2;
 
@@ -83,6 +149,9 @@ export function createRunAndFixGateState(): RunAndFixGateState {
 export interface RoundToolCall {
   name: string;
   ok: boolean;
+  /** Raw tool input — only consulted for local.run_shell / git.run calls
+   *  (exec-aware classification); other tools classify by name alone. */
+  input?: unknown;
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────────
@@ -112,7 +181,7 @@ function sanitizeCalls(calls: unknown): RoundToolCall[] {
     if (!entry || typeof entry !== 'object') continue;
     const name = (entry as { name?: unknown }).name;
     if (typeof name !== 'string' || name.length === 0) continue;
-    out.push({ name, ok: (entry as { ok?: unknown }).ok === true });
+    out.push({ name, ok: (entry as { ok?: unknown }).ok === true, input: (entry as { input?: unknown }).input });
   }
   return out;
 }
@@ -151,10 +220,15 @@ export function foldRunAndFixRound(
 
   for (let i = 0; i < list.length; i += 1) {
     const call = list[i];
-    if (CODE_MUTATION_TOOL_NAMES.has(call.name) && call.ok) {
+    // Exec tools (local.run_shell / git.run) classify by INPUT; everything
+    // else by the static name sets.
+    const execKind = classifyExecCallForGate(call.name, call.input);
+    const isMutation = execKind ? execKind.isMutation : CODE_MUTATION_TOOL_NAMES.has(call.name);
+    const isVerification = execKind ? execKind.isVerification : call.name.startsWith(VERIFICATION_TOOL_PREFIX);
+    if (isMutation && call.ok) {
       lastSuccessfulMutationIndex = i;
     }
-    if (call.name.startsWith(VERIFICATION_TOOL_PREFIX)) {
+    if (isVerification) {
       sawVerification = true;
       lastVerificationIndex = i;
       if (!call.ok) allVerificationsOk = false;

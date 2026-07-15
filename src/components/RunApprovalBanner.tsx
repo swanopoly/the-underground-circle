@@ -15,6 +15,16 @@ import React, { useCallback, useMemo, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, ScrollView } from 'react-native';
 import { useAgentRunApprovals, resolveRunApproval, type AgentRunApproval, type ApprovalKind } from '../services/runApprovalsService';
 import { renderApprovalAction } from '../lib/approvalPayloadRenderer';
+import { classifyApprovalAge, type ApprovalStaleness } from '../lib/approvalPreviewCore';
+
+// Risk badge (from the approval payload's approvalPreview.risk, set by
+// openswanToolRuntime) so a user sees WHAT they're approving at a glance —
+// a read is safe, a destructive action deserves a second look.
+const RISK_BADGES: Record<'read' | 'write' | 'destructive', { fg: string; bg: string; border: string; label: string }> = {
+  read:        { fg: '#34d399', bg: '#022c22', border: '#065f46', label: 'READ' },
+  write:       { fg: '#fbbf24', bg: '#422006', border: '#92400e', label: 'WRITE' },
+  destructive: { fg: '#f87171', bg: '#450a0a', border: '#991b1b', label: 'DESTRUCTIVE' },
+};
 
 const KIND_ACCENTS: Record<ApprovalKind, { fg: string; bg: string; border: string; label: string }> = {
   publish:             { fg: '#fbbf24', bg: '#422006', border: '#92400e', label: 'PUBLISH' },
@@ -55,6 +65,22 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
     return `${Math.floor(sec / 3600)}h ago`;
   }, [item.requested_at]);
 
+  // Staleness (findings 10/11): a card that has sat unanswered gets a "still
+  // waiting" hint; a very old one is flagged so the user knows it may no longer
+  // apply, instead of silently piling up as a dead card.
+  const staleness: ApprovalStaleness = useMemo(
+    () => classifyApprovalAge(Date.now() - new Date(item.requested_at).getTime()),
+    [item.requested_at],
+  );
+
+  // Risk pill from the approval preview payload (secret-safe; set upstream).
+  const risk = useMemo(() => {
+    const r = (item.payload as any)?.approvalPreview?.risk;
+    return r === 'read' || r === 'write' || r === 'destructive'
+      ? RISK_BADGES[r as 'read' | 'write' | 'destructive']
+      : null;
+  }, [item.payload]);
+
   // UC-1b: when the approval payload includes semantic info (tool +
   // label/url/text), render "Click **Send** in Safari" instead of the
   // generic title. Falls back to raw title when payload is missing.
@@ -70,14 +96,30 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
   const headlineDisplay = useMemo(() => action.headline.replace(/\*\*/g, ''), [action.headline]);
 
   return (
-    <View style={[styles.card, { borderColor: accent.border }]} nativeID={`approval-card-${item.id.slice(0, 8)}`}>
+    <View style={[styles.card, { borderColor: accent.border }, staleness === 'expired' && styles.cardExpired]} nativeID={`approval-card-${item.id.slice(0, 8)}`}>
       <View style={styles.cardHeader}>
-        <View style={[styles.kindPill, { backgroundColor: accent.bg, borderColor: accent.border }]}>
-          <Text style={[styles.kindText, { color: accent.fg }]}>{accent.label}</Text>
+        <View style={styles.pillRow}>
+          <View style={[styles.kindPill, { backgroundColor: accent.bg, borderColor: accent.border }]}>
+            <Text style={[styles.kindText, { color: accent.fg }]}>{accent.label}</Text>
+          </View>
+          {risk ? (
+            <View style={[styles.kindPill, { backgroundColor: risk.bg, borderColor: risk.border }]}>
+              <Text style={[styles.kindText, { color: risk.fg }]}>{risk.label}</Text>
+            </View>
+          ) : null}
         </View>
-        <Text style={styles.ageText}>{ageLabel}</Text>
+        <Text style={[styles.ageText, staleness === 'expired' && styles.ageExpired]}>
+          {staleness === 'expired' ? `${ageLabel} · stale` : ageLabel}
+        </Text>
       </View>
       <Text style={styles.titleText} numberOfLines={2}>{headlineDisplay}</Text>
+      {staleness !== 'fresh' ? (
+        <Text style={styles.staleHint} numberOfLines={1}>
+          {staleness === 'expired'
+            ? 'Waiting a while — this may no longer be relevant. Reject to clear it.'
+            : 'Still waiting on you.'}
+        </Text>
+      ) : null}
       {action.detail ? (
         <Text style={styles.detailText} numberOfLines={1}>{action.detail}</Text>
       ) : null}
@@ -186,10 +228,27 @@ const styles = StyleSheet.create({
     minWidth: 260,
     maxWidth: 320,
   },
+  cardExpired: {
+    opacity: 0.62,
+  },
   cardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  pillRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  ageExpired: {
+    color: '#f59e0b',
+  },
+  staleHint: {
+    color: '#f59e0b',
+    fontSize: 10,
+    fontStyle: 'italic',
     marginBottom: 6,
   },
   kindPill: {
