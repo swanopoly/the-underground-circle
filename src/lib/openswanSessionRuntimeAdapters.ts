@@ -678,6 +678,20 @@ export function buildLegacyToolLoopResult(args: {
       incomplete: true,
     };
   }
+  // STOP button: a user-cancelled run must read as user-stopped/incomplete —
+  // NOT a clean completion (hitMaxIterations is false on an abort) and NOT
+  // cap-exhaustion. Return the partial work + a resumable checkpoint so
+  // "continue" picks up from here.
+  if (args.runResult.aborted) {
+    const progress = summarizeToolLoopProgress(args.toolEvents);
+    const stopNote = 'Stopped at your request — the work so far is saved. Tell me to continue to pick up from here.';
+    return {
+      response: [args.runResult.text || '', stopNote, progress].filter(Boolean).join('\n\n'),
+      ...base,
+      incomplete: true,
+      checkpoint: buildToolLoopCheckpoint(args.toolEvents, { maxRounds: args.maxRounds }),
+    };
+  }
   if (!args.runResult.hitMaxIterations) {
     return { response: args.runResult.text, ...base };
   }

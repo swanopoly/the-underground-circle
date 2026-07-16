@@ -1,3 +1,5 @@
+import { planSectionFit, resolveSectionPriority } from './promptSectionPriorityCore';
+
 /**
  * chatPromptAssembly — W5 (unified prompt builder): the PURE core of the
  * shared chat system-prompt assembler.
@@ -277,7 +279,7 @@ export interface AssembledChatPromptExtras {
  */
 export function assembleChatPromptExtras(
   sections: ReadonlyArray<ChatPromptSectionInput>,
-  opts: { maxExtrasChars: number },
+  opts: { maxExtrasChars: number; prioritizeOnClip?: boolean },
 ): AssembledChatPromptExtras {
   const ordered: ChatPromptSectionInput[] = [];
   for (const key of CHAT_PROMPT_SECTION_ORDER) {
@@ -290,21 +292,64 @@ export function assembleChatPromptExtras(
 
   if (ordered.length === 0) return { text: '', rendered: [], clipped: false };
 
-  let combined = ordered.map((s) => s.body).join('\n\n');
-  let clipped = false;
-  if (combined.length > opts.maxExtrasChars) {
-    clipped = true;
-    combined = combined.slice(0, opts.maxExtrasChars);
-    const lastBreak = combined.lastIndexOf('\n');
-    if (lastBreak > opts.maxExtrasChars * 0.7) {
-      combined = combined.slice(0, lastBreak);
-    }
+  const combinedFull = ordered.map((s) => s.body).join('\n\n');
+
+  // Under budget — nothing to clip.
+  if (combinedFull.length <= opts.maxExtrasChars) {
+    return {
+      text: combinedFull,
+      rendered: ordered.map((s) => ({ key: s.key, chars: s.body.length })),
+      clipped: false,
+    };
   }
 
+  // Over budget. Priority-aware fit (opt-in) keeps the highest-value sections —
+  // even ones LATE in the canonical order (e.g. `last_session`, `turn_retrieval`)
+  // — and drops or truncates low-priority ones, instead of the blunt tail-slice
+  // that always sacrifices whatever renders last regardless of its value. When
+  // the caller has not opted in, the legacy tail-slice below runs byte-identical.
+  if (opts.prioritizeOnClip) {
+    const plan = planSectionFit(
+      ordered.map((s) => ({ key: s.key, tokens: s.body.length, priority: resolveSectionPriority(s.key) })),
+      opts.maxExtrasChars,
+    );
+    const keepSet = new Set(plan.keep);
+    const truncMap = new Map(plan.truncate.map((t) => [t.key, t.toTokens]));
+    // Apply the per-key plan to the canonically-ordered sections. (Duplicate
+    // keys are effectively absent in practice; the final char guard below keeps
+    // the ≤ budget invariant even if one slips through.)
+    const kept: Array<{ key: ChatPromptSectionKey; body: string }> = [];
+    for (const s of ordered) {
+      if (keepSet.has(s.key)) {
+        kept.push({ key: s.key, body: s.body });
+      } else if (truncMap.has(s.key)) {
+        const to = truncMap.get(s.key) as number;
+        if (to > 0) kept.push({ key: s.key, body: s.body.slice(0, to) });
+      }
+      // dropped keys are omitted
+    }
+    let combined = kept.map((s) => s.body).join('\n\n');
+    // planSectionFit fits the bodies, not the '\n\n' separators — guard the
+    // char ceiling against that join overhead.
+    if (combined.length > opts.maxExtrasChars) combined = combined.slice(0, opts.maxExtrasChars);
+    return {
+      text: combined,
+      rendered: kept.map((s) => ({ key: s.key, chars: s.body.length })),
+      clipped: true,
+    };
+  }
+
+  // Legacy tail-slice (unchanged): hard slice, then back off to the last newline
+  // when it sits past 70% of the budget.
+  let combined = combinedFull.slice(0, opts.maxExtrasChars);
+  const lastBreak = combined.lastIndexOf('\n');
+  if (lastBreak > opts.maxExtrasChars * 0.7) {
+    combined = combined.slice(0, lastBreak);
+  }
   return {
     text: combined,
     rendered: ordered.map((s) => ({ key: s.key, chars: s.body.length })),
-    clipped,
+    clipped: true,
   };
 }
 

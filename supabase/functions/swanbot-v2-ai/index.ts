@@ -58,6 +58,7 @@ import { callClaude, addUsage, EMPTY_USAGE, logClaudeUsage, type UsageBreakdown 
 import { wrapUntrusted } from "../_shared/untrusted.ts";
 import { attachToolInputExamples } from "../../../src/lib/toolInputExamples.ts";
 import { selectToolGroups } from "../../../src/lib/v2ToolSelectionCore.ts";
+import { nextContinuationDecision } from "../../../src/lib/swanbotContinuationBudgetCore.ts";
 
 // ─── Types (mirroring src/lib/agentExecutionCore.ts) ────────────────────────
 
@@ -2674,7 +2675,10 @@ async function runLoop(args: {
         );
       }
       const continuationCount = (resumeFrom?.continuationCount || 0) + 1;
-      if (continuationCount > MAX_ITERATIONS) {
+      // Client-continuation cap from the SHARED core (swanbotContinuationBudgetCore)
+      // so this can never drift from the client's MAX_CONTINUATIONS again. The
+      // server tool-loop cap (MAX_ITERATIONS) is a separate concern, left as-is.
+      if (nextContinuationDecision({ continuationCount }).atCap) {
         return terminalRunLoopError(
           "Too many client-side continuation rounds.",
           iter,

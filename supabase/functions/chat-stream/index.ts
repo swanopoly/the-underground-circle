@@ -16,6 +16,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 import { computeCostUsd, checkCircleClaudeBudget, logClaudeUsage, type UsageBreakdown } from "../_claude/anthropic.ts";
 import { byokMissingMessage, resolveUserModelApiKey } from "../_shared/edge.ts";
+import { splitPromptAtCacheBoundary, buildCacheableSystemBlocks } from "../../../src/lib/promptCacheSplitCore.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -144,14 +145,17 @@ Deno.serve(async (req: Request) => {
     max_tokens: max_tokens || 2048,
     stream: true,
   };
-  // Wrap the system prompt in a cache_control block so repeated calls with
-  // the same system prefix hit the ephemeral cache (~10% of input cost).
-  // Caller-supplied system prompts should be kept stable byte-for-byte across
-  // requests for this to pay off.
+  // Split the system prompt at the shared cache boundary so cache_control sits
+  // on the STABLE prefix ONLY. Prompt caching is a prefix match, so a single
+  // breakpoint at the end (the old behavior) cached the volatile tail too and
+  // the key changed every turn → ~never a hit. Splitting freezes the stable
+  // prefix (identity/personality/how-to-think) and leaves the per-turn tail
+  // (current context, directive, recent chat, extras) uncached. When the prompt
+  // carries no boundary marker, this degrades to a single cached block —
+  // byte-identical to the old single-breakpoint behavior.
   if (systemPrompt) {
-    anthropicBody.system = [
-      { type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } },
-    ];
+    const split = splitPromptAtCacheBoundary(systemPrompt);
+    anthropicBody.system = buildCacheableSystemBlocks(split.frozenPrefix, split.dynamicTail);
   }
   if (temperature !== undefined && !model.includes("opus")) {
     anthropicBody.temperature = temperature;

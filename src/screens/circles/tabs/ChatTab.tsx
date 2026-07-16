@@ -292,6 +292,22 @@ import {
   type OpenSwanMemoryRecommendation,
   type PromptMemoryReference,
 } from '../../../lib/memoryService';
+import {
+  formatMemoryRecencyLabel,
+  formatMemoryStrengthLabel,
+  formatMemoryStateLabel,
+  formatMemoryTrustLabel,
+  formatArchiveBiasLabel,
+  formatMemorySourceLabel,
+  getMemoryFamily,
+  getMemoryFamilyLabel,
+} from '../../../lib/chatMemoryLabelCore';
+import {
+  deriveSessionTitleFromMessage,
+  isAutoNamedSession,
+  normalizeThreadModelPreference,
+} from '../../../lib/chatSessionTitleCore';
+import { autoModelDisplayName } from '../../../lib/chatModelDisplayCore';
 import { decayMemoryImportance, pinMemory, promoteMemory, recordMemoryFeedback, softDeleteMemory } from '../../../lib/memoryActions';
 import {
   getLatestSpiritResearchReferences,
@@ -527,44 +543,9 @@ function toAssignableSessionAgent(agent: OfficeAgent, circleId: string): Assigna
     source: 'openswan-session',
   };
 }
-const TITLE_STOP_WORDS = new Set([
-  'a', 'an', 'and', 'are', 'at', 'be', 'build', 'can', 'create', 'do', 'for',
-  'from', 'help', 'how', 'i', 'in', 'is', 'it', 'make', 'me', 'my', 'of', 'on',
-  'please', 'show', 'the', 'this', 'to', 'we', 'with', 'you',
-]);
-
-function formatSessionTitleWord(word: string): string {
-  if (!word) return '';
-  if (word.length <= 4 && word === word.toUpperCase()) return word;
-  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
-}
-
-function deriveSessionTitleFromMessage(content: string): string {
-  const normalized = content
-    .replace(/https?:\/\/\S+/gi, ' ')
-    .replace(/[@/#][\w-]+/g, ' ')
-    .replace(/[^\w\s'-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (!normalized) return SESSION_FALLBACK_TITLE;
-
-  const words = normalized
-    .split(' ')
-    .map(word => word.replace(/^'+|'+$/g, '').trim())
-    .filter(Boolean);
-
-  const prioritized = words.filter(word => {
-    const lower = word.toLowerCase();
-    return word.length > 2 && !TITLE_STOP_WORDS.has(lower);
-  });
-
-  const chosen = (prioritized.length >= 2 ? prioritized : words)
-    .slice(0, 3)
-    .map(formatSessionTitleWord)
-    .filter(Boolean);
-
-  return chosen.length > 0 ? chosen.join(' ') : SESSION_FALLBACK_TITLE;
-}
+// Session-title derivation (TITLE_STOP_WORDS, formatSessionTitleWord,
+// deriveSessionTitleFromMessage) extracted verbatim to the pure, smoke-tested
+// src/lib/chatSessionTitleCore.ts (decomposition unit U6) and imported above.
 
 function appendCustomerSafeRecoveryMessage(message: string, recoveryMessage?: string | null): string {
   const base = message.trim().replace(/\s+$/g, '');
@@ -585,16 +566,8 @@ function sanitizeVisibleComputerTaskMessage(message: string, status: string): st
   return 'I could not finish that app or file action. Technical details were saved for recovery.';
 }
 
-function isAutoNamedSession(title: string | null | undefined): boolean {
-  const normalized = (title || '').trim().toLowerCase();
-  return normalized === '' || normalized === 'openswan session' || normalized === 'new chat';
-}
-
-function normalizeThreadModelPreference(model: string | null | undefined): string {
-  const normalized = (model || '').trim().toLowerCase();
-  if (!normalized || normalized === 'openswan') return DEFAULT_CHAT_MODEL;
-  return model || DEFAULT_CHAT_MODEL;
-}
+// isAutoNamedSession + normalizeThreadModelPreference extracted verbatim to
+// src/lib/chatSessionTitleCore.ts (decomposition unit U6) and imported above.
 
 function getFallbackSpiritIdForSessionProfile(profile: SessionCodingProfile): string {
   switch (profile) {
@@ -623,70 +596,9 @@ function buildSessionThinkingLabel(currentRunStep: string, verbIndex: number): s
   return pickThinkingVerb(verbIndex);
 }
 
-function formatMemoryRecencyLabel(ref: PromptMemoryReference): string {
-  const timestamp = ref.lastAccessedAt || ref.updatedAt;
-  if (!timestamp) return 'unknown freshness';
-  const ageMs = Date.now() - new Date(timestamp).getTime();
-  const ageHours = ageMs / 3_600_000;
-  if (ageHours < 24) return 'fresh today';
-  const ageDays = ageHours / 24;
-  if (ageDays < 7) return `${Math.max(1, Math.round(ageDays))}d old`;
-  if (ageDays < 30) return `${Math.max(1, Math.round(ageDays / 7))}w old`;
-  return `${Math.max(1, Math.round(ageDays / 30))}mo old`;
-}
-
-function formatMemoryStrengthLabel(ref: PromptMemoryReference): string {
-  const score = ref.importance ?? 0.5;
-  if (score >= 0.9) return 'core';
-  if (score >= 0.75) return 'strong';
-  if (score >= 0.6) return 'active';
-  return 'light';
-}
-
-function formatMemoryStateLabel(ref: PromptMemoryReference): string {
-  if (ref.memoryState === 'distilled') return 'distilled guidance';
-  if (ref.retrievalMode === 'startup' && ref.pinned) return 'pinned startup';
-  if (ref.retrievalMode === 'startup') return 'startup guidance';
-  if (ref.pinned) return 'pinned';
-  if (ref.memoryState === 'supporting') return 'supporting';
-  return 'retrieved';
-}
-
-function formatMemoryTrustLabel(ref: PromptMemoryReference): string {
-  const helpfulness = ref.helpfulness;
-  if (helpfulness == null) return 'unrated';
-  if (helpfulness >= 0.8) return 'trusted';
-  if (helpfulness >= 0.6) return 'proven';
-  if (helpfulness <= 0.3) return 'weak';
-  return 'mixed';
-}
-
-function formatArchiveBiasLabel(ref: PromptMemoryReference): string | null {
-  if (ref.archiveBias === 'boosted') return 'archive boosted';
-  if (ref.archiveBias === 'suppressed') return 'archive suppressed';
-  if (ref.archiveBias === 'neutral' && ref.archivePassiveScore != null) return 'archive neutral';
-  return null;
-}
-
-function formatMemorySourceLabel(ref: PromptMemoryReference): string | null {
-  switch (ref.sourceSurface) {
-    case 'claude_code_bridge': return 'Claude Code';
-    case 'codex_bridge': return 'Codex';
-    case 'cursor_bridge': return 'Cursor';
-    case 'gemini_bridge': return 'Gemini';
-    default: return null;
-  }
-}
-
-function getMemoryFamily(ref: PromptMemoryReference): 'guidance' | 'pattern' {
-  return ['instruction', 'preference', 'decision', 'policy'].includes(String(ref.memoryKind))
-    ? 'guidance'
-    : 'pattern';
-}
-
-function getMemoryFamilyLabel(ref: PromptMemoryReference): string {
-  return getMemoryFamily(ref) === 'guidance' ? 'Guidance' : 'Pattern';
-}
+// Memory-reference label formatters (8) extracted verbatim to the pure,
+// smoke-tested src/lib/chatMemoryLabelCore.ts (decomposition unit U1) and
+// imported above. Behavior-identical to the former inline copies.
 
 function mapPersistedRowsToChatMessages(
   rows: any[],
@@ -4000,6 +3912,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   const flatListRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
+  // STOP button for OpenSwan typed-loop turns — holds the live turn's cancel
+  // handle so the steering bar can abort it at the next loop boundary.
+  const openSwanAbortRef = useRef<AbortController | null>(null);
   const codingWorkbenchStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const builderDragContainerRef = useRef<HTMLDivElement | null>(null);
   const builderDraggingRef = useRef(false);
@@ -10046,9 +9961,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 : `${pickThinkingVerb(Math.floor(Date.now() / 1500))}…`,
             );
             const pendingMessageId = pendingMessage.id;
+            const openSwanController = new AbortController();
+            openSwanAbortRef.current = openSwanController;
             const structured = await runOpenSwanSessionTurn({
               message: augmentedPrompt,
             context,
+            signal: openSwanController.signal,
             connectedProviders: connectedProviderSet,
             surface: 'main_chat',
             chatSessionId: activeThreadId,
@@ -10106,6 +10024,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               }
             },
           });
+            openSwanAbortRef.current = null; // turn settled — release the STOP handle
             // Map the runtime's tool actions (rooms.create, circle.update_*,
             // agent.update_appearance, etc) into the UI's toolEvent shape
             // so the execution strip on the assistant message actually
@@ -13405,8 +13324,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       {/* Mid-run steering for OpenSwan typed-loop turns (plan §7b) — same
           bar, in-memory bus instead of the DB channel. Hidden while a
           computer task owns the bar above. Guidance-only; the typed loop's
-          approval gates are untouched. No Stop (turns have no cancel handle
-          surfaced yet). */}
+          approval gates are untouched. STOP now cancels the live turn at the
+          next loop boundary (the abort signal is threaded to agentExecutionCore),
+          returning the partial work as an honest 'stopped' result. */}
       {botTyping
         && runStatus === 'running'
         && !!activeThreadId
@@ -13416,6 +13336,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           taskLabel={(currentRunStep || 'OpenSwan run').slice(0, 80)}
           accentColor={accentColor}
           onSend={async (note) => pushOpenSwanSteeringNote(activeThreadId, note)}
+          onStop={openSwanAbortRef.current ? () => openSwanAbortRef.current?.abort() : undefined}
         />
       ) : null}
 
@@ -14812,136 +14733,12 @@ function modelSectionAccent(sectionKey: string, fallback = '#22d3ee'): string {
   return MODEL_SECTION_FALLBACK_COLORS[hash % MODEL_SECTION_FALLBACK_COLORS.length] || fallback;
 }
 
-const MODEL_ROUTE_PREFIXES = new Set([
-  'anthropic',
-  'openai',
-  'openai_compatible',
-  'openrouter',
-  'google',
-  'google_ai',
-  'groq',
-  'mistral_ai',
-  'cohere',
-  'perplexity',
-  'together_ai',
-  'fireworks_ai',
-  'deepseek',
-  'z_ai',
-  'zai',
-  'minimax',
-  'huggingface',
-  'hugging_face',
-  'huggingface_endpoint',
-  'ollama',
-  'replicate',
-  'accounts',
-  'models',
-]);
-
-const MODEL_AUTHOR_SEGMENTS = new Set([
-  'anthropic',
-  'openai',
-  'google',
-  'deepseek',
-  'moonshotai',
-  'tencent',
-  'minimax',
-  'x-ai',
-  'nvidia',
-  'inclusionai',
-  'stepfun',
-  'z-ai',
-  'qwen',
-  'meta-llama',
-  'mistralai',
-  'fireworks',
-  'cswan801',
-]);
-
-function modelDisplayToken(token: string): string {
-  const lower = token.toLowerCase();
-  const brandMap: Record<string, string> = {
-    ai: 'AI',
-    api: 'API',
-    bm: 'BM',
-    claude: 'Claude',
-    codex: 'Codex',
-    deepseek: 'DeepSeek',
-    flash: 'Flash',
-    gemini: 'Gemini',
-    glm: 'GLM',
-    gpt: 'GPT',
-    grok: 'Grok',
-    haiku: 'Haiku',
-    kimi: 'Kimi',
-    llama: 'Llama',
-    minimax: 'MiniMax',
-    mistral: 'Mistral',
-    nemotron: 'Nemotron',
-    opus: 'Opus',
-    oss: 'OSS',
-    qwen: 'Qwen',
-    sonar: 'Sonar',
-    sonnet: 'Sonnet',
-    v: 'V',
-  };
-  if (brandMap[lower]) return brandMap[lower];
-  if (/^gpt$/i.test(token)) return 'GPT';
-  if (/^o\d+$/i.test(token)) return token.toUpperCase();
-  if (/^\d+[a-z]+$/i.test(token)) return token.toUpperCase();
-  if (/^[a-z]+[0-9.]+[a-z0-9.]*$/i.test(token)) {
-    return token.charAt(0).toUpperCase() + token.slice(1);
-  }
-  return token.charAt(0).toUpperCase() + token.slice(1).toLowerCase();
-}
-
-function compactVersionTokens(tokens: string[]): string[] {
-  const compacted: string[] = [];
-  for (let i = 0; i < tokens.length; i += 1) {
-    const current = tokens[i];
-    if (/^\d+$/.test(current) && /^\d+$/.test(tokens[i + 1] || '')) {
-      compacted.push(`${current}.${tokens[i + 1]}`);
-      i += 1;
-    } else {
-      compacted.push(current);
-    }
-  }
-  return compacted;
-}
-
-function autoModelDisplayName(modelId?: string | null): string | null {
-  if (!modelId) return null;
-  const withoutQuery = modelId.split(/[?#]/, 1)[0];
-  const parts = withoutQuery
-    .split('/')
-    .map((part) => part.trim())
-    .filter(Boolean);
-  let modelPart = parts[parts.length - 1] || withoutQuery;
-  if (parts.length > 1) {
-    for (let i = parts.length - 1; i >= 0; i -= 1) {
-      const part = parts[i];
-      const normalized = part.toLowerCase();
-      if (!MODEL_ROUTE_PREFIXES.has(normalized) && !MODEL_AUTHOR_SEGMENTS.has(normalized)) {
-        modelPart = part;
-        break;
-      }
-    }
-  }
-  const cleaned = modelPart
-    .replace(/:[a-z0-9_-]+$/i, '')
-    .replace(/\b(20\d{6}|20\d{4})\b/g, '')
-    .replace(/[_:.]+/g, '-')
-    .replace(/([a-z])([A-Z])/g, '$1-$2')
-    .trim();
-  const rawTokens = cleaned
-    .split(/[-\s]+/)
-    .map((token) => token.trim())
-    .filter(Boolean)
-    .filter((token) => !MODEL_ROUTE_PREFIXES.has(token.toLowerCase()) && !MODEL_AUTHOR_SEGMENTS.has(token.toLowerCase()));
-  const tokens = compactVersionTokens(rawTokens);
-  const label = tokens.map(modelDisplayToken).join(' ').replace(/\s+/g, ' ').trim();
-  return label || modelDisplayToken(cleaned || modelId);
-}
+// Model-display helpers (MODEL_ROUTE_PREFIXES, MODEL_AUTHOR_SEGMENTS,
+// modelDisplayToken, compactVersionTokens, autoModelDisplayName) extracted
+// verbatim to the pure, smoke-tested src/lib/chatModelDisplayCore.ts
+// (decomposition unit U4); autoModelDisplayName is imported above. The two
+// Platform-coupled style fns (modelSectionHoverStyle / modelSectionTransitionStyle)
+// stay below, in ChatTab.
 
 function modelSectionHoverStyle(color: string, hovered: boolean) {
   if (!hovered) return null;

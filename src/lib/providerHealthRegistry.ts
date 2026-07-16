@@ -40,6 +40,8 @@
  * *request-specific* signal (do NOT cool down — a different request
  * may well succeed on the same provider).
  */
+import { backoffWindowMs } from './providerBackoffCore';
+
 export type ProviderErrorClass =
   | 'rate_limit'       // 429 / "rate limit" — provider is throttling us right now
   | 'overload'         // 529 / 503 / "overloaded" — provider is saturated
@@ -192,7 +194,21 @@ export function isProviderCoolingDown(
   const ring = registry.get(key);
   if (!ring || ring.length === 0) return false;
 
-  const windowMs = opts?.cooldownMs ?? DEFAULT_COOLDOWN_MS;
+  // Consecutive-failure backoff (audit): a provider that keeps failing gets an
+  // exponentially longer cooldown (clamped) instead of a flat window — so a
+  // durably-dead provider stops getting retried head-of-line every turn.
+  // Count consecutive recent cooldown-class failures (newest→oldest, stop at a
+  // success or a non-cooldown failure).
+  const baseWindowMs = opts?.cooldownMs ?? DEFAULT_COOLDOWN_MS;
+  let consecutiveFailures = 0;
+  for (let i = ring.length - 1; i >= 0; i -= 1) {
+    const ev = ring[i];
+    if (ev.atMs > nowMs) continue; // future event (clock skew)
+    if (ev.ok) break;
+    if (COOLDOWN_BY_CLASS[ev.errorClass ?? 'other']) consecutiveFailures += 1;
+    else break;
+  }
+  const windowMs = backoffWindowMs(consecutiveFailures, baseWindowMs);
   const floor = nowMs - windowMs;
 
   // Walk newest→oldest; stop as soon as we fall out of the window.

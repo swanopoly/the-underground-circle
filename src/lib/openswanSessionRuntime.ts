@@ -52,6 +52,7 @@ import {
 } from './openswanSessionRuntimeAdapters';
 import { createRunAndFixGateState, foldRunAndFixRound, markNudgeSent, planVerificationNudge } from './runAndFixGateCore';
 import { buildUserActionReceipt } from './userActionReceiptCore';
+import { estimateRunCostUsd } from './runCostRollupCore';
 import { appendOpenSwanTranscriptEvent, buildOpenSwanTranscriptKey, upsertOpenSwanTranscriptHeader, type OpenSwanSessionTranscript } from './openswanTranscripts';
 import { executeOpenSwanVerificationPlan, type OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import { getSwanBotStructuredResponse, executeToolUseLoop, buildStreamableSystemPrompt, type SwanBotContext, type SwanBotStructuredArtifact, type SwanBotStructuredResponse } from './swanbot';
@@ -135,6 +136,10 @@ export type OpenSwanTurnOptions = {
   goal?: string;
   metadata?: Record<string, unknown>;
   autoExecuteVerification?: boolean;
+  /** User-cancel signal — aborts the typed-core turn at the next loop
+   *  boundary and returns the partial work as an honest 'stopped' result.
+   *  The capability is built into agentExecutionCore; this threads it. */
+  signal?: AbortSignal;
 } & OpenSwanRunCallbacks;
 
 function normalizeConnectedProviders(value?: ConnectedProviderSet | string[]): ConnectedProviderSet | undefined {
@@ -571,6 +576,8 @@ async function runTypedCoreToolLoop(args: {
     plannerPrompt: string;
     reason: string;
   } | null;
+  /** User-cancel signal, threaded to runAgent (STOP button). */
+  signal?: AbortSignal;
 }): Promise<LegacyToolLoopResult> {
   // BlackSwan collaboration split (P8 — the CLAUDE.md contract, previously
   // unwired on this path): the typed loop always carries runtime tools and
@@ -879,6 +886,10 @@ async function runTypedCoreToolLoop(args: {
     steering: args.threadId
       ? { drain: () => drainOpenSwanSteeringNotes(args.threadId!) }
       : undefined,
+    // STOP button: the user-cancel signal aborts at the next loop boundary and
+    // returns the partial work as an honest 'aborted' result (adapters mark it
+    // incomplete, not cap-exhausted).
+    signal: args.signal,
     // The legacy loop only parallelized all-read-only, ungated rounds;
     // until the T8 policy provider is flipped on, dispatch sequentially
     // (safe superset of legacy ordering, incl. approval prompts).
@@ -1019,6 +1030,30 @@ async function runTypedCoreToolLoop(args: {
         || String((finalData as any)?.response || '');
     } catch { /* fall back to the limit note */ }
   }
+
+  // Verification receipt (audit): assemble a coding-lane proof-of-work summary
+  // (files edited, checks passed, committed) from this run's tool events and
+  // emit it as best-effort telemetry. Boolean-only, secret-safe, never blocks.
+  try {
+    if (args.runId) {
+      const { buildVerificationReceipt } = await import('./verificationReceiptCore');
+      const receipt = buildVerificationReceipt({ editedFiles: toolEvents, checks: toolEvents, commit: toolEvents });
+      if (receipt.editedFiles.length > 0 || receipt.checks.length > 0) {
+        void supabase.from('agent_run_events').insert({
+          run_id: args.runId,
+          kind: 'verification_receipt',
+          payload: {
+            verdict: receipt.verdict,
+            editedFiles: receipt.editedFiles.slice(0, 40),
+            checks: receipt.checks.slice(0, 20),
+            committed: receipt.committed,
+            ...(receipt.commitRef ? { commitRef: receipt.commitRef } : {}),
+            summary: receipt.summary,
+          },
+        }).then(() => {}, () => {});
+      }
+    }
+  } catch { /* receipt is best-effort — never break the turn */ }
 
   return buildLegacyToolLoopResult({
     runResult,
@@ -1731,6 +1766,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
             toolApprovalGate: opts.onToolApproval,
             onStage: (stage, label) => emitStage(opts, stage, label),
             codingPlanSplit,
+            signal: opts.signal,
           })
         : await executeToolUseLoop({
             systemPrompt: systemPromptWithResume,
@@ -2081,6 +2117,14 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         input_tokens: finalUsageTotals.input,
         output_tokens: finalUsageTotals.output,
         cached_tokens: finalUsageTotals.cached,
+        // Cost attribution (audit): light up the dead estimated_cost column so
+        // the ops board reads real dollars for the main OpenSwan session path.
+        estimated_cost: estimateRunCostUsd({
+          model: run.model,
+          inputTokens: finalUsageTotals.input,
+          outputTokens: finalUsageTotals.output,
+          cachedTokens: finalUsageTotals.cached,
+        }),
       });
       // GAP-2: agent_runs has no read/creation columns, so the cache split (the
       // read:creation ratio that proves the P26 breakpoints work) rides the

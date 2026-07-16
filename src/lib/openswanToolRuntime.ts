@@ -1,6 +1,8 @@
 import { supabase } from './supabase';
 import { semanticSearchMemories } from './memoryEmbeddings';
 import { summarizeDiagnostics } from './verificationDiagnosticsCore';
+import { applyToolSearchRelevanceFloor } from './toolSearchRelevanceCore';
+import { buildToolDefIndex } from './toolCatalogPerfCore';
 import { nextCronOccurrence, parseRecurrence, scheduleAction } from './scheduledActions';
 import { buildIntegrationActionOutcome, buildIntegrationReceiptLines } from './integrationActionReceipt';
 import { attachToolInputExamples } from './toolInputExamples';
@@ -5200,9 +5202,15 @@ const TOOL_DISCLOSURE_FAMILY_DEFAULTS: Record<string, OpenSwanToolDisclosure> = 
   gcal: 'deferred',
 };
 
+// O(1) name→def lookup, built once at module load. Replaces the prior O(n²)
+// `TOOL_DEFINITIONS.find` that ran inside listPinnedOpenSwanToolsForSurface's
+// per-tool `.filter`. Tool names are unique, so index-get is behavior-identical
+// to the former first-wins `.find` (and to the per-call `new Map` below).
+const TOOL_DEF_INDEX = buildToolDefIndex(TOOL_DEFINITIONS) as Map<string, OpenSwanToolDefinition>;
+
 /** Resolves a tool's disclosure class: per-tool override → family default → 'deferred'. */
 export function getOpenSwanToolDisclosure(tool: OpenSwanRuntimeToolName): OpenSwanToolDisclosure {
-  const def = TOOL_DEFINITIONS.find((t) => t.name === tool);
+  const def = TOOL_DEF_INDEX.get(tool);
   if (def?.disclosure) return def.disclosure;
   return TOOL_DISCLOSURE_FAMILY_DEFAULTS[getOpenSwanToolDisclosureFamily(tool)] || 'deferred';
 }
@@ -5352,7 +5360,20 @@ export function searchOpenSwanToolCatalog(
   }
 
   scored.sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name));
-  return scored.slice(0, limit).map(({ tool, family }) => {
+  // Relevance floor (audit): for a real text query, drop weak matches that
+  // would silently unlock the long tail (a band floor off the top score, always
+  // keeping the top few). Family-browse (no query tokens) is unaffected.
+  let ranked = scored;
+  if (tokens.length > 0 && !familyFilter) {
+    const kept = new Set(
+      applyToolSearchRelevanceFloor(
+        scored.map((s) => ({ tool: s.tool.name, score: s.score })),
+        { cap: limit },
+      ).map((r) => r.tool),
+    );
+    ranked = scored.filter((s) => kept.has(s.tool.name));
+  }
+  return ranked.slice(0, limit).map(({ tool, family }) => {
     const policy = getOpenSwanToolPolicy(tool.name);
     return {
       name: tool.name,
@@ -5448,7 +5469,7 @@ export function buildOpenSwanToolBrief(
   taskPlan: OpenSwanTaskPlan,
   activePluginIds?: string[],
 ): string {
-  const toolLookup = new Map(TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
+  const toolLookup = TOOL_DEF_INDEX; // shared O(1) index (built once) — was a per-call new Map
   const lines = taskPlan.recommendedTools
     .filter((item) => toolLookup.get(item.tool)?.surfaces.includes(surface))
     .map((item) => {

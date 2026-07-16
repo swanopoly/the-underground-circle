@@ -14,6 +14,7 @@
  */
 
 import { supabase } from './supabase';
+import { boundEventPayload } from './eventBoundCore';
 import { createRun, updateRunStatus, type AgentRun, type RunSurface } from './agentRunSystem';
 import type { AgentEvent, AgentRunResult, AgentToolResult } from './agentExecutionCore';
 
@@ -122,7 +123,10 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
       await supabase.from('agent_run_events').insert({
         run_id: run.id,
         kind,
-        payload,
+        // Bound the payload (audit): this is the highest-frequency telemetry
+        // table and the payload can carry arbitrary (even cyclic) tool input —
+        // cap depth/size/strings, cyclic-safe, secret-masked, before insert.
+        payload: boundEventPayload(kind, payload) as Record<string, unknown>,
       });
     } catch (e) {
       // Non-fatal — telemetry failures should never bubble.
