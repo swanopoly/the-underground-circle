@@ -431,6 +431,8 @@
     "smoke:connection-status": "npx tsx scripts/connection-status-core-smoketest.ts",
     "smoke:transport-failover-badge": "npx tsx scripts/transport-failover-badge-core-smoketest.ts",
     "smoke:entity-handle": "npx tsx scripts/entity-handle-core-smoketest.ts",
+    "smoke:swanbot-v2-client-loop-flag": "npx tsx scripts/swanbot-v2-client-loop-flag-smoketest.ts",
+    "smoke:v2-agent-event-activity": "npx tsx scripts/v2-agent-event-activity-core-smoketest.ts",
     "evals": "npx tsx scripts/run-evals.ts",
     "evals:update-baseline": "npx tsx scripts/run-evals.ts --update-baseline"
   },
