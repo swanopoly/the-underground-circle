@@ -11,6 +11,7 @@ import { supabase } from './supabase';
 import type { BrowserPlanEvent } from './computerUse';
 import { devLog } from './devLog';
 import { mapLegacyToolEventToLedgerStatus, persistAgentRunToolEvent } from './agentRunLedgerPersistence';
+import { subscribeWithReconnect } from './subscribeWithReconnect';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -1172,20 +1173,37 @@ export function subscribeToCircleRuns(
     }, debounceMs);
   };
 
-  const channel = supabase
-    .channel(`circle-runs:${circleId}`)
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'agent_runs', filter: `circle_id=eq.${circleId}` }, handleChange)
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'agent_runs', filter: `circle_id=eq.${circleId}` }, handleChange)
-    .subscribe();
+  // Route through the shared resilient wrapper so the live-run channel actively
+  // reconnects after a socket drop instead of silently freezing. onCatchUp fires
+  // only on a RE-subscribe (not first mount): re-fetch the active-run list so the
+  // ops board self-heals rows it missed while the channel was down.
+  const handle = subscribeWithReconnect({
+    channelName: `circle-runs:${circleId}`,
+    setup: (channel) =>
+      channel
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'agent_runs', filter: `circle_id=eq.${circleId}` }, handleChange)
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'agent_runs', filter: `circle_id=eq.${circleId}` }, handleChange),
+    onCatchUp: () => {
+      void getActiveRuns(circleId)
+        .then((runs) => {
+          try {
+            callback(runs[0] ?? null);
+          } catch (err) {
+            console.error('[AgentRunSystem] subscribeToCircleRuns catch-up callback error:', err);
+          }
+        })
+        .catch((err) => {
+          console.error('[AgentRunSystem] subscribeToCircleRuns catch-up error:', err);
+        });
+    },
+  });
 
   return () => {
     if (timer) {
       clearTimeout(timer);
       timer = null;
     }
-    try {
-      supabase.removeChannel(channel);
-    } catch {}
+    handle.unsubscribe();
   };
 }
 

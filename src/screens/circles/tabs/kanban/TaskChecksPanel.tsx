@@ -8,6 +8,7 @@ import {
   View, Text, ScrollView, StyleSheet, Platform,
 } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
+import { subscribeWithReconnect } from '../../../../lib/subscribeWithReconnect';
 
 interface Props {
   taskId: string;
@@ -107,18 +108,20 @@ export default function TaskChecksPanel({ taskId, runId, circleId }: Props) {
   useEffect(() => {
     fetchData();
 
-    const channel = supabase
-      .channel(`task-checks-${runId}`)
-      .on('postgres_changes', {
+    const sub = subscribeWithReconnect({
+      channelName: `task-checks-${runId}`,
+      setup: (channel) => channel.on('postgres_changes', {
         event: '*',
         schema: 'public',
         table: 'task_run_check_results',
         filter: `run_id=eq.${runId}`,
-      }, () => fetchData())
-      .subscribe();
+      }, () => fetchData()),
+      onCatchUp: () => fetchData(),
+      heartbeatMs: 30_000,
+    });
 
     return () => {
-      supabase.removeChannel(channel);
+      sub.unsubscribe();
     };
   }, [taskId, runId, fetchData]);
 

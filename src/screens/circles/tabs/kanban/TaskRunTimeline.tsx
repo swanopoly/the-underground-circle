@@ -8,6 +8,7 @@ import {
   View, Text, ScrollView, StyleSheet, Platform,
 } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
+import { subscribeWithReconnect } from '../../../../lib/subscribeWithReconnect';
 
 interface Props {
   runId: string;
@@ -102,24 +103,26 @@ export default function TaskRunTimeline({ runId, circleId }: Props) {
   useEffect(() => {
     fetchSteps();
 
-    const channel = supabase
-      .channel(`task-run-steps-${runId}`)
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'task_run_steps',
-        filter: `run_id=eq.${runId}`,
-      }, () => fetchSteps())
-      .on('postgres_changes', {
-        event: 'UPDATE',
-        schema: 'public',
-        table: 'task_run_steps',
-        filter: `run_id=eq.${runId}`,
-      }, () => fetchSteps())
-      .subscribe();
+    const sub = subscribeWithReconnect({
+      channelName: `task-run-steps-${runId}`,
+      setup: (channel) => channel
+        .on('postgres_changes', {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'task_run_steps',
+          filter: `run_id=eq.${runId}`,
+        }, () => fetchSteps())
+        .on('postgres_changes', {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'task_run_steps',
+          filter: `run_id=eq.${runId}`,
+        }, () => fetchSteps()),
+      onCatchUp: () => fetchSteps(),
+    });
 
     return () => {
-      supabase.removeChannel(channel);
+      sub.unsubscribe();
     };
   }, [runId, fetchSteps]);
 

@@ -8,6 +8,7 @@ import {
   View, Text, ScrollView, StyleSheet, Platform,
 } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
+import { subscribeWithReconnect } from '../../../../lib/subscribeWithReconnect';
 
 interface Props {
   runId: string;
@@ -98,18 +99,19 @@ export default function TaskApprovalsPanel({ runId, circleId }: Props) {
   useEffect(() => {
     fetchApprovals();
 
-    const channel = supabase
-      .channel(`task-run-approvals-${runId}`)
-      .on('postgres_changes', {
+    const sub = subscribeWithReconnect({
+      channelName: `task-run-approvals-${runId}`,
+      setup: (channel) => channel.on('postgres_changes', {
         event: '*',
         schema: 'public',
         table: 'task_run_approvals',
         filter: `run_id=eq.${runId}`,
-      }, () => fetchApprovals())
-      .subscribe();
+      }, () => fetchApprovals()),
+      onCatchUp: () => fetchApprovals(),
+    });
 
     return () => {
-      supabase.removeChannel(channel);
+      sub.unsubscribe();
     };
   }, [runId, fetchApprovals]);
 
