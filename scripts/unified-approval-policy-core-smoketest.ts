@@ -374,6 +374,15 @@ function main() {
   // Mirrors computerGrantGate.STICKY_FLOOR_CATEGORIES order.
   assertEq(ALWAYS_ASK_FLOOR_MARKERS.join(','), 'pay,delete,login,grant', '8.7 canonical order preserved');
 
+  // ── Group 9: floor markers substring-match category + tool (defense-in-depth) ──
+  assertEq(kind({ category: 'delete_file' }), 'require_approval', '9.1 variant category delete_file floors via substring');
+  assertEq(kind({ category: 'paywall_purchase' }), 'require_approval', '9.2 paywall category floors (contains pay)');
+  assertEq(kind({ tool: 'desktop.delete' }), 'require_approval', '9.3 floor-ish tool floors even without isFloorAction');
+  assertEq(kind({ tool: 'browser.login_field', category: 'credential' }), 'require_approval', '9.4 login tool floors via substring');
+  assertEq(kind({ tool: 'files.delete_all', toolApprovalMode: 'auto' }), 'require_approval', '9.5 floor tool beats tool-auto mode');
+  assertEq(kind({ category: 'memory_read', tool: 'memory.read', toolApprovalMode: 'auto' }), 'auto_approve', '9.6 non-floor auto tool unaffected (no false floor)');
+  assertEq(kind({ tool: 42 as unknown }), 'require_approval', '9.7 hostile non-string tool → no throw, safe default');
+
   if (failures > 0) {
     console.error('\n' + failures + ' fail');
     process.exit(1);

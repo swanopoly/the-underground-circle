@@ -54,6 +54,10 @@ export interface ApprovalPolicyInput {
   userConstraintsBlock?: unknown;
   /** Always-confirm floor hit — pay / delete / login / grant. `true`, a marker, or a non-empty list. */
   isFloorAction?: unknown;
+  /** The tool name (e.g. 'desktop.delete', 'browser.fill_credential_field').
+   *  Substring-matched against the floor markers as defense-in-depth so a
+   *  floor-ish tool still requires approval even without an explicit isFloorAction. */
+  tool?: unknown;
 }
 
 export interface ApprovalDecision {
@@ -74,7 +78,18 @@ export interface ApprovalDecision {
  */
 export const ALWAYS_ASK_FLOOR_MARKERS = ['pay', 'delete', 'login', 'grant'] as const;
 
-const FLOOR_MARKER_SET: ReadonlySet<string> = new Set<string>(ALWAYS_ASK_FLOOR_MARKERS);
+/** True iff `s` contains any always-ask floor marker as a SUBSTRING — over-ask
+ *  safe (a match only ever ADDS an approval, never a block). Substring (not
+ *  exact) so a variant category ('delete_file', 'paywall', 'login_flow') or a
+ *  floor-ish tool name ('desktop.delete', 'browser.fill_credential_field' via
+ *  'login'/'grant') still floors even when the caller forgot to set
+ *  isFloorAction. Mirrors openswanApprovalBatchCore.isFloorItem. */
+function matchesFloorMarker(s: string): boolean {
+  for (const marker of ALWAYS_ASK_FLOOR_MARKERS) {
+    if (s.includes(marker)) return true;
+  }
+  return false;
+}
 
 // Bounds so pathological inputs can never blow up time/space.
 const MAX_STR = 200;
@@ -144,14 +159,18 @@ function isForbidden(value: unknown, categoryStr: string): boolean {
  *     non-empty list/Set → floor
  *   - defense-in-depth: a category that is itself a floor marker → floor
  */
-function isFloor(value: unknown, categoryStr: string): boolean {
+function isFloor(value: unknown, categoryStr: string, toolStr: string): boolean {
   if (value === true) return true;
   else if (typeof value === 'string') { if (value.trim().length > 0) return true; }
   else if (typeof value === 'number') { if (Number.isFinite(value) && value !== 0) return true; }
   else if (typeof value === 'bigint') { if (value !== BigInt(0)) return true; }
   else if (Array.isArray(value)) { if (value.length > 0) return true; }
   else if (value instanceof Set) { if (value.size > 0) return true; }
-  if (categoryStr && FLOOR_MARKER_SET.has(categoryStr)) return true;
+  // Defense-in-depth: substring-match the floor markers against the category AND
+  // the tool name so a variant category or floor-ish tool still floors even when
+  // the caller didn't set isFloorAction (over-ask safe — only ever ADDS approval).
+  if (categoryStr && matchesFloorMarker(categoryStr)) return true;
+  if (toolStr && matchesFloorMarker(toolStr)) return true;
   return false;
 }
 
@@ -184,6 +203,7 @@ export function resolveApprovalDecision(input: ApprovalPolicyInput): ApprovalDec
     const inp: Record<string, unknown> =
       input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
     const categoryStr = norm(inp.category);
+    const toolStr = norm(inp.tool);
     const withCat = (decision: ApprovalDecision): ApprovalDecision =>
       categoryStr ? { ...decision, category: categoryStr } : decision;
 
@@ -194,7 +214,7 @@ export function resolveApprovalDecision(input: ApprovalPolicyInput): ApprovalDec
 
     // 2. Floor (pay/delete/login/grant) always requires approval — no autonomy
     //    setting, tool 'auto' mode, or auto-approved category can waive it.
-    if (isFloor(inp.isFloorAction, categoryStr)) {
+    if (isFloor(inp.isFloorAction, categoryStr, toolStr)) {
       return withCat({
         kind: 'require_approval',
         reason: 'always-confirm floor (pay/delete/login/grant) requires approval',
