@@ -179,7 +179,11 @@ function splitSentences(text: string): string[] {
   for (const line of lines) {
     const parts = line.split(/(?<=[.!?])\s+/);
     for (const part of parts) {
-      const s = part.replace(/^\s*[-*•\d.)\]\s]+/, '').trim();
+      // Strip a leading LIST MARKER only — a bullet, or a numbered ordinal
+      // (digits + '.'/')'/']' + whitespace). Do NOT strip a bare leading number:
+      // ports/versions/counts/years are exactly the 'specific' data this check
+      // exists to verify, and the old class ([\\d.)]) ate them before checking.
+      const s = part.replace(/^\s*(?:[-*•]\s*|\d+[.)\]]\s+)/, '').trim();
       if (s) {
         out.push(s);
         if (out.length >= MAX_SENTENCES) return out;

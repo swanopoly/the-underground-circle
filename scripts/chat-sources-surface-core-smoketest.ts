@@ -222,6 +222,14 @@ function main(): void {
     assert(!r.includes('abc') && !r.includes('def'), '(6) secret values gone', r);
   }
   {
+    // OAuth / Supabase implicit-flow tokens ride in the URL #fragment — redact it too.
+    const s = buildSourcesSurface({ citations: 'auth https://app.io/#access_token=SECRET_AT&refresh_token=SECRET_RT&state=xyz' });
+    const r = s.sources[0]?.ref ?? '';
+    assert(r.includes('access_token=REDACTED') && r.includes('refresh_token=REDACTED'), '(6) FRAGMENT tokens redacted', r);
+    assert(!r.includes('SECRET_AT') && !r.includes('SECRET_RT'), '(6) fragment secret values gone', r);
+    assert(r.includes('state=xyz'), '(6) benign fragment param kept', r);
+  }
+  {
     // Absolute / home-dir path → reduced to basename (never leaks the username).
     const s = buildSourcesSurface({ citations: 'edited /Users/cswanson/the-underground-circle/src/lib/foo.ts today' });
     const f = find(s, (x) => x.kind === 'file');

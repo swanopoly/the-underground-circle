@@ -191,18 +191,23 @@ function sanitizeUrl(raw: unknown): string {
   const host = at === -1 ? authority : authority.slice(at + 1);
   if (!host) return '';
 
+  // Split off the fragment FIRST — OAuth / Supabase implicit-flow tokens ride in
+  // the `#access_token=…&refresh_token=…` fragment, so it must be redacted too.
+  // (The previous code re-appended the fragment verbatim, or skipped it entirely
+  // when there was no `?`, leaking those session tokens into the Sources block.)
+  let frag = '';
+  const fIdx = tail.indexOf('#');
+  if (fIdx !== -1) {
+    frag = tail.slice(fIdx + 1);
+    tail = tail.slice(0, fIdx);
+  }
   const qIdx = tail.indexOf('?');
   if (qIdx !== -1) {
     const path = tail.slice(0, qIdx);
-    let query = tail.slice(qIdx + 1);
-    let frag = '';
-    const hIdx = query.indexOf('#');
-    if (hIdx !== -1) {
-      frag = query.slice(hIdx);
-      query = query.slice(0, hIdx);
-    }
-    tail = `${path}?${redactQuery(query)}${frag}`;
+    const query = tail.slice(qIdx + 1);
+    tail = `${path}?${redactQuery(query)}`;
   }
+  if (frag) tail = `${tail}#${redactQuery(frag)}`;
 
   const out = `${scheme}${host}${tail}`;
   const safe = cleanDisplay(out, MAX_REF_LEN);
