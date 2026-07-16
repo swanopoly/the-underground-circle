@@ -2674,11 +2674,15 @@ async function runLoop(args: {
           usageTotal,
         );
       }
-      const continuationCount = (resumeFrom?.continuationCount || 0) + 1;
-      // Client-continuation cap from the SHARED core (swanbotContinuationBudgetCore)
-      // so this can never drift from the client's MAX_CONTINUATIONS again. The
-      // server tool-loop cap (MAX_ITERATIONS) is a separate concern, left as-is.
-      if (nextContinuationDecision({ continuationCount }).atCap) {
+      // Client-continuation cap from the SHARED core (swanbotContinuationBudgetCore).
+      // Check the PRE-increment completed-rounds count against shouldContinue — the
+      // core's documented contract (continuationCount = rounds already COMPLETED,
+      // caps when completed >= ceiling) — so BOTH sides cap at the SAME ceiling.
+      // Using post-increment + .atCap (the old wiring) reproduced the off-by-one
+      // where a legitimate final round dead-ended. MAX_ITERATIONS stays the
+      // per-turn tool-loop budget only.
+      const completedContinuations = resumeFrom?.continuationCount || 0;
+      if (!nextContinuationDecision({ continuationCount: completedContinuations }).shouldContinue) {
         return terminalRunLoopError(
           "Too many client-side continuation rounds.",
           iter,
@@ -2686,6 +2690,7 @@ async function runLoop(args: {
           usageTotal,
         );
       }
+      const continuationCount = completedContinuations + 1; // persisted for the next resume
 
       const serverToolResults: SwanBotResumeToolResult[] = [];
       for (const use of serverUses) {
