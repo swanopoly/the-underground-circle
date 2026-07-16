@@ -97,6 +97,12 @@ import type {
   OfficeTokenTrackerCard as OfficeTokenTrackerCardModel,
 } from '../../../lib/officeOpsBoard';
 import type { AgentRun } from '../../../lib/agentRunSystem';
+import {
+  classifyRunFreshness,
+  freshnessRank,
+  type RunFreshness,
+  type RunFreshnessResult,
+} from '../../../lib/runFreshnessCore';
 import type { ClaudeUsageSummary, ClaudeUsageByModel } from '../../../lib/claudeUsage';
 import AgentActivityFeed from '../../../components/AgentActivityFeed';
 import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
@@ -271,6 +277,48 @@ function isDocumentVisible(): boolean {
   return document.visibilityState === 'visible';
 }
 
+// Shared run-liveness (runFreshnessCore): one bucket/label every surface paints
+// from a single agent_runs row, so Office's roster shows the SAME freshness as
+// Feed instead of a static agent status that can't reveal a wedged run.
+const FRESHNESS_DOT_COLORS: Record<RunFreshness, string> = {
+  live: '#22c55e',
+  recent: '#38bdf8',
+  idle: '#f59e0b',
+  stale: '#ef4444',
+  done: '#606075',
+  unknown: '#606075',
+};
+
+// updatedAtMs for classifyRunFreshness — the shared
+// updated_at||completed_at||started_at||created_at fallback (agent_runs stamps
+// updated_at, but the live-board select omits it, so completed/started/created
+// carry recency). NaN when unusable; classifyRunFreshness degrades that to a
+// null age safely.
+function runFreshnessUpdatedAtMs(run: AgentRun): number {
+  const raw = (run as { updated_at?: string }).updated_at
+    || run.completed_at || run.started_at || run.created_at;
+  return raw ? Date.parse(raw) : Number.NaN;
+}
+
+// The freshest (most-alive by freshnessRank) run among an agent's live/blocked
+// nodes, from the id→freshness index built on the run poll. Null when the agent
+// has no classified live run (the roster freshness chip then hides).
+function pickFreshestRunFreshness(
+  nodes: OfficeRunNode[] | undefined,
+  freshnessById: Map<string, RunFreshnessResult>,
+): RunFreshnessResult | null {
+  if (!nodes || nodes.length === 0 || freshnessById.size === 0) return null;
+  let best: RunFreshnessResult | null = null;
+  for (const node of nodes) {
+    const freshness = node && freshnessById.get(node.runId);
+    if (!freshness) continue;
+    if (!best || freshnessRank(freshness.freshness) < freshnessRank(best.freshness)) {
+      best = freshness;
+    }
+  }
+  return best;
+}
+
 export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady }: Props) {
   const surfaceState = useOfficeSurfaceState();
   const [selectedAgent, setSelectedAgent] = useState<OfficeAgent | null>(null);
@@ -385,6 +433,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
   // O1 (P38): per-agent 24h accountability (last outcome + counts + cost),
   // keyed by the same lowercased agent-name seam as opsRunNodesByAgent.
   const [opsAccountability, setOpsAccountability] = useState<Map<string, OfficeAgentAccountabilityModel> | null>(null);
+  // Shared run freshness (runFreshnessCore) keyed by run.id, rebuilt on every
+  // 15s reload + realtime tick so the roster paints one liveness truth (the
+  // same bucket/label Feed shows) instead of a static agent status.
+  const [opsRunFreshness, setOpsRunFreshness] = useState<Map<string, RunFreshnessResult>>(() => new Map());
   // O5 (P39): main-view bridge readiness (warn/danger strip). Shares the
   // probe→snapshot owner with the Whiteboard (officeBridgeReadinessProbe).
   const [bridgeReadinessStrip, setBridgeReadinessStrip] = useState<OfficeBridgeReadinessSnapshotModel | null>(null);
@@ -417,6 +469,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     // Reset per-circle so a circle switch can't show stale spend/runs.
     opsLiveRunsRef.current = [];
     opsUsageCacheRef.current = { fetchedAtMs: 0 };
+    setOpsRunFreshness(new Map());
 
     const rebuildTracker = async () => {
       try {
@@ -448,6 +501,19 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         opsLiveRunsRef.current = runs;
         setOpsBoard(buildOfficeBuildingBoard(runs, { nowMs: Date.now() }));
         setOpsAccountability(buildOfficeAgentAccountabilityIndex(runs, { nowMs: Date.now() }));
+        // One shared freshness read for every live/blocked run row (row 4-5):
+        // classify from the single agent_runs row so the roster paints the same
+        // bucket/label Feed does. Display-only — the board/poll are untouched.
+        const freshnessNowMs = Date.now();
+        const runFreshnessById = new Map<string, RunFreshnessResult>();
+        for (const run of runs) {
+          runFreshnessById.set(run.id, classifyRunFreshness({
+            status: run.status,
+            updatedAtMs: runFreshnessUpdatedAtMs(run),
+            nowMs: freshnessNowMs,
+          }));
+        }
+        setOpsRunFreshness(runFreshnessById);
         void rebuildTracker(); // live-burn line tracks the fresh runs
       } catch { /* dashboard extra — never break Office */ }
     };
@@ -4251,6 +4317,14 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               filteredDisplayAgents.map((agent) => {
                 const statusColor = getOfficeStatusColor(agent.status);
                 const statusLabel = getOfficeStatusLabel(agent.status);
+                // Shared run freshness for this agent's live/blocked run(s) —
+                // freshnessRank picks the most-alive one so the roster paints
+                // the same bucket/label Feed shows (reveals a wedged run a
+                // static agent status can't).
+                const runFreshness = pickFreshestRunFreshness(
+                  opsRunNodesByAgent.get(agent.name.trim().toLowerCase()),
+                  opsRunFreshness,
+                );
                 const isSelected = selectedAgent?.id === agent.id;
                 return (
                   <Pressable
@@ -4273,6 +4347,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                           ) : null}
                           <View style={[styles.mobileCardStatus, { backgroundColor: statusColor }]} />
                           <Text style={[styles.mobileCardStatusText, { color: statusColor }]}>{statusLabel}</Text>
+                          {runFreshness ? (
+                            <>
+                              <View style={[styles.mobileCardStatus, { backgroundColor: FRESHNESS_DOT_COLORS[runFreshness.freshness] }]} />
+                              <Text
+                                style={[styles.mobileCardStatusText, { color: FRESHNESS_DOT_COLORS[runFreshness.freshness] }]}
+                                numberOfLines={1}
+                              >
+                                {runFreshness.label}
+                              </Text>
+                            </>
+                          ) : null}
                         </View>
                         <Text style={styles.mobileCardRole}>{agent.role} · {PROVIDER_META[agent.providerType]?.icon || '⚡'} {agent.connectionName}</Text>
                         <Text style={styles.mobileCardModel}>{agent.model}</Text>
