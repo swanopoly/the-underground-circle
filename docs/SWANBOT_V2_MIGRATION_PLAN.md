@@ -16,7 +16,7 @@
 | **M2** Client-delegated tool protocol | v2 returns pending `clientToolCalls` for client-only tools; client executes via bridge + posts `{ continuationRunId, toolResults }` back to the same edge function; desktop tools registered in v2 as `clientOnly: true` | Shipped 2026-04-23; hardened with continuation validation, retry, mixed-batch handling, and stale-resume rejection |
 | **M3** Full OpenSwan tool parity | Port the OpenSwan runtime-facing tool families into v2's `TOOLS: ToolDef[]` (Supabase-backed tools direct; client-delegated via M2 protocol) | Shipped for the current 73-tool source catalog; source-derived readiness smoke guards drift |
 | **M4** Flip the default | Default `uc_swanbot_v2_enabled = true`; v1 becomes opt-out for regression escapes | Client default flipped 2026-07-07 with a session circuit breaker (see status log); telemetry sign-off still gates calling M4 done |
-| **M5** Delete v1 | Retire `swanbot-ai` edge function + `BLACKSWAN_TOOLS` array | After 30 days of M4 with no rollbacks |
+| **M5** Retire v1 tool loop | Retire the v1 **tool loop** (`BLACKSWAN_TOOLS` + `executeToolUseLoop`). **Do NOT delete the edge function** — its provider **relay** leg is still load-bearing (see M5). | After 30 days of M4 with no rollbacks |
 
 ---
 
@@ -170,12 +170,37 @@ Pre-M4 readiness:
 
 ---
 
-## M5 — Delete v1
+## M5 — Retire the v1 tool loop (NOT the edge function)
+
+> **⚠️ Corrected 2026-07-15 (architecture review).** The original M5 said "delete the
+> `swanbot-ai/` directory." That is **production-breaking** and must not be done as
+> written. `swanbot-ai` plays **two** roles, and only one is superseded by v2:
+>
+> 1. **Legacy tool loop** — `BLACKSWAN_TOOLS` + `executeToolUseLoop`. *This* is what v2
+>    replaces, and it is safe to retire once the flip is durable.
+> 2. **Provider relay** — the leg that actually calls Anthropic / marketplace / BYOK /
+>    the tool-less relay / the OR-key path and returns model output. This is **still
+>    live** and depended on by, at minimum: `openswanSessionRuntime.ts` (:742, :1017 —
+>    the OpenSwan session transport), `agentInvocation.ts` (:151 — BlackSwan invoke),
+>    `computerTaskRuntime.ts` (:675 — tool-less relay leg), `subagentRegistry.ts` (:468),
+>    `swanbot.ts` (:2381/:2444/:4277/:4707 relay paths), `BlockBriefEditor.tsx` (:197),
+>    **and v2 itself** (`model_unsupported_on_v2` at `swanbot-v2-ai/index.ts:2919` routes
+>    *back* through `swanbot-ai`/`llm-proxy`). Deleting the directory breaks all of these.
+
+**Safe M5 (tool loop only):**
 
 - 30 days after M4 with no rollback.
-- Delete `supabase/functions/swanbot-ai/` directory.
-- Strip v1 import paths from `swanbot.ts`.
-- Update `AGENTS_ROADMAP.md` to mark the split retired.
+- Remove the **tool-loop** code path from `swanbot-ai` (`BLACKSWAN_TOOLS`, the
+  `executeToolUseLoop` branch) — the relay leg stays.
+- Leave every `supabase.functions.invoke('swanbot-ai', …)` relay caller working.
+- Update `AGENTS_ROADMAP.md` to mark the *tool-loop split* retired (not the function).
+
+**Prerequisite before the edge function could ever be deleted (separate, later work):**
+
+- Re-home the provider relay (BlackSwan/marketplace/BYOK/tool-less) onto `llm-proxy`
+  or a dedicated relay function, migrate all 8+ call sites above, and remove v2's own
+  `model_unsupported_on_v2 → swanbot-ai` fallback. Only after that is `swanbot-ai/`
+  genuinely orphaned. Track this as its own milestone; do not fold it into M5.
 
 ---
 
@@ -196,7 +221,7 @@ If v2 goes sideways at any phase:
 | M2 | Client-only desktop/tool calls succeed under v2 with flag on · pending `clientToolCalls` + same-edge continuation round-trip works · invalid/duplicate/missing tool results are rejected · rollback flag works |
 | M3 | Source-derived v2 catalog parity passes · smoke tests cover representative read/write/client-delegated tool families · `agent_runs.metadata` captures the full trace |
 | M4 | `swanbotOpenSwanReadiness` returns ready · default flipped · v1/v2 telemetry shows v2 ≥ v1 on completion rate · no regressions reported |
-| M5 | `swanbot-ai/` directory deleted · no imports remain · roadmap doc updated |
+| M5 | v1 **tool-loop** path removed (`BLACKSWAN_TOOLS` / `executeToolUseLoop`) · **provider relay leg kept + all invoke callers green** · roadmap doc updated. (Edge-function deletion is explicitly OUT of M5 — it needs the relay re-homed first.) |
 
 ---
 
