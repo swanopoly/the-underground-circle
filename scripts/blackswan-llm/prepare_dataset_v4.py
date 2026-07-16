@@ -19,6 +19,17 @@ MULTITURN_FILE = DATA_DIR / "blackswan_multiturn.jsonl"
 PUBLIC_FILE = DATA_DIR / "public_curated_v4.jsonl"
 APP_FILE = DATA_DIR / "app_data.jsonl"
 TOOL_TRACES_FILE = DATA_DIR / "tool_traces_sharegpt.jsonl"
+# 2026-07-16: hand-curated, production-shaped examples (long, realistic
+# multi-section system prompts paired with a correctly-terminating answer)
+# generated after live testing found BlackSwan-v5 breaks down on prompts
+# this complex — training data previously only ever used short
+# single-paragraph system prompts. Checked into git (unlike training_data/,
+# which is gitignored and rebuilt fresh each cycle) since these are
+# deliberately-authored, reusable examples, not raw per-cycle exports. Each
+# file's `metadata.source` is a non-empty, non-"tool_traces" string, so
+# is_app_example() already treats them as app examples and applies the same
+# APP_OVERSAMPLE factor below — no special-casing needed beyond loading them.
+PRODUCTION_SHAPED_DIR = Path(__file__).parent / "training_data_generated"
 TRAIN_FILE = DATA_DIR / "train_v4.jsonl"
 EVAL_FILE = DATA_DIR / "eval_v4.jsonl"
 STATS_FILE = DATA_DIR / "stats_v4.json"
@@ -204,6 +215,18 @@ def oversample_train_tool_traces(train):
     }
 
 
+def load_production_shaped_examples():
+    """Load every hand-curated production_shaped_*.jsonl file from
+    training_data_generated/ (checked into git; see PRODUCTION_SHAPED_DIR's
+    comment above). Missing directory/files are fine — returns []."""
+    if not PRODUCTION_SHAPED_DIR.exists():
+        return []
+    examples = []
+    for path in sorted(PRODUCTION_SHAPED_DIR.glob("production_shaped_*.jsonl")):
+        examples.extend(load_jsonl(path))
+    return examples
+
+
 def main():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     stats = {"sources": {}, "quality_filters": Counter(), "dedup": {}, "final": {}}
@@ -212,12 +235,12 @@ def main():
     synthetic = load_jsonl(SYNTHETIC_FILE)
     multiturn = load_jsonl(MULTITURN_FILE)
     public = load_jsonl(PUBLIC_FILE)
-    app = load_jsonl(APP_FILE)
+    app = load_jsonl(APP_FILE) + load_production_shaped_examples()
     tool_traces = load_jsonl(TOOL_TRACES_FILE)
     print(
         f"Loaded: {len(real)} real, {len(synthetic)} synthetic, "
         f"{len(multiturn)} multiturn, {len(public)} public_v4, "
-        f"{len(app)} app (train oversample factor {APP_OVERSAMPLE}x after dedup), "
+        f"{len(app)} app incl. production-shaped (train oversample factor {APP_OVERSAMPLE}x after dedup), "
         f"{len(tool_traces)} tool_traces (train oversample factor {TOOL_TRACE_OVERSAMPLE}x after dedup)"
     )
     stats["sources"] = {
