@@ -266,7 +266,9 @@ export async function runSwanbotV2Batch(
     // 2.5 provider — the swanbot-ai relay, one model turn per round, non-
     // streaming. Edge-fail parity: on a terminal invoke failure END the turn
     // with partial text — do NOT throw, or already-executed tool work is lost
-    // (openswanSessionRuntime.ts:808-818).
+    // (openswanSessionRuntime.ts:808-818) — BUT record the failure (relayFailed)
+    // so a transport blip is not miswritten as a clean completion below.
+    let relayFailed = false;
     const provider: AgentProvider = {
       turn: async ({ messages, tools: turnTools }) => {
         let data: unknown = null;
@@ -291,11 +293,10 @@ export async function runSwanbotV2Batch(
           error = e;
         }
         if (error || !data) {
-          const fallbackText =
-            data && typeof data === 'object' && typeof (data as { response?: unknown }).response === 'string'
-              ? (data as { response: string }).response
-              : 'Tool-use call failed.';
-          return { stop_reason: 'end_turn', content: [{ type: 'text', text: String(fallbackText) }] };
+          // Record the transport failure (handled after runAgent) but END the turn
+          // gracefully so any tool work already executed this round is not lost.
+          relayFailed = true;
+          return { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Tool-use call failed.' }] };
         }
         return parseSwanbotToolTurnData(data).turn;
       },
@@ -316,6 +317,32 @@ export async function runSwanbotV2Batch(
         ? { toolApprovalGate: createLegacyApprovalGateAdapter(extra.toolApprovalGate) }
         : {}),
     });
+
+    // A swanbot-ai relay transport failure must NOT read as a clean completion —
+    // that would inflate the readiness completion rate, fool the transport breaker
+    // into 'success', and deny the caller's v1 fallback. Mirror the edge /
+    // openswanSessionRuntime edgeFailed handling: write the error terminal row
+    // (final_stop_reason='error', status='failed', cohort tag kept) and return null
+    // so the orchestrator counts a transport_failure and falls back to v1.
+    if (relayFailed) {
+      if (handle) {
+        try {
+          await supabase
+            .from('agent_runs')
+            .update(
+              buildV2BatchErrorRow({
+                targetAgentName,
+                errorMessage: 'swanbot-ai relay failure',
+                completedAt: new Date().toISOString(),
+              }),
+            )
+            .eq('id', handle.run.id);
+        } catch (e) {
+          console.warn('[swanbotV2BatchRuntime] relay-failure error row write failed:', e);
+        }
+      }
+      return { text: null };
+    }
 
     // 2.7 result — adapter maps AgentRunResult → the v2 response contract.
     // DE-RISK #3: aggregate usage from the collected turn_end events and pass it
