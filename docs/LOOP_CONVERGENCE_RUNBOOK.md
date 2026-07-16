@@ -82,6 +82,20 @@ runtime obligations:
    initialMessagesLength: initialMessages.length })` so the reconstructed toolCalls trace
    counts only THIS run's tool_use blocks, not historical ones carried in seeded history.
 
+5. **HIGH — relay-failure double-execution (fix in the runtime BEFORE flip; caught by the
+   2026-07-16 core-QA review).** On a relay transport failure that occurs AFTER a mutating
+   tool already ran in an earlier round, `runSwanbotV2Batch` returns `{ text: null }`, which
+   the orchestrator classifies as `transport_failure` and re-runs the whole prompt via v1 —
+   re-executing the already-committed side effect (e.g. a DUPLICATE email/commit). The sibling
+   `callSwanBotV2` (swanbot.ts) avoids this: once client tools were attempted it returns a
+   stop-message (a completed answer) instead of null, suppressing the v1 fallback. The batch
+   runtime executes ALL tools client-side, so it is the MOST exposed path. Fix before flip:
+   track `anyToolExecuted` (set on the `tool_call_start` event); in the `relayFailed` branch,
+   if `anyToolExecuted` return `{ text: resolveChatStopMessage('continuation_failed').message }`
+   instead of null. First-round failures (no tools yet) keep the harmless v1 fallback. (NOT yet
+   applied — the runtime file was being edited by another session; documented to avoid a merge
+   conflict.)
+
 The adapter's INPUT directions (`toAgentCoreMessages` / `toAgentCoreToolDefs`) were
 reviewed as **correct** — the runtime can build on them as-is.
 
