@@ -1747,7 +1747,15 @@ export function useKanbanData(circleId: string): KanbanData {
             title: String((pub.proofRow as any).title || `Agent run: ${task.title}`),
             detail: pub.proofRow,
           });
-          await logActivity({ circle_id: task.circle_id, agent_name: targetAgentName, ...(pub.activityRow as any) });
+          // The publisher's activityRow defaults to 'task_completed' on any
+          // non-failed run, but a plan-mode / partial run finished WITHOUT
+          // completing the task — only emit the tallied completion activity when
+          // the task actually completed (or the run failed). The durable
+          // proof_of_work row above still rides the Feed for every run's visibility.
+          const taskActuallyCompleted = completionGatePassed || parsed.output.mark_complete === true;
+          if (taskActuallyCompleted || (pub.activityRow as any).activity_type === 'task_failed') {
+            await logActivity({ circle_id: task.circle_id, agent_name: targetAgentName, ...(pub.activityRow as any) });
+          }
         } catch (e) {
           console.warn('[runAgentOnTask] proof-of-work publish failed (non-fatal):', e);
         }
