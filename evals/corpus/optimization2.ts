@@ -274,7 +274,7 @@ export const CASES: CoreGoldenCase[] = [
     id: 'optimization2-v2adapter-result-reconstructs-toolcalls-and-neutral-usage',
     suite: 'v2-to-agentcore-adapter',
     describe:
-      'fromAgentCoreResult maps text through, reconstructs the toolCalls trace from the transcript (ok from the matching tool_result), and yields a neutral zero-usage object + normalised stopReason',
+      'fromAgentCoreResult maps text through, reconstructs the toolCalls trace from the transcript (ok from the matching tool_result), ignores any phantom run-result usage (empty {} — usage comes from opts), and normalises stopReason',
     run: () => {
       const res = fromAgentCoreResult({
         text: 'done',
@@ -286,7 +286,7 @@ export const CASES: CoreGoldenCase[] = [
       });
       return (
         j(res) ===
-        '{"text":"done","toolCalls":[{"toolName":"search","toolUseId":"a","ok":true}],"usage":{"input_tokens":0,"output_tokens":0,"cached_tokens":0},"stopReason":"end_turn"}'
+        '{"text":"done","toolCalls":[{"toolName":"search","toolUseId":"a","ok":true}],"usage":{},"stopReason":"end_turn"}'
       );
     },
   },
@@ -304,10 +304,10 @@ export const CASES: CoreGoldenCase[] = [
   {
     id: 'optimization2-v2adapter-result-hostile-neutral-contract',
     suite: 'v2-to-agentcore-adapter',
-    describe: 'a null run result yields the full neutral v2 contract (empty text/toolCalls, zero usage, stopReason:error) and never throws',
+    describe: 'a null run result yields the full neutral v2 contract (empty text/toolCalls, empty usage {}, stopReason:error) and never throws',
     run: () =>
       j(fromAgentCoreResult(null)) ===
-      '{"text":"","toolCalls":[],"usage":{"input_tokens":0,"output_tokens":0,"cached_tokens":0},"stopReason":"error"}',
+      '{"text":"","toolCalls":[],"usage":{},"stopReason":"error"}',
   },
 
   // ══ suite: stream-first-chunk (streamFirstChunkCore) ═════════════════════════

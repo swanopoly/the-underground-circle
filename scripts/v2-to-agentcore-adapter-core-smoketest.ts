@@ -278,7 +278,15 @@ async function main(): Promise<void> {
     assertEq(tc0.ok, true, 'toolCalls[0].ok from is_error:false');
     const tc1 = v2.toolCalls[1] as { ok: boolean };
     assertEq(tc1.ok, false, 'toolCalls[1].ok from is_error:true');
-    assertEq(JSON.stringify(v2.usage), '{"input_tokens":10,"output_tokens":5,"cached_tokens":3}', 'usage passthrough (sanitised)');
+    // r.usage is IGNORED — AgentRunResult carries no usage; usage is emitted per
+    // turn via turn_end events. The runtime aggregates a UsageBreakdown and passes
+    // it as opts.usage; the adapter must NOT forward a phantom r.usage.
+    assertEq(JSON.stringify(v2.usage), '{}', 'r.usage IGNORED (usage comes from opts, not the run result)');
+    const v2WithUsage = fromAgentCoreResult(runResult, { usage: { uncachedIn: 10, output: 5, cacheRead: 3 } });
+    assertEq(JSON.stringify(v2WithUsage.usage), '{"uncachedIn":10,"output":5,"cacheRead":3}', 'opts.usage passthrough (sanitised)');
+    // initialMessagesLength offset: skip historical tool_use in the prefix.
+    const v2Offset = fromAgentCoreResult(runResult, { initialMessagesLength: 2 });
+    assertEq(v2Offset.toolCalls.length, 0, 'initialMessagesLength offset excludes historical tool_use blocks');
   }
 
   // ── 10. fromAgentCoreResult — abort/cap/absent-usage neutrals ───────────────
@@ -290,7 +298,7 @@ async function main(): Promise<void> {
     const capped = fromAgentCoreResult({ text: '', stopReason: 'tool_use', hitMaxIterations: true, messages: [] });
     assertEq(capped.stopReason, 'max_tokens', 'cap-exhausted → max_tokens');
     const noUsage = fromAgentCoreResult({ text: 'x', stopReason: 'end_turn', messages: [] });
-    assertEq(JSON.stringify(noUsage.usage), '{"input_tokens":0,"output_tokens":0,"cached_tokens":0}', 'absent usage → neutral zero object');
+    assertEq(JSON.stringify(noUsage.usage), '{}', 'absent usage → empty object (no misleading zeros)');
     assertEq(noUsage.toolCalls.length, 0, 'no tool_use → empty toolCalls');
     // Unresolved tool_use (no matching result) → ok:true (rare incomplete case).
     const unresolved = fromAgentCoreResult({ text: '', stopReason: 'end_turn', messages: [

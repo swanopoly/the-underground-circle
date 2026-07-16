@@ -362,7 +362,6 @@ export type V2ResultContract = {
   stopReason: string;
 };
 
-const NEUTRAL_USAGE: Record<string, unknown> = { input_tokens: 0, output_tokens: 0, cached_tokens: 0 };
 
 /**
  * Normalise a raw model stop_reason (+ the run's cap/abort flags) into the v2
@@ -392,8 +391,13 @@ export function normalizeV2StopReason(args: {
  * has no `toolCalls` field, so we walk the transcript: every tool_use block is
  * one call; `ok` is read from the matching tool_result's `is_error`. Bounded.
  */
-function reconstructToolCalls(messages: unknown): unknown[] {
+function reconstructToolCalls(messages: unknown, fromIndex = 0): unknown[] {
   if (!Array.isArray(messages)) return [];
+  // Count tool_use only from THIS run's messages (skip the historical
+  // initialMessages prefix) — otherwise prior tool_use blocks carried in the
+  // passed-in history inflate the trace vs v2's per-run count. The error map is
+  // still built from ALL messages so a run's use resolves against its own result.
+  const start = typeof fromIndex === 'number' && fromIndex > 0 ? Math.floor(fromIndex) : 0;
   const errById = new Map<string, boolean>();
   for (const msg of messages) {
     if (!isPlainObject(msg) || !Array.isArray(msg.content)) continue;
@@ -404,7 +408,8 @@ function reconstructToolCalls(messages: unknown): unknown[] {
     }
   }
   const out: unknown[] = [];
-  for (const msg of messages) {
+  for (let i = start; i < messages.length; i += 1) {
+    const msg = messages[i];
     if (!isPlainObject(msg) || !Array.isArray(msg.content)) continue;
     for (const block of msg.content) {
       if (!isPlainObject(block) || block.type !== 'tool_use') continue;
@@ -428,14 +433,23 @@ function reconstructToolCalls(messages: unknown): unknown[] {
  * aggregated from turn events — so absent usage yields a neutral zero object);
  * `stopReason` is the normalised v2 vocabulary. Always the full contract shape.
  */
-export function fromAgentCoreResult(runResult: unknown): V2ResultContract {
+export function fromAgentCoreResult(
+  runResult: unknown,
+  opts?: { usage?: unknown; initialMessagesLength?: unknown },
+): V2ResultContract {
   try {
     const r = isPlainObject(runResult) ? runResult : {};
+    const o = isPlainObject(opts) ? opts : {};
     const text = clampString(toStringSafe(r.text), V2_TO_AGENTCORE_LIMITS.maxStringChars);
-    const toolCalls = reconstructToolCalls(r.messages);
-    const usage = isPlainObject(r.usage)
-      ? sanitizeObject(r.usage, NEUTRAL_USAGE)
-      : { ...NEUTRAL_USAGE };
+    const fromIdx = typeof o.initialMessagesLength === 'number' ? o.initialMessagesLength : 0;
+    const toolCalls = reconstructToolCalls(r.messages, fromIdx);
+    // Usage is NOT on AgentRunResult — it is emitted per-turn via `turn_end`
+    // events. The RUNTIME must aggregate a UsageBreakdown (see
+    // v2AgentEventActivityCore.accumulateUsageFromEvents) and pass it as
+    // opts.usage; trusting a phantom r.usage would ship zero/wrong-shape cost
+    // telemetry for every converged run. Absent → an empty object (clearly "no
+    // usage supplied"), never the misleading all-zero DB-shaped object.
+    const usage = isPlainObject(o.usage) ? sanitizeObject(o.usage, {}) : {};
     const stopReason = normalizeV2StopReason({
       stopReason: r.stopReason,
       hitMaxIterations: r.hitMaxIterations,
@@ -443,6 +457,6 @@ export function fromAgentCoreResult(runResult: unknown): V2ResultContract {
     });
     return { text, toolCalls, usage, stopReason };
   } catch {
-    return { text: '', toolCalls: [], usage: { ...NEUTRAL_USAGE }, stopReason: 'error' };
+    return { text: '', toolCalls: [], usage: {}, stopReason: 'error' };
   }
 }
