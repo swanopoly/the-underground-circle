@@ -1,0 +1,2827 @@
+[
+  {
+    "caseId": "approval-delete-floor-beats-auto",
+    "suite": "approval",
+    "passed": true
+  },
+  {
+    "caseId": "approval-blocked-wins-over-everything",
+    "suite": "approval",
+    "passed": true
+  },
+  {
+    "caseId": "approval-tool-auto-clean-auto-approves",
+    "suite": "approval",
+    "passed": true
+  },
+  {
+    "caseId": "approval-tool-auto-mutating-fails-closed",
+    "suite": "approval",
+    "passed": true
+  },
+  {
+    "caseId": "approval-user-category-auto-approves",
+    "suite": "approval",
+    "passed": true
+  },
+  {
+    "caseId": "approval-default-requires-approval",
+    "suite": "approval",
+    "passed": true
+  },
+  {
+    "caseId": "approval-pay-marker-category-floors",
+    "suite": "approval",
+    "passed": true
+  },
+  {
+    "caseId": "approval-hostile-cyclic-total",
+    "suite": "approval",
+    "passed": true
+  },
+  {
+    "caseId": "command-context-max-parses-args",
+    "suite": "command",
+    "passed": true
+  },
+  {
+    "caseId": "command-longest-token-wins",
+    "suite": "command",
+    "passed": true
+  },
+  {
+    "caseId": "command-exact-match-empty-args",
+    "suite": "command",
+    "passed": true
+  },
+  {
+    "caseId": "command-alias-resolves-to-owner",
+    "suite": "command",
+    "passed": true
+  },
+  {
+    "caseId": "command-non-slash-no-match",
+    "suite": "command",
+    "passed": true
+  },
+  {
+    "caseId": "command-dispatch-table-maps-alias",
+    "suite": "command",
+    "passed": true
+  },
+  {
+    "caseId": "command-hostile-registry-total",
+    "suite": "command",
+    "passed": true
+  },
+  {
+    "caseId": "cache-split-reproduces-halves",
+    "suite": "cache_split",
+    "passed": true
+  },
+  {
+    "caseId": "cache-split-no-marker-all-frozen",
+    "suite": "cache_split",
+    "passed": true
+  },
+  {
+    "caseId": "cache-split-non-string-neutral",
+    "suite": "cache_split",
+    "passed": true
+  },
+  {
+    "caseId": "cache-blocks-cache-control-frozen-only",
+    "suite": "cache_split",
+    "passed": true
+  },
+  {
+    "caseId": "cache-blocks-empty-tail-single-block",
+    "suite": "cache_split",
+    "passed": true
+  },
+  {
+    "caseId": "cache-volatile-detects-current-context",
+    "suite": "cache_split",
+    "passed": true
+  },
+  {
+    "caseId": "cache-volatile-clean-prefix-empty",
+    "suite": "cache_split",
+    "passed": true
+  },
+  {
+    "caseId": "lane-openswan_v2-agent-core-loop",
+    "suite": "lane",
+    "passed": true
+  },
+  {
+    "caseId": "lane-batch-edge-v2-loop",
+    "suite": "lane",
+    "passed": true
+  },
+  {
+    "caseId": "lane-v1-relay-legacy-loop",
+    "suite": "lane",
+    "passed": true
+  },
+  {
+    "caseId": "lane-stream-agent-core-loop",
+    "suite": "lane",
+    "passed": true
+  },
+  {
+    "caseId": "lane-batch-v1-fallback-not-phantom-edge-v2",
+    "suite": "lane",
+    "passed": true
+  },
+  {
+    "caseId": "lane-alias-automation-plan-folds-to-batch",
+    "suite": "lane",
+    "passed": true
+  },
+  {
+    "caseId": "lane-unrecognized-token-unknown",
+    "suite": "lane",
+    "passed": true
+  },
+  {
+    "caseId": "memory-reuse-suppresses-double-retrieve",
+    "suite": "memory",
+    "passed": true
+  },
+  {
+    "caseId": "memory-trivial-loads-nothing",
+    "suite": "memory",
+    "passed": true
+  },
+  {
+    "caseId": "memory-complex-standalone-runs-all-once",
+    "suite": "memory",
+    "passed": true
+  },
+  {
+    "caseId": "memory-lean-drops-wisdom",
+    "suite": "memory",
+    "passed": true
+  },
+  {
+    "caseId": "memory-max-floors-to-complex",
+    "suite": "memory",
+    "passed": true
+  },
+  {
+    "caseId": "memory-simple-no-wisdom",
+    "suite": "memory",
+    "passed": true
+  },
+  {
+    "caseId": "memory-no-query-skips-retrieval",
+    "suite": "memory",
+    "passed": true
+  },
+  {
+    "caseId": "checkpoint-build-harvests-tool-ids-from-snapshot",
+    "suite": "checkpoint",
+    "passed": true
+  },
+  {
+    "caseId": "checkpoint-build-resume-roundtrip-skips-completed",
+    "suite": "checkpoint",
+    "passed": true
+  },
+  {
+    "caseId": "checkpoint-resume-step-zero-not-resumable",
+    "suite": "checkpoint",
+    "passed": true
+  },
+  {
+    "caseId": "checkpoint-resume-empty-snapshot-not-resumable",
+    "suite": "checkpoint",
+    "passed": true
+  },
+  {
+    "caseId": "checkpoint-resume-missing-run-id-not-resumable",
+    "suite": "checkpoint",
+    "passed": true
+  },
+  {
+    "caseId": "checkpoint-stale-old-checkpoint",
+    "suite": "checkpoint",
+    "passed": true
+  },
+  {
+    "caseId": "checkpoint-fresh-same-instant",
+    "suite": "checkpoint",
+    "passed": true
+  },
+  {
+    "caseId": "checkpoint-hostile-cyclic-messages-total",
+    "suite": "checkpoint",
+    "passed": true
+  },
+  {
+    "caseId": "otel-invoke-agent-root-has-no-parent",
+    "suite": "otel",
+    "passed": true
+  },
+  {
+    "caseId": "otel-chat-maps-usage-to-semconv-keys",
+    "suite": "otel",
+    "passed": true
+  },
+  {
+    "caseId": "otel-tool-failure-stamps-error-type",
+    "suite": "otel",
+    "passed": true
+  },
+  {
+    "caseId": "otel-tool-success-no-error-type",
+    "suite": "otel",
+    "passed": true
+  },
+  {
+    "caseId": "otel-derive-system-from-model",
+    "suite": "otel",
+    "passed": true
+  },
+  {
+    "caseId": "otel-span-duration",
+    "suite": "otel",
+    "passed": true
+  },
+  {
+    "caseId": "metadata-serialize-hydrate-roundtrip",
+    "suite": "message_metadata",
+    "passed": true
+  },
+  {
+    "caseId": "metadata-oversized-bounded-under-ceiling",
+    "suite": "message_metadata",
+    "passed": true
+  },
+  {
+    "caseId": "metadata-cyclic-safe-marker",
+    "suite": "message_metadata",
+    "passed": true
+  },
+  {
+    "caseId": "metadata-non-object-returns-empty",
+    "suite": "message_metadata",
+    "passed": true
+  },
+  {
+    "caseId": "metadata-hydrate-legacy-snake-case",
+    "suite": "message_metadata",
+    "passed": true
+  },
+  {
+    "caseId": "metadata-secret-masked",
+    "suite": "message_metadata",
+    "passed": true
+  },
+  {
+    "caseId": "summary-oversized-keeps-head-tail-and-marks",
+    "suite": "tool_result_summary",
+    "passed": true
+  },
+  {
+    "caseId": "summary-under-threshold-passthrough",
+    "suite": "tool_result_summary",
+    "passed": true
+  },
+  {
+    "caseId": "summary-non-string-neutral",
+    "suite": "tool_result_summary",
+    "passed": true
+  },
+  {
+    "caseId": "gate-edit-marks-dirty",
+    "suite": "run_and_fix_gate",
+    "passed": true
+  },
+  {
+    "caseId": "gate-passing-verification-cleans",
+    "suite": "run_and_fix_gate",
+    "passed": true
+  },
+  {
+    "caseId": "gate-mutation-after-verify-stays-dirty",
+    "suite": "run_and_fix_gate",
+    "passed": true
+  },
+  {
+    "caseId": "gate-nudges-on-verification-failure",
+    "suite": "run_and_fix_gate",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-frecency-recent-frequent-ranks-above-old-rare",
+    "suite": "command-frecency",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-frecency-empty-commands-empty",
+    "suite": "command-frecency",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-frecency-no-usage-preserves-order",
+    "suite": "command-frecency",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-frecency-longest-prefix-credit",
+    "suite": "command-frecency",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-frecency-score-half-life-decay",
+    "suite": "command-frecency",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-frecency-record-bumps-count-newmap",
+    "suite": "command-frecency",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-frecency-normalize-key-lowercases-and-guards-nonslash",
+    "suite": "command-frecency",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-approval-run-row-normalized-record",
+    "suite": "approval-audit",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-approval-secret-redacted-in-title",
+    "suite": "approval-audit",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-approval-actor-token-redacted",
+    "suite": "approval-audit",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-approval-summary-counts-decision-axis",
+    "suite": "approval-audit",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-approval-format-ledger-row",
+    "suite": "approval-audit",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-approval-merge-newest-first",
+    "suite": "approval-audit",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-approval-idless-and-junk-rows-dropped",
+    "suite": "approval-audit",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-lane-v2-served-terminal-is-v2",
+    "suite": "swanbot-lane-telemetry",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-lane-fell-back-to-v1-is-v1",
+    "suite": "swanbot-lane-telemetry",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-lane-clean-v1-relay-is-v1",
+    "suite": "swanbot-lane-telemetry",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-lane-blocked-is-none",
+    "suite": "swanbot-lane-telemetry",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-lane-no-auth-is-none",
+    "suite": "swanbot-lane-telemetry",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-lane-threw-precedes-response",
+    "suite": "swanbot-lane-telemetry",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-lane-hostile-null-input-total-none",
+    "suite": "swanbot-lane-telemetry",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-audit-lane-unknown-tag-is-not-guessed",
+    "suite": "swanbot-lane-telemetry",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-skill-induction-recurring-success-inducts-one",
+    "suite": "skill-induction",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-skill-induction-id-counters-cluster-runs",
+    "suite": "skill-induction",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-skill-induction-single-tool-not-a-procedure",
+    "suite": "skill-induction",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-skill-induction-below-min-occurrences-suppressed",
+    "suite": "skill-induction",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-skill-induction-low-success-ratio-suppressed",
+    "suite": "skill-induction",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-skill-induction-draft-is-well-formed-skill-md",
+    "suite": "skill-induction",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-skill-induction-hostile-total",
+    "suite": "skill-induction",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-task-pr-linkage-pr-url-links-canonical",
+    "suite": "task-pr-linkage",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-task-pr-linkage-prose-pr-links-number-only",
+    "suite": "task-pr-linkage",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-task-pr-linkage-no-reference-unlinked",
+    "suite": "task-pr-linkage",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-task-pr-linkage-spoofed-host-rejected",
+    "suite": "task-pr-linkage",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-task-pr-linkage-git-run-commit-linked",
+    "suite": "task-pr-linkage",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-task-pr-linkage-label-renders-typed-link",
+    "suite": "task-pr-linkage",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-task-pr-linkage-hostile-total",
+    "suite": "task-pr-linkage",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-circle-memory-digest-orders-recent-first-fenced",
+    "suite": "circle-memory-digest",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-circle-memory-digest-empty-set-empty-string",
+    "suite": "circle-memory-digest",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-circle-memory-digest-select-orders-by-recency",
+    "suite": "circle-memory-digest",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-circle-memory-digest-tiny-budget-concentrates",
+    "suite": "circle-memory-digest",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-circle-memory-digest-zero-budget-empty",
+    "suite": "circle-memory-digest",
+    "passed": true
+  },
+  {
+    "caseId": "accountability-links-circle-memory-digest-hostile-total",
+    "suite": "circle-memory-digest",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-age-fresh-under-5min",
+    "suite": "approval-preview",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-age-boundary-fresh-to-stale-at-5min",
+    "suite": "approval-preview",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-age-stale-mid-window",
+    "suite": "approval-preview",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-age-boundary-stale-to-expired-at-30min",
+    "suite": "approval-preview",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-age-nonnumeric-fails-closed-expired",
+    "suite": "approval-preview",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-age-negative-clock-skew-fresh",
+    "suite": "approval-preview",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-risk-shell-destructive-vs-write",
+    "suite": "approval-preview",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-risk-name-and-send-mapping",
+    "suite": "approval-preview",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-preflight-long-exe-name-still-dangerous",
+    "suite": "attachment-preflight",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-preflight-safe-png-allowed",
+    "suite": "attachment-preflight",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-preflight-short-exe-dangerous",
+    "suite": "attachment-preflight",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-preflight-dangerous-mime-backstop",
+    "suite": "attachment-preflight",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-preflight-oversize-human-size-reason",
+    "suite": "attachment-preflight",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-preflight-empty-and-nonarray-neutral",
+    "suite": "attachment-preflight",
+    "passed": true
+  },
+  {
+    "caseId": "approval-attach-preflight-mixed-batch-partial-accept",
+    "suite": "attachment-preflight",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-clarify-delete-them-asks-destructive",
+    "suite": "chat-clarify-gate",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-clarify-delete-them-thread-context-proceeds",
+    "suite": "chat-clarify-gate",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-clarify-attachment-proceeds",
+    "suite": "chat-clarify-gate",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-clarify-noninteractive-mode-proceeds",
+    "suite": "chat-clarify-gate",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-clarify-specific-target-proceeds",
+    "suite": "chat-clarify-gate",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-clarify-deploy-bare-asks-env",
+    "suite": "chat-clarify-gate",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-clarify-build-bare-asks-subject",
+    "suite": "chat-clarify-gate",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-clarify-update-the-post-asks-edit",
+    "suite": "chat-clarify-gate",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-clarify-question-proceeds",
+    "suite": "chat-clarify-gate",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-clarify-destructive-phrase-helper",
+    "suite": "chat-clarify-gate",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-recovery-network-transient-autoretry",
+    "suite": "failure-recovery-copy",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-recovery-autoretry-exhausted-manual",
+    "suite": "failure-recovery-copy",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-recovery-bridge-offline-not-transient",
+    "suite": "failure-recovery-copy",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-recovery-model-config-not-retryable",
+    "suite": "failure-recovery-copy",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-recovery-secret-never-echoed",
+    "suite": "failure-recovery-copy",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-recovery-redact-bearer-masks",
+    "suite": "failure-recovery-copy",
+    "passed": true
+  },
+  {
+    "caseId": "chat-accuracy-recovery-classify-first-match",
+    "suite": "failure-recovery-copy",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-turn-cache-failure-copy-not-cached",
+    "suite": "turn-cache-policy",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-turn-cache-success-cached",
+    "suite": "turn-cache-policy",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-turn-cache-empty-and-nullish-not-cached",
+    "suite": "turn-cache-policy",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-turn-cache-structured-flags-are-failures",
+    "suite": "turn-cache-policy",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-turn-cache-structured-response-text-classified-both-ways",
+    "suite": "turn-cache-policy",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-turn-cache-long-prose-mentioning-failed-still-cached",
+    "suite": "turn-cache-policy",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-batch-all-reads-one-parallel-group",
+    "suite": "client-tool-batch",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-batch-write-never-merges-serial-singletons",
+    "suite": "client-tool-batch",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-batch-leading-reads-coalesce-write-splits",
+    "suite": "client-tool-batch",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-batch-unknown-tool-fail-closed-singleton",
+    "suite": "client-tool-batch",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-batch-readonly-membership-fail-closed",
+    "suite": "client-tool-batch",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-batch-degenerate-input-neutral",
+    "suite": "client-tool-batch",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-receipt-shell-pass",
+    "suite": "user-action-receipt",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-receipt-shell-fail-carries-exit-code",
+    "suite": "user-action-receipt",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-receipt-edit-file-pluralizes-changes",
+    "suite": "user-action-receipt",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-receipt-gmail-to-and-subject",
+    "suite": "user-action-receipt",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-receipt-create-noun-quoted-name",
+    "suite": "user-action-receipt",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-receipt-failure-couldnt-verb-reason",
+    "suite": "user-action-receipt",
+    "passed": true
+  },
+  {
+    "caseId": "chat-flow-receipt-summarize-and-list",
+    "suite": "user-action-receipt",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-todo-mixed-preserves-order-and-status",
+    "suite": "agent-todo",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-todo-single-in-progress-demotes-rest",
+    "suite": "agent-todo",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-todo-duplicate-content-first-kept",
+    "suite": "agent-todo",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-todo-non-array-empty-list",
+    "suite": "agent-todo",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-todo-missing-status-defaults-pending",
+    "suite": "agent-todo",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-todo-render-markers-and-header",
+    "suite": "agent-todo",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-todo-render-empty",
+    "suite": "agent-todo",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-todo-summarize-active",
+    "suite": "agent-todo",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-todo-summarize-empty",
+    "suite": "agent-todo",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-todo-stats-counts",
+    "suite": "agent-todo",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-stop-tool-use-failed-message",
+    "suite": "chat-stop-message",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-stop-with-tool-name-injected",
+    "suite": "chat-stop-message",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-stop-continuation-failed-alias-continues",
+    "suite": "chat-stop-message",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-stop-unknown-reason-generic",
+    "suite": "chat-stop-message",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-stop-humanize-internal-jargon",
+    "suite": "chat-stop-message",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-stop-humanize-clean-passthrough",
+    "suite": "chat-stop-message",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-stop-humanize-model-directed-scrubbed",
+    "suite": "chat-stop-message",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-stop-is-model-directed-detects",
+    "suite": "chat-stop-message",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-lane-classify-rate-limited-system-retry-safe",
+    "suite": "chat-lane-outcome",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-lane-classify-unknown-fail-closed",
+    "suite": "chat-lane-outcome",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-lane-classify-policy-block-non-recoverable",
+    "suite": "chat-lane-outcome",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-lane-classify-5xx-context-required",
+    "suite": "chat-lane-outcome",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-lane-thrown-error-envelope",
+    "suite": "chat-lane-outcome",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-lane-outcome-tags",
+    "suite": "chat-lane-outcome",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-lane-telemetry-summary",
+    "suite": "chat-lane-outcome",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-lane-command-success-envelope",
+    "suite": "chat-lane-outcome",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-lane-conversational-unhandled-skipped",
+    "suite": "chat-lane-outcome",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-cost-rollup-sums-wasted-and-groups",
+    "suite": "run-cost-rollup",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-cost-rollup-empty-zero",
+    "suite": "run-cost-rollup",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-cost-rollup-non-array-zero",
+    "suite": "run-cost-rollup",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-cost-estimate-opus-priced",
+    "suite": "run-cost-rollup",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-cost-estimate-self-hosted-free",
+    "suite": "run-cost-rollup",
+    "passed": true
+  },
+  {
+    "caseId": "chat-misc-cost-wasted-status-classification",
+    "suite": "run-cost-rollup",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-md-fenced-code-block-lang",
+    "suite": "markdown-segment",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-md-plain-text-single-segment",
+    "suite": "markdown-segment",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-md-heading-level",
+    "suite": "markdown-segment",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-md-bullets-drop-markers",
+    "suite": "markdown-segment",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-md-quote-strips-marker",
+    "suite": "markdown-segment",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-md-empty-nonstring-total",
+    "suite": "markdown-segment",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-md-has-renderable-true",
+    "suite": "markdown-segment",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-md-has-renderable-false",
+    "suite": "markdown-segment",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-link-file-mention",
+    "suite": "chat-entity-linkify",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-link-symbol-mention",
+    "suite": "chat-entity-linkify",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-link-social-at-not-linkified",
+    "suite": "chat-entity-linkify",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-link-plain-no-tokens",
+    "suite": "chat-entity-linkify",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-link-absolute-filepath",
+    "suite": "chat-entity-linkify",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-link-url",
+    "suite": "chat-entity-linkify",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-link-and-or-guard",
+    "suite": "chat-entity-linkify",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-link-split-reconstruction",
+    "suite": "chat-entity-linkify",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-guard-empty-blocks",
+    "suite": "chat-send-guard",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-guard-whitespace-only-blocks",
+    "suite": "chat-send-guard",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-guard-normal-text-sends",
+    "suite": "chat-send-guard",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-guard-empty-with-attachment-sends",
+    "suite": "chat-send-guard",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-guard-nonstring-blocks",
+    "suite": "chat-send-guard",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-guard-huge-paste-confirms",
+    "suite": "chat-send-guard",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-guard-error-dump-confirms",
+    "suite": "chat-send-guard",
+    "passed": true
+  },
+  {
+    "caseId": "chat-render-guard-looks-like-error-dump",
+    "suite": "chat-send-guard",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-capability-catalog-stable-section-set",
+    "suite": "capability-overview",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-capability-overview-default-titles-and-bounds",
+    "suite": "capability-overview",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-capability-overview-compact-one-per-group",
+    "suite": "capability-overview",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-empty-suggestions-default-four",
+    "suite": "capability-overview",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-empty-suggestions-max-zero-empty",
+    "suite": "capability-overview",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-empty-suggestions-cap-six",
+    "suite": "capability-overview",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-feature-hint-context-normalized",
+    "suite": "capability-overview",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-feature-hint-mentions-at-prefix",
+    "suite": "capability-overview",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-memory-remember-that-explicit",
+    "suite": "memory-intent",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-memory-question-is-none",
+    "suite": "memory-intent",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-memory-forget-that-explicit",
+    "suite": "memory-intent",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-memory-slash-defers-to-command",
+    "suite": "memory-intent",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-memory-interrogative-remember-none",
+    "suite": "memory-intent",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-memory-command-remember-parses",
+    "suite": "memory-intent",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-memory-command-bare-and-non-command",
+    "suite": "memory-intent",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-slash-typo-suggests-context",
+    "suite": "slash-command-correction",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-slash-exact-no-suggest",
+    "suite": "slash-command-correction",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-slash-non-slash-not-slash",
+    "suite": "slash-command-correction",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-slash-prefix-surfaces-memories",
+    "suite": "slash-command-correction",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-levenshtein-bounded-distance",
+    "suite": "slash-command-correction",
+    "passed": true
+  },
+  {
+    "caseId": "chat-ux-slash-did-you-mean-render",
+    "suite": "slash-command-correction",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-depth-standard-is-identity",
+    "suite": "context-depth-policy",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-depth-lean-drops-wisdom-and-caps-budgets",
+    "suite": "context-depth-policy",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-depth-max-loads-all-and-boosts",
+    "suite": "context-depth-policy",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-depth-max-raises-a-small-policy-never-lowers",
+    "suite": "context-depth-policy",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-depth-max-floors-complexity-to-complex",
+    "suite": "context-depth-policy",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-compose-takes-higher-floor",
+    "suite": "context-depth-policy",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-floor-raises-thin-turn-after-complex-task",
+    "suite": "complexity-floor",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-floor-moderate-prior-yields-simple",
+    "suite": "complexity-floor",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-floor-never-lowers-a-substantive-turn",
+    "suite": "complexity-floor",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-floor-decays-after-casual-turns",
+    "suite": "complexity-floor",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-floor-thin-or-nonarray-trail-no-op",
+    "suite": "complexity-floor",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-estimate-buckets-tiers",
+    "suite": "complexity-floor",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-window-small-default-large-ordered",
+    "suite": "model-context-budget",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-window-prefix-normalized-unknown-null",
+    "suite": "model-context-budget",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-model-large-window-raises-budget",
+    "suite": "model-context-budget",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-model-small-window-lowers-budget",
+    "suite": "model-context-budget",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-model-mid-band-and-unknown-are-identity",
+    "suite": "model-context-budget",
+    "passed": true
+  },
+  {
+    "caseId": "context-budget-model-scaling-is-deterministic",
+    "suite": "model-context-budget",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-sizing-trivial-demotes-architect-to-coder",
+    "suite": "delegation-sizing",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-sizing-complex-keeps-four-bounded",
+    "suite": "delegation-sizing",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-sizing-kept-dropped-exact-partition",
+    "suite": "delegation-sizing",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-sizing-tier-boundaries",
+    "suite": "delegation-sizing",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-sizing-max-specialists-bounded",
+    "suite": "delegation-sizing",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-sizing-score-deterministic-and-clamped",
+    "suite": "delegation-sizing",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-sizing-reason-names-tier-and-count",
+    "suite": "delegation-sizing",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-sizing-empty-and-hostile-total",
+    "suite": "delegation-sizing",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-specialist-selection-signal-wakes-security-high",
+    "suite": "specialist-selection",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-specialist-selection-already-selected-excluded",
+    "suite": "specialist-selection",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-specialist-selection-order-follows-capability-input",
+    "suite": "specialist-selection",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-specialist-selection-rank-puts-strongest-signal-first",
+    "suite": "specialist-selection",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-specialist-selection-rank-stable-within-bucket-no-mutate",
+    "suite": "specialist-selection",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-specialist-selection-priority-thresholds",
+    "suite": "specialist-selection",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-specialist-selection-conservative-generic-no-trip",
+    "suite": "specialist-selection",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-specialist-selection-whole-token-no-substring",
+    "suite": "specialist-selection",
+    "passed": true
+  },
+  {
+    "caseId": "delegation-specialist-selection-hostile-total",
+    "suite": "specialist-selection",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-shell-rm-rf-root-refused",
+    "suite": "shell-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-shell-ls-read-auto",
+    "suite": "shell-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-shell-npm-install-mutate-ask",
+    "suite": "shell-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-shell-file-redirect-escalates-to-mutate",
+    "suite": "shell-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-shell-sudo-blocked",
+    "suite": "shell-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-shell-curl-pipe-sh-blocked",
+    "suite": "shell-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-shell-git-status-subcommand-read",
+    "suite": "shell-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-shell-empty-command-blocked",
+    "suite": "shell-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-git-status-read-auto",
+    "suite": "git-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-git-push-force-blocked",
+    "suite": "git-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-git-reset-hard-blocked",
+    "suite": "git-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-git-commit-message-is-inert-argv-token",
+    "suite": "git-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-git-branch-list-read",
+    "suite": "git-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-git-branch-delete-write",
+    "suite": "git-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-git-unknown-verb-default-deny",
+    "suite": "git-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-git-config-injection-blocked",
+    "suite": "git-command-policy",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-local-shell-read-passthrough",
+    "suite": "local-exec-plan",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-local-shell-catastrophic-empties-argv",
+    "suite": "local-exec-plan",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-local-shell-requires-cwd",
+    "suite": "local-exec-plan",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-local-shell-joined-classification-is-conservative",
+    "suite": "local-exec-plan",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-local-git-run-prepends-git-binary",
+    "suite": "local-exec-plan",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-local-git-run-force-push-blocked",
+    "suite": "local-exec-plan",
+    "passed": true
+  },
+  {
+    "caseId": "exec-policy-local-dispatch-git-run",
+    "suite": "local-exec-plan",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-reindex-unchanged-reuses-vector",
+    "suite": "incremental-reindex",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-reindex-size-change-reindexes",
+    "suite": "incremental-reindex",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-reindex-new-file-and-stale-delete",
+    "suite": "incremental-reindex",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-reindex-force-reindexes-all",
+    "suite": "incremental-reindex",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-reindex-sig-identical-unchanged",
+    "suite": "incremental-reindex",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-reindex-sig-provider-migration",
+    "suite": "incremental-reindex",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-reindex-sig-missing-embedding",
+    "suite": "incremental-reindex",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-event-small-payload-passthrough",
+    "suite": "event-bound",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-event-oversized-string-clipped",
+    "suite": "event-bound",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-event-secret-masked",
+    "suite": "event-bound",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-event-cyclic-marker",
+    "suite": "event-bound",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-event-total-size-guard-wrapper",
+    "suite": "event-bound",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-event-depth-marker",
+    "suite": "event-bound",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-event-toolcalls-cap-and-marker",
+    "suite": "event-bound",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-event-toolcalls-nonarray-empty",
+    "suite": "event-bound",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-codebase-plan-classifies-and-skips",
+    "suite": "codebase-index",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-codebase-plan-nonarray-neutral",
+    "suite": "codebase-index",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-codebase-rank-basename-beats-summary",
+    "suite": "codebase-index",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-codebase-rank-empty-query-empty",
+    "suite": "codebase-index",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-codebase-tokenize-camel-snake",
+    "suite": "codebase-index",
+    "passed": true
+  },
+  {
+    "caseId": "index-persist-codebase-tokenize-keep-stopwords",
+    "suite": "codebase-index",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-skill-relevance-scores-best-field-per-token",
+    "suite": "skill-relevance",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-skill-relevance-irrelevant-and-degenerate-score-zero",
+    "suite": "skill-relevance",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-skill-relevance-whole-token-not-substring",
+    "suite": "skill-relevance",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-skill-relevance-content-breaks-hint-tie",
+    "suite": "skill-relevance",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-skill-relevance-hint-stays-primary-over-content",
+    "suite": "skill-relevance",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-skill-relevance-rank-total-and-maxskills",
+    "suite": "skill-relevance",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-steering-note-preserved-across-turn",
+    "suite": "steering-note-preservation",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-steering-notes-merge-chronological",
+    "suite": "steering-note-preservation",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-steering-empty-note-not-stored",
+    "suite": "steering-note-preservation",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-steering-empty-thread-is-noop",
+    "suite": "steering-note-preservation",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-steering-note-whitespace-normalized",
+    "suite": "steering-note-preservation",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-steering-bounded-oldest-dropped",
+    "suite": "steering-note-preservation",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-aggregate-strong-rows-high-grade",
+    "suite": "openswan-quality-aggregate",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-aggregate-failed-rows-low-grade",
+    "suite": "openswan-quality-aggregate",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-aggregate-buckets-deterministic-unknown-folds-partial",
+    "suite": "openswan-quality-aggregate",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-aggregate-nonarray-and-empty-neutral",
+    "suite": "openswan-quality-aggregate",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-aggregate-averages-cost-and-duration",
+    "suite": "openswan-quality-aggregate",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-aggregate-normalize-passthrough-and-hostile-defaults",
+    "suite": "openswan-quality-aggregate",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-verification-coverage-partial-ratio",
+    "suite": "verification-coverage",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-verification-coverage-manual-kinds-excluded",
+    "suite": "verification-coverage",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-verification-coverage-zero-planned-is-literal-zero",
+    "suite": "verification-coverage",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-verification-coverage-over-executed-clamps-to-one",
+    "suite": "verification-coverage",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-verification-coverage-is-auto-verifiable-classification",
+    "suite": "verification-coverage",
+    "passed": true
+  },
+  {
+    "caseId": "openswan-quality-verification-coverage-null-and-string-kinds-total",
+    "suite": "verification-coverage",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-v2preflight-model-unsupported-aborts-first",
+    "suite": "v2-preflight-abort",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-v2preflight-no-tools-for-request-folds-count",
+    "suite": "v2-preflight-abort",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-v2preflight-stalled-no-progress-aborts",
+    "suite": "v2-preflight-abort",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-v2preflight-stall-guard-fails-open-on-progress",
+    "suite": "v2-preflight-abort",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-v2preflight-budget-exhausted-aborts",
+    "suite": "v2-preflight-abort",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-v2preflight-fails-open-on-ambiguous",
+    "suite": "v2-preflight-abort",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-v2preflight-hostile-input-total-proceeds",
+    "suite": "v2-preflight-abort",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-v2preflight-precedence-model-beats-all",
+    "suite": "v2-preflight-abort",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-compaction-under-threshold-keeps-all",
+    "suite": "context-compaction",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-compaction-over-drops-toolresult-summarizes-text",
+    "suite": "context-compaction",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-compaction-keeps-system-and-recent-suffix",
+    "suite": "context-compaction",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-compaction-referenced-toolresult-never-dropped",
+    "suite": "context-compaction",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-compaction-over-but-all-protected-noop",
+    "suite": "context-compaction",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-compaction-empty-and-hostile-noop",
+    "suite": "context-compaction",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-dedup-identical-result-emits-reference",
+    "suite": "tool-result-dedup",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-dedup-different-args-not-duplicate",
+    "suite": "tool-result-dedup",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-dedup-changed-output-not-duplicate",
+    "suite": "tool-result-dedup",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-dedup-key-is-secret-safe",
+    "suite": "tool-result-dedup",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-dedup-key-is-arg-order-independent",
+    "suite": "tool-result-dedup",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-dedup-empty-and-junk-priors-fail-open",
+    "suite": "tool-result-dedup",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-parallel-consecutive-reads-coalesce",
+    "suite": "openswan-parallel-tool",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-parallel-write-splits-into-singleton",
+    "suite": "openswan-parallel-tool",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-parallel-mutation-is-ordering-barrier",
+    "suite": "openswan-parallel-tool",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-parallel-single-read-is-serial-singleton",
+    "suite": "openswan-parallel-tool",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-parallel-unknown-tool-fails-closed",
+    "suite": "openswan-parallel-tool",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-parallel-injected-policy-decides-safety",
+    "suite": "openswan-parallel-tool",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-parallel-empty-and-hostile-neutral",
+    "suite": "openswan-parallel-tool",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-section-tight-budget-drops-lowest-not-tail",
+    "suite": "prompt-section-priority",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-section-high-priority-truncates-not-drops",
+    "suite": "prompt-section-priority",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-section-low-priority-drops-not-truncates",
+    "suite": "prompt-section-priority",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-section-combined-truncate-high-drop-low",
+    "suite": "prompt-section-priority",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-section-min-truncate-guard-drops-tiny-fragment",
+    "suite": "prompt-section-priority",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-section-everything-fits-keeps-all-canonical-order",
+    "suite": "prompt-section-priority",
+    "passed": true
+  },
+  {
+    "caseId": "optimization-section-hostile-input-empty-plan",
+    "suite": "prompt-section-priority",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-console-intent-seed-beats-body-keyword",
+    "suite": "openswan-console-intent",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-console-intent-wordpress-routes-website",
+    "suite": "openswan-console-intent",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-console-intent-code-routes-files-scrape-routes-browser",
+    "suite": "openswan-console-intent",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-console-intent-empty-and-nomatch-null",
+    "suite": "openswan-console-intent",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-console-intent-guardrail-supervised-folds-workflow-and-oversight",
+    "suite": "openswan-console-intent",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-console-intent-guardrail-balanced-no-intent-uses-overrides",
+    "suite": "openswan-console-intent",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-v2adapter-messages-normalize-role-and-drop-unknown-block",
+    "suite": "v2-to-agentcore-adapter",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-v2adapter-messages-hostile-empty-array",
+    "suite": "v2-to-agentcore-adapter",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-v2adapter-tooldefs-dedupe-drop-clientonly-bind-handler",
+    "suite": "v2-to-agentcore-adapter",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-v2adapter-result-reconstructs-toolcalls-and-neutral-usage",
+    "suite": "v2-to-agentcore-adapter",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-v2adapter-stopreason-abort-beats-end-turn",
+    "suite": "v2-to-agentcore-adapter",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-v2adapter-result-hostile-neutral-contract",
+    "suite": "v2-to-agentcore-adapter",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-stream-no-thinking-small-flush-no-ack",
+    "suite": "stream-first-chunk",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-stream-thinking-emits-ack-larger-flush",
+    "suite": "stream-first-chunk",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-stream-minflush-override-then-clamp",
+    "suite": "stream-first-chunk",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-stream-first-delta-is-observation-not-policy",
+    "suite": "stream-first-chunk",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-stream-hostile-input-safe-default-plan",
+    "suite": "stream-first-chunk",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-stream-coalesce-hold-flush-rules",
+    "suite": "stream-first-chunk",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-runproof-verified-true-clean-completion",
+    "suite": "openswan-run-proof",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-runproof-runfail-never-verified",
+    "suite": "openswan-run-proof",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-runproof-failed-check-verified-false",
+    "suite": "openswan-run-proof",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-runproof-paths-reduced-to-secret-safe-basenames",
+    "suite": "openswan-run-proof",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-runproof-summary-secret-redacted",
+    "suite": "openswan-run-proof",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-runproof-no-activity-and-hostile-neutral",
+    "suite": "openswan-run-proof",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-retrieval-dedupe-collapses-byte-identical",
+    "suite": "chat-retrieval-rank",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-retrieval-source-trust-breaks-score-tie",
+    "suite": "chat-retrieval-rank",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-retrieval-maxitems-caps-survivors",
+    "suite": "chat-retrieval-rank",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-retrieval-ranks-score-descending",
+    "suite": "chat-retrieval-rank",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-retrieval-hostile-and-zero-cap-empty",
+    "suite": "chat-retrieval-rank",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-route-fallback-short-and-badges",
+    "suite": "model-route-explain",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-route-executor-swap",
+    "suite": "model-route-explain",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-route-escalation-clean",
+    "suite": "model-route-explain",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-route-blackswan-primary",
+    "suite": "model-route-explain",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-route-plain-neutral-byok",
+    "suite": "model-route-explain",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-route-reason-secret-redacted",
+    "suite": "model-route-explain",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-stepbudget-continue-under-budget",
+    "suite": "openswan-step-budget",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-stepbudget-checkpoint-on-margin",
+    "suite": "openswan-step-budget",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-stepbudget-checkpoint-on-ratio",
+    "suite": "openswan-step-budget",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-stepbudget-stop-on-exhausted-and-tools",
+    "suite": "openswan-step-budget",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-stepbudget-confirmed-stall-stops-with-budget-left",
+    "suite": "openswan-step-budget",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-stepbudget-no-budget-continues-with-warning",
+    "suite": "openswan-step-budget",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-toolrecovery-auth-and-permission-ask-user",
+    "suite": "swanbot-tool-error-recovery",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-toolrecovery-not-found-alt-skips-else-fixes",
+    "suite": "swanbot-tool-error-recovery",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-toolrecovery-transient-retries-same-call",
+    "suite": "swanbot-tool-error-recovery",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-toolrecovery-invalid-args-and-unknown-fix",
+    "suite": "swanbot-tool-error-recovery",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-toolrecovery-exhausted-prefers-skip-else-abort",
+    "suite": "swanbot-tool-error-recovery",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-toolrecovery-http-aliases-and-hostile",
+    "suite": "swanbot-tool-error-recovery",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-approvalbatch-floor-never-batched",
+    "suite": "openswan-approval-batch",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-approvalbatch-low-risk-one-card",
+    "suite": "openswan-approval-batch",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-approvalbatch-medium-risk-one-card",
+    "suite": "openswan-approval-batch",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-approvalbatch-tiers-never-comingle",
+    "suite": "openswan-approval-batch",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-approvalbatch-high-critical-unknown-each-separate",
+    "suite": "openswan-approval-batch",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-approvalbatch-floor-by-category-and-by-flag",
+    "suite": "openswan-approval-batch",
+    "passed": true
+  },
+  {
+    "caseId": "optimization2-approvalbatch-empty-and-hostile-neutral",
+    "suite": "openswan-approval-batch",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-telemetry-classify-create-run-blocking",
+    "suite": "openswan-telemetry-defer",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-telemetry-classify-memory-alias-blocking",
+    "suite": "openswan-telemetry-defer",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-telemetry-classify-event-fire-and-forget",
+    "suite": "openswan-telemetry-defer",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-telemetry-classify-dependson-ordered",
+    "suite": "openswan-telemetry-defer",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-telemetry-classify-blocksflag-overrides-telemetry",
+    "suite": "openswan-telemetry-defer",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-telemetry-classify-unknown-fails-closed",
+    "suite": "openswan-telemetry-defer",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-telemetry-schedule-preserves-merge-before-status",
+    "suite": "openswan-telemetry-defer",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-catalog-index-last-wins-on-dup",
+    "suite": "tool-catalog-perf",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-catalog-index-skips-bad-and-nonarray",
+    "suite": "tool-catalog-perf",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-catalog-memokey-order-insensitive-and-dedup",
+    "suite": "tool-catalog-perf",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-catalog-memokey-hasfilter-from-length-not-usability",
+    "suite": "tool-catalog-perf",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-catalog-memokey-mode-collapse-vs-distinct",
+    "suite": "tool-catalog-perf",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-catalog-should-rebuild-biases-rebuild-on-doubt",
+    "suite": "tool-catalog-perf",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-memlabel-recency-unknown-and-fresh",
+    "suite": "chat-memory-label",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-memlabel-recency-day-week-month-buckets",
+    "suite": "chat-memory-label",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-memlabel-strength-thresholds",
+    "suite": "chat-memory-label",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-memlabel-state-precedence",
+    "suite": "chat-memory-label",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-memlabel-trust-bands",
+    "suite": "chat-memory-label",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-memlabel-archive-bias",
+    "suite": "chat-memory-label",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-memlabel-source-surface-map",
+    "suite": "chat-memory-label",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-memlabel-family-guidance-vs-pattern",
+    "suite": "chat-memory-label",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-title-derive-first-three-meaningful-words",
+    "suite": "chat-session-title",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-title-strip-url-and-mentions",
+    "suite": "chat-session-title",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-title-preserves-short-allcaps",
+    "suite": "chat-session-title",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-title-fallback-on-empty-or-punct-or-nonstring",
+    "suite": "chat-session-title",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-title-is-auto-named-session",
+    "suite": "chat-session-title",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-title-normalize-model-preference",
+    "suite": "chat-session-title",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-modeldisplay-anthropic-strips-date-compacts-version",
+    "suite": "chat-model-display",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-modeldisplay-openrouter-strips-route-and-author",
+    "suite": "chat-model-display",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-modeldisplay-google-and-deepseek-and-hf",
+    "suite": "chat-model-display",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-modeldisplay-null-and-empty",
+    "suite": "chat-model-display",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-compactversion-merges-adjacent-digit-tokens",
+    "suite": "chat-model-display",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-compactversion-total-on-nonarray-and-trailing-digit",
+    "suite": "chat-model-display",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-draft-reconcile-keep-on-same-thread",
+    "suite": "chat-composer-draft",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-draft-reconcile-restore-wins-over-save",
+    "suite": "chat-composer-draft",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-draft-reconcile-save-outgoing",
+    "suite": "chat-composer-draft",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-draft-reconcile-clear-cases",
+    "suite": "chat-composer-draft",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-draft-should-preserve",
+    "suite": "chat-composer-draft",
+    "passed": true
+  },
+  {
+    "caseId": "optimization3-draft-key-stable-and-secret-free",
+    "suite": "chat-composer-draft",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-proof-verified-completed-both-rows",
+    "suite": "run-proof-publisher",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-proof-failed-run-honest",
+    "suite": "run-proof-publisher",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-proof-empty-no-activity-neutral",
+    "suite": "run-proof-publisher",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-proof-secret-redacted",
+    "suite": "run-proof-publisher",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-proof-hostile-null-total",
+    "suite": "run-proof-publisher",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-memprov-confidence-bands",
+    "suite": "memory-provenance",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-memprov-asof-relative",
+    "suite": "memory-provenance",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-memprov-full-line-all-tokens",
+    "suite": "memory-provenance",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-memprov-no-id-leak-and-basename",
+    "suite": "memory-provenance",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-memprov-empty-and-plain-and-cyclic",
+    "suite": "memory-provenance",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-memprov-reference-line-memoryentry",
+    "suite": "memory-provenance",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-faith-grounded-ok",
+    "suite": "response-faithfulness",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-faith-invented-ungrounded",
+    "suite": "response-faithfulness",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-faith-mixed-review",
+    "suite": "response-faithfulness",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-faith-fluff-and-empty-neutral",
+    "suite": "response-faithfulness",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-faith-citation-credit",
+    "suite": "response-faithfulness",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-faith-secret-redacted-claim",
+    "suite": "response-faithfulness",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-sources-dedupe-and-markdown",
+    "suite": "chat-sources-surface",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-sources-secret-safe-url",
+    "suite": "chat-sources-surface",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-sources-absolute-path-basename",
+    "suite": "chat-sources-surface",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-sources-tool-marker-and-rank",
+    "suite": "chat-sources-surface",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-sources-hostile-neutral",
+    "suite": "chat-sources-surface",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-recovery-customer-safe-sanitizer",
+    "suite": "chat-recovery-display",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-recovery-support-warning-and-append",
+    "suite": "chat-recovery-display",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-recovery-actor-and-surface-labels",
+    "suite": "chat-recovery-display",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-recovery-area-evidence-handoff-labels",
+    "suite": "chat-recovery-display",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-recovery-reliability-status-and-card",
+    "suite": "chat-recovery-display",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-msgtype-ischatmessage-structural",
+    "suite": "chat-message-types",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-msgtype-bot-vs-user",
+    "suite": "chat-message-types",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-msgtype-optional-shape-guards",
+    "suite": "chat-message-types",
+    "passed": true
+  },
+  {
+    "caseId": "optimization4-msgtype-accessors-total",
+    "suite": "chat-message-types",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-provider-error-5xx-classifies-transient",
+    "suite": "provider-error-advance",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-provider-error-4xx-auth-classifies-auth",
+    "suite": "provider-error-advance",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-transient-5xx-advances-when-any-route-remains",
+    "suite": "provider-error-advance",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-auth-4xx-does-not-advance-same-provider",
+    "suite": "provider-error-advance",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-auth-advances-only-to-different-provider",
+    "suite": "provider-error-advance",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-transient-stops-when-chain-exhausted",
+    "suite": "provider-error-advance",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-status-code-classification-table",
+    "suite": "provider-error-advance",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-message-heuristic-and-permanent-failsafe",
+    "suite": "provider-error-advance",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-advance-hostile-ctx-fails-closed",
+    "suite": "provider-error-advance",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-oscillation-abab-detected",
+    "suite": "oscillation-detector",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-oscillation-distinct-rounds-not-stuck",
+    "suite": "oscillation-detector",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-oscillation-identical-block-deferred",
+    "suite": "oscillation-detector",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-oscillation-success-cuts-the-run",
+    "suite": "oscillation-detector",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-oscillation-argskey-disambiguates-symbols",
+    "suite": "oscillation-detector",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-oscillation-needs-two-full-cycles",
+    "suite": "oscillation-detector",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-oscillation-empty-and-null-total",
+    "suite": "oscillation-detector",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-backoff-zero-failures-is-base",
+    "suite": "provider-backoff",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-backoff-escalates-monotonic",
+    "suite": "provider-backoff",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-backoff-multiplier-ceiling",
+    "suite": "provider-backoff",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-backoff-absolute-window-ceiling",
+    "suite": "provider-backoff",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-backoff-negative-count-floors-to-base",
+    "suite": "provider-backoff",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-backoff-cooling-zero-failures-false",
+    "suite": "provider-backoff",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-backoff-cooling-window-boundary",
+    "suite": "provider-backoff",
+    "passed": true
+  },
+  {
+    "caseId": "routing-resilience-backoff-cooling-future-skew-false",
+    "suite": "provider-backoff",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-toolsel-plain-chat-selects-no-groups",
+    "suite": "v2-tool-selection",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-toolsel-memory-request-selects-memory",
+    "suite": "v2-tool-selection",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-toolsel-research-citation-selects-research",
+    "suite": "v2-tool-selection",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-toolsel-login-adds-credentials-via-edge",
+    "suite": "v2-tool-selection",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-toolsel-credential-adds-browser-via-edge",
+    "suite": "v2-tool-selection",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-toolsel-filepath-adds-coding-via-edge",
+    "suite": "v2-tool-selection",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-toolsel-imperative-floor-widens-recall",
+    "suite": "v2-tool-selection",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-toolsel-interrogative-not-imperative",
+    "suite": "v2-tool-selection",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-toolsel-mode-build-parity",
+    "suite": "v2-tool-selection",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-toolsel-hostile-input-total-no-groups",
+    "suite": "v2-tool-selection",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-contbudget-fresh-run-continues",
+    "suite": "swanbot-continuation-budget",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-contbudget-below-ceiling-continues",
+    "suite": "swanbot-continuation-budget",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-contbudget-at-ceiling-stops",
+    "suite": "swanbot-continuation-budget",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-contbudget-coding-deeper-ceiling",
+    "suite": "swanbot-continuation-budget",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-contbudget-coding-caps-at-ten",
+    "suite": "swanbot-continuation-budget",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-contbudget-hostile-count-fails-closed",
+    "suite": "swanbot-continuation-budget",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-contbudget-override-clamped-to-hard-max",
+    "suite": "swanbot-continuation-budget",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-contbudget-override-below-count-stops",
+    "suite": "swanbot-continuation-budget",
+    "passed": true
+  },
+  {
+    "caseId": "v2-loop-contbudget-numeric-string-parsed",
+    "suite": "swanbot-continuation-budget",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-verification-diag-tsc-error-summarized",
+    "suite": "verification-diagnostics",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-verification-diag-empty-is-clean",
+    "suite": "verification-diagnostics",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-verification-diag-eslint-error-biased-order",
+    "suite": "verification-diagnostics",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-verification-diag-jest-fail-summarized",
+    "suite": "verification-diagnostics",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-verification-diag-parse-structured-diagnostic",
+    "suite": "verification-diagnostics",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-verification-diag-count-by-severity",
+    "suite": "verification-diagnostics",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-verification-diag-nonparse-fallback-tail",
+    "suite": "verification-diagnostics",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-a11y-resolve-unique-label-to-element",
+    "suite": "a11y-target-resolver",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-a11y-ambiguous-label-fails-closed",
+    "suite": "a11y-target-resolver",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-a11y-no-match-not-found",
+    "suite": "a11y-target-resolver",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-a11y-empty-target-guarded",
+    "suite": "a11y-target-resolver",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-a11y-resolve-by-role-tier",
+    "suite": "a11y-target-resolver",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-a11y-path-without-som-index",
+    "suite": "a11y-target-resolver",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-a11y-parse-lines-to-nodes",
+    "suite": "a11y-target-resolver",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-symbol-extract-ts-ordered-deduped",
+    "suite": "codebase-symbol",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-symbol-extract-empty-neutral",
+    "suite": "codebase-symbol",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-symbol-extract-python-def-class",
+    "suite": "codebase-symbol",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-symbol-extract-markdown-headings",
+    "suite": "codebase-symbol",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-symbol-summary-block-comment",
+    "suite": "codebase-symbol",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-symbol-embed-text-deterministic",
+    "suite": "codebase-symbol",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-mentions-parse-file",
+    "suite": "codebase-mentions",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-mentions-plain-text-none",
+    "suite": "codebase-mentions",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-mentions-midword-guard",
+    "suite": "codebase-mentions",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-mentions-quoted-value-with-spaces",
+    "suite": "codebase-mentions",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-mentions-trailing-punctuation-stripped",
+    "suite": "codebase-mentions",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-mentions-resolve-exact",
+    "suite": "codebase-mentions",
+    "passed": true
+  },
+  {
+    "caseId": "verify-a11y-codebase-mentions-describe-block",
+    "suite": "codebase-mentions",
+    "passed": true
+  }
+]
