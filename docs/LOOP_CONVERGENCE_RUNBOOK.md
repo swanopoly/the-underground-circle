@@ -49,6 +49,44 @@ the canonical tool catalog — mirroring the proven reference implementation
 
 ---
 
+## 0.5. De-risk requirements (BLOCKING — from the 2026-07-16 pre-build review)
+
+An adversarial review of the adapter + telemetry-parity plan **before** the runtime
+was built surfaced four issues the runtime MUST address or it will ship broken
+telemetry. Two are already fixed in the committed adapter (commit `ff3ecda`); two are
+runtime obligations:
+
+1. **CRITICAL — `started_at` parity.** The readiness/completion-rate telemetry
+   (`swanbotOpenSwanReadiness`) filters its windowed queries on `started_at`, so a
+   client-loop run created with `started_at = NULL` is INVISIBLE to the gate — the
+   v2-client cohort would silently vanish from the completion-rate check (and could
+   never fail it, masking a real regression). The runtime MUST set `started_at` at run
+   creation (mirror the edge INSERT), e.g. an immediate `updateRunStatus(run.id,
+   'running')` right after `createRun`, since `createPersistedRun`/`createRun` accept
+   no `started_at`.
+
+2. **HIGH — terminal-write-on-throw + orphan finalizer.** The client loop introduces
+   failure modes the server edge never had (the process can die mid-run). Wrap
+   `runAgent` + the terminal write in try/catch mirroring the edge: on throw →
+   `UPDATE final_stop_reason='error', status='failed', metadata.version='swanbot-v2-ai'`
+   (keep the cohort tag) so a crashed run never leaves a row with a NULL/clean stop
+   reason the gate miscounts.
+
+3. **HIGH — usage from `turn_end` events (adapter fixed).** `AgentRunResult` carries no
+   usage; aggregate a `UsageBreakdown` from `runAgent`'s `onEvent` `turn_end` events via
+   `v2AgentEventActivityCore.accumulateUsageFromEvents`, and pass it as
+   `fromAgentCoreResult(result, { usage })`. Do NOT trust the adapter's usage field (it
+   now defaults to `{}` and is opt-supplied).
+
+4. **MEDIUM — toolCalls offset (adapter fixed).** Pass `fromAgentCoreResult(result, {
+   initialMessagesLength: initialMessages.length })` so the reconstructed toolCalls trace
+   counts only THIS run's tool_use blocks, not historical ones carried in seeded history.
+
+The adapter's INPUT directions (`toAgentCoreMessages` / `toAgentCoreToolDefs`) were
+reviewed as **correct** — the runtime can build on them as-is.
+
+---
+
 ## 1. Builder scope (this workflow) — NEW FILES ONLY, inert
 
 The builder in this workflow creates **only net-new files**. They are unreferenced
