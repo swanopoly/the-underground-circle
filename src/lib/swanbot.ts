@@ -2206,10 +2206,18 @@ async function callSwanBotAI(
         // failures. A 200-with-error-body (`model_unsupported_on_v2`,
         // `key_missing`, …) is a PERMANENT CONFIG error — v2 IS reachable and
         // answered — so it must NOT trip the breaker (one config error was
-        // disabling v2 for the whole session). We still SURFACE it
-        // (fail-visible) rather than silently masking it; v1 shares the same
-        // key/config and would usually hit the same wall. A real transport
-        // failure (null text, no body error) counts and falls through to v1.
+        // disabling v2 for the whole session). Most body errors are SURFACED
+        // (fail-visible) rather than silently masked, since v1 shares the
+        // same key/config and would usually hit the same wall — EXCEPT
+        // `model_unsupported_on_v2`, which is not a key/config problem at
+        // all: the v2 typed loop is Anthropic-only by design and 400s any
+        // non-Claude model (its own error message says "route via
+        // swanbot-ai/llm-proxy"). v1 genuinely supports those models (HF,
+        // BlackSwan, OpenRouter, etc.) that v2 never will, so falling
+        // through there is the correct behavior, not a wasted retry.
+        // Without this, selecting a hosted BlackSwan/marketplace model with
+        // v2 enabled (the default) silently errored on every single message
+        // instead of ever reaching the model.
         const outcome: import('./swanbotRouting').SwanbotV2Outcome = v2.text
           ? { kind: 'success' }
           : v2.bodyError
@@ -2219,11 +2227,15 @@ async function callSwanBotAI(
           recordSwanbotV2Outcome(outcome.kind === 'success');
         }
         if (v2.text) return { response: v2.text };
-        if (v2.bodyError) {
+        if (v2.bodyError && v2.bodyError.code !== 'model_unsupported_on_v2') {
           console.warn('[SwanBot] v2 returned a config error body (not counted toward the breaker):', v2.bodyError.code || v2.bodyError.message);
           return { response: null, error: v2.bodyError };
         }
-        console.log('[SwanBot] v2 returned null (transport) — falling back to v1.');
+        console.log(
+          v2.bodyError
+            ? '[SwanBot] v2 rejected the model (model_unsupported_on_v2) — falling back to v1.'
+            : '[SwanBot] v2 returned null (transport) — falling back to v1.'
+        );
       }
     }
   } catch (err) {
