@@ -435,6 +435,7 @@
     "smoke:swanbot-v2-client-loop-flag": "npx tsx scripts/swanbot-v2-client-loop-flag-smoketest.ts",
     "smoke:v2-agent-event-activity": "npx tsx scripts/v2-agent-event-activity-core-smoketest.ts",
     "smoke:swanbot-v2-batch-runtime-core": "npx tsx scripts/swanbot-v2-batch-runtime-core-smoketest.ts",
+    "smoke:swanbot-v2-mode-contract": "npx tsx scripts/swanbot-v2-mode-contract-core-smoketest.ts",
     "evals": "npx tsx scripts/run-evals.ts",
     "evals:update-baseline": "npx tsx scripts/run-evals.ts --update-baseline"
   },
