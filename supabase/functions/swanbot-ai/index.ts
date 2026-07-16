@@ -2406,7 +2406,90 @@ function isBlackSwanTextModel(modelId: string | null | undefined): boolean {
   return /(?:^|\/)(?:blackswan|cswan801\/blackswan)/i.test((modelId || "").trim());
 }
 
+// 2026-07-16: live fleet testing found BlackSwan-v5 reliably breaks down on
+// production-shaped system prompts (long, multi-section, grounding/tool
+// blocks the model was never trained on) — 11/12 realistic test questions
+// across categories came back garbled, via a handful of recurring failure
+// signatures: unclosed/leaked `<think>` tags, foreign-script word-salad,
+// verbatim sentence/phrase repetition loops, and echoed `##`-header prompt
+// structure instead of an answer. This is a training-distribution gap, not
+// fixable in this function — but a real user should never SEE the garbage.
+// This is a deliberately conservative pattern match (multiple repeats /
+// real percentage thresholds) so it only fires on the severe breakdown
+// cases actually observed, not on a normal answer that happens to use a
+// non-English word or a bullet list.
+const BLACKSWAN_GARBLE_THINK_TAG_RE = /<\/?think>/i;
+const BLACKSWAN_GARBLE_HEADER_RE = /##\s*(?:BlackSwan App-Grounding Contract|Tools\s*&\s*Actions|Your Personality|Expanded Knowledge)/i;
+const BLACKSWAN_GARBLE_NON_LATIN_RE = /[぀-ヿ㐀-鿿가-힯Ѐ-ӿ]/g;
+// Two more signatures found in real captured fleet-test output that the
+// checks above miss: a "fake structured document" pattern (repeated `---`
+// dividers with no real paragraph structure) and a scatter of short,
+// meaningless backtick-quoted tokens (`cw`, `p`, `app_tools`, ...) — both
+// rare in genuine prose or even genuine technical answers (which use at
+// most one or two real code/command backticks), common in the hallucinated
+// fake-table/fake-config garbling failure mode.
+const BLACKSWAN_GARBLE_HRULE_RE = /^---\s*$/gm;
+const BLACKSWAN_GARBLE_SHORT_BACKTICK_RE = /`[a-zA-Z_]{1,14}`/g;
+
+function looksLikeGarbledBlackSwanOutput(text: string): boolean {
+  if (!text) return false;
+  if (BLACKSWAN_GARBLE_THINK_TAG_RE.test(text)) return true;
+  if (BLACKSWAN_GARBLE_HEADER_RE.test(text)) return true;
+
+  const nonLatinCount = (text.match(BLACKSWAN_GARBLE_NON_LATIN_RE) || []).length;
+  const nonWhitespaceLen = text.replace(/\s+/g, "").length || 1;
+  if (nonLatinCount / nonWhitespaceLen > 0.05) return true;
+
+  if ((text.match(BLACKSWAN_GARBLE_HRULE_RE) || []).length >= 3) return true;
+  if ((text.match(BLACKSWAN_GARBLE_SHORT_BACKTICK_RE) || []).length >= 6) return true;
+
+  // Repetition-loop detector: any 20+ char sliding window that recurs 3+
+  // times verbatim is the hallmark of the non-terminating loop failure mode
+  // observed in fleet testing (the same clause repeated near-verbatim
+  // dozens of times until the token budget runs out).
+  const normalized = text.toLowerCase().replace(/\s+/g, " ");
+  if (normalized.length >= 60) {
+    const seen = new Map<string, number>();
+    const windowSize = 24;
+    for (let i = 0; i + windowSize <= normalized.length; i += 8) {
+      const window = normalized.slice(i, i + windowSize);
+      const count = (seen.get(window) || 0) + 1;
+      seen.set(window, count);
+      if (count >= 3) return true;
+    }
+  }
+  return false;
+}
+
+const BLACKSWAN_GARBLE_FALLBACK_MESSAGE =
+  "I couldn't form a clear answer to that just now — BlackSwan sometimes struggles with longer conversations (a known issue being worked on). Could you try asking again in a shorter, more direct way, or switch to a different model for this one?";
+
+// Public entry point: strips reasoning-trace artifacts, then — regardless
+// of which internal path produced the result (including the early-return
+// "no reasoning prefix" case below, which a plain repetition-loop or a
+// leaked `<think>` tag would also hit, since neither necessarily starts
+// with a "Thinking Process:" prose prefix) — checks the FINAL text for the
+// known garbling signatures and substitutes an honest fallback message
+// instead of ever surfacing garbage to a real user.
 function stripBlackSwanReasoningText(text: string | null): string | null {
+  const result = stripBlackSwanReasoningTextRaw(text);
+  if (result && looksLikeGarbledBlackSwanOutput(result)) {
+    return BLACKSWAN_GARBLE_FALLBACK_MESSAGE;
+  }
+  // The salvage logic above can strip a fully-looping response down to ""
+  // (every paragraph matched the reasoning-block pattern, nothing left to
+  // salvage) — that's the SAME garbling failure, just surfacing as a blank
+  // reply instead of visible garbage, which is worse UX, not better. Only
+  // treat this as garbling when there was real input text to begin with;
+  // a null/empty `text` (e.g. a failed upstream call) is a different,
+  // legitimate case this function should keep passing through unchanged.
+  if (text && text.trim() && (!result || !result.trim())) {
+    return BLACKSWAN_GARBLE_FALLBACK_MESSAGE;
+  }
+  return result;
+}
+
+function stripBlackSwanReasoningTextRaw(text: string | null): string | null {
   if (!text) return text;
   const trimmed = text.trim();
   if (!trimmed) return trimmed;
