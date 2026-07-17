@@ -900,6 +900,56 @@ ${ctx.wikiContext}`;
   return { frozen, volatile };
 }
 
+// ─── BlackSwan-specific system prompt (shortened) ────────────────────────────
+// 2026-07-16 fleet A/B test found BlackSwan-v5 reliably breaks down on the
+// full production system prompt above (~875-1400+ tokens once volatile
+// state is included): a 5-question realistic baseline run came back 4/5
+// fully garbled (leaked `<think>` tags, unbounded meta-reasoning, or a
+// hallucinated dump of raw context) and 0/5 good. Three shortened variants
+// were tested; only the most aggressive one — short frozen persona, no
+// "Expanded Knowledge", no personality bullet list, no full tool catalog,
+// no soul-wisdom/guardrails, and a small hand-picked facts block instead of
+// the full per-request state dump — eliminated garbling entirely (0/5
+// garbled vs. 4/5 on the full prompt) and produced BlackSwan's first
+// coherent-and-good answer in this testing. It is NOT a complete fix (the
+// model still sometimes burns its token budget on unterminated reasoning
+// instead of answering, and some answers stayed thin/generic) —
+// looksLikeGarbledBlackSwanOutput()/stripBlackSwanReasoningText() above
+// remain the safety net for whatever still slips through — but it is a
+// clear, measured improvement over the full prompt for this one model
+// family. Every call site MUST gate this behind isBlackSwanTextModel() so
+// Claude's prompt (and every other model's prompt) is byte-identical to
+// before.
+function buildBlackSwanSystemPrompt(ctx: any): string {
+  let prompt = `You are Agent 🦢, an AI accountability partner inside The Underground Circle, a small-team accountability app. You're direct, warm, and sharp — you help people plan work, stay on track, and follow through, without fluff or hype. Keep replies concise and prefix them with 🦢.
+
+Only use the real facts given below — never invent names, streaks, numbers, or tasks. If you don't have the information, say so plainly.
+
+You can't create tasks or take other actions directly in this reply — tell the user to use the task board, or describe the plan clearly so they can add it.`;
+
+  // Small, hand-picked facts block — deliberately NOT the full volatile
+  // dump (Circle Info/Members/XP/achievements/challenges/goals/agent
+  // activity/knowledge entries/GitHub/rooms/automations/skills/memories/
+  // wiki) that the full prompt sends. Keeping this short is the point.
+  const facts: string[] = [];
+  facts.push(`Circle: ${ctx.circle?.name || "Unknown"} — ${ctx.checkedInCount ?? 0}/${ctx.memberCount ?? 0} checked in today.`);
+  if (ctx.currentUser) {
+    facts.push(`You're talking to ${ctx.currentUser.display_name || ctx.currentUser.username || "the user"} — current streak ${ctx.currentUser.current_streak || 0} days, longest ${ctx.currentUser.longest_streak || 0} days.`);
+  }
+  if (ctx.userTasks?.length > 0) {
+    facts.push(`Their open tasks: ${ctx.userTasks.slice(0, 3).map((t: any) => `[${t.status}] ${t.title}`).join("; ")}.`);
+  }
+  if (ctx.notCheckedIn?.length > 0) {
+    facts.push(`Haven't checked in today: ${ctx.notCheckedIn.slice(0, 5).map((m: any) => m.display_name || m.username).join(", ")}.`);
+  }
+
+  if (facts.length > 0) {
+    prompt += `\n\n${facts.join("\n")}`;
+  }
+
+  return prompt;
+}
+
 // ─── Call BlackSwan LLM (local/self-hosted, zero cost) ───────────────────────
 
 async function callBlackSwanLLM(systemPrompt: string, userMessage: string): Promise<string | null> {
@@ -4632,6 +4682,12 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       : frozenPrompt
     ).replace(TOOL_USE_PROMPT_BLOCK, TEXT_ONLY_ACTIONS_PROMPT_BLOCK);
 
+    // BlackSwan-only shortened prompt (see buildBlackSwanSystemPrompt for
+    // the fleet-test rationale). Built once here and selected per call site
+    // below via isBlackSwanTextModel() — every other model keeps using
+    // `combinedSystemPrompt` above, completely unchanged.
+    const blackSwanSystemPrompt = buildBlackSwanSystemPrompt(context);
+
     // ── Marketplace integration routing ───────────────────────────────────
     // The chat picker prefixes provider-routed model ids with the
     // integration's provider key. We strip the prefix, look up the
@@ -4737,7 +4793,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
           const provResult = await callMarketplaceProvider({
             provider: providerKey,
             modelId: tail,
-            systemPrompt: combinedSystemPrompt,
+            systemPrompt: isBlackSwanTextModel(tail) ? blackSwanSystemPrompt : combinedSystemPrompt,
             userMessage: message,
             apiKey: providerApiKey,
             maxTokens: maxTokens || 2048,
@@ -4783,9 +4839,10 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
 
     // Route to HuggingFace if user selected an open model
     if (!aiResponse && hfModelId && !isClaudeModel) {
+      const hfSystemPrompt = isBlackSwanTextModel(hfModelId) ? blackSwanSystemPrompt : combinedSystemPrompt;
       const hfResult = await callHfProxy("chat", {
         messages: [
-          { role: "system", content: combinedSystemPrompt },
+          { role: "system", content: hfSystemPrompt },
           { role: "user", content: message },
         ],
       }, hfModelId, undefined, userId);
@@ -4793,10 +4850,10 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       if (!hfResult.error && hfResult.result) {
         const rawHfResponse = hfResult.result?.choices?.[0]?.message?.content || JSON.stringify(hfResult.result);
         aiResponse = isBlackSwanTextModel(hfModelId) ? stripBlackSwanReasoningText(rawHfResponse) : rawHfResponse;
-        const est = Math.ceil((combinedSystemPrompt.length + message.length + (aiResponse?.length || 0)) / 4);
+        const est = Math.ceil((hfSystemPrompt.length + message.length + (aiResponse?.length || 0)) / 4);
         tokenBreakdown = {
           model: hfModelId,
-          input_tokens: Math.ceil((combinedSystemPrompt.length + message.length) / 4),
+          input_tokens: Math.ceil((hfSystemPrompt.length + message.length) / 4),
           output_tokens: Math.ceil((aiResponse?.length || 0) / 4),
           cache_creation_tokens: 0,
           cache_read_tokens: 0,
@@ -4806,13 +4863,15 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
     }
 
     if (!aiResponse && !isClaudeModel && !hfModelId) {
-      // Try BlackSwan LLM first (zero cost)
-      aiResponse = await callBlackSwanLLM(combinedSystemPrompt, message);
+      // Try BlackSwan LLM first (zero cost) — this path is always BlackSwan
+      // (hardcoded `model: "blackswan"` inside callBlackSwanLLM), so it
+      // always gets the shortened prompt.
+      aiResponse = await callBlackSwanLLM(blackSwanSystemPrompt, message);
       if (aiResponse) {
-        const est = Math.ceil((combinedSystemPrompt.length + message.length + aiResponse.length) / 4);
+        const est = Math.ceil((blackSwanSystemPrompt.length + message.length + aiResponse.length) / 4);
         tokenBreakdown = {
           model: "blackswan",
-          input_tokens: Math.ceil((combinedSystemPrompt.length + message.length) / 4),
+          input_tokens: Math.ceil((blackSwanSystemPrompt.length + message.length) / 4),
           output_tokens: Math.ceil(aiResponse.length / 4),
           cache_creation_tokens: 0,
           cache_read_tokens: 0,
