@@ -98,7 +98,7 @@ const SECRET_PATTERNS: readonly RegExp[] = [
   /\bBearer\s+[A-Za-z0-9._\-]{4,}/gi,
   /\bAuthorization\b\s*[:=]\s*["']?[A-Za-z0-9._\-]{4,}["']?/gi,
   /\bsk-ant-[A-Za-z0-9._\-]{6,}/gi,
-  /\bsk-[A-Za-z0-9]{3,}/gi,
+  /\bsk-[A-Za-z0-9-]{3,}/gi, // hyphen in class → matches multi-segment keys (OpenRouter sk-or-v1-…)
   /\bxox[baprs]-[A-Za-z0-9-]{6,}/gi,
   /\bgh[pousr]_[A-Za-z0-9]{12,}/g,
   /\bAKIA[0-9A-Z]{10,}/g,

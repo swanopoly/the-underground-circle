@@ -93,6 +93,13 @@ function main() {
   // ENOTFOUND is a DNS/network wobble, NOT a model "not found":
   assertEq(classifyProviderError({ code: 'ENOTFOUND' }), 'transient', 'ENOTFOUND -> transient (not not_found)');
 
+  // Browser/Supabase fetch-failure messages must classify transient (regression
+  // for React Native Web / Netlify: 'Failed to fetch', 'Load failed', and the
+  // Supabase functions-js 'Failed to send a request' wrapper).
+  assertEq(classifyProviderError({ message: 'TypeError: Failed to fetch' }), 'transient', "'Failed to fetch' (Chrome/Edge) -> transient");
+  assertEq(classifyProviderError({ message: 'Load failed' }), 'transient', "'Load failed' (Safari) -> transient");
+  assertEq(classifyProviderError({ message: 'Failed to send a request to the Edge Function' }), 'transient', 'Supabase FunctionsFetchError -> transient');
+
   // ─── 5. classify → not_found ──────────────────────────────────────
   assertEq(classifyProviderError({ status: 404 }), 'not_found', '404 -> not_found');
   assertEq(classifyProviderError({ message: 'model not found' }), 'not_found', 'model not found -> not_found');

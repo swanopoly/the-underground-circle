@@ -292,6 +292,16 @@ function main(): void {
     console.error(`FAIL: (13) degenerate inputs threw: ${(e as Error)?.message}`);
   }
 
+  // ─── (Nb) OpenRouter multi-segment keys must not leak into route copy ──────
+  {
+    const OR_FRAG = 'abcdef0123456789';
+    const OR_KEY = `sk-or-v1-${OR_FRAG}${OR_FRAG}`;
+    const e = explainRoute({ model: 'claude-opus-4-8', reason: `relayed ${OR_KEY} upstream` });
+    assert(!leaks(e, OR_FRAG), '(Nb) OpenRouter sk-or-v1 key body redacted from route copy', blob(e));
+    assert(!leaks(e, 'sk-or-v1'), '(Nb) OpenRouter key prefix not present verbatim', blob(e));
+    assert(isValid(e), '(Nb) explanation still valid after redaction');
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} failure(s), ${passes} passed`);
     process.exit(1);

@@ -67,7 +67,7 @@ const OVERLOAD_RE =
 const NOT_FOUND_RE =
   /not found|no such|does not exist|doesn'?t exist|unknown model|unrecognized model|no model|model_not_found|nonexistent|deprecated model/;
 const TRANSIENT_RE =
-  /timeout|timed out|etimedout|enotfound|enetunreach|epipe|econn|network|fetch failed|socket hang up|connection reset|connection refused|connection closed|connection error|abort|bad gateway|gateway timeout|temporar|try again|getaddrinfo|\bdns\b|reset by peer|server error|internal error/;
+  /timeout|timed out|etimedout|enotfound|enetunreach|epipe|econn|network|fetch failed|failed to fetch|load failed|failed to send a request|socket hang up|connection reset|connection refused|connection closed|connection error|abort|bad gateway|gateway timeout|temporar|try again|getaddrinfo|\bdns\b|reset by peer|server error|internal error/;
 
 type UnknownRecord = Record<string, unknown>;
 

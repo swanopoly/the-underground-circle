@@ -228,6 +228,27 @@ function main(): void {
     assert(degenerate !== null && degenerate.isMutation && !degenerate.isVerification, '(16) degenerate exec input fails safe to mutation');
   }
 
+  // ─── (16b) verification tools with rewrite flags are MUTATIONS ─────────────
+  // A formatter/fixer that exits 0 applied fixes; it did NOT prove correctness,
+  // so it must dirty the tree and never mark it verified-clean.
+  {
+    const cls = (argv: string[]) => classifyExecCallForGate('local.run_shell', { argv })!;
+    for (const argv of [
+      ['prettier', '--write', '.'], ['prettier', '-w', 'src'], ['eslint', '--fix', '.'],
+      ['ruff', 'check', '--fix'], ['npm', 'run', 'clean'], ['npm', 'run', 'format'],
+    ]) {
+      const c = cls(argv);
+      assert(c.isMutation === true && c.isVerification === false, `(16b) rewrite → mutation: ${argv.join(' ')}`, JSON.stringify(c));
+    }
+    for (const argv of [
+      ['npm', 'test'], ['npm', 'run', 'typecheck'], ['npm', 'run', 'test'], ['tsc', '--noEmit'],
+      ['prettier', '--check', '.'], ['vitest', 'run'], ['cargo', 'check'],
+    ]) {
+      const c = cls(argv);
+      assert(c.isMutation === false && c.isVerification === true, `(16b) verify stays verify: ${argv.join(' ')}`, JSON.stringify(c));
+    }
+  }
+
   // ─── (15) degenerate / undefined never throws ─────────────────────────────
   try {
     const f15 = foldRunAndFixRound(undefined, [{ name: 'desktop.edit_file', ok: true }]);

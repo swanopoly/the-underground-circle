@@ -63,6 +63,17 @@ const VERIFICATION_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   cargo: new Set(['test', 'check', 'clippy', 'build']),
   go: new Set(['test', 'vet', 'build']),
 };
+/** Flags that make an otherwise-"verification" tool REWRITE the working tree
+ *  (prettier --write / -w, eslint --fix, ruff --fix). Exit 0 then means "fixes
+ *  applied", not "code correct" — so the call is a mutation, not a verification.
+ *  `-w` also matches some watch modes (jest/vitest/tsc -w); those don't fit the
+ *  gate's completed-round model, and classifying them dirty is fail-safe. */
+const MUTATING_SHELL_FLAGS: ReadonlySet<string> = new Set(['--write', '-w', '--fix']);
+/** `<pm> run <script>` script names that imply read-only verification. An
+ *  unknown script (format/clean/prepare/…) may mutate → fail-safe dirty. */
+const VERIFY_RUN_SCRIPTS: ReadonlySet<string> = new Set([
+  'test', 'typecheck', 'tsc', 'lint', 'check', 'build', 'vitest', 'jest', 'types',
+]);
 /** Read-only leads that neither verify nor dirty the workspace. */
 const NEUTRAL_SHELL_LEADS: ReadonlySet<string> = new Set([
   'ls', 'cat', 'pwd', 'echo', 'printf', 'which', 'type', 'find', 'grep', 'rg', 'ag',
@@ -101,9 +112,25 @@ export function classifyExecCallForGate(
   const lead = (argv[0] || '').split('/').pop()!.trim().toLowerCase();
   const sub = (argv[1] || '').trim().toLowerCase();
   if (!lead) return { isMutation: true, isVerification: false }; // degenerate → fail-safe dirty
-  const isVerification = VERIFICATION_SHELL_LEADS.has(lead)
-    || Boolean(VERIFICATION_SUBCOMMANDS[lead]?.has(sub));
-  if (isVerification) return { isMutation: false, isVerification: true };
+  // A verification tool invoked with a working-tree-rewriting flag (prettier
+  // --write, eslint/ruff --fix) is a MUTATION: exit 0 means fixes were applied,
+  // not that the code is correct. Check before the verification match so such a
+  // call dirties the tree and never marks it verified-clean.
+  if (argv.some((a) => MUTATING_SHELL_FLAGS.has(a.trim().toLowerCase()))) {
+    return { isMutation: true, isVerification: false };
+  }
+  if (VERIFICATION_SUBCOMMANDS[lead]?.has(sub)) {
+    // `<pm> run <script>` verifies only for known read-only scripts; an unknown
+    // script (format/clean/prepare/…) may mutate → fail-safe dirty.
+    if (sub === 'run') {
+      const script = (argv[2] || '').trim().toLowerCase();
+      return VERIFY_RUN_SCRIPTS.has(script)
+        ? { isMutation: false, isVerification: true }
+        : { isMutation: true, isVerification: false };
+    }
+    return { isMutation: false, isVerification: true }; // e.g. `npm test`, `cargo check`
+  }
+  if (VERIFICATION_SHELL_LEADS.has(lead)) return { isMutation: false, isVerification: true };
   if (NEUTRAL_SHELL_LEADS.has(lead)) return { isMutation: false, isVerification: false };
   return { isMutation: true, isVerification: false }; // unknown command → fail-safe dirty
 }
