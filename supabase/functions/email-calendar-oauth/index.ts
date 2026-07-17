@@ -438,10 +438,26 @@ Deno.serve(async (req: Request) => {
   const action = pathParts[pathParts.length - 1];
 
   // ── GET /authorize — Start OAuth flow ────────────────────────────────────
-  if (action === "authorize" && req.method === "GET") {
-    const provider = url.searchParams.get("provider") || "google";
-    const scopes = url.searchParams.get("scopes") || "calendar,email";
-    const state = url.searchParams.get("state") || "";
+  // Authenticated init: verify the caller, mint a server-stored nonce, and
+  // return the IdP authorize URL carrying only that nonce as state. The user's
+  // JWT never travels through the IdP anymore (advisory #6). POST (not GET) so
+  // the bearer token rides an Authorization header, not the URL.
+  if (action === "authorize" && req.method === "POST") {
+    const authClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      global: { headers: { Authorization: req.headers.get("Authorization") || "" } },
+    });
+    const { data: { user } } = await authClient.auth.getUser();
+    if (!user) {
+      return new Response(
+        JSON.stringify({ error: "Not authenticated" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    let body: { provider?: unknown; scopes?: unknown } = {};
+    try { body = await req.json(); } catch { /* empty body */ }
+    const provider = typeof body.provider === "string" && body.provider ? body.provider : "google";
+    const scopes = typeof body.scopes === "string" && body.scopes ? body.scopes : "calendar,email";
 
     const config = getProviderConfig(provider);
     if (!config || !config.clientId) {
@@ -460,16 +476,32 @@ Deno.serve(async (req: Request) => {
       scopeParts.push(config.scopes.email);
     }
 
+    // Opaque single-use nonce bound to the verified user, stored server-side.
+    const nonceBytes = new Uint8Array(24);
+    crypto.getRandomValues(nonceBytes);
+    const nonce = Array.from(nonceBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+    const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const { error: stateErr } = await serviceClient.from("email_calendar_oauth_states").insert({
+      state: nonce,
+      user_id: user.id,
+      provider,
+      scopes,
+      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    });
+    if (stateErr) {
+      console.error("Failed to store email/calendar OAuth state:", stateErr);
+      return new Response(
+        JSON.stringify({ error: "Failed to initiate OAuth flow" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const authUrl = new URL(config.authUrl);
     authUrl.searchParams.set("client_id", config.clientId);
     authUrl.searchParams.set("redirect_uri", getCallbackUrl());
     authUrl.searchParams.set("scope", scopeParts.join(" "));
     authUrl.searchParams.set("response_type", "code");
-    // Encode provider + JWT into state
-    authUrl.searchParams.set(
-      "state",
-      btoa(JSON.stringify({ provider, jwt: state, scopes }))
-    );
+    authUrl.searchParams.set("state", nonce);
 
     // Provider-specific params
     if (config.extraAuthParams) {
@@ -478,10 +510,10 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    return new Response(null, {
-      status: 302,
-      headers: { ...corsHeaders, Location: authUrl.toString() },
-    });
+    return new Response(
+      JSON.stringify({ url: authUrl.toString() }),
+      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   }
 
   // ── GET /callback — OAuth redirect handler ──────────────────────────────
@@ -502,17 +534,28 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    let provider = "google";
-    let jwt = "";
-    let scopes = "calendar,email";
-    try {
-      const parsed = JSON.parse(atob(stateRaw));
-      provider = parsed.provider || "google";
-      jwt = parsed.jwt || "";
-      scopes = parsed.scopes || "calendar,email";
-    } catch {
-      // fallback
+    // Resolve the flow from the server-stored nonce — never trust a decoded
+    // client-supplied state (that carried the JWT; advisory #6).
+    const serviceClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const { data: stateRow } = await serviceClient
+      .from("email_calendar_oauth_states")
+      .select("id, user_id, provider, scopes, expires_at")
+      .eq("state", stateRaw)
+      .maybeSingle();
+    if (!stateRow) {
+      return new Response(oauthResultHTML(false, "Invalid or expired state"), {
+        headers: { ...corsHeaders, "Content-Type": "text/html" },
+      });
     }
+    if (new Date(stateRow.expires_at) < new Date()) {
+      await serviceClient.from("email_calendar_oauth_states").delete().eq("id", stateRow.id);
+      return new Response(oauthResultHTML(false, "State expired"), {
+        headers: { ...corsHeaders, "Content-Type": "text/html" },
+      });
+    }
+    const provider = (stateRow.provider as string) || "google";
+    const scopes = (stateRow.scopes as string) || "calendar,email";
+    const userId = stateRow.user_id as string;
 
     const config = getProviderConfig(provider);
     if (!config) {
@@ -581,22 +624,22 @@ Deno.serve(async (req: Request) => {
       // non-critical
     }
 
-    // Store tokens using user's JWT
-    if (jwt) {
-      const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-        global: { headers: { Authorization: `Bearer ${jwt}` } },
-      });
-
-      await storeTokens(
-        supabase,
-        provider,
-        tokens.access_token,
-        tokens.refresh_token || null,
-        tokens.expires_in || 3600,
-        userEmail,
-        scopes
-      );
-    }
+    // Store tokens for the verified user via the service role — no JWT needed
+    // now that the flow is bound to a server-stored nonce (advisory #6).
+    await serviceClient.rpc("store_user_api_key_service", {
+      p_user_id: userId,
+      p_provider: provider,
+      p_api_key: tokens.access_token,
+      p_label: "oauth",
+      p_endpoint: JSON.stringify({
+        refresh_token: tokens.refresh_token || "",
+        expires_at: new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString(),
+        email: userEmail,
+        scopes,
+      }),
+    });
+    // Single-use: delete the consumed nonce.
+    await serviceClient.from("email_calendar_oauth_states").delete().eq("id", stateRow.id);
 
     // Send success HTML that posts message to opener window
     return new Response(oauthResultHTML(true, "", provider, userEmail), {
