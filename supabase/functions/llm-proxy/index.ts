@@ -158,6 +158,45 @@ const OPENAI_COMPATIBLE: Provider[] = [
   "deepseek",
 ];
 
+// ─── SSRF guard for caller-supplied endpoints (ollama / openai_compatible) ───
+// A caller-controlled endpoint URL must never resolve to a loopback, private,
+// link-local, CGNAT, or cloud-metadata host from the hosted edge server.
+// (Mirrors the guard in custom-api-proxy/index.ts.)
+function isPrivateIpv4(hostname: string): boolean {
+  const match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!match) return false;
+  const nums = match.slice(1).map(Number);
+  if (nums.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a, b] = nums;
+  return a === 10
+    || a === 127
+    || a === 0
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 100 && b >= 64 && b <= 127);
+}
+function isBlockedHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return host === "localhost"
+    || host.endsWith(".localhost")
+    || host.endsWith(".local")
+    || host.endsWith(".internal")
+    || host === "::1"
+    || host.startsWith("fc")
+    || host.startsWith("fd")
+    || host.startsWith("fe80")
+    || host === "169.254.169.254"
+    || isPrivateIpv4(host);
+}
+/** True when a resolved endpoint must NOT be fetched (bad scheme or blocked host). */
+function endpointIsBlocked(rawUrl: string): boolean {
+  let u: URL;
+  try { u = new URL(rawUrl); } catch { return true; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return true;
+  return isBlockedHostname(u.hostname);
+}
+
 function normalizeOpenAICompatibleEndpoint(endpoint: string): string {
   const trimmed = endpoint.trim().replace(/\/+$/, "");
   if (!trimmed) return "";
@@ -777,6 +816,12 @@ Deno.serve(async (req: Request) => {
         }
       } else {
         endpoint = PROVIDER_ENDPOINTS[provider];
+      }
+      // SSRF guard: only the caller-controlled endpoints (ollama /
+      // openai_compatible) are attacker-influenced. Built-in PROVIDER_ENDPOINTS
+      // are trusted public hosts and are left unchecked.
+      if ((provider === "ollama" || provider === "openai_compatible") && endpointIsBlocked(endpoint)) {
+        return errResponse(400, "validation", "Endpoint host is not allowed.");
       }
       result = await callOpenAICompatible(
         endpoint,

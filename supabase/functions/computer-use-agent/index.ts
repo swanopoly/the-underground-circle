@@ -438,6 +438,27 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  // Cross-circle IDOR guard: the reads below are keyed on body.circleId via the
+  // service-role client (RLS bypassed). A verified caller must be a MEMBER of
+  // that circle. The scheduled service-role path (trusted internal caller) is
+  // exempt. Service-role + explicit (circle_id, user_id) equality checks the
+  // VERIFIED user's own membership and avoids the circle_members RLS recursion.
+  const isScheduledServiceCall = Boolean(scheduledBy) && isServiceRoleRequest(req);
+  if (!isScheduledServiceCall && supabase && body.circleId) {
+    const { data: membership } = await supabase
+      .from("circle_members")
+      .select("circle_id")
+      .eq("circle_id", body.circleId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (!membership) {
+      return new Response(
+        JSON.stringify({ error: "Not a member of this circle", code: "forbidden" }),
+        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+  }
+
   const apiKey = await resolveUserModelApiKey({
     supabase,
     userId,
