@@ -2628,6 +2628,28 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
     sentenceCounts.set(sentence, count);
     if (count >= 2) return true;
   }
+
+  // 2026-07-17: found via live direct-endpoint testing (not routed through
+  // the app) — a different shape of degenerate loop than either repetition
+  // check above: many short, fragmentary, grammatically incomplete lines
+  // ("QA", "blac got QA", "the car was      ", trailing whitespace-only
+  // lines), word-salad rather than exact repeated text, so neither the
+  // 24-char verbatim window nor the 50-char sentence-repeat check fires.
+  // Distinctive symptom here isn't repeated TEXT, it's the LINE STRUCTURE:
+  // mostly very short (<25 char), unpunctuated fragments — a genuine reply
+  // (even a numbered task list or a Done/Next update) is essentially always
+  // either a few substantive lines or short lines that still end in real
+  // punctuation. Requires at least 10 non-empty lines before checking the
+  // ratio, specifically to avoid flagging ordinary short multi-line replies
+  // (verified: a 7-line genuine task list and a 4-line Done/Next update
+  // both score well under the 0.6 threshold; this only fires on responses
+  // that are both long AND structurally degenerate throughout).
+  const nonEmptyLines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (nonEmptyLines.length >= 10) {
+    const degenerateLines = nonEmptyLines.filter((l) => l.length < 25 && !/[.!?:]$/.test(l));
+    if (degenerateLines.length / nonEmptyLines.length >= 0.6) return true;
+  }
+
   return false;
 }
 /* UC_SMOKE_EXTRACT_END looksLikeGarbledBlackSwanOutput */

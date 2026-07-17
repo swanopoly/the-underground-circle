@@ -283,6 +283,59 @@ assert(
   ) === false,
 );
 
+// Found via live direct-endpoint testing (2026-07-17, bypassing the app):
+// a word-salad loop of many short, fragmentary, unpunctuated lines — a
+// different shape than either repetition check above (no exact-repeated
+// text, so neither the sliding window nor the sentence-repeat check fires).
+const degenerateLineSalad = `***** Messages: *****
+
+Q: ** interval since QA units* Sonic chess car got blac swan
+
+S: <- QA
+    interval since sonic units* blac got blac swan
+    the car was purely the
+    it was a
+    blac swan car
+    blac swan car
+    the car was
+    the car was
+    the car was      blac swan
+QA
+    blac got QA
+    blac chess car got
+
+    QA
+    blac got QA
+    blac swan car got QA
+    internal QA
+
+    blac swan car got QA
+    internal QA
+    pure QA
+
+    QA
+    blac got QA
+    internal QA
+
+    blac swan car got QA
+
+
+    pure internal QA
+    pure internal blac swan
+    pure internal QA
+    internal pure blac swan QA`;
+assert('a long word-salad loop of short unpunctuated lines is flagged', looksLikeGarbledBlackSwanOutput(degenerateLineSalad) === true);
+assert(
+  'a genuine multi-item task list (7 lines, still under the 10-line floor) is NOT flagged',
+  looksLikeGarbledBlackSwanOutput(
+    "🦢 Here's where things stand:\n- Fix login bug (in progress)\n- Write API docs (todo)\n- Deploy checklist (todo)\n- Client follow-up (todo)\n- Design review (blocked)\n\nStart with the login bug since it's already moving.",
+  ) === false,
+);
+assert(
+  'a genuine Done/Next update (short lines, but not degenerate-shaped) is NOT flagged',
+  looksLikeGarbledBlackSwanOutput("Update:\n**Done:** shipped the fix\n**Next:** writing tests\nAnything I'm missing?") === false,
+);
+
 // ─── stripBlackSwanReasoningText ───────────────────────────────────────────
 console.log('stripBlackSwanReasoningText');
 
