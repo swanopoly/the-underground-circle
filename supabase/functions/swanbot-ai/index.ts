@@ -2650,6 +2650,31 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
     if (degenerateLines.length / nonEmptyLines.length >= 0.6) return true;
   }
 
+  // 2026-07-17: a third distinct loop shape found live in the same testing
+  // session — a repeated short PHRASE ("can't create plan", "can't check
+  // in") embedded inside otherwise-varying, individually-punctuated lines
+  // (e.g. "You can't create the (can't create plan)" / "You love you
+  // (can't create plan)" / "You watch Chris (can't create plan)"), so
+  // neither the sentence-repeat check (the surrounding sentences differ) nor
+  // the line-structure check above (these lines aren't short/unpunctuated)
+  // fires. Flags any exact 4-word phrase (12+ chars, to skip trivial
+  // stopword n-grams) that recurs 4+ times anywhere in the response — a
+  // genuine answer essentially never repeats the same 4-word phrase that
+  // many times. Verified against 9 genuine longer/list-shaped/digest-style
+  // replies already covered by the tests above plus 4 more borderline
+  // stress cases (a 4-item numbered list, a task referenced 3x across one
+  // sentence, 4 short "today"-ending sentences, a facts block) — none trip
+  // this at the 4-occurrences threshold.
+  const words = text.toLowerCase().replace(/\s+/g, " ").trim().split(" ");
+  const phraseCounts = new Map<string, number>();
+  for (let i = 0; i + 4 <= words.length; i++) {
+    const phrase = words.slice(i, i + 4).join(" ");
+    if (phrase.length < 12) continue;
+    const count = (phraseCounts.get(phrase) || 0) + 1;
+    phraseCounts.set(phrase, count);
+    if (count >= 4) return true;
+  }
+
   return false;
 }
 /* UC_SMOKE_EXTRACT_END looksLikeGarbledBlackSwanOutput */

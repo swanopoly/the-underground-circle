@@ -336,6 +336,33 @@ assert(
   looksLikeGarbledBlackSwanOutput("Update:\n**Done:** shipped the fix\n**Next:** writing tests\nAnything I'm missing?") === false,
 );
 
+// Found via live direct-endpoint testing (2026-07-17, same session as the
+// line-structure check above): a repeated short phrase ("can't create
+// plan") embedded inside otherwise-varying, individually-punctuated lines
+// — a third distinct loop shape neither the sentence-repeat nor the
+// line-structure check catches.
+const repeatedPhraseSalad = `You can't take other (can't create plan), but with 0/2 - can't create plan.
+You can't check in, but with a plan - can't create plan.
+You haven't checked in today - can't create plan.
+You can't create the (can't create plan).
+You can't create (can't create plan).
+You love you (can't create plan).
+You watch Chris (can't create plan).
+You can't take (can't create plan).`;
+assert('a repeated short phrase embedded in otherwise-varying punctuated lines is flagged', looksLikeGarbledBlackSwanOutput(repeatedPhraseSalad) === true);
+assert(
+  'a 4-item numbered list is NOT flagged',
+  looksLikeGarbledBlackSwanOutput('1. Fix the login bug\n2. Fix the API docs typo\n3. Fix the deployment script\n4. Fix the test suite') === false,
+);
+assert(
+  "a task referenced 3 times across one sentence is NOT flagged",
+  looksLikeGarbledBlackSwanOutput("Please review this task, then review this task's dependencies, then review this task's PR before merging.") === false,
+);
+assert(
+  'a genuine reply with 4 short "today"-ending sentences is NOT flagged',
+  looksLikeGarbledBlackSwanOutput("🦢 Nice work! You checked in today. You finished your task today. You're on track today.") === false,
+);
+
 // ─── stripBlackSwanReasoningText ───────────────────────────────────────────
 console.log('stripBlackSwanReasoningText');
 
