@@ -34,14 +34,33 @@ function getSupabase() {
   );
 }
 
+// Resolve the VERIFIED caller from the Authorization: Bearer <supabase jwt>
+// header. The service-role reads below bypass RLS, so this is the ONLY access
+// control — never trust a user_id from the query string. (Mirrors google-oauth.)
+async function getAuthedUser(req: Request): Promise<string | null> {
+  const token = (req.headers.get("Authorization") || "").replace("Bearer ", "");
+  if (!token) return null;
+  const anon = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+    { global: { headers: { Authorization: `Bearer ${token}` } } },
+  );
+  const { data: { user } } = await anon.auth.getUser();
+  return user?.id || null;
+}
+
 // ─── Action: authorize ──────────────────────────────────────────────────────
 
-async function handleAuthorize(url: URL): Promise<Response> {
+async function handleAuthorize(req: Request, url: URL): Promise<Response> {
+  // Bind the OAuth flow to the VERIFIED caller, not a client-supplied user_id —
+  // otherwise an attacker could plant their GitHub token onto a victim's account
+  // by naming the victim's uuid here (account-link CSRF).
+  const userId = await getAuthedUser(req);
+  if (!userId) return jsonResponse({ error: "Unauthenticated" }, 401);
   const circleId = url.searchParams.get("circle_id");
-  const userId = url.searchParams.get("user_id");
 
-  if (!circleId || !userId) {
-    return jsonResponse({ error: "Missing circle_id or user_id" }, 400);
+  if (!circleId) {
+    return jsonResponse({ error: "Missing circle_id" }, 400);
   }
 
   const clientId = Deno.env.get("GITHUB_CLIENT_ID");
@@ -203,12 +222,11 @@ async function handleCallback(url: URL): Promise<Response> {
 
 // ─── Action: list_repos ─────────────────────────────────────────────────────
 
-async function handleListRepos(url: URL): Promise<Response> {
-  const userId = url.searchParams.get("user_id");
-
-  if (!userId) {
-    return jsonResponse({ error: "Missing user_id" }, 400);
-  }
+async function handleListRepos(req: Request): Promise<Response> {
+  // Use the VERIFIED caller — the service-role read below bypasses RLS, so a
+  // query-param user_id would let anyone list another user's private repos.
+  const userId = await getAuthedUser(req);
+  if (!userId) return jsonResponse({ error: "Unauthenticated" }, 401);
 
   const supabase = getSupabase();
 
@@ -273,12 +291,9 @@ async function handleListRepos(url: URL): Promise<Response> {
 
 // ─── Action: status — check if user has connected GitHub ────────────────────
 
-async function handleStatus(url: URL): Promise<Response> {
-  const userId = url.searchParams.get("user_id");
-
-  if (!userId) {
-    return jsonResponse({ error: "Missing user_id" }, 400);
-  }
+async function handleStatus(req: Request): Promise<Response> {
+  const userId = await getAuthedUser(req);
+  if (!userId) return jsonResponse({ error: "Unauthenticated" }, 401);
 
   const supabase = getSupabase();
 
@@ -318,13 +333,13 @@ Deno.serve(async (req: Request) => {
   try {
     switch (action) {
       case "authorize":
-        return await handleAuthorize(url);
+        return await handleAuthorize(req, url);
       case "callback":
         return await handleCallback(url);
       case "list_repos":
-        return await handleListRepos(url);
+        return await handleListRepos(req);
       case "status":
-        return await handleStatus(url);
+        return await handleStatus(req);
       default:
         return jsonResponse({ error: `Unknown action: ${action}` }, 400);
     }

@@ -557,6 +557,7 @@ export async function connectViaOAuth(circleId: string, userId: string): Promise
   try {
     const res = await fetch(
       `${SUPABASE_FUNCTIONS_URL}/github-oauth?action=authorize&circle_id=${circleId}&user_id=${userId}`,
+      { headers: await getEdgeAuthHeaders() },
     );
     const data = await res.json();
     if (data.error) return { error: data.error };
