@@ -302,8 +302,21 @@ assert(
     '<think>\nHer streak is 0, so I should acknowledge that plainly.\n</think>\n🦢 Looks like your streak reset to 0 — happens to everyone. Want to jump back in today?',
   ) === '🦢 Looks like your streak reset to 0 — happens to everyone. Want to jump back in today?',
 );
+// Found via live direct-endpoint testing (2026-07-17, not just synthetic
+// cases): the model's chat template evidently auto-opens the think block
+// before generation starts, so the raw completion routinely begins
+// mid-reasoning with NO literal opening <think> tag at all, and only the
+// closing tag appears — a real, well-formed 2-task answer was being
+// discarded purely because of this lone closing tag. The salvage logic
+// must match on the closing tag alone, not require both tags.
 assert(
-  'an unclosed <think> tag (leaked mid-generation, no closing tag) is still treated as garbled',
+  'a lone closing </think> tag with no opening tag is still salvaged (the model\'s template auto-opens it)',
+  stripBlackSwanReasoningText(
+    'Thinking about the user\'s request.\n\nSam is on a 5-day streak with 2 open tasks.\n</think>\n\n🦢 You have 2 tasks open:\n1. [in_progress] Fix login bug\n2. [todo] Write API docs',
+  ) === '🦢 You have 2 tasks open:\n1. [in_progress] Fix login bug\n2. [todo] Write API docs',
+);
+assert(
+  'an unclosed <think> tag (leaked mid-generation, no closing tag at all) is still treated as garbled',
   stripBlackSwanReasoningText('<think>\nHer streak is 0, so I should') === null ||
     stripBlackSwanReasoningText('<think>\nHer streak is 0, so I should')?.startsWith("I couldn't form a clear answer"),
 );

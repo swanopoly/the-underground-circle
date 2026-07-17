@@ -2665,24 +2665,33 @@ function stripBlackSwanReasoningTextRaw(text: string | null): string | null {
   let trimmed = text.trim();
   if (!trimmed) return trimmed;
 
-  // 2026-07-17: a well-formed <think>...</think> block (the raw model
-  // wrapping its reasoning in these XML-style tags, as opposed to the
-  // "Thinking Process:" prose prefix this function otherwise expects) used
-  // to be handled nowhere in this function — the untouched text, tags and
-  // all, would fall straight through to looksLikeGarbledBlackSwanOutput(),
-  // whose BLACKSWAN_GARBLE_THINK_TAG_RE check discards the ENTIRE response
+  // 2026-07-17: a <think>...</think> block (the raw model wrapping its
+  // reasoning in these XML-style tags, as opposed to the "Thinking
+  // Process:" prose prefix this function otherwise expects) used to be
+  // handled nowhere in this function — the untouched text, tags and all,
+  // would fall straight through to looksLikeGarbledBlackSwanOutput(), whose
+  // BLACKSWAN_GARBLE_THINK_TAG_RE check discards the ENTIRE response
   // (including a genuinely good answer written after the closing tag) just
-  // for containing the tag. Extract the content after a closed think block
-  // first, so a real answer underneath a well-formed think block survives.
-  // An UNCLOSED tag (no matching </think>, i.e. generation got cut off
-  // mid-reasoning) is deliberately NOT extracted here — `trimmed` is left
-  // as-is, still containing the tag, so it still correctly falls through to
-  // the garbling check below as a genuine leaked-reasoning failure; there's
-  // no reliable "end of reasoning" boundary to salvage an answer from.
-  const thinkBlockMatch = trimmed.match(/<think>[\s\S]*?<\/think>\s*([\s\S]*)/i);
-  if (thinkBlockMatch) {
-    const afterThink = thinkBlockMatch[1].trim();
-    if (afterThink) trimmed = afterThink;
+  // for containing the tag. Extract the content after the closing tag
+  // first, so a real answer underneath survives.
+  //
+  // Deliberately matches on the CLOSING </think> tag alone, not requiring a
+  // literal opening <think> tag first — live direct-endpoint testing found
+  // the model's chat template evidently auto-opens the think block before
+  // generation starts, so the raw completion routinely begins mid-reasoning
+  // ("Thinking about the user's request...") and only the closing tag
+  // itself appears in the text. Requiring both tags (an earlier version of
+  // this fix did) missed that shape entirely, silently discarding a
+  // perfectly good, fact-correct answer written right after the lone
+  // closing tag. An opening tag with NO closing tag (generation cut off
+  // mid-reasoning) is still correctly left alone here — nothing to match on
+  // — so it still falls through to the garbling check below as a genuine
+  // leaked-reasoning failure; there's no reliable "end of reasoning"
+  // boundary to salvage an answer from in that case.
+  const closeThinkMatch = trimmed.match(/<\/think>\s*([\s\S]*)/i);
+  if (closeThinkMatch) {
+    const afterClose = closeThinkMatch[1].trim();
+    if (afterClose) trimmed = afterClose;
   }
 
   const reasoningPrefix = /^\s*(?:Thinking Process|Thought Process|Reasoning|Chain[- ]of[- ]Thought)\s*:\s*/i;
