@@ -170,7 +170,7 @@ _Generated from run `wf_757a5bc0-723` (7/7 confirmed after adversarial verify)._
 
 # Second sweep — 2026-07-17 (remaining stable edge functions)
 
-> Status: **REMEDIATED IN CODE (7 of 8) — pending redeploy + SQL apply; 1 blocked.**
+> Status: **REMEDIATED IN CODE (8 of 8) — pending redeploy + SQL apply.**
 > A second adversarial fleet (run `wf_67a7de68`) reviewed the ~33 remaining
 > git-clean edge functions and confirmed 8 more vulns (2 HIGH, 6 medium). All
 > validated with `deno check`. Commits: `48fc22b`-era pattern → `89fe096` (6
@@ -185,16 +185,13 @@ _Generated from run `wf_757a5bc0-723` (7/7 confirmed after adversarial verify)._
 | S5 | MED | `research-daily-runner` | set_review_status let any authed user rewrite any doc | enforce the RLS predicate (owner/writable-circle member) | `89fe096` |
 | S6 | MED | `aggregate-analytics` | unauthenticated service-role circle sweep (DB/cost DoS) | service-role gate | `89fe096` |
 | S7 | MED | `chat-stream` | body circleId trusted for budget read + usage attribution | verify membership; drop attribution for non-members | `89fe096` |
-| S8 | MED | `custom-api-proxy` | SSRF: host guard applied pre-flight only; upstream 3xx follows to internal hosts | **BLOCKED** — file is root-owned (EACCES). Fix: `redirect:"manual"` + block 3xx before reading body | — |
+| S8 | MED | `custom-api-proxy` | SSRF: host guard applied pre-flight only; upstream 3xx follows to internal hosts | `redirect:"manual"` + throw on any 3xx before reading the body (flows to the existing host-block catch) | `a4b2176` |
 
 **New migration:** `20260717_teams_oauth_states.sql` (service-role-only RLS).
 
 **Operator steps for the second sweep:**
 1. Apply `teams_oauth_states` (SQL below / in the migration file).
-2. Redeploy the 7 fixed functions (`boss-agent`, `heartbeat-agent`, `aggregate-analytics`, `generate-report`, `research-daily-runner`, `chat-stream`, `teams-auth`).
-3. Ship the `teams.ts` frontend with teams-auth (atomic, like the other OAuth callbacks). The other 6 have no frontend change.
-4. **S8 custom-api-proxy** is unfixed — the file is root-owned so the edit was refused. Run
-   `sudo chown "$(whoami)":staff supabase/functions/custom-api-proxy supabase/functions/custom-api-proxy/index.ts`
-   and the redirect-follow SSRF fix can then be applied.
+2. Redeploy the 8 fixed functions (`boss-agent`, `heartbeat-agent`, `aggregate-analytics`, `generate-report`, `research-daily-runner`, `chat-stream`, `teams-auth`, `custom-api-proxy`).
+3. Ship the `teams.ts` frontend with teams-auth (atomic, like the other OAuth callbacks). The other 7 have no frontend change.
 
 _Generated from run `wf_67a7de68` (8/8 confirmed after adversarial verify)._
