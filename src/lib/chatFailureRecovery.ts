@@ -301,8 +301,19 @@ export function resolveChatFailureRecoveryOptionFollowup(
 
   // A user retyping an option's exact on-card label (e.g. tapping-then-typing
   // "Resolve the contract blocker") should always resolve, even when the label
-  // itself contains none of the generic recovery keywords below.
-  const directLabelMatch = options.find((option) => {
+  // itself contains none of the generic recovery keywords below. But
+  // normalizeOptionFollowupText strips punctuation, so a genuine QUESTION
+  // that merely quotes/references a label — "What does 'Resolve the contract
+  // blocker' actually mean?" — normalizes to text that still `includes()`
+  // the label, and would otherwise be misread as selecting it (found via
+  // live code review). A trailing "?" on the raw message is a strong,
+  // low-false-positive signal the user is asking ABOUT the option, not
+  // choosing it, so skip the direct-label short-circuit in that case —
+  // it still falls through to the generic keyword gate below, which a plain
+  // question like that won't match either, correctly returning null overall
+  // (safe default: not a recovery followup) rather than acting on a guess.
+  const looksLikeQuestion = message.trim().endsWith('?');
+  const directLabelMatch = looksLikeQuestion ? undefined : options.find((option) => {
     const labelText = normalizeOptionFollowupText(option.label);
     return labelText.length > 3 && (text === labelText || text.includes(labelText));
   });

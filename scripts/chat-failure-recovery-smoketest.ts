@@ -335,6 +335,10 @@ async function main() {
   ];
   const exactLabelFollowup = resolveChatFailureRecoveryOptionFollowup('Resolve the contract blocker', contractBlockerOptions);
   assert(exactLabelFollowup?.option.id === 'resolve_contract_blocker', 'retyping an option label with no generic keywords still resolves that option');
+  assert(
+    !resolveChatFailureRecoveryOptionFollowup("What does 'Resolve the contract blocker' actually mean?", contractBlockerOptions),
+    'a genuine question quoting an option label is not treated as selecting it'
+  );
   const selectedOptionText = formatChatFailureRecoveryOptionSelection(recoveryOptions[0], {
     messageId: 'bot-failure-1',
     runId: 'run-1',
