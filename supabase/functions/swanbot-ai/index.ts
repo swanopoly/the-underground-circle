@@ -2495,6 +2495,11 @@ const BLACKSWAN_GARBLE_REASONING_PREAMBLE_RE = /^\s*(?:thinking about|thinking:|
 
 function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   if (!text) return false;
+  // A single punctuation mark or a couple of stray characters is never a
+  // real answer — found live: a raw response of just "." slipped through
+  // every other check (not empty, no tags/headers/repetition/foreign
+  // script). A genuine BlackSwan reply is never this short.
+  if (text.trim().length > 0 && text.trim().length < 5) return true;
   if (BLACKSWAN_GARBLE_THINK_TAG_RE.test(text)) return true;
   if (BLACKSWAN_GARBLE_HEADER_RE.test(text)) return true;
   if (BLACKSWAN_GARBLE_REASONING_PREAMBLE_RE.test(text)) return true;
