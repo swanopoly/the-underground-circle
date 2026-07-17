@@ -42,6 +42,7 @@ function extractFunction<T>(name: string): T {
 
 const looksLikeGarbledBlackSwanOutput = extractFunction<(text: string) => boolean>('looksLikeGarbledBlackSwanOutput');
 const buildBlackSwanSystemPrompt = extractFunction<(ctx: any) => string>('buildBlackSwanSystemPrompt');
+const stripBlackSwanReasoningText = extractFunction<(text: string | null) => string | null>('stripBlackSwanReasoningText');
 
 let failures = 0;
 function assert(label: string, cond: boolean): void {
@@ -280,6 +281,43 @@ assert(
   looksLikeGarbledBlackSwanOutput(
     'Alex checked in today. Great job, keep up that streak of yours! Jamie checked in today. Great job, keep up that streak of yours!',
   ) === false,
+);
+
+// ─── stripBlackSwanReasoningText ───────────────────────────────────────────
+console.log('stripBlackSwanReasoningText');
+
+// 2026-07-17: found while auditing the prepared production-shaped training
+// data (which uses a <think>...</think> XML-tag reasoning format) against
+// the live detector — a well-formed <think> block used to make the ENTIRE
+// response, including a genuinely good answer written after the closing
+// tag, get discarded and replaced with the generic fallback message, since
+// nothing extracted the real answer first. If a future training cycle uses
+// this data as-is, the model would likely learn to always wrap answers in
+// <think> tags, which would then make close to every response hit this
+// bug. Fixed by extracting content after a closed </think> tag before the
+// garbling check runs, so a real answer underneath survives.
+assert(
+  'a well-formed <think> block followed by a real answer is salvaged, not discarded',
+  stripBlackSwanReasoningText(
+    '<think>\nHer streak is 0, so I should acknowledge that plainly.\n</think>\n🦢 Looks like your streak reset to 0 — happens to everyone. Want to jump back in today?',
+  ) === '🦢 Looks like your streak reset to 0 — happens to everyone. Want to jump back in today?',
+);
+assert(
+  'an unclosed <think> tag (leaked mid-generation, no closing tag) is still treated as garbled',
+  stripBlackSwanReasoningText('<think>\nHer streak is 0, so I should') === null ||
+    stripBlackSwanReasoningText('<think>\nHer streak is 0, so I should')?.startsWith("I couldn't form a clear answer"),
+);
+assert(
+  'a closed <think> block with nothing written after it is still treated as garbled (no real answer to salvage)',
+  stripBlackSwanReasoningText('<think>\nHer streak is 0.\n</think>')?.startsWith("I couldn't form a clear answer") === true,
+);
+assert(
+  'a genuine reply with no think tags at all is returned unchanged',
+  stripBlackSwanReasoningText('🦢 Nice, three days running — keep it up!') === '🦢 Nice, three days running — keep it up!',
+);
+assert(
+  'the salvaged post-think answer is still checked for garbling (a repetition loop after the think block still falls back)',
+  stripBlackSwanReasoningText(`<think>reasoning</think>\n${'loop now'.repeat(10)}`)?.startsWith("I couldn't form a clear answer") === true,
 );
 
 // ─── buildBlackSwanSystemPrompt ────────────────────────────────────────────

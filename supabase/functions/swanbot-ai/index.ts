@@ -2479,6 +2479,7 @@ function isBlackSwanTextModel(modelId: string | null | undefined): boolean {
 // cases actually observed, not on a normal answer that happens to use a
 // non-English word or a bullet list.
 /* UC_SMOKE_EXTRACT_START looksLikeGarbledBlackSwanOutput */
+/* UC_SMOKE_EXTRACT_START stripBlackSwanReasoningText */
 const BLACKSWAN_GARBLE_THINK_TAG_RE = /<\/?think>/i;
 const BLACKSWAN_GARBLE_HEADER_RE = /##\s*(?:BlackSwan App-Grounding Contract|Tools\s*&\s*Actions|Your Personality|Expanded Knowledge)/i;
 const BLACKSWAN_GARBLE_NON_LATIN_RE = /[぀-ヿ㐀-鿿가-힯Ѐ-ӿ]/g;
@@ -2661,8 +2662,29 @@ function stripBlackSwanReasoningText(text: string | null): string | null {
 
 function stripBlackSwanReasoningTextRaw(text: string | null): string | null {
   if (!text) return text;
-  const trimmed = text.trim();
+  let trimmed = text.trim();
   if (!trimmed) return trimmed;
+
+  // 2026-07-17: a well-formed <think>...</think> block (the raw model
+  // wrapping its reasoning in these XML-style tags, as opposed to the
+  // "Thinking Process:" prose prefix this function otherwise expects) used
+  // to be handled nowhere in this function — the untouched text, tags and
+  // all, would fall straight through to looksLikeGarbledBlackSwanOutput(),
+  // whose BLACKSWAN_GARBLE_THINK_TAG_RE check discards the ENTIRE response
+  // (including a genuinely good answer written after the closing tag) just
+  // for containing the tag. Extract the content after a closed think block
+  // first, so a real answer underneath a well-formed think block survives.
+  // An UNCLOSED tag (no matching </think>, i.e. generation got cut off
+  // mid-reasoning) is deliberately NOT extracted here — `trimmed` is left
+  // as-is, still containing the tag, so it still correctly falls through to
+  // the garbling check below as a genuine leaked-reasoning failure; there's
+  // no reliable "end of reasoning" boundary to salvage an answer from.
+  const thinkBlockMatch = trimmed.match(/<think>[\s\S]*?<\/think>\s*([\s\S]*)/i);
+  if (thinkBlockMatch) {
+    const afterThink = thinkBlockMatch[1].trim();
+    if (afterThink) trimmed = afterThink;
+  }
+
   const reasoningPrefix = /^\s*(?:Thinking Process|Thought Process|Reasoning|Chain[- ]of[- ]Thought)\s*:\s*/i;
   if (!reasoningPrefix.test(trimmed)) return trimmed;
 
@@ -2716,6 +2738,7 @@ function stripBlackSwanReasoningTextRaw(text: string | null): string | null {
   if (answerBlock) return answerBlock.trim();
   return "";
 }
+/* UC_SMOKE_EXTRACT_END stripBlackSwanReasoningText */
 
 async function loadMarketplaceProviderCredential(
   supabase: any,
