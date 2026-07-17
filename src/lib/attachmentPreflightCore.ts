@@ -133,6 +133,11 @@ function fileExtension(name: unknown): string {
   if (cut >= 0) s = s.slice(0, cut);
   const slash = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
   if (slash >= 0) s = s.slice(slash + 1);
+  // Windows strips trailing dots/spaces from filenames, so 'malware.exe.' opens
+  // as 'malware.exe'. Normalize so the real dangerous extension is surfaced
+  // instead of an empty ext (which would slip past the dangerous-type check).
+  s = s.replace(/[.\s]+$/, '');
+  if (!s) return '';
   const dot = s.lastIndexOf('.');
   if (dot <= 0) return ''; // no dot, or leading-dot dotfile (".bashrc")
   const ext = s.slice(dot + 1).toLowerCase();

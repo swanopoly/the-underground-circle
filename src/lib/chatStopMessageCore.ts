@@ -339,8 +339,18 @@ export function matchStopResolution(text: unknown): ChatStopResolution | null {
     if (!t.startsWith(sig.prefix)) continue;
     if (sig.prefix === 'The ') {
       const lower = t.toLowerCase();
-      const looksLikeStep = lower.includes('step') && (lower.includes('cut off') || lower.includes('failed'));
-      if (!looksLikeStep) continue;
+      // The two withTool variants share "The <tool> step …"; route by each
+      // template's distinctive tail so 'cut off' → truncated_tool_call and
+      // 'failed' → tool_use_failed (non-continuable — so a failed turn doesn't
+      // get a 'Continue' chip), and ordinary answers lacking these exact tails
+      // fall through instead of all matching truncated_tool_call.
+      if (lower.includes('step was cut off before it finished sending')) {
+        return resolveChatStopMessage('truncated_tool_call');
+      }
+      if (lower.includes('step failed, so i stopped this turn early')) {
+        return resolveChatStopMessage('tool_use_failed');
+      }
+      continue;
     }
     return resolveChatStopMessage(sig.reason);
   }

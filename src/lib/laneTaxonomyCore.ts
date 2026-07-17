@@ -164,7 +164,12 @@ const TRANSPORT_TOKEN_SET: ReadonlySet<string> = new Set(LANE_TRANSPORTS as stri
 function coerceSurfaceToken(raw: unknown): UnifiedLane | null {
   if (typeof raw !== 'string') return null;
   if (CANONICAL_SURFACE_SET.has(raw)) return raw as UnifiedLane;
-  const alias = SURFACE_ALIASES[raw];
+  // Own-property guard: a raw value like 'constructor'/'toString'/'__proto__'
+  // would otherwise resolve to an inherited Object.prototype member instead of
+  // normalizing to null/unknown.
+  const alias = Object.prototype.hasOwnProperty.call(SURFACE_ALIASES, raw)
+    ? SURFACE_ALIASES[raw]
+    : undefined;
   return alias || null;
 }
 

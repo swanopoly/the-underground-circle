@@ -56,6 +56,13 @@ export const NON_CACHEABLE_MARKERS: readonly string[] = [
   'something broke',
   'something went wrong',
   'went wrong',
+  // Loop-termination stop messages (step_cap / truncated_tool_call /
+  // interrupted_stream) — these carry no ok/error flag on the bare-string path,
+  // so their lead phrases must be markers or a re-send within the dedupe TTL
+  // would replay the cached failure as a silent no-op retry.
+  'step limit',
+  'cut off',
+  'connection dropped',
   // Inability
   "couldn't",
   'could not',
@@ -166,6 +173,9 @@ function classifyString(raw: string): TurnResultClass {
 function classifyObject(obj: Record<string, unknown>): TurnResultClass {
   if (obj.ok === false) return 'failure';
   if (obj.error) return 'failure';
+  // A structured result explicitly marked incomplete (step cap, truncated tool
+  // call, interrupted stream) is a non-cacheable failure regardless of its copy.
+  if (obj.incomplete === true) return 'failure';
   const fields = ['response', 'message', 'text'] as const;
   for (let i = 0; i < fields.length; i += 1) {
     const v = obj[fields[i]];

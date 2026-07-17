@@ -83,7 +83,11 @@ const URL_TRAILING_RE = /[.,;:!?]+$/;
 const PATH_TRAILING_RE = /[.,;:!?)]+$/;
 const MENTION_TRAILING = new Set(['.', ',', ';', ':', '!', '?', ')']);
 // A bare relative path is only a path if its final segment has an extension.
-const FINAL_EXT_RE = /\.[A-Za-z0-9]{1,10}$/;
+// Require the final extension to contain at least one LETTER (still 1-10 alnum to
+// end), so a decimal suffix like `3.5`/`4.0`/`.2026` is NOT treated as a file ext
+// (which would false-link a bare relative path). Compound exts (`.min.js`) + digit
+// exts (`.mp4`, `.7z`, `.h264`) still match.
+const FINAL_EXT_RE = /\.(?=[A-Za-z0-9]{1,10}$)[A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*$/;
 
 // Priority is a tie-break for the (near-impossible) same-start+end collision only;
 // real nesting is resolved by start position. Lower = kept first.

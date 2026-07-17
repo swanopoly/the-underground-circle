@@ -415,7 +415,7 @@ const DETECTORS: readonly Detector[] = [
   {
     cls: 'model_config',
     test: (h) =>
-      /\bmodel_unsupported\b|\bkey_missing\b|\bunsupported model\b|\bmodel (?:not (?:found|available|supported)|unavailable|unsupported)\b|\bno (?:such )?model\b|\b(?:model|provider) not configured\b|\bmissing api key\b|\bno api key\b|\bapi key (?:missing|required|not configured|invalid)\b|\binvalid api key\b|\bbyok\b|\bunsupported\b|\bmodel\b/.test(
+      /\bmodel_unsupported\b|\bkey_missing\b|\bunsupported model\b|\bmodel (?:not (?:found|available|supported)|unavailable|unsupported)\b|\bno (?:such )?model\b|\b(?:model|provider) not configured\b|\bmissing api key\b|\bno api key\b|\bapi key (?:missing|required|not configured|invalid)\b|\binvalid api key\b|\bbyok\b|\bmodel\b[^.\n]{0,24}\b(?:not\s+supported|unsupported|unavailable|not\s+available|not\s+found|not\s+configured)\b/.test(
         h,
       ),
   },
