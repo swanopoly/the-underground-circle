@@ -1,10 +1,24 @@
 # Edge-Function Security Advisory — 2026-07-16
 
-> Status: **OPEN — not yet remediated.** Found by an adversarial security-review
-> fleet (review -> independent verify) over the git-clean edge functions. Every
-> finding below was confirmed by a second agent reading the real code. Fixes
-> touch **deployed** functions (and, for the OAuth-auth cluster, frontend
-> callers), so each needs review + a coordinated **redeploy** to take effect.
+> Status: **REMEDIATED IN CODE — pending redeploy + SQL apply.** Found by an
+> adversarial security-review fleet (review -> independent verify) over the
+> git-clean edge functions; every finding was confirmed by a second agent
+> reading the real code. All 7 are now fixed in git (commits `48fc22b`, `abc9873`,
+> `bc36603`, `6990442`, `93a4ef2`) and validated (`deno check` all 6 functions +
+> `typecheck` + `evals` green), but they touch **deployed** functions + frontend
+> callers, so they only take effect once **you** redeploy.
+>
+> **Operator checklist:**
+> 1. Apply the 3 new migrations (all service-role-only RLS):
+>    `supabase/migrations/20260717_slack_oauth_states.sql`,
+>    `..._email_calendar_oauth_states.sql`, `..._figma_oauth_states.sql`.
+>    (github-oauth #1/#2 needed no new table.)
+> 2. Redeploy the 6 functions: `github-oauth`, `slack-oauth`, `email-calendar-oauth`,
+>    `figma-oauth`, `llm-proxy`, `computer-use-agent`.
+> 3. Ship the frontend (github/slack/email/figma callers). github-oauth is
+>    backward-compatible (frontend-first ok); slack/email/figma are **atomic**
+>    (migration first, then edge + frontend together — the new callbacks reject
+>    the old state flow).
 
 ## Summary
 
