@@ -110,6 +110,25 @@ function main(): void {
     console.error(`FAIL: (10) degenerate inputs threw: ${(e as Error)?.message}`);
   }
 
+  // ─── (11) security: hidden-mutation forms must escalate to ask ────────────
+  // Regression guards for the stable-cores security sweep. `python -c/-m` is
+  // arbitrary eval/module-run; `find -delete/-exec/-fprintf` deletes/execs/writes;
+  // `env CMD` is a universal command-runner; `git branch -D/config/tag/remote`
+  // mutate refs/config; `sort -o` writes a file. None may auto-run.
+  for (const c of [
+    'python3 -c "import shutil"', 'python -c print(1)', 'python3 -m pip install x', 'python -m venv .env',
+    'find . -delete', 'find . -exec echo {} +', 'find . -execdir echo x +', 'find . -fprintf out.txt %p',
+    'env node -e x', 'env FOO=bar somebinary', 'env somebinary run',
+    'git branch -D main', 'git config --global core.hooksPath /tmp/x', 'git tag -d v1', 'git remote add evil url',
+    'sort -o victim.txt f', 'sort --output=victim.txt f', 'sort -ofile f',
+  ]) {
+    assert(tier(c) === 'ask' && cls(c) === 'mutate', `(11) hidden-mutation → ask: ${c}`, `${cls(c)}/${tier(c)}`);
+  }
+  // The genuinely-read forms of the same tools must STAY auto (no over-escalation).
+  for (const c of ['python3 --version', 'python --version', 'find . -name "*.ts"', 'find . -type f', 'sort f', 'sort -r f', 'git status', 'git diff HEAD']) {
+    assert(tier(c) === 'auto' && cls(c) === 'read', `(11) safe read stays auto: ${c}`, `${cls(c)}/${tier(c)}`);
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} failure(s), ${passes} passed`);
     process.exit(1);

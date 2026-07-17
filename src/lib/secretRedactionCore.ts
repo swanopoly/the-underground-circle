@@ -69,7 +69,7 @@ export const SECRET_PATTERNS: SecretPattern[] = [
   // GitHub fine-grained PAT (github_pat_…) before classic (ghp_…).
   {
     kind: 'github_pat',
-    re: /github_pat_[A-Za-z0-9_]{50,}|ghp_[A-Za-z0-9]{36,}/g,
+    re: /github_pat_[A-Za-z0-9_]{50,}|gh[pousr]_[A-Za-z0-9]{36,}/g,
   },
   {
     kind: 'aws_access_key',
@@ -77,7 +77,7 @@ export const SECRET_PATTERNS: SecretPattern[] = [
   },
   {
     kind: 'slack_token',
-    re: /xox[baprs]-[A-Za-z0-9-]{10,}/g,
+    re: /xox[a-z]-[A-Za-z0-9-]{10,}/g,
   },
   // Credentials embedded in a URL: `://user:password@host`. Capture scheme-tail +
   // user in $1 and the leading `@`-anchored host boundary in $2 so only the

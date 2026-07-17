@@ -179,6 +179,12 @@ function stickyScopeCases() {
   assert(normalizeScopeKey('site', 'deep.shop.acme.co.uk') === 'acme.co.uk', 'sticky: multi-part TLD keeps acme.co.uk');
   assert(normalizeScopeKey('site', 'localhost') === 'localhost', 'sticky: single-label host passes through');
   assert(normalizeScopeKey('app', '  Adobe  Photoshop App ') === 'adobe photoshop', 'sticky: app name lowercases and trims');
+  // Private multi-tenant hosting suffixes: each subdomain is a separate tenant,
+  // so eTLD+1 collapse must KEEP the tenant label (no cross-tenant grant leak).
+  assert(normalizeScopeKey('site', 'alice.myshopify.com') === 'alice.myshopify.com', 'sticky: multi-tenant suffix keeps tenant label');
+  assert(normalizeScopeKey('site', 'alice.myshopify.com') !== normalizeScopeKey('site', 'bob.myshopify.com'), 'sticky: distinct tenants → distinct scopes');
+  assert(normalizeScopeKey('site', 'myblog.wordpress.com') === 'myblog.wordpress.com', 'sticky: wordpress.com tenant isolated');
+  assert(normalizeScopeKey('site', 'app.vercel.app') === 'app.vercel.app', 'sticky: vercel.app tenant isolated');
 
   const created = createStickyScope({
     scopeKind: 'site',

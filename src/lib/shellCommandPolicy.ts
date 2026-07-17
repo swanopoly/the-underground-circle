@@ -43,8 +43,11 @@ export const MAX_PREVIEW_LEN = 200;
 // them auto — but anything that installs, writes, or is unknown is NOT here.
 const READ_LEADS = new Set([
   'ls', 'cat', 'pwd', 'echo', 'printf', 'which', 'type', 'find', 'grep', 'rg', 'ag',
-  'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'stat', 'file', 'tree', 'du', 'df',
-  'date', 'whoami', 'id', 'uname', 'env', 'printenv', 'realpath', 'dirname',
+  // `uniq in out` writes a file and `env CMD …` execs an arbitrary wrapped
+  // command (also launders the bridge's argv[0] blocklist) — both removed so
+  // they fall through to mutate→ask. `sort` stays but is guarded below (`-o`).
+  'head', 'tail', 'wc', 'sort', 'cut', 'stat', 'file', 'tree', 'du', 'df',
+  'date', 'whoami', 'id', 'uname', 'printenv', 'realpath', 'dirname',
   'basename', 'cksum', 'shasum', 'md5', 'md5sum', 'diff', 'cmp', 'tac', 'nl',
   'column', 'jq', 'yq', 'pgrep', 'ps', 'top', 'hostname', 'true', 'false', 'test',
   // dev toolchain — non-mutating runs (build output dirs are recoverable)
@@ -59,10 +62,17 @@ const SUBCOMMAND_READS: Record<string, Set<string>> = {
   yarn: new Set(['test', 'run', 'why', 'list', 'info']),
   cargo: new Set(['build', 'test', 'check', 'clippy', 'fmt', 'tree', 'metadata', 'bench']),
   go: new Set(['build', 'test', 'vet', 'list', 'version', 'env', 'doc']),
-  python: new Set(['-m', '-c', '--version', '-V']),
-  python3: new Set(['-m', '-c', '--version', '-V']),
+  // NOTE: `-c <code>` is arbitrary-code eval and `-m <module>` runs a module
+  // (pip/venv/…), so neither is read-only — both must fall through to mutate→ask.
+  // Only `--version` stays auto; `-V` is omitted because secondWord lowercases it
+  // to `-v` (verbose-RUN, which executes a script) — so `python -V` safely over-asks.
+  python: new Set(['--version']),
+  python3: new Set(['--version']),
   npx: new Set(['tsc', 'eslint', 'prettier', 'vitest', 'jest']),
-  git: new Set(['status', 'diff', 'log', 'show', 'blame', 'remote', 'rev-parse', 'describe', 'ls-files', 'shortlog', 'config', 'branch', 'tag']),
+  // config/branch/tag/remote each have a mutating form the shell classifier
+  // can't see (`git config k v`, `git branch -D`, `git tag -d`, `git remote add`);
+  // route git mutation through gitCommandPolicy, not this auto path.
+  git: new Set(['status', 'diff', 'log', 'show', 'blame', 'rev-parse', 'describe', 'ls-files', 'shortlog']),
   dotnet: new Set(['build', 'test']),
   mvn: new Set(['test', 'compile', 'verify']),
   gradle: new Set(['test', 'build', 'check']),
@@ -166,6 +176,16 @@ function classifySegment(segment: string): ShellClassification {
     const sub = secondWord(seg);
     if (SUBCOMMAND_READS[lead].has(sub)) return 'read';
     return 'mutate'; // known tool, non-read subcommand (install/commit/publish/…)
+  }
+  // A few read-leads have write/exec forms the lead word alone can't reveal:
+  // `find … -delete/-exec` runs programs / deletes files (execvp, no shell), and
+  // `sort -o FILE` writes a file. execFile passes argv literally, so those forms
+  // really mutate → escalate to mutate (ask). Over-asking is the safe direction.
+  if (lead === 'find' && /(?:^|\s)-(?:execdir|exec|okdir|ok|delete|fprintf|fprint0|fprint|fls)\b/.test(seg)) {
+    return 'mutate';
+  }
+  if (lead === 'sort' && /(?:^|\s)(?:-o|--output)/.test(seg)) {
+    return 'mutate';
   }
   if (READ_LEADS.has(lead)) return 'read';
   if (MUTATE_LEADS.has(lead)) return 'mutate';

@@ -165,6 +165,29 @@ function badInputs(): void {
   }
 }
 
+// === 9b. GitHub/Slack token-family coverage (security sweep regression) =========
+function tokenFamilyCoverage(): void {
+  for (const t of [
+    'gho_000000000000000000000000000000000000',
+    'ghu_000000000000000000000000000000000000',
+    'ghs_000000000000000000000000000000000000',
+    'ghr_000000000000000000000000000000000000',
+  ]) {
+    const r = redactSecrets('token ' + t + ' end');
+    assert(r.redactionCount === 1 && r.kinds.includes('github_pat'), `github token family masked: ${t.slice(0, 4)}`);
+    assert(!r.text.includes(t), `github token value removed: ${t.slice(0, 4)}`);
+  }
+  for (const t of [
+    'xoxc-0000000000-0000000000-FAKEFAKEFAKE',
+    'xoxd-0000000000-0000000000-FAKEFAKEFAKE',
+    'xoxe-0000000000-0000000000-FAKEFAKEFAKE',
+  ]) {
+    const r = redactSecrets('token ' + t + ' end');
+    assert(r.redactionCount === 1 && r.kinds.includes('slack_token'), `slack token family masked: ${t.slice(0, 5)}`);
+    assert(!r.text.includes(t), `slack token value removed: ${t.slice(0, 5)}`);
+  }
+}
+
 // === 10. SECRET_PATTERNS export shape ===========================================
 function patternsExportShape(): void {
   assert(Array.isArray(SECRET_PATTERNS) && SECRET_PATTERNS.length >= 11, `SECRET_PATTERNS should be a non-trivial array (len=${SECRET_PATTERNS.length})`);
@@ -212,6 +235,7 @@ badInputs();
 patternsExportShape();
 determinism();
 secretInProse();
+tokenFamilyCoverage();
 
 console.log(`secret-redaction-core smoke: ${passed} passed, ${failed} failed`);
 if (failed > 0) {

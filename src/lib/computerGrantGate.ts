@@ -77,6 +77,17 @@ const MULTI_PART_TLDS = new Set([
   'co.in', 'co.za', 'com.sg', 'com.hk', 'com.tw', 'co.kr',
 ]);
 
+// Private/platform suffixes where each subdomain is a SEPARATE tenant. These are
+// not registry public suffixes, so plain eTLD+1 collapse would wrongly merge
+// distinct tenants (a.myshopify.com + b.myshopify.com → one scope), leaking a
+// grant across tenants. Keep the tenant label so scopes stay isolated.
+const PRIVATE_MULTI_TENANT_SUFFIXES = new Set([
+  'myshopify.com', 'wordpress.com', 'blogspot.com', 'tumblr.com',
+  'vercel.app', 'netlify.app', 'pages.dev', 'web.app', 'firebaseapp.com',
+  'github.io', 'gitlab.io', 'herokuapp.com', 'glitch.me', 'repl.co',
+  'surge.sh', 'pythonanywhere.com', 'workers.dev', 'onrender.com',
+]);
+
 /**
  * Normalize a scope key. Sites: strip scheme/credentials/port/path/query,
  * lowercase, drop leading `www.`, collapse to eTLD+1-ish so subdomains of the
@@ -101,7 +112,7 @@ export function normalizeScopeKey(scopeKind: StickyAllowScopeKind, raw: string):
   const labels = host.split('.').filter(Boolean);
   if (labels.length <= 2) return labels.join('.').slice(0, 120);
   const lastTwo = labels.slice(-2).join('.');
-  const keep = MULTI_PART_TLDS.has(lastTwo) ? 3 : 2;
+  const keep = MULTI_PART_TLDS.has(lastTwo) || PRIVATE_MULTI_TENANT_SUFFIXES.has(lastTwo) ? 3 : 2;
   return labels.slice(-keep).join('.').slice(0, 120);
 }
 

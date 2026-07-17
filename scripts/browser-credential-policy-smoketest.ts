@@ -46,6 +46,9 @@ function main() {
   assert(profileKeyForDomain('acme.com') === 'profile_acme_com', 'profile key is stable + filesystem-safe');
   assert(profileKeyForDomain('https://WWW.Acme.com/x') === 'profile_acme_com', 'profile key normalizes host before deriving');
   assert(profileKeyForDomain('shop.acme.com') === profileKeyForDomain('acme.com'), 'same registrable domain shares one isolated profile');
+  // Multi-tenant hosting suffixes stay per-tenant so credentials never bleed across tenants.
+  assert(profileKeyForDomain('alice.myshopify.com') !== profileKeyForDomain('bob.myshopify.com'), 'per-tenant profile isolation on multi-tenant hosting suffix');
+  assert(normalizeDomain('alice.myshopify.com') === 'alice.myshopify.com', 'multi-tenant suffix keeps tenant label (credential isolation)');
   assert(
     profileKeyForDomain('acme.com') !== profileKeyForDomain('other.com'),
     'distinct domains get distinct profiles (isolation)',
