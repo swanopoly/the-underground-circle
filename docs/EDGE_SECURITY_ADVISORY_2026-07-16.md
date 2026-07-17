@@ -165,3 +165,36 @@ NO GUARD: Caller au
    nonce + a state table; update `oauthConnect.ts` / `CustomizePanel.tsx` init.
 
 _Generated from run `wf_757a5bc0-723` (7/7 confirmed after adversarial verify)._
+
+---
+
+# Second sweep — 2026-07-17 (remaining stable edge functions)
+
+> Status: **REMEDIATED IN CODE (7 of 8) — pending redeploy + SQL apply; 1 blocked.**
+> A second adversarial fleet (run `wf_67a7de68`) reviewed the ~33 remaining
+> git-clean edge functions and confirmed 8 more vulns (2 HIGH, 6 medium). All
+> validated with `deno check`. Commits: `48fc22b`-era pattern → `89fe096` (6
+> authz gates), `24bc733` (teams-auth).
+
+| # | Sev | File | Vuln | Fix | Commit |
+|---|-----|------|------|-----|--------|
+| S1 | HIGH | `boss-agent` | No auth at all — any anon-key caller ran RLS-bypassing actions on ANY circle (detect_stuck exfiltrated tasks to a caller-supplied Telegram) | isServiceRoleRequest ‖ (authed + circle_members) gate | `89fe096` |
+| S2 | HIGH | `teams-auth` | `atob(state)` trusted, no caller auth → bind attacker Teams bot to any victim circle/org | `teams_oauth_states` + authed POST (org-admin/circle-creator) + stored-state callback | `24bc733` |
+| S3 | MED | `heartbeat-agent` | cron-only run path, no caller auth | service-role gate | `89fe096` |
+| S4 | MED | `generate-report` | cross-org report IDOR (reportId not org-scoped) | `.eq(org_id, orgId)` | `89fe096` |
+| S5 | MED | `research-daily-runner` | set_review_status let any authed user rewrite any doc | enforce the RLS predicate (owner/writable-circle member) | `89fe096` |
+| S6 | MED | `aggregate-analytics` | unauthenticated service-role circle sweep (DB/cost DoS) | service-role gate | `89fe096` |
+| S7 | MED | `chat-stream` | body circleId trusted for budget read + usage attribution | verify membership; drop attribution for non-members | `89fe096` |
+| S8 | MED | `custom-api-proxy` | SSRF: host guard applied pre-flight only; upstream 3xx follows to internal hosts | **BLOCKED** — file is root-owned (EACCES). Fix: `redirect:"manual"` + block 3xx before reading body | — |
+
+**New migration:** `20260717_teams_oauth_states.sql` (service-role-only RLS).
+
+**Operator steps for the second sweep:**
+1. Apply `teams_oauth_states` (SQL below / in the migration file).
+2. Redeploy the 7 fixed functions (`boss-agent`, `heartbeat-agent`, `aggregate-analytics`, `generate-report`, `research-daily-runner`, `chat-stream`, `teams-auth`).
+3. Ship the `teams.ts` frontend with teams-auth (atomic, like the other OAuth callbacks). The other 6 have no frontend change.
+4. **S8 custom-api-proxy** is unfixed — the file is root-owned so the edit was refused. Run
+   `sudo chown "$(whoami)":staff supabase/functions/custom-api-proxy supabase/functions/custom-api-proxy/index.ts`
+   and the redirect-follow SSRF fix can then be applied.
+
+_Generated from run `wf_67a7de68` (8/8 confirmed after adversarial verify)._
