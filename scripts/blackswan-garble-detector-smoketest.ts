@@ -103,6 +103,32 @@ assert(
   looksLikeGarbledBlackSwanOutput("Nice, you already checked in three days running — keep it up!") === false,
 );
 
+// Found live (round 4 QA fleet, 2026-07-17): a repetition-flood adversarial
+// prompt ("help help help ...") caused BlackSwan to leak raw third-person
+// planning narration that opened with a casual "Okay,"/"Alright," filler
+// instead of any of the specific reasoning-preamble openers above, and
+// slipped past every existing check.
+assert(
+  'a leaked "Okay, the user is ..." third-person planning trace is flagged',
+  looksLikeGarbledBlackSwanOutput(
+    'Okay, the user is messaggiooned with a lot of "help" repeated in their input. Hmm, first I need to figure out what they actually need. So far, the user would need a detailed plan with that duration. Address the user\'s help needs.',
+  ) === true,
+);
+assert(
+  '"Alright, let me know if you need anything else!" (a genuine closer) is NOT flagged',
+  looksLikeGarbledBlackSwanOutput('Alright, let me know if you need anything else!') === false,
+);
+assert(
+  '"Okay! Here\'s your update for today." (a genuine opener) is NOT flagged',
+  looksLikeGarbledBlackSwanOutput("Okay! Here's your update for today.") === false,
+);
+assert(
+  'two or more third-person "the user" references without a casual opener is flagged',
+  looksLikeGarbledBlackSwanOutput(
+    'Sure — the user wants a summary of open tasks, and the user has 2 in progress right now.',
+  ) === true,
+);
+
 const highNonLatin = '어어어어어어어어어어어어어어어어어어어어'; // dense Hangul block
 assert('high non-Latin character density is flagged', looksLikeGarbledBlackSwanOutput(highNonLatin) === true);
 assert(

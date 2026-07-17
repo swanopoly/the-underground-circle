@@ -2507,6 +2507,14 @@ const BLACKSWAN_GARBLE_SHORT_BACKTICK_RE = /`[a-zA-Z_]{1,14}`/g;
 // ...) — found via code review that the earlier, unqualified version also
 // matched a perfectly good answer opener like "First, let's celebrate your
 // streak!", which is not reasoning leakage at all.
+// 2026-07-17, found via live fleet QA against a repetition-flood adversarial
+// prompt ("help help help ..."): BlackSwan can open with a casual "Okay,"/
+// "Alright,"/"Hmm," filler and then immediately lapse into narrating its own
+// planning in the third person ("Okay, the user is ... so I need to figure
+// out ..."), which the narrower opener list above didn't match. "let me"
+// only counts when followed by a reasoning verb (think/figure/check/...) —
+// plain "let me know" is a completely normal, non-leaking closer.
+const BLACKSWAN_GARBLE_CASUAL_PREAMBLE_RE = /^\s*(?:okay|alright|hmm)[,.]?\s+(?:so\s+)?(?:the\s+user\b|i\s+need\s+to\b|let\s+me\s+(?:think|figure|check|determine|analyze|verify|consider|prepare|make\s+sure|look)\b)/i;
 const BLACKSWAN_GARBLE_REASONING_PREAMBLE_RE = /^\s*(?:thinking about|thinking:|step\s*1[:.]\s|let me think|first,?\s+(?:let'?s|i'?ll|i\s+need\s+to)\s+(?:check|determine|figure|analyze|verify|think|consider|look\s+at|review)|i\s+need\s+to\s+(?:check|determine|figure|analyze|verify)|my\s+plan\s*:)/i;
 
 function looksLikeGarbledBlackSwanOutput(text: string): boolean {
@@ -2519,6 +2527,12 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   if (BLACKSWAN_GARBLE_THINK_TAG_RE.test(text)) return true;
   if (BLACKSWAN_GARBLE_HEADER_RE.test(text)) return true;
   if (BLACKSWAN_GARBLE_REASONING_PREAMBLE_RE.test(text)) return true;
+  if (BLACKSWAN_GARBLE_CASUAL_PREAMBLE_RE.test(text)) return true;
+  // A reply addressed to the person chatting always says "you", never talks
+  // about them in the third person — 2+ uses of "the user" is leaked
+  // internal planning narration, not a real answer (found in the same live
+  // leak: "the user is ... the user would need ... the user's help needs").
+  if ((text.match(/\bthe user\b/gi) || []).length >= 2) return true;
 
   const nonLatinCount = (text.match(BLACKSWAN_GARBLE_NON_LATIN_RE) || []).length;
   const nonWhitespaceLen = text.replace(/\s+/g, "").length || 1;
