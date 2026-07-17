@@ -135,6 +135,25 @@ assert(
   'a normal answer with one non-English word is NOT flagged',
   looksLikeGarbledBlackSwanOutput('Great work today — that streak is looking très bien, keep it up!') === false,
 );
+// Found live (round 5 QA fleet, 2026-07-17): a mostly-English garbled reply
+// with only 3 stray CJK characters was too sparse to trip the old 5%
+// density threshold. Any true non-Latin script match is now a hard trigger.
+assert(
+  'a single stray CJK character in an otherwise-English reply is flagged',
+  looksLikeGarbledBlackSwanOutput('No sensors — IAF A才有了. NO BLACKSWAN') === true,
+);
+
+// Found live (round 5 QA fleet, 2026-07-17): degenerate fragments that
+// slipped past the <5-char near-empty check — a bare colon-terminated
+// label, and a response truncated mid-word/mid-sentence so it opens on a
+// single stray lowercase letter.
+assert('a bare "length:" label is flagged as a degenerate fragment', looksLikeGarbledBlackSwanOutput('length:') === true);
+assert(
+  'a response opening on a single stray lowercase letter is flagged',
+  looksLikeGarbledBlackSwanOutput('s to one or two sentences.') === true,
+);
+assert('"On it!" is NOT flagged as a degenerate fragment', looksLikeGarbledBlackSwanOutput('On it!') === false);
+assert('"yep, sounds good" is NOT flagged as a degenerate fragment', looksLikeGarbledBlackSwanOutput('yep, sounds good') === false);
 
 assert(
   'three or more bare --- hrule lines are flagged',
@@ -167,6 +186,25 @@ assert(
       'The second is the client follow-up email, which still needs a draft. The third is the ' +
       'deployment checklist, which can probably wait until Friday.',
   ) === false,
+);
+
+// Found live (round 5 QA fleet, 2026-07-17): a loop where the wording drifts
+// slightly between repeats never lines up into an identical 24-char sliding
+// window, so the check above misses it — but the same full sentence (30+
+// chars) recurring verbatim is still the same failure mode at the sentence
+// level.
+assert(
+  'a full sentence repeated verbatim (with drifting wording elsewhere) is flagged',
+  looksLikeGarbledBlackSwanOutput(
+    'Based on the plan, you need two days, which means at least two days for the plan. ' +
+      'The plan status is in check, which is a product status. ' +
+      'So, there is no information so this is purely a product. ' +
+      'The plan status is in check, which is a product status.',
+  ) === true,
+);
+assert(
+  'a short greeting repeated twice in casual speech is NOT flagged (below the 30-char sentence-length floor)',
+  looksLikeGarbledBlackSwanOutput('Hey! Hey, nice to see you back today.') === false,
 );
 
 // ─── buildBlackSwanSystemPrompt ────────────────────────────────────────────

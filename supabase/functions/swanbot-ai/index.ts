@@ -2524,6 +2524,22 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   // every other check (not empty, no tags/headers/repetition/foreign
   // script). A genuine BlackSwan reply is never this short.
   if (text.trim().length > 0 && text.trim().length < 5) return true;
+  // 2026-07-17, round-5 live fleet QA: two more degenerate-fragment shapes
+  // slipped past the <5-char check above — a bare label like "length:" (a
+  // short fragment ending in a colon/semicolon instead of real punctuation)
+  // and a mid-word/mid-sentence truncation like "s to one or two sentences."
+  // (opens on a single stray lowercase letter, i.e. the actual first word(s)
+  // of the sentence were cut off before the model started generating). A
+  // genuine reply is never a 1-2 word colon-terminated label, and never
+  // opens on a single lowercase letter followed by a space.
+  {
+    const trimmed = text.trim();
+    if (trimmed.length > 0 && trimmed.length < 40) {
+      const words = trimmed.split(/\s+/).filter(Boolean);
+      if (words.length <= 2 && /[:;]$/.test(trimmed)) return true;
+      if (/^[a-z]\b/.test(trimmed)) return true;
+    }
+  }
   if (BLACKSWAN_GARBLE_THINK_TAG_RE.test(text)) return true;
   if (BLACKSWAN_GARBLE_HEADER_RE.test(text)) return true;
   if (BLACKSWAN_GARBLE_REASONING_PREAMBLE_RE.test(text)) return true;
@@ -2534,9 +2550,17 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   // leak: "the user is ... the user would need ... the user's help needs").
   if ((text.match(/\bthe user\b/gi) || []).length >= 2) return true;
 
-  const nonLatinCount = (text.match(BLACKSWAN_GARBLE_NON_LATIN_RE) || []).length;
-  const nonWhitespaceLen = text.replace(/\s+/g, "").length || 1;
-  if (nonLatinCount / nonWhitespaceLen > 0.05) return true;
+  // 2026-07-17, round-5: this app's genuine replies are English/French/
+  // Spanish (accented Latin script), so ANY match of a true non-Latin script
+  // (CJK/Hangul/Cyrillic) is itself the signature — found live in an
+  // otherwise mostly-English garbled reply that had only 3 stray CJK
+  // characters ("IAF A才有了"), which a density-ratio threshold missed
+  // entirely (originally this check only fired above 5% non-Latin density).
+  // Uses .match(), not .test() — BLACKSWAN_GARBLE_NON_LATIN_RE carries the
+  // "g" flag, and .test() on a shared global-flagged regex mutates its
+  // lastIndex across calls, which would make this check flaky across
+  // successive invocations; .match() does not have that problem.
+  if ((text.match(BLACKSWAN_GARBLE_NON_LATIN_RE) || []).length >= 1) return true;
 
   if ((text.match(BLACKSWAN_GARBLE_HRULE_RE) || []).length >= 3) return true;
   if ((text.match(BLACKSWAN_GARBLE_SHORT_BACKTICK_RE) || []).length >= 6) return true;
@@ -2555,6 +2579,24 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
       seen.set(window, count);
       if (count >= 3) return true;
     }
+  }
+
+  // 2026-07-17, round-5: the sliding-window check above only catches EXACT
+  // 24-char verbatim recurrence, so a loop where the wording drifts slightly
+  // between repeats (e.g. "...which means at least two days..." vs "...which
+  // is a product status.") never realigns into a matching window — found
+  // live in a response that repeated 3 distinct full sentences verbatim
+  // (each 30+ chars) without ever having an identical 24-char window recur
+  // 3 times. A genuine answer essentially never repeats a full clause this
+  // long verbatim even twice, so this checks sentence-level duplication
+  // independently of the character-window check above.
+  const sentenceCounts = new Map<string, number>();
+  for (const rawSentence of text.split(/[.!?\n]+/)) {
+    const sentence = rawSentence.trim().toLowerCase().replace(/\s+/g, " ");
+    if (sentence.length < 30) continue;
+    const count = (sentenceCounts.get(sentence) || 0) + 1;
+    sentenceCounts.set(sentence, count);
+    if (count >= 2) return true;
   }
   return false;
 }
