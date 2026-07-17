@@ -17,6 +17,7 @@ import {
   logClaudeUsage,
   type UsageBreakdown,
 } from "../_claude/anthropic.ts";
+import { errResponse, isServiceRoleRequest } from "../_shared/edge.ts";
 
 const HEARTBEAT_MODEL = "claude-haiku-4-5";
 
@@ -511,6 +512,14 @@ Deno.serve(async (req: Request) => {
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
+  }
+
+  // Cron-only run path: the heartbeat drives cross-circle reads/writes and
+  // Anthropic spend on the service-role client. pg_cron already calls this
+  // with Bearer <service_role_key>; block anon/user callers so they cannot
+  // trigger heartbeat runs against arbitrary circles.
+  if (!isServiceRoleRequest(req)) {
+    return errResponse(401, "unauthorized", "heartbeat-agent requires service-role authorization");
   }
 
   if (!heartbeatAgentEnabled()) {

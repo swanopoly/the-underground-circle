@@ -100,12 +100,29 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  // Circle attribution guard — circleId is caller-supplied and drives the
+  // service-role budget read (whose numbers are echoed in the 429 body) and
+  // both usage ledgers. Confirm the authenticated caller belongs to the circle
+  // before consuming it; on a non-member, drop attribution (effectiveCircleId
+  // = undefined) so spend is recorded un-attributed instead of disclosing or
+  // mis-charging another circle. userId is guaranteed non-null here.
+  let effectiveCircleId = circleId;
+  if (effectiveCircleId) {
+    const { data: membership } = await svc
+      .from("circle_members")
+      .select("user_id")
+      .eq("circle_id", effectiveCircleId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (!membership) effectiveCircleId = undefined;
+  }
+
   // Umbrella circle cap — chat-stream is the highest-volume streaming
   // surface so the 24h total-spend ceiling matters here. Skip when
   // caller didn't pass a circleId (e.g. prompt playground previews).
-  if (circleId) {
+  if (effectiveCircleId) {
     try {
-      const cap = await checkCircleClaudeBudget(svc, circleId);
+      const cap = await checkCircleClaudeBudget(svc, effectiveCircleId);
       if (!cap.allowed) {
         return new Response(JSON.stringify({
           error: "circle_claude_budget_exceeded",
@@ -328,7 +345,7 @@ Deno.serve(async (req: Request) => {
           await Promise.allSettled([
             supabase.from("user_ai_usage").insert({
               user_id: userId,
-              circle_id: circleId || null,
+              circle_id: effectiveCircleId || null,
               model,
               provider: "anthropic",
               input_tokens: usage.uncachedIn,
@@ -339,7 +356,7 @@ Deno.serve(async (req: Request) => {
               source: "chat-stream",
             }),
             logClaudeUsage(supabase, {
-              circleId: circleId || null,
+              circleId: effectiveCircleId || null,
               userId,
               source: "chat-stream",
               model,

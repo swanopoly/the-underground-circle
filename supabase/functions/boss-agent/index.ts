@@ -10,6 +10,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 import { callClaude as callClaudeShared, logClaudeUsage, checkCircleClaudeBudget } from "../_claude/anthropic.ts";
+import { isServiceRoleRequest, getAuthenticatedUser } from "../_shared/edge.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -531,6 +532,34 @@ Deno.serve(async (req) => {
     }
 
     const supabase = getSupabase();
+
+    // Caller-authorization gate: `supabase` above is a service-role client that
+    // BYPASSES RLS, so before any privileged action confirm the caller is the
+    // pg_cron / automation-executor path (service-role bearer) OR a member of the
+    // target circle. Without this, anyone with the public anon key could
+    // read/write/exfiltrate any circle's data (or redirect detect_stuck output).
+    if (!isServiceRoleRequest(req)) {
+      const user = await getAuthenticatedUser(req);
+      if (!user) {
+        return new Response(
+          JSON.stringify({ error: "unauthorized" }),
+          { status: 401, headers: { ...corsHeaders, "content-type": "application/json" } }
+        );
+      }
+      const { data: membership } = await supabase
+        .from("circle_members")
+        .select("user_id")
+        .eq("circle_id", circle_id)
+        .eq("user_id", user.id)
+        .maybeSingle();
+      if (!membership) {
+        return new Response(
+          JSON.stringify({ error: "forbidden" }),
+          { status: 403, headers: { ...corsHeaders, "content-type": "application/json" } }
+        );
+      }
+    }
+
     const results: Record<string, any> = {};
 
     if (action === "promote_reviewed" || action === "all") {

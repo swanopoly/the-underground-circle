@@ -60,6 +60,7 @@ Deno.serve(async (req: Request) => {
       .from("reports")
       .select("*")
       .eq("id", reportId)
+      .eq("org_id", orgId)
       .single();
 
     if (!report) {

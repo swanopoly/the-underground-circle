@@ -797,12 +797,31 @@ Deno.serve(async (req) => {
 
     const { data: existing, error: fetchError } = await supabase
       .from("research_documents")
-      .select("metadata")
+      .select("metadata, created_by, circle_id, visibility")
       .eq("id", documentId)
       .maybeSingle();
 
     if (fetchError) {
       return errResponse(500, "fetch_failed", fetchError.message);
+    }
+
+    // Enforce the research_documents_update RLS predicate for non-service-role
+    // callers, since this service-role client bypasses RLS. The pg_cron /
+    // automation-executor path (isServiceRole) stays unblocked.
+    if (!isServiceRole) {
+      if (!user) {
+        return errResponse(401, "unauthorized", "Authentication required");
+      }
+      if (!existing) {
+        return errResponse(404, "not_found", "Document not found");
+      }
+      const isOwner = existing.created_by && existing.created_by === user.id;
+      const isCircleWritable = existing.circle_id &&
+        ["circle_shared", "public"].includes(existing.visibility) &&
+        await assertCircleMember(supabase, existing.circle_id, user.id);
+      if (!isOwner && !isCircleWritable) {
+        return errResponse(403, "forbidden", "not allowed to update this document");
+      }
     }
 
     const existingMetadata = (existing?.metadata && typeof existing.metadata === "object")
