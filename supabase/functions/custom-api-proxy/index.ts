@@ -374,8 +374,18 @@ Deno.serve(async (req) => {
       headers,
       body: method === "GET" || method === "HEAD" ? undefined : requestBody,
       signal: controller.signal,
+      // SSRF guard: the host allow-list is enforced pre-flight on the configured
+      // hostname, so following a 3xx to an internal/metadata host would escape
+      // it. Do not follow redirects — any redirect is treated as blocked below.
+      redirect: "manual",
     });
     clearTimeout(timeout);
+
+    // A redirect points somewhere the host guard never vetted. Refuse without
+    // reading or forwarding the body (mirrors the isBlockedHostname block).
+    if ((res.status >= 300 && res.status < 400) || res.type === "opaqueredirect") {
+      throw new Error("Custom API upstream attempted a redirect, which is blocked.");
+    }
 
     const maxBytes = Math.max(256, Math.min(20_000, Number(body.maxBytes) || 8_000));
     const preview = method === "HEAD"
