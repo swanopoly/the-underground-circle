@@ -2524,20 +2524,22 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   // every other check (not empty, no tags/headers/repetition/foreign
   // script). A genuine BlackSwan reply is never this short.
   if (text.trim().length > 0 && text.trim().length < 5) return true;
-  // 2026-07-17, round-5 live fleet QA: two more degenerate-fragment shapes
-  // slipped past the <5-char check above — a bare label like "length:" (a
-  // short fragment ending in a colon/semicolon instead of real punctuation)
-  // and a mid-word/mid-sentence truncation like "s to one or two sentences."
-  // (opens on a single stray lowercase letter, i.e. the actual first word(s)
-  // of the sentence were cut off before the model started generating). A
-  // genuine reply is never a 1-2 word colon-terminated label, and never
-  // opens on a single lowercase letter followed by a space.
+  // 2026-07-17, round-5 live fleet QA: a bare label like "length:" (a short
+  // fragment ending in a colon/semicolon instead of real punctuation)
+  // slipped past the <5-char check above. A genuine reply is never a 1-2
+  // word colon-terminated label. (An earlier version of this check also
+  // flagged ANY response opening on a single lowercase letter, meant to
+  // catch a mid-sentence truncation like "s to one or two sentences." — an
+  // independent review fleet found and verified that this also flagged
+  // ordinary casual replies like "k, got it!"/"u ready for standup?" and
+  // lettered lists like "a) do the dishes", so it was removed rather than
+  // narrowed, since no safe narrowing covers real single-letter words like
+  // "a"/"i" while still catching arbitrary other stray-letter truncations.)
   {
     const trimmed = text.trim();
     if (trimmed.length > 0 && trimmed.length < 40) {
       const words = trimmed.split(/\s+/).filter(Boolean);
       if (words.length <= 2 && /[:;]$/.test(trimmed)) return true;
-      if (/^[a-z]\b/.test(trimmed)) return true;
     }
   }
   if (BLACKSWAN_GARBLE_THINK_TAG_RE.test(text)) return true;
@@ -2545,25 +2547,47 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   if (BLACKSWAN_GARBLE_REASONING_PREAMBLE_RE.test(text)) return true;
   if (BLACKSWAN_GARBLE_CASUAL_PREAMBLE_RE.test(text)) return true;
   // A reply addressed to the person chatting always says "you", never talks
-  // about them in the third person — 2+ uses of "the user" is leaked
-  // internal planning narration, not a real answer (found in the same live
-  // leak: "the user is ... the user would need ... the user's help needs").
-  if ((text.match(/\bthe user\b/gi) || []).length >= 2) return true;
+  // about them in the third person — 2+ occurrences of "the user" directly
+  // followed by a state/planning verb is leaked internal planning narration,
+  // not a real answer (found live: "the user is ... the user would need
+  // ..."). Requires an immediate verb, not just the bare bigram "the user"
+  // — an independent review fleet found and verified that the unqualified
+  // version also flagged ordinary text discussing product documentation
+  // ("the user manual is ... the user guide covers ...").
+  if ((text.match(/\bthe user\s+(?:is|was|are|were|would|wants?|needs?|has|have|had|should|must|can|could|will)\b/gi) || []).length >= 2) return true;
 
-  // 2026-07-17, round-5: this app's genuine replies are English/French/
-  // Spanish (accented Latin script), so ANY match of a true non-Latin script
-  // (CJK/Hangul/Cyrillic) is itself the signature — found live in an
-  // otherwise mostly-English garbled reply that had only 3 stray CJK
-  // characters ("IAF A才有了"), which a density-ratio threshold missed
-  // entirely (originally this check only fired above 5% non-Latin density).
-  // Uses .match(), not .test() — BLACKSWAN_GARBLE_NON_LATIN_RE carries the
-  // "g" flag, and .test() on a shared global-flagged regex mutates its
-  // lastIndex across calls, which would make this check flaky across
-  // successive invocations; .match() does not have that problem.
-  if ((text.match(BLACKSWAN_GARBLE_NON_LATIN_RE) || []).length >= 1) return true;
+  // This app's genuine replies are English/French/Spanish (accented Latin
+  // script). A density-ratio threshold for true non-Latin script
+  // (CJK/Hangul/Cyrillic) is a reasonable garbling signature, but an
+  // earlier attempt to hard-trigger on ANY single non-Latin character
+  // (regardless of density) was reverted after an independent review fleet
+  // found and verified it discards otherwise-correct replies that
+  // legitimately name a teammate in Cyrillic or quote a room-chat message
+  // in Korean — a hard trigger flags those unconditionally, on top of the
+  // pre-existing density-ratio limitation below.
+  // Known, pre-existing, still-open limitation (predates this diff, not
+  // something this revert fixes): a short reply genuinely built around
+  // quoting ONE foreign word (e.g. "'hello' in Japanese is こんにちは.")
+  // still trips this ratio, since a single quoted word can dominate a short
+  // reply's character count just as much as sparse garbling would. Properly
+  // distinguishing "an intentional foreign-word quote" from "stray garbled
+  // characters" would need real language-boundary detection, not a bare
+  // character-class ratio — out of scope for this fix.
+  const nonLatinCount = (text.match(BLACKSWAN_GARBLE_NON_LATIN_RE) || []).length;
+  const nonWhitespaceLen = text.replace(/\s+/g, "").length || 1;
+  if (nonLatinCount / nonWhitespaceLen > 0.05) return true;
 
   if ((text.match(BLACKSWAN_GARBLE_HRULE_RE) || []).length >= 3) return true;
   if ((text.match(BLACKSWAN_GARBLE_SHORT_BACKTICK_RE) || []).length >= 6) return true;
+  // 2026-07-17, round-5: a live garbled response used excessive short
+  // markdown-bold spans ("**word**: **word**" repeated dozens of times) as
+  // its dominant symptom — sparser non-Latin characters within the same
+  // response (only 3 stray CJK characters in ~1600 chars) were too sparse to
+  // trip the density check above, so this catches that response via a much
+  // safer signal: genuine replies (even ones that legitimately bold a
+  // "**Done:**"/"**Next:**" label or two) essentially never use 8+ short
+  // bold spans in one message.
+  if ((text.match(/\*\*[^*]{1,60}\*\*/g) || []).length >= 8) return true;
 
   // Repetition-loop detector: any 20+ char sliding window that recurs 3+
   // times verbatim is the hallmark of the non-terminating loop failure mode
@@ -2586,14 +2610,19 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   // between repeats (e.g. "...which means at least two days..." vs "...which
   // is a product status.") never realigns into a matching window — found
   // live in a response that repeated 3 distinct full sentences verbatim
-  // (each 30+ chars) without ever having an identical 24-char window recur
+  // (each 50+ chars) without ever having an identical 24-char window recur
   // 3 times. A genuine answer essentially never repeats a full clause this
   // long verbatim even twice, so this checks sentence-level duplication
-  // independently of the character-window check above.
+  // independently of the character-window check above. Floor is 50 chars,
+  // not 30 — an independent review fleet found and verified that a 30-char
+  // floor also flags a genuine multi-person digest reusing the same short
+  // congratulatory template sentence for two different people (e.g. "Great
+  // job, keep up that streak of yours!" said once per person), which is
+  // ~40 chars and a real, non-garbled shape for this product.
   const sentenceCounts = new Map<string, number>();
   for (const rawSentence of text.split(/[.!?\n]+/)) {
     const sentence = rawSentence.trim().toLowerCase().replace(/\s+/g, " ");
-    if (sentence.length < 30) continue;
+    if (sentence.length < 50) continue;
     const count = (sentenceCounts.get(sentence) || 0) + 1;
     sentenceCounts.set(sentence, count);
     if (count >= 2) return true;

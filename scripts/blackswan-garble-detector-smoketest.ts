@@ -123,10 +123,30 @@ assert(
   looksLikeGarbledBlackSwanOutput("Okay! Here's your update for today.") === false,
 );
 assert(
-  'two or more third-person "the user" references without a casual opener is flagged',
+  'two or more third-person "the user" references (each directly followed by a verb) without a casual opener is flagged',
   looksLikeGarbledBlackSwanOutput(
     'Sure — the user wants a summary of open tasks, and the user has 2 in progress right now.',
   ) === true,
+);
+assert(
+  'a single "the user is ..." mention with no second occurrence is NOT flagged',
+  looksLikeGarbledBlackSwanOutput('Thanks for asking — the user is able to update their own preferences from settings.') === false,
+);
+// Fixed via independent review fleet (2026-07-17): the unqualified bare-
+// bigram version of this check ("the user" appearing >=2 times, with no
+// requirement on what follows) also flagged ordinary text discussing
+// product documentation, since "the user manual"/"the user guide" both
+// contain the literal substring "the user". Narrowed to require an
+// immediate state/planning verb, which the live leak still has twice
+// ("the user IS messaggiooned ... the user WOULD need ...") but ordinary
+// noun phrases like "the user manual" never do.
+assert(
+  '"the user manual ... the user guide ..." (genuine docs text) is NOT flagged',
+  looksLikeGarbledBlackSwanOutput('The user manual is in the shared drive, and the user guide covers setup.') === false,
+);
+assert(
+  'a casual "Hmm," opener followed by "I need to" (isolated from the "the user" count check) is flagged',
+  looksLikeGarbledBlackSwanOutput('Hmm, I need to double-check that before I answer.') === true,
 );
 
 const highNonLatin = '어어어어어어어어어어어어어어어어어어어어'; // dense Hangul block
@@ -135,25 +155,66 @@ assert(
   'a normal answer with one non-English word is NOT flagged',
   looksLikeGarbledBlackSwanOutput('Great work today — that streak is looking très bien, keep it up!') === false,
 );
-// Found live (round 5 QA fleet, 2026-07-17): a mostly-English garbled reply
-// with only 3 stray CJK characters was too sparse to trip the old 5%
-// density threshold. Any true non-Latin script match is now a hard trigger.
 assert(
-  'a single stray CJK character in an otherwise-English reply is flagged',
+  '3 stray CJK characters in an otherwise-short, mostly-English reply are flagged (still above 5% density at this length)',
   looksLikeGarbledBlackSwanOutput('No sensors — IAF A才有了. NO BLACKSWAN') === true,
 );
+// Fixed via independent review fleet (2026-07-17): a prior version made ANY
+// single non-Latin character match a hard trigger regardless of density, to
+// catch a live case with only 3 stray CJK characters scattered through a
+// long (~1600 char) garbled reply. That was reverted after the review found
+// and verified it discards otherwise-correct replies that legitimately name
+// a teammate in Cyrillic or quote a room-chat message in Korean. Reverting
+// to a pure density ratio does NOT fully solve the false-positive problem
+// though — this is a known, still-open, PRE-EXISTING limitation (predates
+// this round's changes): a short reply genuinely built around quoting one
+// foreign word has just as high a density as short foreign-heavy garbling,
+// so it is still (incorrectly) flagged. Documented here rather than
+// silently left unverified.
+assert(
+  'a short reply that genuinely quotes one foreign word is still flagged (known pre-existing density-ratio limitation, not solved by this round)',
+  looksLikeGarbledBlackSwanOutput("'hello' in Japanese is こんにちは.") === true,
+);
+// The dropped live case above (3 CJK chars in a long garbled reply) is
+// instead caught by the excessive-bold-span check below, which was the
+// response's more distinctive and much safer-to-detect symptom.
+assert(
+  'excessive short markdown-bold spans (8+) are flagged',
+  looksLikeGarbledBlackSwanOutput(
+    "You're stating a task creation request. BlackSwan QA Agent **currently has a task creation capability.** " +
+      'However, it does not have the information about **specific task details.** ' +
+      "BlackSwan QA Agent's **current task board capacity** is 70 days. " +
+      'Sensor **resource compliance** was not checked, resulting in **resource sensor availability.** ' +
+      'You are currently in **BlackSwan Recovery** — BlackSwan QA Agent could **verify if they have specific task details** but instead, it was not checked. ' +
+      "BlackSwan QA Agent's **stated: SIXTY** — **answered: SIXTY**: time.",
+  ) === true,
+);
+assert(
+  'a genuine reply with 2 bold labels (e.g. Done/Next) is NOT flagged',
+  looksLikeGarbledBlackSwanOutput("Update:\n**Done:** shipped the fix\n**Next:** writing tests\nAnything I'm missing?") === false,
+);
 
-// Found live (round 5 QA fleet, 2026-07-17): degenerate fragments that
-// slipped past the <5-char near-empty check — a bare colon-terminated
-// label, and a response truncated mid-word/mid-sentence so it opens on a
-// single stray lowercase letter.
+// Found live (round 5 QA fleet, 2026-07-17): a bare colon-terminated label
+// slipped past the <5-char near-empty check.
 assert('a bare "length:" label is flagged as a degenerate fragment', looksLikeGarbledBlackSwanOutput('length:') === true);
 assert(
-  'a response opening on a single stray lowercase letter is flagged',
-  looksLikeGarbledBlackSwanOutput('s to one or two sentences.') === true,
+  '"Section one summary:" (3 words, over the <=2-word cutoff) is NOT flagged',
+  looksLikeGarbledBlackSwanOutput('Section one summary:') === false,
 );
+// Boundary test for the trimmed.length < 40 gate (found missing via
+// independent review fleet, 2026-07-17).
+assert('a 39-char single-word colon fragment (just under the 40-char gate) is flagged', looksLikeGarbledBlackSwanOutput('x'.repeat(38) + ':') === true);
+assert('a 40-char single-word colon fragment (at the 40-char gate) is NOT flagged', looksLikeGarbledBlackSwanOutput('x'.repeat(39) + ':') === false);
 assert('"On it!" is NOT flagged as a degenerate fragment', looksLikeGarbledBlackSwanOutput('On it!') === false);
 assert('"yep, sounds good" is NOT flagged as a degenerate fragment', looksLikeGarbledBlackSwanOutput('yep, sounds good') === false);
+// A single-lowercase-letter-opener check (meant to catch mid-sentence
+// truncation like "s to one or two sentences.") was removed after an
+// independent review fleet found and verified it also flagged ordinary
+// casual replies ("k, got it!", "u ready for standup?") and lettered lists
+// ("a) do the dishes"). These genuine short openers must stay unflagged —
+// this is an intentional, accepted trade-off, not an oversight.
+assert('"A great job today, keep it up!" is NOT flagged', looksLikeGarbledBlackSwanOutput('A great job today, keep it up!') === false);
+assert("\"I'll get right on it.\" is NOT flagged", looksLikeGarbledBlackSwanOutput("I'll get right on it.") === false);
 
 assert(
   'three or more bare --- hrule lines are flagged',
@@ -190,9 +251,10 @@ assert(
 
 // Found live (round 5 QA fleet, 2026-07-17): a loop where the wording drifts
 // slightly between repeats never lines up into an identical 24-char sliding
-// window, so the check above misses it — but the same full sentence (30+
+// window, so the check above misses it — but the same full sentence (50+
 // chars) recurring verbatim is still the same failure mode at the sentence
-// level.
+// level. Floor is 50 chars, not 30 — see the false-positive regression test
+// below (raised via independent review fleet, 2026-07-17).
 assert(
   'a full sentence repeated verbatim (with drifting wording elsewhere) is flagged',
   looksLikeGarbledBlackSwanOutput(
@@ -203,8 +265,21 @@ assert(
   ) === true,
 );
 assert(
-  'a short greeting repeated twice in casual speech is NOT flagged (below the 30-char sentence-length floor)',
+  'a short greeting repeated twice in casual speech is NOT flagged',
   looksLikeGarbledBlackSwanOutput('Hey! Hey, nice to see you back today.') === false,
+);
+// Fixed via independent review fleet (2026-07-17): the original 30-char
+// sentence-length floor also flagged a genuine multi-person digest reusing
+// the same short congratulatory template sentence for two different
+// people — a real, non-garbled shape for this product (per-member
+// streak/check-in summaries). Raised the floor to 50 chars, which still
+// catches the drifting-repetition test above (each repeated sentence is
+// 50+ chars) while no longer catching this shorter, legitimate case.
+assert(
+  'the same short congratulatory sentence reused for two different people in a digest is NOT flagged',
+  looksLikeGarbledBlackSwanOutput(
+    'Alex checked in today. Great job, keep up that streak of yours! Jamie checked in today. Great job, keep up that streak of yours!',
+  ) === false,
 );
 
 // ─── buildBlackSwanSystemPrompt ────────────────────────────────────────────
