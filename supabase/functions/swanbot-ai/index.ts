@@ -2480,11 +2480,24 @@ const BLACKSWAN_GARBLE_NON_LATIN_RE = /[぀-ヿ㐀-鿿가-힯Ѐ-ӿ]/g;
 // fake-table/fake-config garbling failure mode.
 const BLACKSWAN_GARBLE_HRULE_RE = /^---\s*$/gm;
 const BLACKSWAN_GARBLE_SHORT_BACKTICK_RE = /`[a-zA-Z_]{1,14}`/g;
+// 2026-07-16, found via live end-to-end testing of the shortened
+// BlackSwan-only prompt: a response can leak raw, unresolved step-by-step
+// reasoning as if it WERE the final answer — no <think> tags, no headers,
+// no repetition, no foreign script, so none of the checks above catch it
+// (e.g. "Thinking about the answer: ... Step 1: ... Step 2: ... No direct
+// task or action; instead, provide a clear plan to add." with no real
+// answer ever stated). stripBlackSwanReasoningTextRaw's own reasoning-prefix
+// regex only recognizes "Thinking Process:"/"Thought Process:" style
+// prefixes, not this "Thinking about..."/"Step 1:" shape, so it passes
+// through unmodified. Narrow, high-precision match on how the response
+// OPENS — a genuine final answer essentially never starts this way.
+const BLACKSWAN_GARBLE_REASONING_PREAMBLE_RE = /^\s*(?:thinking about|thinking:|step\s*1[:.]\s|let me think|first,?\s+(?:let'?s|i'?ll|i\s+need)|i\s+need\s+to\s+(?:check|determine|figure|analyze|verify)|my\s+plan\s*:)/i;
 
 function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   if (!text) return false;
   if (BLACKSWAN_GARBLE_THINK_TAG_RE.test(text)) return true;
   if (BLACKSWAN_GARBLE_HEADER_RE.test(text)) return true;
+  if (BLACKSWAN_GARBLE_REASONING_PREAMBLE_RE.test(text)) return true;
 
   const nonLatinCount = (text.match(BLACKSWAN_GARBLE_NON_LATIN_RE) || []).length;
   const nonWhitespaceLen = text.replace(/\s+/g, "").length || 1;
