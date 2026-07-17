@@ -9,19 +9,27 @@ import { getAuthenticatedUser } from '../_shared/edge.ts';
 
 // Bot-authored `messages.content` rows carry a `[[UC_CHAT_META]]`-prefixed
 // JSON metadata blob (recovery options, plan, findings, etc.) appended after
-// the visible text — see BOT_META_MARKER in src/lib/persistedChatMetadata.ts,
-// the single source of truth for this marker string. This MCP resource is
-// read directly by MCP clients (LLM apps) as conversation context, so an
-// unstripped marker would leak a raw JSON blob into a model prompt.
-// Deliberately NOT importing that module here: it has no Deno-runtime
-// dependencies (all its imports are `import type`), but pulling its full
-// type surface into `deno check` surfaces pre-existing type errors never
-// exercised before nothing imported it into a Deno context. Duplicating just
-// the marker constant keeps this fix isolated and Deno-clean.
+// the visible text, and (for legacy rows) a leading display-name prefix like
+// "🦢 **BlackSwan:** " baked directly into content — see BOT_META_MARKER /
+// BOT_PREFIX / LEGACY_CROWN_PREFIX in src/lib/persistedChatMetadata.ts's
+// stripPersistedChatBotPrefix(), the single source of truth for this shape.
+// This MCP resource is read directly by MCP clients (LLM apps) as
+// conversation context, so an unstripped marker or prefix would leak into a
+// model prompt. Deliberately NOT importing that module here: it has no
+// Deno-runtime dependencies (all its imports are `import type`), but
+// pulling its full type surface into `deno check` surfaces pre-existing
+// type errors never exercised before nothing imported it into a Deno
+// context. Duplicating just the marker/prefix patterns keeps this fix
+// isolated and Deno-clean, while matching stripPersistedChatBotPrefix()'s
+// actual behavior — mirrored from a code-review finding that this function
+// previously stripped only the trailing marker, leaving the leading prefix
+// (when present) in the resource content returned to MCP clients.
 const BOT_META_MARKER = '\n[[UC_CHAT_META]]';
+const BOT_META_LEGACY_PREFIX_RE = /^(?:👑 \*\*OpenSwan:\*\* |(?:🦢|🤖) \*\*[^*]{1,80}:\*\* )/u;
 function stripBotMetaMarker(content: string): string {
-  const index = content.indexOf(BOT_META_MARKER);
-  return index >= 0 ? content.slice(0, index) : content;
+  const withoutPrefix = content.replace(BOT_META_LEGACY_PREFIX_RE, '');
+  const index = withoutPrefix.indexOf(BOT_META_MARKER);
+  return index >= 0 ? withoutPrefix.slice(0, index) : withoutPrefix;
 }
 
 const corsHeaders = {

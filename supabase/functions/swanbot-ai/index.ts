@@ -22,17 +22,25 @@ import {
 } from "../../../src/lib/anthropicContextManagement.ts";
 // Bot-authored `messages.content` rows carry a `[[UC_CHAT_META]]`-prefixed
 // JSON metadata blob (recovery options, plan, findings, etc.) appended after
-// the visible text — see BOT_META_MARKER in src/lib/persistedChatMetadata.ts,
-// the single source of truth for this marker string. Deliberately NOT
-// importing that module here: it has no Deno-runtime dependencies (all its
-// imports are `import type`), but pulling its full type surface into `deno
-// check` surfaces ~120 pre-existing type errors never exercised before
-// nothing imported it into a Deno context. Duplicating just the marker
-// constant keeps this fix isolated and Deno-clean.
+// the visible text, and (for legacy rows) a leading display-name prefix like
+// "🦢 **BlackSwan:** " baked directly into content — see BOT_META_MARKER /
+// BOT_PREFIX / LEGACY_CROWN_PREFIX in src/lib/persistedChatMetadata.ts's
+// stripPersistedChatBotPrefix(), the single source of truth for this shape.
+// Deliberately NOT importing that module here: it has no Deno-runtime
+// dependencies (all its imports are `import type`), but pulling its full
+// type surface into `deno check` surfaces ~120 pre-existing type errors
+// never exercised before nothing imported it into a Deno context.
+// Duplicating just the marker/prefix patterns keeps this fix isolated and
+// Deno-clean, while matching stripPersistedChatBotPrefix()'s actual
+// behavior — mirrored from a code-review finding that this function
+// previously stripped only the trailing marker, leaving the leading
+// prefix (when present) in the history sent to the model.
 const BOT_META_MARKER = "\n[[UC_CHAT_META]]";
+const BOT_META_LEGACY_PREFIX_RE = /^(?:👑 \*\*OpenSwan:\*\* |(?:🦢|🤖) \*\*[^*]{1,80}:\*\* )/u;
 function stripBotMetaMarker(content: string): string {
-  const index = content.indexOf(BOT_META_MARKER);
-  return index >= 0 ? content.slice(0, index) : content;
+  const withoutPrefix = content.replace(BOT_META_LEGACY_PREFIX_RE, "");
+  const index = withoutPrefix.indexOf(BOT_META_MARKER);
+  return index >= 0 ? withoutPrefix.slice(0, index) : withoutPrefix;
 }
 
 const corsHeaders = {
@@ -914,12 +922,13 @@ ${ctx.wikiContext}`;
 // coherent-and-good answer in this testing. It is NOT a complete fix (the
 // model still sometimes burns its token budget on unterminated reasoning
 // instead of answering, and some answers stayed thin/generic) —
-// looksLikeGarbledBlackSwanOutput()/stripBlackSwanReasoningText() above
+// looksLikeGarbledBlackSwanOutput()/stripBlackSwanReasoningText() defined later in this file
 // remain the safety net for whatever still slips through — but it is a
 // clear, measured improvement over the full prompt for this one model
 // family. Every call site MUST gate this behind isBlackSwanTextModel() so
 // Claude's prompt (and every other model's prompt) is byte-identical to
 // before.
+/* UC_SMOKE_EXTRACT_START buildBlackSwanSystemPrompt */
 function buildBlackSwanSystemPrompt(ctx: any): string {
   let prompt = `You are Agent 🦢, an AI accountability partner inside The Underground Circle, a small-team accountability app. You're direct, warm, and sharp — you help people plan work, stay on track, and follow through, without fluff or hype. Keep replies concise and prefix them with 🦢.
 
@@ -949,6 +958,7 @@ You can't create tasks or take other actions directly in this reply — tell the
 
   return prompt;
 }
+/* UC_SMOKE_EXTRACT_END buildBlackSwanSystemPrompt */
 
 // ─── Call BlackSwan LLM (local/self-hosted, zero cost) ───────────────────────
 
@@ -2468,6 +2478,7 @@ function isBlackSwanTextModel(modelId: string | null | undefined): boolean {
 // real percentage thresholds) so it only fires on the severe breakdown
 // cases actually observed, not on a normal answer that happens to use a
 // non-English word or a bullet list.
+/* UC_SMOKE_EXTRACT_START looksLikeGarbledBlackSwanOutput */
 const BLACKSWAN_GARBLE_THINK_TAG_RE = /<\/?think>/i;
 const BLACKSWAN_GARBLE_HEADER_RE = /##\s*(?:BlackSwan App-Grounding Contract|Tools\s*&\s*Actions|Your Personality|Expanded Knowledge)/i;
 const BLACKSWAN_GARBLE_NON_LATIN_RE = /[぀-ヿ㐀-鿿가-힯Ѐ-ӿ]/g;
@@ -2491,7 +2502,12 @@ const BLACKSWAN_GARBLE_SHORT_BACKTICK_RE = /`[a-zA-Z_]{1,14}`/g;
 // prefixes, not this "Thinking about..."/"Step 1:" shape, so it passes
 // through unmodified. Narrow, high-precision match on how the response
 // OPENS — a genuine final answer essentially never starts this way.
-const BLACKSWAN_GARBLE_REASONING_PREAMBLE_RE = /^\s*(?:thinking about|thinking:|step\s*1[:.]\s|let me think|first,?\s+(?:let'?s|i'?ll|i\s+need)|i\s+need\s+to\s+(?:check|determine|figure|analyze|verify)|my\s+plan\s*:)/i;
+// "first,? (let's|I'll|I need to) <verb>" only counts as a leaked-reasoning
+// opener when <verb> is itself reasoning-flavored (check/determine/analyze/
+// ...) — found via code review that the earlier, unqualified version also
+// matched a perfectly good answer opener like "First, let's celebrate your
+// streak!", which is not reasoning leakage at all.
+const BLACKSWAN_GARBLE_REASONING_PREAMBLE_RE = /^\s*(?:thinking about|thinking:|step\s*1[:.]\s|let me think|first,?\s+(?:let'?s|i'?ll|i\s+need\s+to)\s+(?:check|determine|figure|analyze|verify|think|consider|look\s+at|review)|i\s+need\s+to\s+(?:check|determine|figure|analyze|verify)|my\s+plan\s*:)/i;
 
 function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   if (!text) return false;
@@ -2528,6 +2544,7 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   }
   return false;
 }
+/* UC_SMOKE_EXTRACT_END looksLikeGarbledBlackSwanOutput */
 
 const BLACKSWAN_GARBLE_FALLBACK_MESSAGE =
   "I couldn't form a clear answer to that just now — BlackSwan sometimes struggles with longer conversations (a known issue being worked on). Could you try asking again in a shorter, more direct way, or switch to a different model for this one?";

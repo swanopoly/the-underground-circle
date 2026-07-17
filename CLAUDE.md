@@ -144,6 +144,19 @@ Model IDs may be provider-prefixed, such as `openrouter/auto`,
   `scripts/blackswan-llm/CONTINUOUS_TRAINING.md`.
 - `buildBlackSwanGroundingBlock` injects app-state rules and safe memory
   references without exposing secrets.
+- BlackSwan-v5 reliably garbles on the full Claude-shaped production system
+  prompt. `supabase/functions/swanbot-ai/index.ts` sends BlackSwan text
+  models a separate, shortened `buildBlackSwanSystemPrompt` (short persona +
+  a few hand-picked facts, no tool catalog/personality/knowledge sections)
+  instead; every call site gates this behind `isBlackSwanTextModel`. Output
+  that still slips through garbled (leaked `<think>` tags, repetition loops,
+  foreign-script salad, raw reasoning preambles) is caught by
+  `looksLikeGarbledBlackSwanOutput`/`stripBlackSwanReasoningText` in the same
+  file and replaced with an honest fallback message — a mitigation for a
+  known training-distribution gap, not a full fix.
+- `scripts/blackswan-llm/training_data_generated/` holds hand-curated,
+  production-shaped training examples (checked into git, unlike the
+  gitignored `training_data/`) loaded by `prepare_dataset_v4.py`.
 
 OpenSwan remains the in-app shared agent/runtime brand. The internal default
 agent id `default::blackswan` should not be renamed without a migration plan.
