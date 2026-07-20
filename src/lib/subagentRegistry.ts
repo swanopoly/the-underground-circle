@@ -13,6 +13,7 @@ import {
   type SwanBotStructuredToolAction,
 } from './swanbot';
 import { createRun, addStep, mergeRunMetadata, updateRunStatus, type RunSurface } from './agentRunSystem';
+import { assembleDelegationBrief } from './delegationBriefCore';
 import {
   buildSubagentChildRunOptions,
   buildSubagentLoopSummary,
@@ -684,6 +685,10 @@ export async function delegateToSubagent(opts: {
   /** Parent chat mode. If provided, overrides the role-derived mode so the
    *  subagent respects the user's current mode discipline. */
   parentMode?: string | null;
+  /** Pre-assembled delegation brief (scoped subtask + boundaries + return contract).
+   *  When set it replaces the raw parent message as the child's ## Task, keeping the
+   *  clean `message` for gate previews / run titles / memory queries. */
+  taskBrief?: string;
 }): Promise<DelegationResult> {
   // CA-8d: gate-check BEFORE any DB writes so rejected delegations
   // don't leave orphan agent_runs rows. Depth = parent's depth + 1;
@@ -839,7 +844,7 @@ export async function delegateToSubagent(opts: {
   const fullPrompt = [
     opts.subagent.systemPrompt,
     opts.chatHistory ? `\n## Recent Conversation\n${opts.chatHistory}` : '',
-    `\n## Task\n${opts.message}`,
+    opts.taskBrief ? `\n## Task\n${opts.taskBrief}` : `\n## Task\n${opts.message}`,
   ].filter(Boolean).join('\n\n');
 
   // Execute via SwanBot
@@ -1168,13 +1173,21 @@ export async function delegateToSubagents(opts: {
   parentMode?: string | null;
 }): Promise<ParallelDelegationResult> {
   const settled = await Promise.allSettled(
-    opts.specs.map((spec) =>
+    opts.specs.map((spec, index) =>
       delegateToSubagent({
         circleId: opts.circleId,
         userId: opts.userId,
         userName: opts.userName,
         surface: opts.surface,
         message: spec.task,
+        // Structured outbound brief: scoped subtask + minimal context + success
+        // criteria + coordination boundaries (from the sibling specs) + return
+        // contract, instead of a raw task string. Falls back to `message` if empty.
+        taskBrief: assembleDelegationBrief({
+          spec,
+          parentMessage: opts.message,
+          siblingSpecs: opts.specs.filter((_, i) => i !== index),
+        }).text,
         subagent: spec.subagent,
         parentRunId: opts.parentRunId,
         model: opts.model || spec.subagent.modelPreference,
