@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, Pressable, Animated, ScrollView, Platform } fro
 import { AgentApproval, resolveApproval } from '../services/hitlService';
 import { safeGetUserId } from '../lib/authSession';
 import { applyApprovedAction } from '../lib/agentApprovalsWorker';
+import { planApprovalOrder } from '../lib/approvalUnblockOrderCore';
 import {
   AUTO_APPROVE_CATEGORY_LABELS,
   planCategory,
@@ -258,7 +259,22 @@ export default function HitlApprovalBanner({ approvals, circleId, onEditAndResen
 
       {expanded && (
         <ScrollView style={styles.list} showsVerticalScrollIndicator={false}>
-          {approvals.map((ap) => {
+          {/* Unblock-impact ordering: rank the stalled queue by wait × blocked-work ×
+              risk/deadline floor (approvalUnblockOrderCore) instead of newest-first, so
+              the highest-leverage approval sits on top. This is the shared render for both
+              the Office and Chat banners, so one edit reorders both. Unmatched → skipped. */}
+          {planApprovalOrder(
+            approvals.map((a) => ({
+              id: a.id,
+              waitMs: Date.now() - Date.parse(a.requested_at),
+              risk: (a.payload as any)?.plan?.risk ?? (a.payload as any)?.risk,
+              tool: a.action_type,
+              category: a.action_type,
+              blockedWork: (a.payload as any)?.plan?.steps?.length,
+            })),
+          ).ranked.map((r) => {
+            const ap = approvals[r.index];
+            if (!ap) return null;
             // INTENT PREVIEW (2025-26 trust pattern): derive a plain-language
             // what/why + risk chip + scope facts + three-choice lane. When the
             // approval lacks structured signal we fall back to TODAY's exact
