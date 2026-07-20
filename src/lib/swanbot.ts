@@ -2964,7 +2964,23 @@ async function buildSystemPromptAsync(
   // ahead of the assembled extras — preserving their original position relative
   // to the extras while keeping the stable prefix (base) byte-identical and
   // cacheable across turns.
-  const dynamicTail = assembled.text ? `${volatileTail}\n\n${assembled.text}` : volatileTail;
+  // Per-turn OUTPUT register directive — the output-shaping dial symmetric to the
+  // /context INPUT dial. resolveResponseRegister reads explicit inline directives
+  // ("just the code", "eli5") > sticky preference > prior-turn corrective feedback
+  // ("too long") > message style > profile, and renders ONE imperative line. Appended
+  // at the very end of the dynamic tail (max salience, never budget-clipped); '' /
+  // no-op when neutral, so a plain turn's prompt is byte-identical to before.
+  const { resolveResponseRegister } = await import('./responseRegisterCore');
+  const registerDirective = resolveResponseRegister({
+    currentMessage,
+    priorMessages: context.conversationMessages,
+  }).directive;
+  const dynamicTail = [
+    assembled.text ? `${volatileTail}\n\n${assembled.text}` : volatileTail,
+    registerDirective,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
   return composeChatSystemPrompt(base, dynamicTail);
 }
 
