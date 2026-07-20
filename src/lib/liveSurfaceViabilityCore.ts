@@ -493,8 +493,25 @@ export function reconcileLiveSurfaceViability(
   input: LiveSurfaceViabilityInput | null | undefined,
 ): LiveSurfaceViabilityResult {
   const raw = input && typeof input === 'object' ? (input as unknown as Record<string, unknown>) : {};
-  const order = normalizeOrder(raw.preferredSurfaceOrder);
-  const reports = normalizeReports(raw.reachability);
+  // TOTAL contract: the reads of preferredSurfaceOrder / reachability — and the
+  // normalize passes that consume them — are the ONLY throw sources in this
+  // reconciler (everything after runs on normalized plain values through guarded
+  // sanitizers). A hostile input (a throwing accessor, a throwing Proxy, or an
+  // array whose element/length getter throws) must NOT propagate: degrade each
+  // read independently to empty so the normal degenerate path yields a
+  // well-formed result instead of re-throwing.
+  let order: ExecutionSurface[] = [];
+  try {
+    order = normalizeOrder(raw.preferredSurfaceOrder);
+  } catch {
+    order = [];
+  }
+  let reports: SafeReport[] = [];
+  try {
+    reports = normalizeReports(raw.reachability);
+  } catch {
+    reports = [];
+  }
 
   // Fold the desktop disposition across governing (non-web) reports, worst-wins,
   // and collect the web reports separately for the mismatch axis.

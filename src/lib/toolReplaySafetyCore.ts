@@ -307,7 +307,13 @@ function classifySideEffectString(value: string): ToolSideEffectClass {
   const token = normalizeToken(value);
   if (!token) return 'unknown';
   if (SIDE_EFFECT_CLASSES.has(token)) return token as ToolSideEffectClass;
-  const alias = SIDE_EFFECT_ALIASES[token];
+  // Own-property guard: SIDE_EFFECT_ALIASES is a plain object literal, so a bare
+  // `[token]` walks Object.prototype and would return an inherited member for a
+  // token like `constructor` (the Object function) — breaking the TOTAL/enum
+  // contract. Only accept the map's own keys; anything else falls through.
+  const alias = Object.prototype.hasOwnProperty.call(SIDE_EFFECT_ALIASES, token)
+    ? SIDE_EFFECT_ALIASES[token]
+    : undefined;
   return alias ?? 'unknown';
 }
 
@@ -469,7 +475,14 @@ function dispoText(v: unknown): string {
 export function classifyFailureDisposition(disposition: unknown): ToolFailureDisposition {
   try {
     if (typeof disposition === 'string') {
-      const alias = DISPOSITION_ALIASES[normalizeToken(disposition)];
+      // Own-property guard: DISPOSITION_ALIASES is a plain object literal, so a
+      // bare `[token]` walks Object.prototype and would return an inherited
+      // member for a token like `constructor` (the Object function) — breaking
+      // the TOTAL/enum contract. Only accept the map's own keys.
+      const token = normalizeToken(disposition);
+      const alias = Object.prototype.hasOwnProperty.call(DISPOSITION_ALIASES, token)
+        ? DISPOSITION_ALIASES[token]
+        : undefined;
       if (alias) return alias;
     }
     const text = dispoText(disposition);

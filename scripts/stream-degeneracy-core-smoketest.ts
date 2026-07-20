@@ -190,6 +190,39 @@ for (const s of ['a'.repeat(400), 'ab'.repeat(200), 'hello world normal text', '
   }
 }
 
+// ── (L) non-BMP (astral) single-char run parity — REGRESSION ────────────────
+// A repeated non-BMP char is ONE code point, not a two-code-unit "phrase". It must
+// behave exactly like every BMP char: healthy until CHAR_RUN_MIN *code points*,
+// then char_run (never phrase_loop). Astral input is built from a CODE POINT via
+// String.fromCodePoint — never a raw surrogate/control char in this source.
+{
+  const EMOJI = String.fromCodePoint(0x1f389); // U+1F389 party popper (surrogate pair)
+  // exact failing input: 120 emoji = 240 UTF-16 units = old FALSE p=2 phrase_loop.
+  const v120 = assessStreamDegeneracy(EMOJI.repeat(120));
+  assertEq(v120.degenerate, false, 'astral run of 120 is NOT degenerate (parity with BMP: 120 < CHAR_RUN_MIN)');
+  assertEq(v120.kind, 'none', 'astral run of 120 → kind none (not phrase_loop)');
+  assertEq(v120.repeatUnit, '', 'astral run of 120 → empty repeatUnit');
+  // 119 emoji (238 units) was already correctly none; one below the boundary too.
+  assertEq(assessStreamDegeneracy(EMOJI.repeat(119)).degenerate, false, 'astral run of 119 stays healthy');
+  assertEq(assessStreamDegeneracy(EMOJI.repeat(CHAR_RUN_MIN - 1)).degenerate, false, 'astral run one below CHAR_RUN_MIN stays healthy');
+  // at CHAR_RUN_MIN code points it fires — as char_run, counted in code points.
+  const vRun = assessStreamDegeneracy(EMOJI.repeat(CHAR_RUN_MIN));
+  assertEq(vRun.degenerate, true, 'astral run at CHAR_RUN_MIN is degenerate');
+  assertEq(vRun.kind, 'char_run', 'astral run fires as char_run (not phrase_loop)');
+  assertEq(vRun.repeats, CHAR_RUN_MIN, 'astral char_run repeats counted in code points');
+  assertEq(vRun.repeatUnit, EMOJI, 'astral char_run repeatUnit is the single emoji');
+  assert(/single-character run/.test(vRun.reason), 'astral char_run reason says single-character run');
+  assert(!/phrase/.test(vRun.reason), 'astral char_run reason is NOT a phrase');
+  // parity proof: a BMP char at the same counts behaves identically.
+  assertEq(assessStreamDegeneracy('a'.repeat(120)).degenerate, false, 'BMP parity: 120 healthy');
+  // a genuine TWO distinct alternating emoji IS still a real phrase_loop — the
+  // defer is distinct-CODE-POINT==1 only, so legitimate astral loops are preserved.
+  const EMOJI2 = String.fromCodePoint(0x1f38a); // U+1F38A confetti ball
+  const two = assessStreamDegeneracy((EMOJI + EMOJI2).repeat(150));
+  assertEq(two.degenerate, true, 'two distinct alternating emoji is still a real loop');
+  assertEq(two.kind, 'phrase_loop', 'two distinct emoji → phrase_loop (not deferred as a char run)');
+}
+
 console.log(`stream-degeneracy-core smoke: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
 console.log('All stream-degeneracy-core smoke cases passed (' + passed + ' passed).');

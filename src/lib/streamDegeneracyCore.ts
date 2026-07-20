@@ -270,15 +270,57 @@ function countTailRepeats(s: string, p: number, n: number): number {
   return repeats;
 }
 
-/** Count distinct char codes in `s[start, start+len)`, early-exiting at 2 (the
- *  only threshold callers care about). */
-function distinctCharCount(s: string, start: number, len: number): number {
+/** Count distinct CODE POINTS in `s[start, start+len)`, early-exiting at 2 (the
+ *  only threshold callers care about). Code-point aware so a non-BMP char (a
+ *  surrogate PAIR of two distinct code units) counts as ONE distinct symbol: an
+ *  all-same-astral-char block therefore reads as 1 (a char run) exactly like an
+ *  all-same-BMP block, instead of falsely reading as >=2 distinct units and firing
+ *  as a phrase loop. A block boundary that splits a pair leaves a lone surrogate,
+ *  counted as its own width-1 point. */
+function distinctCodePointCount(s: string, start: number, len: number): number {
   const seen = new Set<number>();
-  for (let k = 0; k < len; k++) {
-    seen.add(s.charCodeAt(start + k));
+  const end = start + len;
+  let i = start;
+  while (i < end) {
+    let cp = s.charCodeAt(i);
+    let step = 1;
+    if (cp >= 0xd800 && cp <= 0xdbff && i + 1 < end) {
+      const lo = s.charCodeAt(i + 1);
+      if (lo >= 0xdc00 && lo <= 0xdfff) {
+        cp = (cp - 0xd800) * 0x400 + (lo - 0xdc00) + 0x10000; // combine surrogate pair
+        step = 2;
+      }
+    }
+    seen.add(cp);
     if (seen.size >= 2) return seen.size;
+    i += step;
   }
   return seen.size;
+}
+
+/** The trailing single-CODE-POINT run at the very end of `s` (length `n`): how
+ *  many times the last code point repeats CONTIGUOUSLY (counted in code POINTS,
+ *  not UTF-16 units) plus that point's code-unit `width` (1 for BMP, 2 for an
+ *  astral surrogate pair). This is the code-unit-safe replacement for the old
+ *  p==1 char-run count: a repeated emoji / astral char now scores its true
+ *  code-point run length and is held to CHAR_RUN_MIN like every BMP char, instead
+ *  of escaping as a period-2 unit of two distinct surrogate code units. A trailing
+ *  lone/unpaired surrogate is treated as a width-1 point (its own char). Bounded by
+ *  n/width iterations; never throws on a well-formed string. */
+function trailingCodePointRun(s: string, n: number): { width: number; repeats: number } {
+  let width = 1;
+  const last = s.charCodeAt(n - 1);
+  if (last >= 0xdc00 && last <= 0xdfff && n >= 2) {
+    const hi = s.charCodeAt(n - 2);
+    if (hi >= 0xd800 && hi <= 0xdbff) width = 2; // last point is a surrogate pair
+  }
+  let repeats = 1;
+  let start = n - width;
+  while (start - width >= 0 && blockEqualChars(s, start - width, start, width)) {
+    repeats += 1;
+    start -= width;
+  }
+  return { width, repeats };
 }
 
 /** Last <= MAX_DIVERSITY_WORDS non-empty whitespace tokens of `tail`. */
@@ -310,14 +352,17 @@ function buildPeriodicVerdict(
 }
 
 /**
- * (a) PERIODIC TAIL-LOOP - the primary, unambiguous detector. Scans period
- * p=1..maxPeriod and returns the SMALLEST qualifying p (the true fundamental
+ * (a) PERIODIC TAIL-LOOP - the primary, unambiguous detector. First checks a
+ * single-CODE-POINT run (the char-run case, surrogate-safe), then scans period
+ * p=2..maxPeriod and returns the SMALLEST qualifying p (the true fundamental
  * period). Returns null when nothing qualifies.
  *
- *   p==1  -> qualifies on repeats >= CHAR_RUN_MIN (single-char runaway).
- *   p>=2  -> the block must have >= 2 DISTINCT chars (an all-same block is a char
- *           run, deferred to the higher p==1 threshold - so a long "====" divider
- *           never trips here), AND repeats*p >= minLoopSpan AND repeats >= minRepeats.
+ *   char run -> the last CODE POINT repeated >= CHAR_RUN_MIN times (counted in
+ *           code points, so a non-BMP / astral char is one symbol - not two units).
+ *   p>=2  -> the block must have >= 2 DISTINCT CODE POINTS (a block that is a whole
+ *           number of identical code points is a char run, deferred to the higher
+ *           char-run threshold - so neither a "====" divider NOR an astral emoji
+ *           wall trips here), AND repeats*p >= minLoopSpan AND repeats >= minRepeats.
  */
 function detectPeriodicLoop(
   tail: string,
@@ -326,15 +371,23 @@ function detectPeriodicLoop(
   minLoopSpan: number,
   minRepeats: number,
 ): StreamDegeneracyVerdict | null {
+  // CHAR RUN first, in CODE POINTS (the old p==1 check, made surrogate-safe): the
+  // last code point repeated to a runaway length, held to the HIGHER CHAR_RUN_MIN.
+  // Counting code points (not UTF-16 units) makes a non-BMP char behave exactly
+  // like a BMP one - an astral emoji wall is a single-character run reached only at
+  // CHAR_RUN_MIN, never a period-2 "phrase" of two distinct surrogate code units.
+  const run = trailingCodePointRun(tail, n);
+  if (run.repeats >= CHAR_RUN_MIN) {
+    return buildPeriodicVerdict(tail, n, run.width, run.repeats, 'char_run');
+  }
   const pMax = Math.min(maxPeriod, n);
-  for (let p = 1; p <= pMax; p++) {
+  for (let p = 2; p <= pMax; p++) {
+    // A block that is a whole number of IDENTICAL code points is really a char run
+    // (handled above at the higher threshold) - defer it. Distinct-CODE-POINT (not
+    // code-unit) so neither an all-same "====" block NOR an astral single-char run
+    // (whose period-p block is one emoji repeated) trips the lower p>=2 phrase gate.
+    if (distinctCodePointCount(tail, n - p, p) < 2) continue;
     const repeats = countTailRepeats(tail, p, n);
-    if (p === 1) {
-      if (repeats >= CHAR_RUN_MIN) return buildPeriodicVerdict(tail, n, p, repeats, 'char_run');
-      continue;
-    }
-    // p >= 2: an all-same-char block is really a char run - defer to p==1.
-    if (distinctCharCount(tail, n - p, p) < 2) continue;
     if (repeats * p < minLoopSpan || repeats < minRepeats) continue;
     const hasNewline = tail.slice(n - p, n).indexOf('\n') >= 0;
     return buildPeriodicVerdict(tail, n, p, repeats, hasNewline ? 'line_loop' : 'phrase_loop');

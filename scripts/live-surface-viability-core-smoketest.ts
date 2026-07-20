@@ -570,6 +570,59 @@ function main(): void {
     console.error(`FAIL: (HOSTILE) sweep threw: ${(e as Error)?.message}`);
   }
 
+  // ─── (O) TOTAL contract: throwing top-level reads / proxy / array elements ───
+  // Regression: reconcile must NEVER throw when the READ of preferredSurfaceOrder
+  // / reachability itself throws (a throwing accessor, or a throwing Proxy input),
+  // nor when an order/reachability ARRAY element getter throws. Cases 1–3 bypass
+  // run()'s plain-object wrapper by calling the export directly (that wrapper is
+  // what previously hid the top-level throwing-read from the sibling smoke). No
+  // throwing value is ever String()-ed into an assert message.
+  {
+    const safeReconcile = (bad: unknown): LiveSurfaceViabilityResult | null => {
+      try {
+        return reconcileLiveSurfaceViability(bad as never);
+      } catch {
+        return null; // a throw here IS the bug
+      }
+    };
+
+    // 1) top-level throwing getter on preferredSurfaceOrder (the exact failing input)
+    const throwOrderProp = Object.defineProperty({ reachability: null }, 'preferredSurfaceOrder', {
+      get() { throw new Error('order-prop boom'); },
+      enumerable: true,
+      configurable: true,
+    });
+    const rO1 = safeReconcile(throwOrderProp);
+    assert(rO1 !== null && resultIsValid(rO1, 0), '(O) throwing preferredSurfaceOrder getter → valid result, no throw');
+    assertEq(rO1?.disposition, 'no_desktop_reports', '(O) throwing order getter → no_desktop_reports');
+    assertEq(rO1?.startSurface, null, '(O) throwing order getter → no start surface');
+
+    // 2) top-level throwing getter on reachability (order still normalizes → partial progress kept)
+    const throwReachProp = Object.defineProperty({ preferredSurfaceOrder: ['desktop_a11y'] }, 'reachability', {
+      get() { throw new Error('reach-prop boom'); },
+      enumerable: true,
+      configurable: true,
+    });
+    const rO2 = safeReconcile(throwReachProp);
+    assert(rO2 !== null && resultIsValid(rO2, 1), '(O) throwing reachability getter → valid result, no throw');
+    assertEq(rO2?.findings.length, 1, '(O) throwing reachability getter → order findings preserved');
+
+    // 3) whole input is a throwing Proxy (every property read throws)
+    const throwInputProxy = new Proxy({}, { get() { throw new Error('input-proxy boom'); } });
+    const rO3 = safeReconcile(throwInputProxy);
+    assert(rO3 !== null && resultIsValid(rO3, 0), '(O) throwing-proxy input → valid result, no throw');
+
+    // 4) preferredSurfaceOrder is an array whose index-0 getter throws (through run())
+    const throwOrderArr: unknown[] = ['desktop_a11y'];
+    Object.defineProperty(throwOrderArr, 0, { get() { throw new Error('order-el boom'); }, enumerable: true, configurable: true });
+    assert(totalOn(throwOrderArr, rep('reachable'), 1), '(O) throwing order-array element getter → total');
+
+    // 5) reachability is an array whose index-0 getter throws (through run())
+    const throwReachArr: unknown[] = [rep('reachable')];
+    Object.defineProperty(throwReachArr, 0, { get() { throw new Error('reach-el boom'); }, enumerable: true, configurable: true });
+    assert(totalOn(['desktop_a11y', 'desktop_vision'], throwReachArr, 2), '(O) throwing reachability-array element getter → total');
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} failure(s), ${passes} passed`);
     process.exit(1);

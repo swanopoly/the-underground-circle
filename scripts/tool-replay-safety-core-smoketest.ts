@@ -313,6 +313,37 @@ function main(): void {
     }
   }
 
+  // ─── (J) prototype-chain / inherited-key guard (regression) ─────────────────
+  // Both alias maps are plain object literals; a lookup keyed by an inherited
+  // Object.prototype member name — notably `constructor` (survives normalizeToken
+  // verbatim; `CONSTRUCTOR!!` also normalizes to it) — must NOT resolve to that
+  // inherited member (the Object function). It must fall through to the
+  // conservative default, and the decision must keep every required enum field
+  // so JSON.stringify never silently drops one.
+  {
+    // Bug 2: classifyToolSideEffect('constructor') → 'unknown' (not the Object fn).
+    assertEq(se('constructor'), 'unknown', "(J) se('constructor') → unknown (no inherited Object.constructor)");
+    assert(CLASSES.includes(se('constructor')), '(J) se(constructor) stays within the class enum');
+    // Bug 1: classifyFailureDisposition('constructor') (+ decorated variant) →
+    // 'outcome_unknown' (not the Object fn).
+    assertEq(fd('constructor'), 'outcome_unknown', "(J) fd('constructor') → outcome_unknown (no inherited member)");
+    assertEq(fd('CONSTRUCTOR!!'), 'outcome_unknown', "(J) fd('CONSTRUCTOR!!') normalizes to constructor → outcome_unknown");
+    assert(DISPOS.includes(fd('constructor')), '(J) fd(constructor) stays within the disposition enum');
+
+    // Bug 2 downstream: decision keeps a valid sideEffectClass that survives JSON.
+    const seDec = d({ sideEffect: 'constructor', disposition: 'timeout' });
+    assertEq(seDec.sideEffectClass, 'unknown', '(J) decide sideEffect=constructor → sideEffectClass unknown');
+    assertEq(seDec.safety, 'unsafe_replay', '(J) decide sideEffect=constructor + timeout → unsafe_replay (fail-closed)');
+    assert(decisionIsValid(seDec), '(J) decide sideEffect=constructor → valid decision (no dropped field)');
+    assertEq(JSON.parse(JSON.stringify(seDec)).sideEffectClass, 'unknown', '(J) sideEffectClass survives JSON round-trip');
+
+    // Bug 1 downstream: decision keeps a valid disposition that survives JSON.
+    const fdDec = d({ sideEffect: 'read_only', disposition: 'constructor' });
+    assertEq(fdDec.disposition, 'outcome_unknown', '(J) decide disposition=constructor → disposition outcome_unknown');
+    assert(decisionIsValid(fdDec), '(J) decide disposition=constructor → valid decision (no dropped field)');
+    assertEq(JSON.parse(JSON.stringify(fdDec)).disposition, 'outcome_unknown', '(J) disposition survives JSON round-trip');
+  }
+
   // ─── (HOSTILE) totality: never throw, never leak, fail-closed ───────────────
   try {
     const hostiles: unknown[] = [null, undefined, 123, NaN, Infinity, -0, true, false, 'x'.repeat(1_000_000), {}, [], 9n, Symbol('s'), () => 1];
