@@ -855,7 +855,17 @@ function pickProviderForModel(modelId: string | null | undefined): string | null
   if (slashIdx > 0) {
     const head = normalized.slice(0, slashIdx);
     if (head === 'huggingface_endpoint') return null;
-    if (head === 'huggingface') return 'huggingface';
+    // The public `huggingface/cswan801/BlackSwan-v5` id (as opposed to the
+    // dedicated-endpoint id above) must also fall through to null here, not
+    // route to the plain llm-proxy path — llm-proxy calls HF directly and
+    // returns raw completion text unfiltered, with none of the BlackSwan-
+    // specific garbling detection / <think>-tag salvage / shortened system
+    // prompt that swanbot-ai (Tier 2) applies. Live auto-routing never picks
+    // this public id (only the endpoint id), but a user-configured custom
+    // marketplace model matching it would otherwise bypass all of that
+    // protection entirely. Any OTHER huggingface/* model (not BlackSwan)
+    // still routes to llm-proxy as before.
+    if (head === 'huggingface') return isBlackSwanModel(normalized) ? null : 'huggingface';
     if (head === 'z_ai') return 'zai';
     if (head === 'zai') return 'zai';
     if ([
