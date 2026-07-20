@@ -438,6 +438,36 @@ function main(): void {
   assertEq(classifyChangedFileRisk(['a.sql', 'b.sql', 'c.sql'], { maxFiles: 0 }).codeFileCount, 3, '(G) maxFiles:0 → default cap');
   assertEq(classifyChangedFileRisk(['a.sql', 'b.sql', 'c.sql'], { maxFiles: 'x' as unknown as number }).codeFileCount, 3, '(G) bad maxFiles → default cap');
 
+  // ─── (H) regression (QA) ─────────────────────────────────────────────────────
+  {
+    // Bug 1: non-array input must NOT hand back the shared EMPTY_SCAN.categories
+    // singleton. Mutating a returned categories array must not contaminate any
+    // later empty/non-array decision.
+    const r = classifyChangedFileRisk(null);
+    r.categories.push('schema', 'auth');
+    const d = planVerificationDepth({ changedFiles: undefined });
+    assertJson(d.categories, [], '(H) non-array categories not aliased to shared singleton');
+    assertJson(d.manualReviewKinds, [], '(H) contaminated categories do not fabricate manual review');
+    assertEq(d.reason, 'low risk — 0 code file(s); categories: none; require: none', '(H) reason unaffected by prior mutation');
+    // A second classify call likewise returns a fresh, un-contaminated array.
+    assertJson(classifyChangedFileRisk({}).categories, [], '(H) later non-array classify still empty');
+  }
+  {
+    // Bug 2: the deleted flag must be OR-ed across duplicate entries of the same
+    // code-bearing path — risk must not depend on entry order.
+    const modifyFirst = planVerificationDepth({
+      changedFiles: [{ path: 'src/a.ts', deleted: false }, { path: 'src/a.ts', deleted: true }],
+    });
+    const deleteFirst = planVerificationDepth({
+      changedFiles: [{ path: 'src/a.ts', deleted: true }, { path: 'src/a.ts', deleted: false }],
+    });
+    assertEq(modifyFirst.riskTier, 'elevated', '(H) modify-first duplicate deleted path → elevated');
+    assertEq(deleteFirst.riskTier, 'elevated', '(H) delete-first duplicate deleted path → elevated');
+    assertJson(modifyFirst.requiredKinds, ['tests', 'typecheck'], '(H) duplicate deleted path → [tests,typecheck]');
+    assertEq(modifyFirst.codeFileCount, 1, '(H) duplicate deleted path counted once');
+    assertJson(modifyFirst, deleteFirst, '(H) deleted-flag fold is order-independent');
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} failure(s), ${passes} passed`);
     process.exit(1);

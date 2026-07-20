@@ -387,6 +387,20 @@ function main(): void {
     assertEq(encodeEntityHandle(m!.handle), 'office:task:task_pinned', '(K) handle uses the pinned surface');
   }
 
+  // ─── regression (QA): "constructor" must not leak Object.prototype.constructor ─
+  // The vocab maps are raw-token-indexed, and "constructor" survives toLowerCase,
+  // so a plain-object map resolved it via the prototype chain to the `Object`
+  // function instead of EntitySurface|null (silently vanishing under JSON). A
+  // realistic dev-chat word ("the constructor refactor") — must cue nothing.
+  {
+    assertEq(detectSurfaceCue('constructor'), null, '(QA) detectSurfaceCue("constructor") → null, not the Object function');
+    assertEq(detectSurfaceCue('how is the constructor refactor going'), null, '(QA) "constructor" mid-sentence cues nothing');
+    const r = resolveCrossSurfaceReferences('the constructor pattern', []);
+    assert(typeof r.surfaceCue !== 'function', '(QA) surfaceCue is never a function');
+    assert(typeof r.suggestedSurface !== 'function', '(QA) suggestedSurface is never a function');
+    assertJson(r, { matches: [], suggestedSurface: null, surfaceCue: null }, '(QA) "constructor pattern" → documented all-null result');
+  }
+
   // ─── (I/HOSTILE) totality: never throw, never leak ──────────────────────────
   try {
     // degenerate messages → empty matches, valid shape

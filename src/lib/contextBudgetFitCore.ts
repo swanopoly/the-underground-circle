@@ -514,6 +514,13 @@ export function fitCandidatesToBudget(
       remaining.sort(cmp);
       for (const it of remaining) {
         if (totalKept >= globalMaxItems) break; // no more slots at all
+        // Non-positive weighted value never improves the objective: a negative-eff
+        // item strictly LOWERS total kept value, and a zero-eff item only wastes a
+        // slot/budget. `remaining` is density-desc sorted and sign(dens)==sign(eff)
+        // (dens = eff / max(tokens,1), denom > 0), so all eff<=0 items form a
+        // contiguous tail — a single break drops them and keeps the selection
+        // value-maximizing. Pass 1 floors are exempt (reserved before this loop).
+        if (it.eff <= 0) break;
         const rule = ruleMap.get(it.source) ?? DEFAULT_CLEAN_RULE;
         const sItems = keptItemsBySource.get(it.source) ?? 0;
         const sTokens = keptTokensBySource.get(it.source) ?? 0;

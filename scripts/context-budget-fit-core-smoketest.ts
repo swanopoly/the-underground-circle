@@ -352,6 +352,41 @@ function main(): void {
     assert(Object.isFrozen(DEFAULT_SOURCE_RULE), '(K) DEFAULT_SOURCE_RULE is frozen');
   }
 
+  // ─── (REGRESSION QA) non-positive weighted-value items are dropped ────────
+  // Bug: the pass-2 global density fill admitted ANY item that fit the budget
+  // with no gate on value sign, so a negative-value item was kept and drove
+  // total kept value below the achievable optimum (dropping it is strictly
+  // better). A value-maximizing selection must drop non-positive weighted value.
+  {
+    // Exact failing input #1: a lone negative-value item under a roomy budget.
+    const soloInput = [{ id: 'bad', source: 's', tokens: 10, value: -100 }];
+    const solo = fitCandidatesToBudget(soloInput, 1000);
+    assertEq(solo.keep.length, 0, '(REGRESSION) lone negative-value item dropped despite roomy budget');
+    assert(has(solo.drop, 'bad'), '(REGRESSION) the negative-value item lands in drop');
+    assertEq(solo.usedTokens, 0, '(REGRESSION) dropping the negative item spends no tokens');
+    assert(partitionOk(solo, soloInput), '(REGRESSION) lone-negative keep∪drop partition total');
+
+    // Exact failing input #2: good + bad, roomy budget -> keep good ALONE
+    // (total value 5 > -95 from keeping both).
+    const mixInput = [
+      { id: 'good', source: 's', tokens: 10, value: 5 },
+      { id: 'bad', source: 's', tokens: 10, value: -100 },
+    ];
+    const mix = fitCandidatesToBudget(mixInput, 1000);
+    assertJson(keptIds(mix), ['good'], '(REGRESSION) good+bad keeps the positive item alone, drops the negative');
+    assert(has(mix.drop, 'bad'), '(REGRESSION) negative item dropped even with leftover budget');
+    assert(usedOk(mix, 1000), '(REGRESSION) good+bad usedTokens invariant holds');
+
+    // The gate is on weighted value (eff), not raw value: a weight-0 source
+    // yields eff 0 -> no gain -> dropped (a positive raw value is not enough).
+    const zeroEff = fitCandidatesToBudget(
+      [{ id: 'z', source: 'zsrc', tokens: 4, value: 9 }],
+      1000,
+      { sourceRules: { zsrc: { weight: 0 } } },
+    );
+    assertEq(zeroEff.keep.length, 0, '(REGRESSION) weight-0 source (eff 0) treated as no-gain and dropped');
+  }
+
   // ─── (HOSTILE) totality: never throw, never leak ─────────────────────────
   const baseList = [
     { id: 'k1', source: 'A', tokens: 5, value: 3 },

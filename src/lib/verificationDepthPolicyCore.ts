@@ -351,12 +351,17 @@ function resolveMaxFiles(opts: ClassifyRiskOptions | null | undefined): number {
 
 /** Single bounded, never-throwing scan of the changed-file set. */
 function scanChangedFiles(changedFiles: unknown, maxFiles: number): InternalScan {
-  if (!Array.isArray(changedFiles)) return { ...EMPTY_SCAN };
+  // Fresh categories array: EMPTY_SCAN.categories is a shared module-level array
+  // and Object.freeze is shallow, so spreading its reference would let a consumer
+  // that mutates the returned `.categories` contaminate every later empty/non-array
+  // decision. Every other returned array is built fresh per call; match that here.
+  if (!Array.isArray(changedFiles)) return { ...EMPTY_SCAN, categories: [] };
   const length = changedFiles.length;
   const cap = maxFiles < MAX_CHANGED_FILES ? maxFiles : MAX_CHANGED_FILES;
   const limit = length < cap ? length : cap;
 
   const seen = new Set<string>();
+  const deletedPaths = new Set<string>();
   const catSet = new Set<RiskCategory>();
   let codeFileCount = 0;
   let highHit = false;
@@ -373,11 +378,19 @@ function scanChangedFiles(changedFiles: unknown, maxFiles: number): InternalScan
     }
     const { path, deleted } = readEntry(entry);
     if (path === null) continue;
-    if (seen.has(path)) continue; // distinct paths only
-    seen.add(path);
+    const firstSeen = !seen.has(path);
+    if (firstSeen) seen.add(path);
     if (isDocOrImagePath(path)) continue; // non-code-bearing: no count, no cats
+    // OR the deleted flag across all entries of a code-bearing path (folded once
+    // per path) so a later deleted:true can't be suppressed by an earlier
+    // un-deleted entry claiming the dedup slot first — risk must not depend on
+    // the order of otherwise-equivalent entries.
+    if (deleted && !deletedPaths.has(path)) {
+      deletedPaths.add(path);
+      deletedCodeFileCount += 1;
+    }
+    if (!firstSeen) continue; // distinct paths only for count + classification
     codeFileCount += 1;
-    if (deleted) deletedCodeFileCount += 1;
     const cats = classifyPathCategories(path);
     for (const c of cats) {
       catSet.add(c);

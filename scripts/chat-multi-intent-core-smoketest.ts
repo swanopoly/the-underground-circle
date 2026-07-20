@@ -349,6 +349,30 @@ function main(): void {
     assert(invariantsHold(m), '(12) invariants hold', JSON.stringify(m.slice(0, 32)));
   }
 
+  // ─── (13) regression (QA): "constructor" is NOT a curated action verb ───────
+  // Guards the inherited-prototype bug: ACTION_VERBS is a plain object literal,
+  // so ACTION_VERBS["constructor"] resolved to Object.prototype.constructor (a
+  // truthy function) and mis-read the common dev-chat word "constructor" as an
+  // imperative — falsely keeping an 'and'/'then' boundary and over-splitting the
+  // turn into a phantom second intent. firstActionVerb now gates on === true.
+  {
+    const msg = 'constructor the widget and deploy it';
+    const r = segmentChatIntents(msg);
+    assertEq(r.isMultiIntent, false, '(13) "constructor …" leader is not a verb → no spurious split');
+    assertEq(r.segments.length, 1, '(13) collapses to a single segment');
+    assertEq(r.segments[0].verb, null, '(13) leading "constructor" verb is null (not the inherited prototype)');
+    assertEq(r.segments[0].connective, 'lead', '(13) lone segment is lead');
+    // trailing "deploy it" IS actionable but merges into the non-actionable lead;
+    // some clause is actionable, so reason is single-one-verb (verified ground truth).
+    assertEq(r.reason, 'single-one-verb', '(13) reason single-one-verb');
+    assertEq(isCompoundRequest(msg), false, '(13) isCompoundRequest parity → false');
+  }
+  assertEq(segmentChatIntents('constructor the app').segments[0].verb, null, '(13) bare "constructor the app" verb null');
+  assertEq(res('constructor the app').reason, 'single-no-verb', '(13) "constructor the app" reason single-no-verb');
+  assertEq(isCompoundRequest('constructor a and constructor b'), false, '(13) neither "constructor" clause is a verb → not compound');
+  // control: a genuine curated verb in the same shape STILL splits (no over-correction).
+  assertEq(isCompoundRequest('build the widget and deploy it'), true, '(13) real verb still splits (fix did not over-correct)');
+
   if (failures > 0) {
     console.error(`\n${failures} failure(s), ${passes} passed`);
     process.exit(1);

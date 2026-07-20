@@ -246,7 +246,7 @@ function toFiniteNumber(v: unknown): number | undefined {
 function coerceText(v: unknown): string {
   if (typeof v === 'string') return v.length > MAX_TEXT_OUT ? v.slice(0, MAX_TEXT_OUT) : v;
   if (typeof v === 'number') return Number.isFinite(v) ? String(v) : '';
-  if (typeof v === 'bigint') return v.toString();
+  if (typeof v === 'bigint') { const s = v.toString(); return s.length > MAX_TEXT_OUT ? s.slice(0, MAX_TEXT_OUT) : s; }
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   return '';
 }

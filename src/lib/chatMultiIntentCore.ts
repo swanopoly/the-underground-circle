@@ -276,7 +276,10 @@ function firstActionVerb(raw: string): string | null {
     const m = t.match(/^([a-zA-Z][a-zA-Z'’-]*)/);
     if (!m) return null;
     const w = m[1].toLowerCase().replace(/['’-]+$/, '');
-    return ACTION_VERBS[w] ? w : null;
+    // Strict === true (not truthy): ACTION_VERBS is a plain object literal, so a
+    // missing key like "constructor" would otherwise resolve to the inherited
+    // Object.prototype.constructor (a truthy function) and be mis-read as a verb.
+    return ACTION_VERBS[w] === true ? w : null;
   } catch {
     return null;
   }

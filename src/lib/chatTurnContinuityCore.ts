@@ -585,7 +585,7 @@ function isAnswerShaped(
   // short value answer that is not itself a question and not a fresh imperative
   if (
     contentWordCount <= ANSWER_MAX_CONTENT_WORDS &&
-    !NEW_WORK_VERBS.has(first) &&
+    !toks.slice(0, LEAD_WINDOW).some((w) => NEW_WORK_VERBS.has(w)) &&
     !INTERROGATIVE_LEAD_RE.test(t) &&
     !t.replace(/[\s"'”’)\]]+$/, '').endsWith('?')
   ) {
@@ -612,7 +612,7 @@ function detectReferents(clean: string, lower: string, contentWordCount: number)
     const tryAdd = (span: string, charPos: number, ordinal: boolean): void => {
       if (referents.length >= MAX_REFERENTS) return;
       if (charPos < 0) return;
-      const before = clean.slice(0, charPos);
+      const before = lower.slice(0, charPos);
       if (hasArticleNoun(before)) return; // in-message antecedent exists
       const leadCount = tokenize(before.toLowerCase()).length;
       if (!shortMsg && leadCount > LEAD_WINDOW) return; // not short & doesn't lead
@@ -626,9 +626,9 @@ function detectReferents(clean: string, lower: string, contentWordCount: number)
     };
 
     // Multi-word anaphora first.
-    for (const m of scanAll(SAME_RE, lower)) tryAdd(clean.slice(m.index, m.index + m[0].length), m.index, false);
-    for (const m of scanAll(ORDINAL_RE, lower)) tryAdd(clean.slice(m.index, m.index + m[0].length), m.index, true);
-    for (const m of scanAll(NUM_OPTION_RE, lower)) tryAdd(clean.slice(m.index, m.index + m[0].length), m.index, true);
+    for (const m of scanAll(SAME_RE, lower)) tryAdd(lower.slice(m.index, m.index + m[0].length), m.index, false);
+    for (const m of scanAll(ORDINAL_RE, lower)) tryAdd(lower.slice(m.index, m.index + m[0].length), m.index, true);
+    for (const m of scanAll(NUM_OPTION_RE, lower)) tryAdd(lower.slice(m.index, m.index + m[0].length), m.index, true);
 
     // Single-word pronouns (skip demonstratives acting as determiners).
     for (const p of PRONOUN_LIST) {
@@ -640,7 +640,7 @@ function detectReferents(clean: string, lower: string, contentWordCount: number)
         const nextTok = tokenize(after)[0] || '';
         if (isConcreteNounToken(nextTok)) continue; // "that file" → determiner
       }
-      tryAdd(clean.slice(idx, idx + p.length), idx, false);
+      tryAdd(lower.slice(idx, idx + p.length), idx, false);
     }
   } catch {
     return { referents: capReferents(referents), hasOrdinal };

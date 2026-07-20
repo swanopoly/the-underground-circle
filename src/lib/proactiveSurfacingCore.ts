@@ -509,7 +509,16 @@ function normalizeMemory(raw: unknown): SurfacingMemory {
   if (!entries || typeof entries !== 'object') return out;
   const acc: Record<string, SurfacingMemoryEntry> = {};
   let count = 0;
-  for (const key of Object.keys(entries as Record<string, unknown>)) {
+  // Enumerate eagerly + guarded: an exotic `entries` (e.g. a Proxy whose ownKeys
+  // trap throws) must degrade to the empty default, never escape this "never
+  // throws" helper — readSafe guards per-property GETs but not the enumeration.
+  let keys: string[];
+  try {
+    keys = Object.keys(entries as Record<string, unknown>);
+  } catch {
+    return out;
+  }
+  for (const key of keys) {
     if (count >= MAX_MEMORY_KEYS) break;
     const cleanKey = sanitizeId(key);
     if (!cleanKey) continue;

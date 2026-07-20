@@ -488,6 +488,14 @@ function main(): void {
     assert(rHugeText.keptCount === 1, '[hostile] 2MB novel text kept');
     assert(rHugeText.keep[0].text.length <= MAX_TEXT_OUT_LIMIT, '[hostile] kept huge text length-bounded', String(rHugeText.keep[0].text.length));
 
+    // regression (QA): a huge BIGINT candidate text must be clamped like a string
+    // (10n ** 150000n → 150001 digits; before the fix the bigint branch skipped
+    // the MAX_TEXT_OUT clamp and leaked a 150001-char kept text).
+    const rBigInt = f([{ id: 'x', text: 10n ** 150000n }], '');
+    assert(verdictOk(rBigInt), '[regression] huge bigint candidate → valid verdict');
+    assert(rBigInt.keptCount === 1, '[regression] huge bigint novel text kept');
+    assert(rBigInt.keep[0].text.length <= MAX_TEXT_OUT_LIMIT, '[regression] kept bigint text length-bounded', String(rBigInt.keep[0].text.length));
+
     passes += 1; // reached the end of the hostile sweep without throwing
   } catch (e) {
     failures += 1;

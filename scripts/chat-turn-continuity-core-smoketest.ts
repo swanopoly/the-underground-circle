@@ -340,6 +340,38 @@ function main(): void {
     assert(f2.antecedentHint.length <= MAX_HINT_LEN, '(K) antecedentHint clamped', String(f2.antecedentHint.length));
   }
 
+  // ─── (L) regression (QA) ─────────────────────────────────────────────────────
+  {
+    // Bug 1: an adverb-led fresh imperative (verb behind a leading adverb NOT in
+    // COURTESY_TOKENS) must NOT be misclassified as an answer. Must match plain
+    // 'build a login page' → new-topic, not carry forward.
+    const q = [{ role: 'assistant', text: 'Anything else?' }];
+    const adv = r('quickly build a login page', q);
+    assertEq(adv.relation, 'new-topic', '(L) "quickly build a login page" after a question → new-topic, not answer');
+    assertEq(adv.answersPriorQuestion, false, '(L) adverb-led imperative → answersPriorQuestion false');
+    assertEq(adv.carriesForward, false, '(L) adverb-led imperative → carriesForward false');
+    assertEq(adv.resolvable, false, '(L) adverb-led imperative → resolvable false');
+    // and the dangling referent behind a leading adverb is NOT dropped
+    for (const lead of ['quickly', 'just', 'now', 'simply']) {
+      const f = r(`${lead} delete them`, q);
+      assertEq(f.relation, 'continuation', `(L) "${lead} delete them" → continuation, not answer`);
+      assertEq(f.answersPriorQuestion, false, `(L) "${lead} delete them" → answersPriorQuestion false`);
+      assertEq(f.carriesForward, true, `(L) "${lead} delete them" → carriesForward true`);
+      assert(hasRef(f, 'them'), `(L) "${lead} delete them" keeps the "them" referent`, JSON.stringify(refs(f)));
+    }
+
+    // Bug 2: clean/lower length desync (U+0130 'İ' lowercases to 2 code points)
+    // must not garble the emitted referent span. Indices are computed against
+    // `lower`, so spans must be sliced from `lower`.
+    const I_DOT = String.fromCharCode(0x130); // U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE
+    const themDesync = r(`${I_DOT} fix them`, [{ role: 'assistant', text: 'the login page' }]);
+    assertJson(refs(themDesync), ['them'], '(L) İ length-desync → referent is "them" (not the shifted "hem")');
+    assert(frameIsValid(themDesync), '(L) İ-them frame valid');
+    const itDesync = r(`${I_DOT} delete it`, [{ role: 'assistant', text: 'the login page is broken' }]);
+    assertJson(refs(itDesync), ['it'], '(L) İ length-desync → referent is "it" (not the shifted "t")');
+    assert(frameIsValid(itDesync), '(L) İ-it frame valid');
+  }
+
   // ─── (HOSTILE) totality: never throw, never leak ────────────────────────────
   try {
     for (const bad of [null, undefined, 42, NaN, true, {}, [], () => 1, Symbol('s'), 9n, Infinity, -0]) {

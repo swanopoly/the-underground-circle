@@ -131,8 +131,14 @@ const SURFACE_BY_KIND: Readonly<Record<EntityKind, EntitySurface>> = Object.free
 /** Fallback surface for an unknown/junk kind — Chat is the primary surface. */
 const FALLBACK_SURFACE: EntitySurface = 'chat';
 
-/** Message word → the surface it cues. Frozen. */
-const SURFACE_CUE_WORDS: Readonly<Record<string, EntitySurface>> = Object.freeze({
+/**
+ * Message word → the surface it cues. Frozen with a NULL prototype so raw
+ * message tokens that collide with Object.prototype member names (notably
+ * "constructor", which survives toLowerCase) resolve to `undefined`, not the
+ * inherited `Object` function — keeping detectSurfaceCue's contract of
+ * `EntitySurface | null`.
+ */
+const SURFACE_CUE_WORDS: Readonly<Record<string, EntitySurface>> = Object.freeze(Object.assign(Object.create(null), {
   feed: 'feed',
   mission: 'feed',
   missions: 'feed',
@@ -153,10 +159,15 @@ const SURFACE_CUE_WORDS: Readonly<Record<string, EntitySurface>> = Object.freeze
   threads: 'chat',
   conversation: 'chat',
   conversations: 'chat',
-});
+}));
 
-/** Message word → the entity kind it cues (for the +60 kind-cue boost). Frozen. */
-const KIND_CUE_WORDS: Readonly<Record<string, EntityKind>> = Object.freeze({
+/**
+ * Message word → the entity kind it cues (for the +60 kind-cue boost). Frozen
+ * with a NULL prototype for the same reason as SURFACE_CUE_WORDS: a raw token
+ * like "constructor" must miss (undefined), never inherit `Object` and poison
+ * messageKindCues.
+ */
+const KIND_CUE_WORDS: Readonly<Record<string, EntityKind>> = Object.freeze(Object.assign(Object.create(null), {
   mission: 'mission',
   missions: 'mission',
   task: 'task',
@@ -171,7 +182,7 @@ const KIND_CUE_WORDS: Readonly<Record<string, EntityKind>> = Object.freeze({
   threads: 'thread',
   message: 'message',
   messages: 'message',
-});
+}));
 
 /** Confidence tiers → rank for the sort tiebreak. Frozen. */
 const CONFIDENCE_RANK: Readonly<Record<ReferenceConfidence, number>> = Object.freeze({

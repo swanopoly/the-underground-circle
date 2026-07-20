@@ -435,6 +435,29 @@ function main(): void {
     console.error(`FAIL: (O) hostile sweep threw: ${(e as Error)?.message}`);
   }
 
+  // ─── (P) regression (QA): ownKeys-throwing Proxy memory must not escape ─────
+  // normalizeMemory enumerated `entries` with an unguarded Object.keys; a Proxy
+  // whose ownKeys trap throws propagated OUT of both selectProactiveSurfacings
+  // (memory normalized before the try) and markSurfacingDismissed (no try at
+  // all), breaking the "every export is TOTAL / never throws" guarantee. Both
+  // callers route through normalizeMemory, so one guard covers both — verify the
+  // hostile memory degrades to empty and neither export throws.
+  {
+    const mkProxyMem = () => ({ v: 1 as const, entries: new Proxy({}, { ownKeys() { throw new Error('boom'); } }) });
+    const sig: SurfacingSignal = { kind: 'failed_run', title: 'x', entityId: 'run_abc' };
+
+    let d: ProactiveSurfacingDecision | null = null;
+    try { d = selectProactiveSurfacings([sig], { turnIndex: 1, nowMs: NOW }, mkProxyMem()); } catch { d = null; }
+    assert(d !== null && decisionIsValid(d), '(P) ownKeys-throwing Proxy memory → valid decision, no throw');
+    assertEq(d?.surface.length, 1, '(P) hostile memory degrades to empty → signal still surfaces');
+    assertEq(d?.surface[0]?.key, 'failed_run:run_abc', '(P) surfaced key correct despite hostile memory');
+
+    let dm: SurfacingMemory | null = null;
+    try { dm = markSurfacingDismissed(mkProxyMem(), 'failed_run:run_abc'); } catch { dm = null; }
+    assert(dm !== null, '(P) markSurfacingDismissed does not throw on ownKeys-throwing Proxy memory');
+    assertEq(dm?.entries['failed_run:run_abc']?.dismissed, true, '(P) dismissed entry created despite hostile memory');
+  }
+
   if (failures > 0) {
     console.error(`\n${failures} failure(s), ${passes} passed`);
     process.exit(1);
