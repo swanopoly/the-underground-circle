@@ -57,6 +57,7 @@ import { resolveCapabilityFallback } from './capabilityFallbackCore';
 import { getModelCapabilityFlags } from './modelCapabilities';
 import { getModelContextWindow } from './modelContextBudgetCore';
 import { evaluateTurnSpend } from './turnSpendGovernorCore';
+import { assessStreamDegeneracy } from './streamDegeneracyCore';
 import { appendOpenSwanTranscriptEvent, buildOpenSwanTranscriptKey, upsertOpenSwanTranscriptHeader, type OpenSwanSessionTranscript } from './openswanTranscripts';
 import { executeOpenSwanVerificationPlan, type OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import { getSwanBotStructuredResponse, executeToolUseLoop, buildStreamableSystemPrompt, type SwanBotContext, type SwanBotStructuredArtifact, type SwanBotStructuredResponse } from './swanbot';
@@ -1868,6 +1869,21 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         usage: toolLoopResult.usage || {},
         ...(toolLoopResult.routing ? { routing: toolLoopResult.routing } : {}),
       };
+
+      // Degenerate-response safety net: assess the finished answer for a content-based
+      // degenerate loop (char-run / phrase-loop / low-diversity) — the flowing-but-looping
+      // failure a smaller model (e.g. BlackSwan) can emit. This path is a non-streaming
+      // edge invoke, so it runs on the finished text (the disjoint content half of the
+      // stream-health timing watch). Surfaced in the run transcript for observability;
+      // never mutates the response.
+      const responseDegeneracy = assessStreamDegeneracy(toolLoopResult.response);
+      if (responseDegeneracy.degenerate) {
+        transcript = (await appendTranscriptEvent(transcriptKey, {
+          kind: 'tool_activity',
+          title: 'Degenerate response detected',
+          summary: `The answer looks degenerate (${responseDegeneracy.kind}) — ${responseDegeneracy.reason}. Likely a repetition loop; consider regenerating.`,
+        })) || transcript;
+      }
 
       // The tool loop hit its per-turn step cap before producing a final
       // answer. Record it so the run transcript shows the result is partial
