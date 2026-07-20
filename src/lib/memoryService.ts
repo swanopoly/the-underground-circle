@@ -9,6 +9,7 @@
  */
 
 import { supabase } from './supabase';
+import { fitCandidatesToBudget } from './contextBudgetFitCore';
 import {
   loadMemories, saveMemory,
   type MemoryScope, type MemoryKind, type MemoryEntry,
@@ -1022,15 +1023,21 @@ export async function retrieveForTurn(opts: {
 
   scored.sort((a, b) => b.score - a.score);
 
-  // Step 4 — enforce finalCount AND budgetChars (first one to bite wins)
-  const kept: RetrievedMemory[] = [];
-  let used = 0;
-  for (const mem of scored.slice(0, cfg.finalCount)) {
-    const line = `- [${mem.memory_kind}] ${mem.title}: ${mem.content}\n`;
-    if (used + line.length > cfg.budgetChars) break;
-    kept.push(mem);
-    used += line.length;
-  }
+  // Step 4 — enforce finalCount AND budgetChars. Density-greedy fit (value = score,
+  // cost = rendered chars) instead of stop-at-first-overflow: the old `break` let one
+  // large early memory STARVE every smaller high-value memory after it. fitCandidatesToBudget
+  // skips the overflowing item and keeps packing, so a later small high-score memory
+  // still lands. Selection is by value-density; presentation stays score-desc (we map the
+  // kept ids back onto the already-sorted `scored`).
+  const budgetCandidates = scored.slice(0, cfg.finalCount).map((mem) => ({
+    id: mem.id,
+    source: mem.memory_kind,
+    tokens: `- [${mem.memory_kind}] ${mem.title}: ${mem.content}\n`.length,
+    value: mem.score,
+  }));
+  const fit = fitCandidatesToBudget(budgetCandidates, cfg.budgetChars);
+  const keptIds = new Set(fit.keep.map((k) => k.id));
+  const kept: RetrievedMemory[] = scored.filter((mem) => keptIds.has(mem.id));
   if (kept.length === 0) return { memories: [], formatted: '' };
 
   // Step 5 — log access (best-effort; prompt build doesn't wait on it)
