@@ -9224,8 +9224,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (!content.trim().startsWith('/')) {
       try {
         const { decideChatClarify } = await import('../../../lib/chatClarifyGateCore');
+        const { carriesThreadContext } = await import('../../../lib/chatTurnContinuityCore');
+        // Upgrade the crude `messages.length >= 2` proxy: suppress the clarify gate only
+        // when THIS message actually carries forward from the thread AND the thread
+        // plausibly supplies its antecedent. So "delete them" with no resolvable referent
+        // still asks ONE question even mid-conversation, instead of blindly proceeding
+        // just because 2+ messages exist. (chatTurnContinuityCore bounds the window.)
+        const priorTurns = messages
+          .slice(-12)
+          .map((m) => ({ role: m.isBot ? 'assistant' : 'user', text: m.content || '' }));
         const clarify = decideChatClarify(content, {
-          hasActiveThreadContext: messages.length >= 2,
+          hasActiveThreadContext: carriesThreadContext(content, priorTurns),
           hasAttachment: attachments.length > 0 || stagedFiles.length > 0,
           mode: chatMode,
         });
