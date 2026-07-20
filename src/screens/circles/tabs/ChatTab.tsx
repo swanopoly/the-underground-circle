@@ -1995,6 +1995,23 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     () => resolveChatAgentTarget(chatAgentTargets, selectedChatAgentId),
     [chatAgentTargets, selectedChatAgentId],
   );
+  // "Send to agent" on an already-sent message — a one-off dispatch,
+  // deliberately separate from selectedChatAgentTarget (which persistently
+  // pins a target for future composer turns). Restricted to providers with
+  // a real, session-verified local bridge (claude-code/codex/cursor/gemini
+  // via bridgeTaskDispatcher) rather than the full chatAgentTargets list —
+  // the generic-bridge providers (opencode/aider/cline/...) only have a
+  // fire-once POST with no health/status verification, so surfacing them
+  // here would imply a reliability they don't have.
+  const [sendToAgentFor, setSendToAgentFor] = useState<ChatMessage | null>(null);
+  const SEND_TO_AGENT_PROVIDERS = ['claude-code', 'codex', 'cursor', 'gemini', 'gemini-cli'];
+  const sendToAgentTargets = useMemo(
+    () => chatAgentTargets.filter(
+      (target: ChatAgentTarget<AssignableAgent>) =>
+        target.connected && SEND_TO_AGENT_PROVIDERS.includes((target.provider || '').toLowerCase()),
+    ),
+    [chatAgentTargets],
+  );
   const [activeSpiritId, setActiveSpiritId] = useState<string | null>(null);
   const [soulLearningRefs, setSoulLearningRefs] = useState<ResearchDocumentReference[]>([]);
   const [soulMemoryRefs, setSoulMemoryRefs] = useState<PromptMemoryReference[]>([]);
@@ -5096,6 +5113,48 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const viaLabel = preferredModel ? `${normalizedProvider || 'ai'} · ${preferredModel}` : (normalizedProvider || 'ai');
     return `**${agent.name}** [AI draft via ${viaLabel}]:\n\n${aiResp}`;
   }, [circleId, currentUserId, currentUserName, resolveOpenSwanConnection]);
+
+  // "Send to agent" on an already-sent message — reuses dispatchAssignedAgentTask
+  // unmodified (same dispatch path the composer's pinned-target flow uses),
+  // just triggered from a specific past message instead of fresh composer
+  // input. Mirrors the composer flow's addBotMessage/error-recovery shape
+  // exactly (ChatTab.tsx selected-agent dispatch above) so receipts and
+  // failures look and behave the same either way.
+  const handleSendMessageToAgent = useCallback(async (item: ChatMessage, agent: AssignableAgent) => {
+    setSendToAgentFor(null);
+    setBotTyping(true);
+    try {
+      const response = await dispatchAssignedAgentTask(agent, item.content);
+      addBotMessage(response, undefined, {
+        source: {
+          actor: agent.name,
+          surface: 'message_send_to_agent',
+          provider: agent.provider,
+          selectedModel: agent.model || selectedModel || null,
+        },
+      });
+    } catch (err: any) {
+      await addRecoverableChatErrorMessage({
+        title: `**${agent.name}** failed`,
+        task: item.content,
+        error: err,
+        executionKind: 'message_send_to_agent',
+        source: 'message_send_to_agent_error',
+        touched: ['surface:main_chat', 'surface:message_send_to_agent', 'src/lib/bridgeTaskDispatcher.ts', 'src/lib/customAgentBridgeDispatcher.ts'],
+        messageSource: {
+          actor: agent.name,
+          surface: 'message_send_to_agent_error',
+          provider: agent.provider,
+          selectedModel: agent.model || selectedModel || null,
+        },
+      });
+    } finally {
+      setBotTyping(false);
+      setTimeout(() => {
+        void refreshAssignableAgentsRef.current?.();
+      }, 1500);
+    }
+  }, [dispatchAssignedAgentTask, selectedModel]);
 
   const spawnDedicatedOpenSwanSession = useCallback(async (agent: AssignableAgent, task: string): Promise<string> => {
     const config = await resolveOpenSwanConnection();
@@ -11639,6 +11698,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           onReply={() => { setReplyTo(item); inputRef.current?.focus(); }}
           onReaction={(emoji: string) => toggleReaction(item.id, emoji)}
           onDelete={(item.isUser || item.isBot) ? () => deleteMessage(item.id, item.dbId) : undefined}
+          onSendToAgent={(item.content && sendToAgentTargets.length > 0) ? () => setSendToAgentFor(item) : undefined}
           renderContent={renderContent}
           accentColor={accentColor}
           messageDensity={messageDensity}
@@ -12047,6 +12107,49 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         title={effectiveBuildArtifact?.title || 'UC Build'}
         html={effectiveBuildArtifact?.kind === 'webpage' ? (effectiveBuildArtifact?.content || null) : null}
       />
+
+      <Modal
+        visible={sendToAgentFor != null}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setSendToAgentFor(null)}
+      >
+        <Pressable style={styles.sendToAgentScrim} onPress={() => setSendToAgentFor(null)}>
+          <Pressable style={styles.sendToAgentCard} onPress={() => {}}>
+            <Text style={styles.sendToAgentTitle}>Send to agent</Text>
+            <Text style={styles.sendToAgentSubtitle} numberOfLines={2}>
+              {sendToAgentFor?.content || ''}
+            </Text>
+            {sendToAgentTargets.map((target: ChatAgentTarget<AssignableAgent>) => (
+              <Pressable
+                key={target.id}
+                onPress={() => {
+                  if (sendToAgentFor && target.agent) {
+                    void handleSendMessageToAgent(sendToAgentFor, target.agent as AssignableAgent);
+                  }
+                }}
+                style={({ hovered, pressed }: any) => [
+                  styles.sendToAgentRow,
+                  { borderColor: `${target.color}30` },
+                  hovered && { backgroundColor: `${target.color}14`, borderColor: `${target.color}70` },
+                  pressed && { transform: [{ scale: 0.99 }] },
+                ]}
+                accessibilityRole="button"
+              >
+                <View style={[styles.controlAgentIcon, { backgroundColor: `${target.color}22` }]}>
+                  <Text style={[styles.controlAgentIconText, { color: target.color }]} numberOfLines={1}>
+                    {target.icon}
+                  </Text>
+                </View>
+                <Text style={styles.sendToAgentRowLabel}>{target.label}</Text>
+              </Pressable>
+            ))}
+            <Pressable onPress={() => setSendToAgentFor(null)} style={styles.sendToAgentCancel}>
+              <Text style={styles.sendToAgentCancelText}>Cancel</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       <Modal
         visible={builderModalOpen}
@@ -13731,7 +13834,7 @@ function TipCard({ tip, delay, accentColor }: { tip: string; delay: number; acce
 
 function MessageRow({
   item, consecutive, reactionEntries, currentUserId,
-  showReactions, onToggleReactions, onReply, onReaction, onDelete, renderContent, accentColor, messageDensity, agentAvatarSource, agentName,
+  showReactions, onToggleReactions, onReply, onReaction, onDelete, onSendToAgent, renderContent, accentColor, messageDensity, agentAvatarSource, agentName,
 }: any) {
   const [hovered, setHovered] = useState(false);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -13862,6 +13965,11 @@ function MessageRow({
             <Pressable onPress={onReply} style={styles.hoverBtn} accessibilityRole="button">
               <Text style={styles.hoverBtnText}>↩</Text>
             </Pressable>
+            {onSendToAgent && (
+              <Pressable onPress={onSendToAgent} style={styles.hoverBtn} accessibilityRole="button" accessibilityLabel="Send this message to a connected agent">
+                <Text style={styles.hoverBtnText}>🤖</Text>
+              </Pressable>
+            )}
             {onDelete && (
               <Pressable onPress={onDelete} style={styles.hoverBtn} accessibilityRole="button">
                 <Text style={[styles.hoverBtnText, { color: '#ef4444' }]}>🗑</Text>
@@ -17263,6 +17371,58 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     letterSpacing: 0.8,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  sendToAgentScrim: {
+    flex: 1,
+    backgroundColor: 'rgba(2, 6, 23, 0.72)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  sendToAgentCard: {
+    width: '100%',
+    maxWidth: 340,
+    borderRadius: 14,
+    backgroundColor: '#0b1220',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    padding: 14,
+    gap: 8,
+  },
+  sendToAgentTitle: {
+    color: '#e2e8f0',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  sendToAgentSubtitle: {
+    color: '#64748b',
+    fontSize: 11,
+    marginBottom: 4,
+  },
+  sendToAgentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  sendToAgentRowLabel: {
+    color: '#e2e8f0',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  sendToAgentCancel: {
+    alignSelf: 'flex-end',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    marginTop: 4,
+  },
+  sendToAgentCancelText: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '600',
   },
   liveMiniDot: {
     width: 6,
