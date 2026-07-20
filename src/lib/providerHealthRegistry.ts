@@ -208,7 +208,9 @@ export function isProviderCoolingDown(
     if (COOLDOWN_BY_CLASS[ev.errorClass ?? 'other']) consecutiveFailures += 1;
     else break;
   }
-  const windowMs = backoffWindowMs(consecutiveFailures, baseWindowMs);
+  // First failure keeps the base window (2^0); escalation starts at the
+  // SECOND consecutive failure — backoffWindowMs computes base × 2^n.
+  const windowMs = backoffWindowMs(Math.max(0, consecutiveFailures - 1), baseWindowMs);
   const floor = nowMs - windowMs;
 
   // Walk newest→oldest; stop as soon as we fall out of the window.

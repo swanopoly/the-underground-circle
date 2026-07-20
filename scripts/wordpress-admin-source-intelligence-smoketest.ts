@@ -218,7 +218,10 @@ assert(swanbotV2Edge.includes('name: "browser.wp_admin_source_intelligence"'), '
 assert(swanbotV2Edge.includes('Never returns raw HTML') && swanbotV2Edge.includes('additionalProperties: false'), 'SwanBot v2 schema documents no raw HTML and rejects stray args');
 assert(swanbotV2Edge.includes('browser.wp_admin_source_intelligence", "browser.verification_state'), 'SwanBot v2 browser group includes source intelligence');
 assert(swanbotV2Edge.includes('wordpress: ["wp.discover_types", "wp.list_posts", "browser.wp_admin_source_intelligence"'), 'SwanBot v2 WordPress group prioritizes source intelligence');
-assert(swanbotV2Edge.includes('dealer inspire|dealerinspire|di_slide|flavor_di_slides|di slides?|quick edit|expiration_date|admin\\.php|reload cache'), 'SwanBot v2 WordPress selector includes Dealer Inspire admin terms');
+// P76b moved the edge's inline selector regexes into v2ToolSelectionCore (imported by the edge fn)
+const v2SelectionCore = readRepoFile('src/lib/v2ToolSelectionCore.ts');
+assert(swanbotV2Edge.includes('selectToolGroups'), 'SwanBot v2 edge selects tool groups via v2ToolSelectionCore');
+assert(v2SelectionCore.includes('dealer inspire|dealerinspire|di_slide|flavor_di_slides|di slides?|quick edit|expiration_date|admin\\.php|reload cache'), 'SwanBot v2 WordPress selector includes Dealer Inspire admin terms');
 assert(swanbotV2Edge.includes('call **browser.wp_admin_source_intelligence** before wp-admin UI decisions'), 'SwanBot v2 prompt tells the model to use source intelligence before wp-admin UI decisions');
 
 if (failures > 0) {
