@@ -47,6 +47,31 @@ export async function getGoogleAuthStatus(): Promise<GoogleAuthStatus> {
 }
 
 /**
+ * AUTHORITATIVE status probe: returns `null` when the answer is UNKNOWN — no
+ * session token, transport error, non-OK response, or malformed body — instead
+ * of collapsing those into `{connected:false}` like {@link getGoogleAuthStatus}
+ * does. Callers that gate behavior on an EXPLICIT false (e.g. the v2
+ * connectivity snapshot, whose tristate contract is "omit when unknown; only
+ * literal false gates") must use this variant so a transient status-endpoint
+ * blip is never reported as "Google is not connected".
+ */
+export async function getGoogleAuthStatusAuthoritative(): Promise<GoogleAuthStatus | null> {
+  const accessToken = await getFreshAccessToken();
+  if (!accessToken) return null;
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/google-oauth?action=status`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    if (!body || typeof body.connected !== 'boolean') return null;
+    return body as GoogleAuthStatus;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Returns a currently-valid Google Workspace access token via the edge fn's
  * `?action=token` route, which refreshes with the stored refresh_token when
  * the cached one has expired (P14 durability fix — connections made weeks ago

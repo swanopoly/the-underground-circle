@@ -96,6 +96,14 @@ export interface StreamChatOpts {
   /** Optional tool_choice forwarded alongside `tools` (server defaults to {type:'auto'}). */
   toolChoice?: unknown;
   onDelta: (text: string) => void;
+  /**
+   * Optional: fired once when the SSE handshake succeeds (HTTP 200 with a
+   * readable body) — the exact moment the transport is connected and now
+   * waiting for the first token. Additive; existing callers are unaffected.
+   * Lets a caller stamp a stream-health clock (see streamHealthCore) at the
+   * true handshake instant instead of at request creation.
+   */
+  onOpen?: () => void;
   onUsage?: (usage: { model: string; input_tokens: number; output_tokens: number; total_tokens: number }) => void;
   /**
    * Fired once on a CLEAN completion (`status:'complete'`). Receives the
@@ -308,6 +316,10 @@ export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
         return;
       }
 
+      // Handshake succeeded: 200 + readable body. Fail-soft — a throwing
+      // callback must not kill the stream it is only observing.
+      try { opts.onOpen?.(); } catch { /* observer only */ }
+
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = '';
@@ -429,6 +441,11 @@ export function streamChatResponse(opts: StreamChatOpts): StreamHandle {
   return {
     cancel: () => {
       cancelled = true;
+      // Drop any armed coalesce flush: a cancelled stream must never emit a
+      // late onDelta (the caller may already have rendered a terminal state,
+      // e.g. an interrupted-partial notice, that a stray flush would clobber).
+      if (coalesceTimer) { clearTimeout(coalesceTimer); coalesceTimer = null; }
+      coalesceBuf = '';
       controller.abort();
     },
     done: donePromise,

@@ -1,6 +1,7 @@
 import { buildAgenticCodingPrompt, detectAgenticCodingProfile, type AgenticCodingProfile, type AgenticCodingSurface } from './agenticCodingProfile';
 import { getChatPromptLaneSpec } from './chatPromptAssembly';
-import { addArtifact, addStep, createRun, mergeRunMetadata, type ArtifactKind, type RunSurface, updateRunStatus } from './agentRunSystem';
+import { addArtifact, addStep, completeRunUnlessCancelled, createRun, mergeRunMetadata, type ArtifactKind, type RunSurface, updateRunStatus } from './agentRunSystem';
+import { startRunHeartbeat } from './agentRunPersistence';
 import { buildOpenSwanExecutionStream, type OpenSwanExecutionContract } from './openswanExecution';
 import { buildOpenSwanMemoryRecommendations, captureOpenSwanOutcomeMemory, recordArchiveDerivedMemorySuccess, recordArchiveDerivedMemoryWeakSignal, type OpenSwanMemoryRecommendation, type PromptMemoryReference } from './memoryService';
 import { buildOpenSwanObservedEvalSummary } from './openswanObservedEvals';
@@ -25,7 +26,7 @@ import {
   type OpenSwanRuntimeToolName,
 } from './openswanToolRuntime';
 import { runAgent, type AgentProvider, type AgentToolDefinition } from './agentExecutionCore';
-import { getOpenSwanToolsForSurface, getProgressiveOpenSwanTools } from './openswanBridge';
+import { getOpenSwanToolsForSurface, getProgressiveOpenSwanTools, createOpenSwanToolParallelPolicyProvider } from './openswanBridge';
 import { dispatchToolDetailed, MAX_TOOL_ROUNDS } from './openswanTools/index';
 import { EDGE_INVOKE_RETRIES, edgeRetryBackoffMs, isRetryableEdgeFailure } from './edgeInvokeRetry';
 import { extractAssistantText } from './toolLoopProgress';
@@ -181,6 +182,9 @@ export type OpenSwanTurnResult = SwanBotStructuredResponse & {
   browserPlanEvents?: BrowserPlanEvent[];
   modeOutcomeSummary?: OpenSwanModeOutcomeSummary | null;
   observedEval?: import('./openswanObservedEvals').OpenSwanObservedEvalSummary | null;
+  /** Coding-lane proof-of-work receipt ("edited N files · checks passed ·
+   *  committed sha") from the typed tool loop, when the turn produced one. */
+  verificationReceipt?: import('./verificationReceiptCore').VerificationReceipt | null;
 };
 
 function buildInitialBrowserPlanEvents(plans: BrowserPlanCardData[]): BrowserPlanEvent[] {
@@ -585,7 +589,7 @@ async function runTypedCoreToolLoop(args: {
   } | null;
   /** User-cancel signal, threaded to runAgent (STOP button). */
   signal?: AbortSignal;
-}): Promise<LegacyToolLoopResult> {
+}): Promise<LegacyToolLoopResult & { cancelled?: boolean }> {
   // BlackSwan collaboration split (P8 — the CLAUDE.md contract, previously
   // unwired on this path): the typed loop always carries runtime tools and
   // BlackSwan cannot reliably drive native tool calling, so the loop runs
@@ -870,7 +874,39 @@ async function runTypedCoreToolLoop(args: {
   // before finishing. The legacy reliability nudges keep priority (one note
   // per round), and the gate self-caps per run.
   let runAndFixState = createRunAndFixGateState();
+
+  // Honest STOP (user cancel): the loop's effective signal is a LOCAL
+  // controller composed manually with the caller's signal (no AbortSignal.any —
+  // unreliable on Hermes). Two abort sources feed it: (a) the ChatTab/console
+  // STOP button via args.signal, and (b) the console's DB-side cancel — the
+  // console flips agent_runs.status to 'cancelled' without holding this
+  // closure's signal, so onRoundComplete polls the row once per round boundary
+  // and aborts locally when it reads 'cancelled'. Either path surfaces a
+  // distinct `cancelled: true` on the loop result (separate from
+  // cap-exhaustion `incomplete`) so finalization can write an honest
+  // 'cancelled' status instead of overwriting it with 'completed'.
+  const localAbort = new AbortController();
+  if (args.signal) {
+    if (args.signal.aborted) localAbort.abort();
+    else args.signal.addEventListener('abort', () => localAbort.abort(), { once: true });
+  }
+  let dbCancelled = false;
+
   const onRoundComplete: ReturnType<typeof createLegacyRoundNudgeHook> = async (round) => {
+    // DB-cancel poll (cheap, fail-open): only when this turn has a run row.
+    if (args.runId && !dbCancelled) {
+      try {
+        const { data: runRow } = await supabase
+          .from('agent_runs')
+          .select('status')
+          .eq('id', args.runId)
+          .maybeSingle();
+        if ((runRow as { status?: string } | null)?.status === 'cancelled') {
+          dbCancelled = true;
+          localAbort.abort();
+        }
+      } catch { /* poll failure must never break the loop */ }
+    }
     runAndFixState = foldRunAndFixRound(
       runAndFixState,
       (round.toolResults || []).map((r) => ({ name: r.toolName, ok: r.ok, input: r.input })),
@@ -904,6 +940,13 @@ async function runTypedCoreToolLoop(args: {
     return legacy;
   };
 
+  // Run-reaper heartbeat (timer-driven): this runtime never goes through
+  // agentRunPersistence.createPersistedRun (onEvent above writes
+  // agent_run_events directly), and event-side bumps starve during one long
+  // model/tool await anyway — so beat agent_runs.updated_at on wall-clock time
+  // for the whole typed-loop invocation. `.finally` stops the timer on throw
+  // and abort paths too, so it never keeps beating for a finished turn.
+  const stopLoopHeartbeat = args.runId ? startRunHeartbeat(args.runId) : null;
   const runResult = await runAgent({
     initialMessages: buildSnapshotAwareInitialMessages({
       userMessage: args.userMessage,
@@ -926,11 +969,14 @@ async function runTypedCoreToolLoop(args: {
       : undefined,
     // STOP button: the user-cancel signal aborts at the next loop boundary and
     // returns the partial work as an honest 'aborted' result (adapters mark it
-    // incomplete, not cap-exhausted).
-    signal: args.signal,
+    // incomplete, not cap-exhausted). Composed locally so the DB-side console
+    // cancel (onRoundComplete poll above) can abort the same loop.
+    signal: localAbort.signal,
     // The legacy loop only parallelized all-read-only, ungated rounds;
-    // until the T8 policy provider is flipped on, dispatch sequentially
-    // (safe superset of legacy ordering, incl. approval prompts).
+    // dispatch stays sequential (safe superset of legacy ordering, incl.
+    // approval prompts) — the T8 policy provider below is supplied for
+    // replay-safety classification only, and concurrency 1 keeps its
+    // partitioned groups executing one call at a time, in order.
     parallelToolConcurrency: 1,
     toolApprovalGate: args.toolApprovalGate
       ? createLegacyApprovalGateAdapter(args.toolApprovalGate, (toolUseId) => rejectedToolUseIds.add(toolUseId))
@@ -1033,9 +1079,14 @@ async function runTypedCoreToolLoop(args: {
     // runAgent merges them additively each turn; when OFF it is `undefined`
     // (set above) and runAgent skips it entirely — exact legacy behavior.
     resolveAdditionalTools,
-    // O1 follow-up flip (T8 parallelism policy): see plan doc un-darking checklist
-    // toolParallelPolicyProvider: createOpenSwanToolParallelPolicyProvider({ activePluginIds: args.activePluginIds }),
-  });
+    // T8 policy provider — flipped on for CLASSIFICATION, not parallelism:
+    // `parallelToolConcurrency` stays 1 above (and partitioned groups stay
+    // contiguous/in-order), so dispatch order is unchanged. Supplying the
+    // provider feeds each tool's catalog side-effect policy into the core's
+    // replay-safety gate, so an outcome-unknown failure of a mutating tool
+    // gets "verify first / do not replay" instead of "a single retry is OK".
+    toolParallelPolicyProvider: createOpenSwanToolParallelPolicyProvider({ activePluginIds: args.activePluginIds }),
+  }).finally(() => { stopLoopHeartbeat?.(); });
 
   // Legacy parity: the cap was hit on a pure tool_use round — the final
   // round's results were pushed to history but no turn consumed them, so the
@@ -1070,14 +1121,18 @@ async function runTypedCoreToolLoop(args: {
     } catch { /* fall back to the limit note */ }
   }
 
-  // Verification receipt (audit): assemble a coding-lane proof-of-work summary
-  // (files edited, checks passed, committed) from this run's tool events and
-  // emit it as best-effort telemetry. Boolean-only, secret-safe, never blocks.
+  // Verification receipt (audit + user-facing): assemble a coding-lane
+  // proof-of-work summary (files edited, checks passed, committed) from this
+  // run's tool events. Emitted as best-effort telemetry AND surfaced on the
+  // loop result so the chat message can show an honest receipt line.
+  // Boolean-only, secret-safe, never blocks.
+  let verificationReceipt: import('./verificationReceiptCore').VerificationReceipt | null = null;
   try {
-    if (args.runId) {
-      const { buildVerificationReceipt } = await import('./verificationReceiptCore');
-      const receipt = buildVerificationReceipt({ editedFiles: toolEvents, checks: toolEvents, commit: toolEvents });
-      if (receipt.editedFiles.length > 0 || receipt.checks.length > 0) {
+    const { buildVerificationReceipt } = await import('./verificationReceiptCore');
+    const receipt = buildVerificationReceipt({ editedFiles: toolEvents, checks: toolEvents, commit: toolEvents });
+    if (receipt.editedFiles.length > 0 || receipt.checks.length > 0) {
+      verificationReceipt = receipt;
+      if (args.runId) {
         void supabase.from('agent_run_events').insert({
           run_id: args.runId,
           kind: 'verification_receipt',
@@ -1094,7 +1149,7 @@ async function runTypedCoreToolLoop(args: {
     }
   } catch { /* receipt is best-effort — never break the turn */ }
 
-  return buildLegacyToolLoopResult({
+  const legacyResult = buildLegacyToolLoopResult({
     runResult,
     toolEvents,
     routing,
@@ -1102,7 +1157,14 @@ async function runTypedCoreToolLoop(args: {
     edgeFailed,
     finalizationText,
     usage: finalizeLoopUsage(usageAcc),
+    verificationReceipt,
   });
+  // Honest STOP: a user cancel (signal abort or DB-side console cancel) is a
+  // distinct outcome from cap-exhaustion `incomplete` — surface it so the
+  // session finalization writes 'cancelled' instead of 'completed'.
+  return runResult.aborted === true || dbCancelled
+    ? { ...legacyResult, cancelled: true }
+    : legacyResult;
 }
 
 type OpenSwanUsageLike = {
@@ -1710,6 +1772,14 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   let browserPlans: BrowserPlanCardData[] = [];
   let browserPlanEvents: BrowserPlanEvent[] = [];
   let executionStream = buildOpenSwanExecutionStream({ toolEvents: [], verificationResults: [] });
+  // Honest STOP: true when the tool loop ended on a user cancel (STOP signal
+  // or DB-side console cancel). Finalization then writes status 'cancelled'
+  // (keeping token/cost extras) instead of overwriting the row as 'completed'.
+  let turnCancelled = false;
+  // Proof-of-work receipt from the typed tool loop (files edited / checks /
+  // commit) — surfaced on the turn result so chat can render an honest
+  // receipt line instead of burying it in agent_run_events.
+  let turnVerificationReceipt: import('./verificationReceiptCore').VerificationReceipt | null = null;
 
   const runTextOnlyResponse = async () => getSwanBotStructuredResponse(prompt, {
     ...opts.context,
@@ -1815,7 +1885,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       // legacy executeToolUseLoop stays callable behind the manual revert
       // flag (`uc_openswan_typed_core` = '0'). Both paths return the same
       // contract, so everything below is path-agnostic.
-      const toolLoopResult: LegacyToolLoopResult = typedCoreEnabled
+      const toolLoopResult: LegacyToolLoopResult & { cancelled?: boolean } = typedCoreEnabled
         ? await runTypedCoreToolLoop({
             systemPrompt: systemPromptWithResume,
             userMessage: prompt,
@@ -1859,6 +1929,11 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       // stale scope are bounded (queue cap 5), and the next turn's register
       // clears them before its loop starts.
       if (steeringScopeKey) unregisterOpenSwanSteeringScope(steeringScopeKey);
+
+      // Honest STOP: a user-cancelled loop must finalize the run as
+      // 'cancelled', never 'completed'. (Legacy loop never sets this flag.)
+      turnCancelled = toolLoopResult.cancelled === true;
+      turnVerificationReceipt = toolLoopResult.verificationReceipt || null;
 
       const designManifestLedgerActions = buildDesignAppRuntimeManifestLedgerActions({
         task: cleanMessage,
@@ -2086,7 +2161,10 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       body: structured.response.slice(0, 5000),
       tokensUsed: (structured.usage?.input_tokens || 0) + (structured.usage?.output_tokens || 0),
     });
-    await updateRunStatus(run.id, 'running', { current_step_index: actualAssistantResponseStepIndex, total_steps: totalSteps });
+    // Honest STOP: once the loop reported a user cancel, the row must never
+    // leave the cancelled state — write step progress under 'cancelled'
+    // instead of flipping a cancelled run back to 'running' mid-finalization.
+    await updateRunStatus(run.id, turnCancelled ? 'cancelled' : 'running', { current_step_index: actualAssistantResponseStepIndex, total_steps: totalSteps });
   }
 
   emitStage(opts, 'rendering_artifacts', 'Rendering artifacts');
@@ -2128,7 +2206,9 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       });
       currentStepIndex = artifactStepIndex;
     }
-    await updateRunStatus(run.id, 'running', { current_step_index: currentStepIndex, total_steps: totalSteps });
+    // Honest STOP: same guard as above — a cancelled run must not reappear as
+    // 'running' during the artifact phase.
+    await updateRunStatus(run.id, turnCancelled ? 'cancelled' : 'running', { current_step_index: currentStepIndex, total_steps: totalSteps });
   }
 
   emitStage(opts, 'finalizing', 'Finalizing run');
@@ -2175,13 +2255,32 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
           },
         });
       }
+      // Honest STOP (late cancel): the round-boundary poll only runs between
+      // tool rounds, so a console STOP that lands during the final model round
+      // or during finalization (assistant-response step, artifacts,
+      // verification above) — or on a run that never called a tool — is
+      // invisible to the loop. Re-check the row once here so a late cancel
+      // still gets the honest 'cancelled' receipt with partial usage/cost.
+      if (!turnCancelled) {
+        try {
+          const { data: lateRunRow } = await supabase
+            .from('agent_runs')
+            .select('status')
+            .eq('id', run.id)
+            .maybeSingle();
+          if ((lateRunRow as { status?: string } | null)?.status === 'cancelled') turnCancelled = true;
+        } catch { /* re-check failure must never break finalization */ }
+      }
       await addStep({
         runId: run.id,
         circleId: opts.context.circleId,
         stepIndex: finalStepIndex,
         stepKind: 'finalize',
-        title: 'Run finalized',
+        // Honest STOP: a user-cancelled run is finalized as cancelled with its
+        // partial work, not presented as a clean finish.
+        title: turnCancelled ? 'Run cancelled by user' : 'Run finalized',
         body: [
+          ...(turnCancelled ? ['Stopped at the user\'s request — partial work and usage below are preserved.', ''] : []),
           `${structured.artifacts?.length || 0} artifact(s) ready`,
           '',
           'Verification checklist:',
@@ -2196,7 +2295,13 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       finalUsageTotals.cached += delegatedUsageTotals.cached;
       finalUsageTotals.cacheRead += delegatedUsageTotals.cacheRead;
       finalUsageTotals.cacheCreation += delegatedUsageTotals.cacheCreation;
-      await updateRunStatus(run.id, 'completed', {
+      // Honest STOP: a user cancel finalizes the row as 'cancelled' — never
+      // overwritten to 'completed' — while keeping the token/cost extras as an
+      // honest partial-work receipt. Pure cap-exhaustion still completes.
+      // The completed path uses the .neq('status','cancelled')-guarded helper
+      // to close the re-check→write race: a cancel landing after the
+      // re-select above can never be promoted back to 'completed'.
+      const finalRunExtras = {
         current_step_index: finalStepIndex,
         total_steps: finalTotalSteps,
         input_tokens: finalUsageTotals.input,
@@ -2210,7 +2315,19 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
           outputTokens: finalUsageTotals.output,
           cachedTokens: finalUsageTotals.cached,
         }),
-      });
+      };
+      if (turnCancelled) {
+        await updateRunStatus(run.id, 'cancelled', finalRunExtras);
+      } else {
+        await completeRunUnlessCancelled(run.id, finalRunExtras);
+      }
+      if (turnCancelled) {
+        transcript = (await appendTranscriptEvent(transcriptKey, {
+          kind: 'tool_activity',
+          title: 'Run cancelled by user',
+          summary: 'The user stopped this run. Partial work, token usage, and cost are recorded; the run is finalized as cancelled, not completed.',
+        })) || transcript;
+      }
       // GAP-2: agent_runs has no read/creation columns, so the cache split (the
       // read:creation ratio that proves the P26 breakpoints work) rides the
       // metadata JSON blob. Use mergeRunMetadata — updateRunStatus's `metadata`
@@ -2404,6 +2521,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     browserPlanEvents,
     modeOutcomeSummary,
     observedEval,
+    ...(turnVerificationReceipt ? { verificationReceipt: turnVerificationReceipt } : {}),
     toolEvents: runtimeToolActions.map((action) => ({
       tool: action.tool_name,
       input: action.input_preview || null,

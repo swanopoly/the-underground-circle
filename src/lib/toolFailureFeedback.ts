@@ -162,3 +162,49 @@ export function buildToolFailureFeedback(toolName: string, errorText: string): s
     ? `[recovery] ${actionableHint}\n${clamped}`
     : `[recovery] ${actionableHint}`;
 }
+
+/** Bound on the optional replay-safety note echoed into the feedback (same
+ *  clamp `agentExecutionCore`'s appendix uses). */
+export const TOOL_FAILURE_REPLAY_NOTE_CLAMP = 200;
+
+/**
+ * JSON-preserving variant for lanes whose tool_result content is JSON.parsed
+ * downstream. The v2 edge's continuation sanitizer parses every
+ * `credentials.get` tool_result as JSON before persisting the snapshot and
+ * replaces the WHOLE content with "[redacted sensitive tool result]" when the
+ * parse throws — so a plain-text "[recovery] …\n" preamble would destroy both
+ * the hint AND the original error on resume.
+ *
+ * When `errorEnvelope` parses as a plain JSON object (the serialized
+ * `{"ok":false,"error":…}` client-tool envelope), the hint is embedded as a
+ * `recovery` field — and the optional replay-safety note as a `replay_safety`
+ * field — keeping the content valid JSON end to end. Non-JSON input falls back
+ * to {@link buildToolFailureFeedback}'s plain-text shape (with the note
+ * appended as a `[replay-safety]` line, matching agentExecutionCore's
+ * appendix). Never throws.
+ */
+export function buildToolFailureFeedbackJson(
+  toolName: string,
+  errorEnvelope: string,
+  replaySafetyNote?: string,
+): string {
+  const { actionableHint } = classifyToolFailure(toolName, errorEnvelope);
+  const note =
+    typeof replaySafetyNote === 'string' && replaySafetyNote.trim()
+      ? replaySafetyNote.trim().slice(0, TOOL_FAILURE_REPLAY_NOTE_CLAMP)
+      : undefined;
+  try {
+    const parsed: unknown = JSON.parse(errorEnvelope);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return JSON.stringify({
+        ...(parsed as Record<string, unknown>),
+        recovery: actionableHint,
+        ...(note ? { replay_safety: note } : {}),
+      });
+    }
+  } catch {
+    /* non-JSON envelope → plain-text fallback below */
+  }
+  const plain = buildToolFailureFeedback(toolName, errorEnvelope);
+  return note ? `${plain}\n[replay-safety] ${note}` : plain;
+}

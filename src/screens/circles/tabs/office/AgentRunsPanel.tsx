@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { MONO, formatTokens } from './AgentPanelShared';
 import OpenSwanQualityAggregate from '../../../../components/chat/OpenSwanQualityAggregate';
@@ -7,6 +7,7 @@ import RunMetadataSummary from '../../../../components/chat/RunMetadataSummary';
 import { buildOpenSwanObservedEvalAggregate, buildOpenSwanObservedEvalDashboard } from '../../../../lib/openswanObservedEvals';
 import { buildRunMetadataSummaryProps } from '../../../../lib/runMetadataSummary';
 import { getRunSubjectSummary } from '../../../../lib/agentRunSubjectSummary';
+import { planRunReap } from '../../../../lib/runStallPolicyCore';
 
 type StatusFilter = 'all' | 'completed' | 'running' | 'failed';
 
@@ -74,6 +75,9 @@ function matchesFilter(run: any, filter: StatusFilter): boolean {
 
 export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], agentName, accentColor }: { circleId: string; agentId: string; agentAliases?: string[]; agentName: string; accentColor: string }) {
   const [runs, setRuns] = useState<any[]>([]);
+  // Run-reaper wire: 'running' runs whose heartbeat (updated_at) is aging —
+  // flagged "STALLED?" but not yet reaped (dead ones get flipped to failed).
+  const [staleRunIds, setStaleRunIds] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(true);
   const [expandedRun, setExpandedRun] = useState<string | null>(null);
   const [steps, setSteps] = useState<any[]>([]);
@@ -82,22 +86,60 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  // Run-reaper dedupe: run ids this mount already issued a DB reap for, so
+  // dep-change effect re-runs (pageSize / identity) don't re-fire writes while
+  // the conditional status flip is still in flight.
+  const reapedRunIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       setLoading(true);
       try {
-        const { listRunsForAgentSubject } = await import('../../../../lib/agentRunSystem');
+        const { listRunsForAgentSubject, reapRun } = await import('../../../../lib/agentRunSystem');
         // Fetch one extra row so we know whether to show "load more"
         const aliases = Array.from(new Set([agentId, ...agentAliases].map(id => String(id || '').trim()).filter(Boolean)));
-        const data = await listRunsForAgentSubject(circleId, {
+        const rawData = await listRunsForAgentSubject(circleId, {
           agentId,
           agentAliases: aliases,
           agentName,
           limit: pageSize + 1,
         });
+        // Run-reaper: classify liveness off the heartbeat column only.
+        // started_at deliberately OMITTED so runs from producers that never
+        // heartbeat classify as 'live' (core fail-safe), not false-reaped.
+        const reapPlan = planRunReap(
+          rawData.map((r) => ({ id: r.id, status: r.status, updated_at: r.updated_at })),
+          Date.now(),
+        );
+        // Reap eligibility (fail-safe floor): every producer's row carries a
+        // non-null updated_at (DEFAULT now() + updateRunStatus), so a dead
+        // heartbeat only proves death for runs that OPTED IN to heartbeating —
+        // metadata.heartbeat, set by agentRunPersistence.createPersistedRun.
+        // Everything else (edge v2 loops, legacy runtimes, 'client_pending'
+        // user-paced waits) gets at most the soft "STALLED?" badge below,
+        // NEVER the local 'failed' flip or the DB reap.
+        const reapEligibleIds = new Set(rawData
+          .filter((r) => r.metadata?.heartbeat === true && r.final_stop_reason !== 'client_pending')
+          .map((r) => r.id));
+        const reapIds = new Set(reapPlan.toReap.filter((id) => reapEligibleIds.has(id)));
+        const data = reapIds.size > 0
+          ? rawData.map((r) => (reapIds.has(r.id) ? { ...r, status: 'failed' as const } : r))
+          : rawData;
         if (cancelled) return;
+        for (const runId of reapIds) {
+          // Fire-and-forget reap, once per mount: reapRun claims the row
+          // conditionally (only while still 'running'), so concurrent surfaces
+          // never duplicate the status flip or the reaped_reason metadata
+          // merge (the merge only runs for the claim winner).
+          if (reapedRunIdsRef.current.has(runId)) continue;
+          reapedRunIdsRef.current.add(runId);
+          void reapRun(runId, 'heartbeat_stale');
+        }
+        setStaleRunIds(new Set([
+          ...reapPlan.stale,
+          ...reapPlan.toReap.filter((id) => !reapIds.has(id)),
+        ]));
         if (data.length > pageSize) {
           setRuns(data.slice(0, pageSize));
           setHasMore(true);
@@ -253,6 +295,9 @@ export default function AgentRunsPanel({ circleId, agentId, agentAliases = [], a
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                       <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: sc }} />
                       <Text style={{ color: '#f0f0f5', fontSize: 13, fontWeight: '600', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{run.title || 'Untitled run'}</Text>
+                      {staleRunIds.has(run.id) ? (
+                        <Text style={{ color: '#f59e0b', fontSize: 11, fontWeight: '700', fontFamily: MONO }}>STALLED?</Text>
+                      ) : null}
                       <Text style={{ color: sc, fontSize: 11, fontWeight: '700', fontFamily: MONO }}>{run.status.toUpperCase()}</Text>
                     </View>
                     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 3 }}>

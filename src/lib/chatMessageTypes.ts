@@ -28,6 +28,7 @@ import type {
 import type { ChatComputerHandoffMetadata } from './chatComputerHandoffContext';
 import type { ChatAutomationPlanPreview } from './chatAutomationPlanPreview';
 import type { ChatOutcomeVerdict, ChatUserSignal } from './chatOutcomeSignals';
+import type { CrossSurfaceFollowup } from './crossSurfaceFollowupCore';
 import type { OpenSwanTaskPlan } from './openswanTaskPlanner';
 import type { OpenSwanToolEvent } from './openswanToolRuntime';
 import type { OpenSwanVerificationResult } from './openswanVerificationRuntime';
@@ -92,6 +93,10 @@ export type ChatMessage = {
    *  tiny enums so it becomes BlackSwan training data. See chatOutcomeSignals. */
   outcomeSignal?: { verdict: ChatOutcomeVerdict; signal?: ChatUserSignal; lane?: string; model?: string } | null;
   quickReplies?: string[];    // tappable suggested replies (e.g. clarification answers)
+  /** Cross-surface follow-up chips (create Feed task / open run / approve /
+   *  retry) derived at finalize time by crossSurfaceFollowupCore. NOT
+   *  persisted — cheap to re-derive and keeps message rows bounded. */
+  crossSurfaceFollowups?: CrossSurfaceFollowup[];
   delegatedTo?: string;       // subagent that handled this message
   delegatedSubagents?: string[];
   runId?: string | null;

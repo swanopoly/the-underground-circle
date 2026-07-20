@@ -35,6 +35,7 @@ import { compressContextIfOversized, PRUNED_IMAGE_PLACEHOLDER_TEXT } from './age
 import { partitionParallelSafeBatch } from './toolBatchParallelism';
 import type { ToolParallelPolicy } from './toolBatchParallelism';
 import { buildToolFailureFeedback } from './toolFailureFeedback';
+import { decideToolReplaySafety } from './toolReplaySafetyCore';
 import { detectRepeatedToolFailure, hashToolInput, type RecentToolCall } from './toolLoopStuckBreaker';
 import { detectOscillatingFailure } from './oscillationDetectorCore';
 import { buildSolverConsultationMessage, previewToolInput, shouldConsultSolver } from './toolLoopSolver';
@@ -825,11 +826,33 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     const hasInteractive = toolUses.some(u => toolsByName.get(u.name)?.interactive);
     const effectiveConcurrency = hasInteractive ? 1 : parallelToolConcurrency;
 
+    // Replay-safety gate (toolReplaySafetyCore): computed ONCE per round —
+    // true iff a pure-read tool is advertised this round, so a failed
+    // outcome-unknown mutate can be told "re-observe first, then retry only
+    // if it did not land" (verify_first) instead of degrading straight to
+    // unsafe_replay/escalate. No policy provider → gate stays off entirely
+    // (fail open; failure envelopes byte-identical to before).
+    const freshVerificationAvailable = toolParallelPolicyProvider
+      ? advertisedTools.some((t) => {
+          try {
+            const p = toolParallelPolicyProvider(t.name);
+            return p?.mutatesState === false && p.externalSideEffect === false;
+          } catch { return false; }
+        })
+      : false;
+
     const dispatchOne = async (use: typeof toolUses[number]): Promise<AgentMessageContentBlock> => {
       emit({ kind: 'tool_call_start', iteration, toolName: use.name, toolUseId: use.id, input: use.input });
       const started = Date.now();
       const def = toolsByName.get(use.name);
       let result: AgentToolResult;
+      // Replay-safety scope guard: only failures whose request may have
+      // actually reached the target (handler invoked, incl. "Handler threw")
+      // are candidates for the replay-safety appendix below. Pre-dispatch
+      // blocks (unregistered tool, constraint/floor block, approval reject)
+      // provably never ran — appending "may have landed" there is false and
+      // contradicts their fail-closed do-not-retry instruction.
+      let dispatched = false;
       if (!def) {
         result = { ok: false, error: `Tool "${use.name}" is not registered.` };
       } else {
@@ -889,6 +912,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
             };
           } else {
             try {
+              dispatched = true;
               result = await def.handler(use.input, ctx);
             } catch (e) {
               // Tools SHOULD NOT throw — we still catch to preserve the loop.
@@ -944,10 +968,36 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
       // The block SHAPE is unchanged (same `tool_use_id`, `is_error: true`,
       // string content); SUCCESS results below are byte-identical to before.
       if (!result.ok) {
+        let failureContent = buildToolFailureFeedback(use.name, summarizeResultText(JSON.stringify(modelVisible)));
+        // Replay-safety gate: the recovery template above can say "a single
+        // retry is OK" — but for a non-idempotent side-effecting tool whose
+        // failure is outcome-unknown (timeout / 5xx / reset after the request
+        // may have landed), a blind replay risks DOUBLING the effect
+        // (duplicate email/row/commit/push). When the caller supplied a
+        // policy provider, append the core's bounded, secret-safe verdict so
+        // the model verifies-or-escalates instead of replaying as-is.
+        // replay_safe verdicts append nothing; no provider → byte-identical.
+        // Gated on `dispatched`: pre-dispatch blocks never sent a request, so
+        // their outcome is KNOWN (nothing ran) and no verdict is appended.
+        if (toolParallelPolicyProvider && dispatched) {
+          try {
+            let policy: ToolParallelPolicy | null = null;
+            try { policy = toolParallelPolicyProvider(use.name); } catch { policy = null; }
+            const replay = decideToolReplaySafety({
+              sideEffect: policy,
+              disposition: result.error,
+              freshVerificationAvailable,
+              toolName: use.name,
+            });
+            if (replay.safety === 'verify_first' || replay.safety === 'unsafe_replay') {
+              failureContent += '\n[replay-safety] ' + replay.reason.slice(0, 200);
+            }
+          } catch { /* replay-safety must never break the failure envelope */ }
+        }
         return {
           type: 'tool_result',
           tool_use_id: use.id,
-          content: buildToolFailureFeedback(use.name, summarizeResultText(JSON.stringify(modelVisible))),
+          content: failureContent,
           is_error: true,
         };
       }

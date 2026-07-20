@@ -59,6 +59,8 @@ import { wrapUntrusted } from "../_shared/untrusted.ts";
 import { attachToolInputExamples } from "../../../src/lib/toolInputExamples.ts";
 import { selectToolGroups } from "../../../src/lib/v2ToolSelectionCore.ts";
 import { nextContinuationDecision } from "../../../src/lib/swanbotContinuationBudgetCore.ts";
+import { buildToolFailureFeedback } from "../../../src/lib/toolFailureFeedback.ts";
+import { gateToolNames, type ToolPrereqRule } from "../../../src/lib/toolConnectivityGateCore.ts";
 
 // ─── Types (mirroring src/lib/agentExecutionCore.ts) ────────────────────────
 
@@ -2170,6 +2172,52 @@ function resolveToolsByName(names?: string[]): ToolDef[] {
   return out.length > 0 ? out : TOOLS;
 }
 
+// ─── Connectivity gate (client-supplied snapshot) ───────────────────────────
+// The edge cannot see the user's localhost bridges, so the client POSTs an
+// optional `connectivity` snapshot (booleans only, omit-when-unknown) and the
+// fresh-start tool list runs through the pure toolConnectivityGateCore gate:
+// tools whose prerequisite is EXPLICITLY not connected are withheld and the
+// model gets a "start the bridge / connect X first" note instead of burning a
+// round on a doomed call. No snapshot → gate nothing (old clients identical).
+//
+// extraRules re-key v2's local-bridge-backed families to their TRUE
+// prerequisites (they are clientOnly here — wp.* and credentials.get execute
+// over the local desktop bridge, browser.fill_credential_field over the
+// browser bridge). extraRules win specificity ties over the core's defaults.
+const V2_CONNECTIVITY_EXTRA_RULES: ToolPrereqRule[] = [
+  { match: "wp.", capability: "desktopBridge", hint: "Start the local desktop bridge to use wp.* tools." },
+  { match: "credentials.get", capability: "desktopBridge", hint: "Start the local desktop bridge before fetching a credential." },
+  { match: "browser.fill_credential_field", capability: "browser", hint: "Start the local browser bridge before filling saved credentials." },
+];
+
+/** Keep LITERAL booleans only from the caller-supplied snapshot (plus bounded
+ *  boolean maps for googleServices/integrations); anything else is dropped so
+ *  the gate's fail-open tristate ("absent never gates") holds. */
+function sanitizeConnectivitySnapshot(raw: unknown): Record<string, unknown> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const src = raw as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of ["google", "browser", "desktopBridge", "vault", "wordpress"]) {
+    const v = src[key];
+    if (v === true || v === false) out[key] = v;
+  }
+  for (const nestedKey of ["googleServices", "integrations"]) {
+    const nested = src[nestedKey];
+    if (!nested || typeof nested !== "object" || Array.isArray(nested)) continue;
+    const sub: Record<string, boolean> = {};
+    let kept = 0;
+    for (const [k, v] of Object.entries(nested as Record<string, unknown>)) {
+      if ((v === true || v === false) && k.length > 0 && k.length <= 80) {
+        sub[k] = v;
+        kept += 1;
+        if (kept >= 40) break;
+      }
+    }
+    if (kept > 0) out[nestedKey] = sub;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 // ─── Prompt building ────────────────────────────────────────────────────────
 
 async function buildFrozenBlock(
@@ -2597,7 +2645,13 @@ async function executeEdgeToolUse(args: {
       payload: { iteration: iter, tool: use.name, tool_use_id: use.id, ok: result.ok, duration_ms: durationMs, ...(result.ok ? {} : { error: result.error }) },
     });
   }
-  const content = JSON.stringify(result);
+  // Failure path: lead with a classified recovery hint (built-in 600-char
+  // clamp) instead of the raw {ok:false} envelope, so the model changes its
+  // approach rather than retrying the identical failing call. Success path
+  // stays byte-identical.
+  const content = result.ok
+    ? JSON.stringify(result)
+    : buildToolFailureFeedback(use.name, JSON.stringify(result));
   return {
     block: {
       type: "tool_result",
@@ -2634,6 +2688,9 @@ async function runLoop(args: {
    *  turn. Injected as a `user` message with `tool_result` blocks
    *  before the next Anthropic turn. */
   resumeToolResults?: SwanBotResumeToolResult[];
+  /** Client-supplied connectivity snapshot (sanitized: literal booleans
+   *  only). Absent → no gating (old clients behave identically). */
+  connectivity?: Record<string, unknown> | null;
 }): Promise<RunLoopTerminal | RunLoopPending> {
   const {
     apiKey,
@@ -2651,10 +2708,36 @@ async function runLoop(args: {
     runId,
     resumeFrom,
     resumeToolResults,
+    connectivity,
   } = args;
-  const activeTools = resumeFrom
+  let activeTools = resumeFrom
     ? resolveToolsByName(resumeFrom.toolNames)
     : selectToolsForTurn(userMessage, mode);
+
+  // Connectivity gate: fresh starts only (the resume path reuses the saved
+  // tool set verbatim). Gate the FINAL selected tool-name list; withheld
+  // tools produce a note + per-family hints appended to the NON-cached
+  // system block below (never the cache_control frozen block, or every
+  // connectivity change would bust the prompt cache).
+  let connectivityNote = "";
+  if (!resumeFrom && connectivity) {
+    const gate = gateToolNames(
+      activeTools.map((t) => t.name),
+      connectivity,
+      { extraRules: V2_CONNECTIVITY_EXTRA_RULES },
+    );
+    if (gate.gated.length > 0) {
+      const availableSet = new Set(gate.available);
+      const filtered = activeTools.filter((t) => availableSet.has(t.name));
+      // Fail open: never let the gate empty the palette entirely.
+      if (filtered.length > 0) activeTools = filtered;
+      const hints: string[] = [];
+      for (const verdict of gate.gated) {
+        if (verdict.hint && !hints.includes(verdict.hint) && hints.length < 6) hints.push(verdict.hint);
+      }
+      connectivityNote = [gate.note, ...hints].filter(Boolean).join(" ");
+    }
+  }
 
   // ── Resume vs fresh start ────────────────────────────────────────────
   // When `resumeFrom` is present, we reuse the snapshot verbatim and
@@ -2666,7 +2749,7 @@ async function runLoop(args: {
     ? resumeFrom.systemBlocks
     : [
         { type: "text" as const, text: `${await buildFrozenBlock(supabase, circleId, targetAgentName, activeTools)}\n\n[${mode.toUpperCase()} RESPONSE CONTRACT]\n${MODE_CONTRACT[mode]}`, cache_control: { type: "ephemeral" as const } },
-        { type: "text" as const, text: `Now: ${new Date().toISOString()}\nUser id: ${userId}` },
+        { type: "text" as const, text: `Now: ${new Date().toISOString()}\nUser id: ${userId}${connectivityNote ? `\nConnectivity: ${connectivityNote}` : ""}` },
       ];
 
   const ctx: ToolContext = { supabase, circleId, userId, runId };
@@ -2945,6 +3028,7 @@ Deno.serve(async (req: Request) => {
   let runId: string | null = null;
   let resumeFrom: RunContinuation | undefined;
   let resumeToolResults: SwanBotResumeToolResult[] | undefined;
+  let connectivity: Record<string, unknown> | null = null;
 
   if (isContinuation) {
     // Load the continuation snapshot + verify ownership.
@@ -3018,6 +3102,9 @@ Deno.serve(async (req: Request) => {
     model = resolvedModel;
     targetAgentName = body.targetAgentName || "BlackSwan";
     targetAgentMetadata = normalizeTargetAgentMetadata(body, targetAgentName);
+    // Optional client connectivity snapshot for the fresh-start tool gate
+    // (literal booleans only; anything else is dropped so absent never gates).
+    connectivity = sanitizeConnectivitySnapshot(body.connectivity);
 
     // Create the agent_runs row up front so tool events have a parent.
     try {
@@ -3045,7 +3132,7 @@ Deno.serve(async (req: Request) => {
       targetAgentLegacyIds: targetAgentMetadata.targetAgentLegacyIds as string[] | undefined,
       agentSubject: targetAgentMetadata.agentSubject as Record<string, unknown> | undefined,
       supabase, circleId, userId, runId,
-      resumeFrom, resumeToolResults,
+      resumeFrom, resumeToolResults, connectivity,
     });
 
     // ── M2 pending response ────────────────────────────────────────────

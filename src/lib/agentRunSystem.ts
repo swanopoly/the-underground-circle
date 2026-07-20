@@ -49,6 +49,13 @@ export interface AgentRun {
   estimated_cost: number;
   started_at?: string;
   completed_at?: string;
+  /**
+   * Last loop stop reason persisted at finalize/pause time. 'client_pending'
+   * marks a user-paced continuation wait — legitimately silent, never reapable.
+   */
+  final_stop_reason?: string;
+  /** Heartbeat column — bumped by the tool loop; runStallPolicyCore reads it. */
+  updated_at?: string;
   created_at: string;
   parent_run_id?: string;
   delegated_to?: string;
@@ -246,6 +253,34 @@ export async function updateRunStatus(
   return true;
 }
 
+// Honest STOP: promote a run to 'completed' only when the user has not already
+// cancelled it. The console flips agent_runs.status to 'cancelled' without
+// holding the runtime's abort signal, so even after the runtime re-checks the
+// row there is a re-select→write race; the `.neq('status','cancelled')` guard
+// closes it at the DB so a cancelled row can never be overwritten to
+// 'completed'. Callers that KNOW the turn was cancelled should keep using
+// updateRunStatus(runId, 'cancelled', extras) so the honest partial
+// usage/cost receipt still lands on the row.
+export async function completeRunUnlessCancelled(
+  runId: string,
+  extra?: Partial<{ plan_summary: string; current_step_index: number; total_steps: number; completed_at: string; input_tokens: number; output_tokens: number; cached_tokens: number; estimated_cost: number; metadata: Record<string, unknown> }>,
+): Promise<boolean> {
+  const updates: Record<string, unknown> = {
+    status: 'completed',
+    updated_at: new Date().toISOString(),
+    completed_at: new Date().toISOString(),
+  };
+  if (extra) Object.assign(updates, extra);
+
+  const { error } = await supabase
+    .from('agent_runs')
+    .update(updates)
+    .eq('id', runId)
+    .neq('status', 'cancelled');
+  if (error) { console.error('[AgentRunSystem] completeRunUnlessCancelled error:', error); return false; }
+  return true;
+}
+
 export async function mergeRunMetadata(runId: string, patch: Record<string, unknown>): Promise<boolean> {
   try {
     const { data, error } = await supabase
@@ -272,6 +307,34 @@ export async function mergeRunMetadata(runId: string, patch: Record<string, unkn
     return true;
   } catch (err) {
     console.error('[AgentRunSystem] mergeRunMetadata exception:', err);
+    return false;
+  }
+}
+
+/**
+ * Run-reaper claim: flip a dead-heartbeat zombie to 'failed', conditionally at
+ * the DB. The `.eq('status','running')` predicate means exactly one surface
+ * wins when several dashboards reap the same dead run concurrently, and a run
+ * the producer (or another surface) already moved off 'running' is never
+ * touched. Only the claim winner writes the `reaped_reason` metadata marker,
+ * so the non-atomic mergeRunMetadata read-modify-write is not duplicated
+ * across surfaces. Returns true only when THIS caller claimed the row.
+ */
+export async function reapRun(runId: string, reason = 'heartbeat_stale'): Promise<boolean> {
+  try {
+    const nowIso = new Date().toISOString();
+    const { data, error } = await supabase
+      .from('agent_runs')
+      .update({ status: 'failed', updated_at: nowIso, completed_at: nowIso })
+      .eq('id', runId)
+      .eq('status', 'running')
+      .select('id');
+    if (error) { console.error('[AgentRunSystem] reapRun error:', error); return false; }
+    if (!Array.isArray(data) || data.length === 0) return false; // lost the claim / no longer running
+    await mergeRunMetadata(runId, { reaped_reason: reason });
+    return true;
+  } catch (err) {
+    console.error('[AgentRunSystem] reapRun exception:', err);
     return false;
   }
 }
@@ -1393,7 +1456,8 @@ function mapRun(d: any): AgentRun {
     current_step_index: d.current_step_index || 0, total_steps: d.total_steps || 0,
     input_tokens: d.input_tokens || 0, output_tokens: d.output_tokens || 0,
     cached_tokens: d.cached_tokens || 0, estimated_cost: parseFloat(d.estimated_cost || '0'),
-    started_at: d.started_at, completed_at: d.completed_at, created_at: d.created_at,
+    final_stop_reason: d.final_stop_reason || undefined,
+    started_at: d.started_at, completed_at: d.completed_at, updated_at: d.updated_at, created_at: d.created_at,
     parent_run_id: d.parent_run_id, delegated_to: d.delegated_to, metadata: d.metadata || {},
   };
 }

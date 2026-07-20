@@ -125,6 +125,13 @@ import {
   serializeSwanBotClientToolError,
   serializeSwanBotClientToolResult,
 } from './swanbotClientToolDispatcher';
+import { buildToolFailureFeedbackJson } from './toolFailureFeedback';
+// Replay-safety gate for failed client tools (pure, zero-import core): the
+// transient failure hint can say "a single retry is OK", which is unsafe for
+// non-idempotent client tools (wp.* mutations, local.run_shell, git.run)
+// whose failure outcome is unknown — same counterweight agentExecutionCore
+// applies on the typed loop's failure path.
+import { decideToolReplaySafety } from './toolReplaySafetyCore';
 import {
   buildOpenSwanToolApprovalKey,
   resolveOpenSwanRuntimeApprovalDecision,
@@ -1111,6 +1118,122 @@ async function callLlmProxy(
  *  breaker DOES count). */
 type V2CallResult = { text: string | null; bodyError?: V2BodyError };
 
+// ─── Connectivity snapshot for the v2 edge tool gate ─────────────────────────
+// The edge cannot see the localhost bridges, so the CLIENT reports what is
+// actually connected and `swanbot-v2-ai` runs the fresh-start tool list
+// through the pure `toolConnectivityGateCore` gate. Contract (that core's
+// tristate): literal booleans only, and anything UNKNOWN is OMITTED — absent
+// never gates (fail open). No secret values, ever — booleans + provider ids.
+
+type V2ConnectivitySnapshot = Record<string, unknown>;
+
+const V2_CONNECTIVITY_TTL_MS = 60_000;
+// Short TTL for a snapshot reporting a local bridge DOWN. The flagship
+// recovery flow is "start the bridge, then retry" — a 60s negative cache
+// would keep gating the wp/desktop tools and re-emitting "start the bridge"
+// after the user already started it. The bridge health probes are single ~ms
+// localhost GETs, so re-probing quickly is cheap; the expensive probes
+// (vault/marketplace Supabase reads) still enjoy the full TTL whenever the
+// bridges are up.
+const V2_CONNECTIVITY_NEGATIVE_TTL_MS = 5_000;
+/** Hard cap on how long a turn waits for probes; slower probes still land in
+ *  the cache for the next turn. */
+const V2_CONNECTIVITY_BUILD_CAP_MS = 1_500;
+
+/** A snapshot whose bridge fields say DOWN goes stale fast (see above);
+ *  everything else — including `null` (nothing known → edge gates nothing) —
+ *  keeps the full TTL. */
+function v2ConnectivitySnapshotTtlMs(snapshot: V2ConnectivitySnapshot | null): number {
+  if (snapshot && (snapshot.desktopBridge === false || snapshot.browser === false)) {
+    return V2_CONNECTIVITY_NEGATIVE_TTL_MS;
+  }
+  return V2_CONNECTIVITY_TTL_MS;
+}
+let v2ConnectivityCache: { circleId: string; at: number; snapshot: V2ConnectivitySnapshot | null } | null = null;
+let v2ConnectivityInFlight: { circleId: string; promise: Promise<V2ConnectivitySnapshot | null> } | null = null;
+
+async function probeV2ConnectivitySnapshot(circleId: string): Promise<V2ConnectivitySnapshot | null> {
+  const snapshot: V2ConnectivitySnapshot = {};
+  await Promise.all([
+    (async () => {
+      try {
+        const bridge = await import('./desktopBridge');
+        snapshot.desktopBridge = await bridge.isDesktopBridgeAvailable();
+      } catch { /* unknown — omit so the edge never gates on it */ }
+    })(),
+    (async () => {
+      try {
+        const { isBrowserBridgeAvailable } = await import('./browserBridge');
+        snapshot.browser = await isBrowserBridgeAvailable();
+      } catch { /* unknown — omit */ }
+    })(),
+    (async () => {
+      try {
+        // Authoritative variant only: `getGoogleAuthStatus` collapses every
+        // failure (missing session token, non-OK response, network throw)
+        // into {connected:false}, which would report UNKNOWN as an explicit
+        // false and gate all g* tools on a transient blip. The authoritative
+        // probe returns null unless the status endpoint actually answered
+        // with a boolean — null stays omitted (fail open per the tristate
+        // contract above).
+        const { getGoogleAuthStatusAuthoritative } = await import('./googleCreds');
+        const status = await getGoogleAuthStatusAuthoritative();
+        if (status && typeof status.connected === 'boolean') snapshot.google = status.connected === true;
+      } catch { /* unknown — omit */ }
+    })(),
+    (async () => {
+      try {
+        const v = await import('./vaultAgentAccess');
+        const result = await v.findVaultAutomationEntries(circleId, {});
+        if (!result.error && Array.isArray(result.entries)) snapshot.vault = result.entries.length > 0;
+      } catch { /* unknown — omit */ }
+    })(),
+    (async () => {
+      try {
+        const { loadMarketplaceIntegrationContext } = await import('./marketplaceIntegrationContext');
+        const ctx = await loadMarketplaceIntegrationContext(circleId);
+        const integrations: Record<string, boolean> = {};
+        for (const item of (ctx?.integrations || []).slice(0, 40)) {
+          if (typeof item?.provider === 'string' && item.provider) {
+            integrations[item.provider] = item.connected === true;
+          }
+        }
+        if (Object.keys(integrations).length > 0) snapshot.integrations = integrations;
+      } catch { /* unknown — omit */ }
+    })(),
+  ]);
+  return Object.keys(snapshot).length > 0 ? snapshot : null;
+}
+
+/** TTL-cached, time-capped, fail-soft snapshot build. Returns null when
+ *  nothing is known yet (the edge then gates nothing — old-client behavior). */
+async function buildV2ConnectivitySnapshot(circleId: string): Promise<V2ConnectivitySnapshot | null> {
+  try {
+    const cached = v2ConnectivityCache;
+    if (cached && cached.circleId === circleId && Date.now() - cached.at < v2ConnectivitySnapshotTtlMs(cached.snapshot)) {
+      return cached.snapshot;
+    }
+    let inFlight = v2ConnectivityInFlight;
+    if (!inFlight || inFlight.circleId !== circleId) {
+      const promise = probeV2ConnectivitySnapshot(circleId)
+        .then((snapshot) => {
+          v2ConnectivityCache = { circleId, at: Date.now(), snapshot };
+          return snapshot;
+        })
+        .catch(() => null as V2ConnectivitySnapshot | null);
+      void promise.finally(() => {
+        if (v2ConnectivityInFlight?.promise === promise) v2ConnectivityInFlight = null;
+      });
+      inFlight = { circleId, promise };
+      v2ConnectivityInFlight = inFlight;
+    }
+    const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), V2_CONNECTIVITY_BUILD_CAP_MS));
+    return await Promise.race([inFlight.promise, timeout]);
+  } catch {
+    return null;
+  }
+}
+
 async function callSwanBotV2(
   message: string,
   circleId: string,
@@ -1138,11 +1261,16 @@ async function callSwanBotV2(
     const accessToken = await getFreshAccessToken();
     if (!accessToken) return { text: null };
 
+    // Client-supplied connectivity snapshot for the edge's pre-dispatch tool
+    // gate (fresh start only; the resume path reuses the saved tool set).
+    const connectivity = await buildV2ConnectivitySnapshot(circleId);
+
     // ── First call — initial message. ─────────────────────────────────
     let response = await invokeSwanbotV2(accessToken, {
       message,
       circleId,
       userId,
+      ...(connectivity ? { connectivity } : {}),
       mode: thinkingLevel === 'fast' ? 'talk' : 'build',
       model: model || undefined,
       systemDirective,
@@ -1290,6 +1418,48 @@ async function executeClientToolCalls(
   const bridge = await import('./desktopBridge');
   const { appendAppActionVerificationGate } = await import('./appActionVerificationGate');
 
+  // Catalog side-effect policy lookup for the replay-safety gate below.
+  // Best-effort: a missing provider degrades to the core's conservative
+  // 'unknown' class (never widens what replays without a verdict).
+  let toolPolicyLookup: ((toolName: string) => unknown) | null = null;
+  try {
+    const { createOpenSwanToolParallelPolicyProvider } = await import('./openswanBridge');
+    toolPolicyLookup = createOpenSwanToolParallelPolicyProvider();
+  } catch { toolPolicyLookup = null; }
+
+  // Failed client tools get a classified recovery hint (bridge offline /
+  // element not found / …) PLUS — mirroring agentExecutionCore's failure
+  // path — a replay-safety verdict when a non-idempotent tool failed with an
+  // outcome-unknown disposition (timeout/5xx/reset after the effect may have
+  // landed), so the transient "a single retry is OK" hint never sanctions a
+  // blind replay that could double an external effect. JSON-preserving shape:
+  // when the serialized envelope is a JSON object, hint + verdict are embedded
+  // as fields so downstream JSON consumers (the v2 edge's credentials.get
+  // continuation sanitizer) still parse the content instead of redacting it.
+  const buildClientToolFailureContent = (
+    toolName: string,
+    serializedEnvelope: string,
+    rawError: unknown,
+  ): string => {
+    let replayNote: string | undefined;
+    try {
+      let policy: unknown = null;
+      if (toolPolicyLookup) {
+        try { policy = toolPolicyLookup(toolName); } catch { policy = null; }
+      }
+      const replay = decideToolReplaySafety({
+        sideEffect: policy,
+        disposition: rawError,
+        freshVerificationAvailable: true,
+        toolName,
+      });
+      if (replay.safety === 'verify_first' || replay.safety === 'unsafe_replay') {
+        replayNote = replay.reason;
+      }
+    } catch { /* replay-safety must never break the failure envelope */ }
+    return buildToolFailureFeedbackJson(toolName, serializedEnvelope, replayNote);
+  };
+
   // One call's full dispatch (bridge call + a11y cache + recording observer +
   // verification-gate framing), unchanged from the legacy loop body.
   const runOne = async (
@@ -1327,8 +1497,13 @@ async function executeClientToolCalls(
         tool_use_id: call.id,
         // Observe→act→VERIFY: same in-loop nudge as executeToolUseLoop, now on
         // the v2 client-delegated path (where desktop/browser tools run).
+        // Failures additionally get a classified recovery hint (bridge
+        // offline / element not found / …) so the model course-corrects
+        // instead of burning rounds on identical retries.
         content: appendAppActionVerificationGate(
-          serializeSwanBotClientToolResult(result),
+          result.ok
+            ? serializeSwanBotClientToolResult(result)
+            : buildClientToolFailureContent(call.name, serializeSwanBotClientToolResult(result), result.error),
           call.name,
           result.ok ? 'success' : 'error',
         ),
@@ -1338,7 +1513,7 @@ async function executeClientToolCalls(
       return {
         tool_use_id: call.id,
         content: appendAppActionVerificationGate(
-          serializeSwanBotClientToolError(err),
+          buildClientToolFailureContent(call.name, serializeSwanBotClientToolError(err), err),
           call.name,
           'error',
         ),
@@ -1536,6 +1711,50 @@ function buildSwanBotClientToolApprovalArgs(input: Record<string, unknown>): Rec
   return out;
 }
 
+/**
+ * approval-resume: cross-run approval honor. Each chat turn creates a NEW
+ * agent run, so an approval the user grants AFTER a turn ends (e.g. via
+ * RunApprovalBanner) lives on the previous run's row — the run-scoped
+ * lookups in the two resolvers below can never see it, and the retry turn
+ * would ask again. Deliberately narrow: same circle, same title, already
+ * approved/auto_approved, requested within the last 15 minutes, honored
+ * ONLY on an exact toolApprovalKey match. Pending/rejected rows from other
+ * runs are never honored. Fail-closed: errors fall back to the ask flow.
+ */
+async function findCrossRunApprovedToolPass(
+  circleId: string,
+  title: string,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from('agent_run_approvals')
+      .select('id,status,payload')
+      .eq('circle_id', circleId)
+      .eq('title', title)
+      .in('status', ['approved', 'auto_approved'])
+      .gte('requested_at', new Date(Date.now() - 15 * 60 * 1000).toISOString())
+      .order('requested_at', { ascending: false })
+      .limit(8);
+    if (error || !Array.isArray(data)) return null;
+    const key = buildOpenSwanToolApprovalKey(tool, args);
+    for (const row of data as OpenSwanRuntimeApprovalRow[]) {
+      const status = String(row.status || '').toLowerCase();
+      if (status !== 'approved' && status !== 'auto_approved') continue;
+      const payloadKey = row.payload && typeof row.payload === 'object'
+        ? (row.payload as Record<string, unknown>).toolApprovalKey
+        : null;
+      if (typeof payloadKey === 'string' && payloadKey === key) {
+        return String(row.id || '') || null;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveSwanBotClientToolApproval(input: {
   tool: string;
   args: Record<string, unknown>;
@@ -1586,6 +1805,12 @@ async function resolveSwanBotClientToolApproval(input: {
       error: 'This WordPress action was rejected. I did not touch WordPress.',
     };
   }
+
+  // decision.kind === 'new': before creating a fresh approval row, honor an
+  // exact-match approval the user granted on a PREVIOUS run in the last 15
+  // minutes (approve → retry turn actually resumes instead of re-asking).
+  const crossRunPassId = await findCrossRunApprovedToolPass(context.circleId, title, input.tool, args);
+  if (crossRunPassId) return { ok: true, approvalId: crossRunPassId };
 
   const toolApprovalKey = buildOpenSwanToolApprovalKey(input.tool, args);
   const { requestRunApproval } = await import('./agentRunSystem');
@@ -1715,6 +1940,11 @@ async function resolveSwanBotFloorApproval(input: {
       approvalId: decision.approvalId,
     };
   }
+  // decision.kind === 'new': before creating a fresh floor approval row, honor
+  // an exact-match approval the user granted on a PREVIOUS run in the last 15
+  // minutes (approve → retry turn actually resumes instead of re-asking).
+  const crossRunPassId = await findCrossRunApprovedToolPass(context.circleId, title, input.tool, args);
+  if (crossRunPassId) return { passed: true };
   const toolApprovalKey = buildOpenSwanToolApprovalKey(input.tool, args);
   const { requestRunApproval } = await import('./agentRunSystem');
   const approval = await requestRunApproval({
@@ -4604,8 +4834,16 @@ export async function executeToolUseLoop(opts: {
     // BEFORE it runs, so a verb-anchored match can't be executed ahead of the
     // gate. `canParallelizeToolBatch` already bars mutating/side-effect tools;
     // this closes the gap where a read-only tool name matches a floor verb.
-    const preDispatched = !enforceConstraints
-      && canParallelizeToolBatch(batchPolicies, { hasApprovalGate: !!opts.toolApprovalGate })
+    const canPreDispatchBatch = !enforceConstraints
+      && canParallelizeToolBatch(batchPolicies, { hasApprovalGate: !!opts.toolApprovalGate });
+    // Live activity label for the parallel batch (mirrors the v2 pattern
+    // above): sink is fail-soft, so this never affects the loop itself.
+    if (canPreDispatchBatch) {
+      emitSwanBotActivity(toolUseBlocks.length > 1
+        ? `Running ${toolUseBlocks.length} steps…`
+        : toolActivityLabel(toolUseBlocks[0].name, toolUseBlocks[0].input));
+    }
+    const preDispatched = canPreDispatchBatch
       ? await Promise.all(toolUseBlocks.map((b: any) => dispatchToolDetailed(b.name, b.input || {}, toolCtx)))
       : null;
     // Layer-8 auto-grounding (deterministic re-observe) is suppressed only in
@@ -4738,6 +4976,10 @@ export async function executeToolUseLoop(opts: {
           }
         }
       }
+      // Live activity label for the sequential dispatch — emitted AFTER the
+      // approval/constraint/floor gates above so an approval wait is never
+      // mislabeled as tool activity. Fail-soft sink; no loop behavior change.
+      if (!preDispatched) emitSwanBotActivity(toolActivityLabel(block.name, block.input));
       const dispatched = preDispatched ? preDispatched[bi] : await dispatchToolDetailed(block.name, block.input || {}, toolCtx);
       // Enforce observe→act→VERIFY on multi-step app/desktop/browser tasks:
       // attach a re-observe/verify (or retry-ladder) reminder to mutating app

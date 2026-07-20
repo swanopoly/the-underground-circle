@@ -54,7 +54,8 @@ import { OPENSWAN_AUTOMATION_INTENT_SEED } from '../../lib/openswanAutomationLau
 import { rageForget } from '../../lib/memoryActions';
 import { supabase } from '../../lib/supabase';
 import { useClaudeSpendBreakdown } from '../../lib/circleCostTelemetry';
-import { listRuns, updateRunStatus, type AgentRun } from '../../lib/agentRunSystem';
+import { listRuns, reapRun, updateRunStatus, type AgentRun } from '../../lib/agentRunSystem';
+import { planRunReap } from '../../lib/runStallPolicyCore';
 import { estimateCost, resolveModelRate } from '../../lib/modelPricing';
 import {
   auditComputerCapabilities,
@@ -612,6 +613,9 @@ export default function OpenSwanConsole({
   const [showHiddenTools, setShowHiddenTools] = useState(false);
   const [budgetCap, setBudgetCap] = useState<number | null>(null);
   const [recentRuns, setRecentRuns] = useState<AgentRun[]>([]);
+  // Run-reaper wire: 'running' runs whose heartbeat (updated_at) is aging —
+  // flagged "stalled?" and excluded from the live pulse, but not yet reaped.
+  const [staleRunIds, setStaleRunIds] = useState<Set<string>>(() => new Set());
   const [recentRunsExpanded, setRecentRunsExpanded] = useState(false);
   const [cancellingRunIds, setCancellingRunIds] = useState<Set<string>>(() => new Set());
   const [showAvailableTools, setShowAvailableTools] = useState(false);
@@ -871,6 +875,11 @@ export default function OpenSwanConsole({
     }
   }, []);
 
+  // Run-reaper dedupe: run ids this mount already issued a DB reap for, so
+  // effect re-runs (visibility toggles) don't re-fire writes while the
+  // conditional status flip is still in flight.
+  const reapedRunIdsRef = useRef<Set<string>>(new Set());
+
   // Load the last few runs the user kicked off in this circle, plus
   // subscribe for realtime updates so the list reflects status flips
   // (running → completed/failed) and brand-new runs without a refresh.
@@ -881,7 +890,44 @@ export default function OpenSwanConsole({
     (async () => {
       try {
         const runs = await listRuns(circleId, { userId, limit: 8 });
-        if (!cancelled) setRecentRuns(runs);
+        // Run-reaper: classify liveness off the heartbeat column only.
+        // started_at is deliberately OMITTED so runs from producers that
+        // never heartbeat classify as 'live' (core fail-safe) instead of
+        // being false-reaped.
+        const reapPlan = planRunReap(
+          runs.map((r) => ({ id: r.id, status: r.status, updated_at: r.updated_at })),
+          Date.now(),
+        );
+        // Reap eligibility (fail-safe floor): every producer's row carries a
+        // non-null updated_at (DEFAULT now() + updateRunStatus), so a dead
+        // heartbeat only proves death for runs that OPTED IN to heartbeating —
+        // metadata.heartbeat, set by agentRunPersistence.createPersistedRun.
+        // Everything else (edge v2 loops, legacy runtimes, 'client_pending'
+        // user-paced waits) gets at most the soft "stalled?" badge below,
+        // NEVER the local 'failed' flip or the DB reap.
+        const reapEligibleIds = new Set(runs
+          .filter((r) => r.metadata?.heartbeat === true && r.final_stop_reason !== 'client_pending')
+          .map((r) => r.id));
+        const reapIds = new Set(reapPlan.toReap.filter((id) => reapEligibleIds.has(id)));
+        const softStaleIds = new Set([
+          ...reapPlan.stale,
+          ...reapPlan.toReap.filter((id) => !reapIds.has(id)),
+        ]);
+        if (!cancelled) {
+          setRecentRuns(reapIds.size > 0
+            ? runs.map((r) => (reapIds.has(r.id) ? { ...r, status: 'failed' as const } : r))
+            : runs);
+          setStaleRunIds(softStaleIds);
+          for (const runId of reapIds) {
+            // Fire-and-forget reap, once per mount: reapRun claims the row
+            // conditionally (only while still 'running'), so concurrent
+            // surfaces never duplicate the status flip or the reaped_reason
+            // metadata merge (the merge only runs for the claim winner).
+            if (reapedRunIdsRef.current.has(runId)) continue;
+            reapedRunIdsRef.current.add(runId);
+            void reapRun(runId, 'heartbeat_stale');
+          }
+        }
       } catch {
         if (!cancelled) setRecentRuns([]);
       }
@@ -924,6 +970,7 @@ export default function OpenSwanConsole({
           estimated_cost: Number(row.estimated_cost || 0),
           started_at: row.started_at || undefined,
           completed_at: row.completed_at || undefined,
+          updated_at: row.updated_at || undefined,
           created_at: row.created_at,
           parent_run_id: row.parent_run_id || undefined,
           delegated_to: row.delegated_to || undefined,
@@ -940,6 +987,13 @@ export default function OpenSwanConsole({
           // INSERT — prepend, cap at 8 (oldest drops off).
           return [next, ...prev].slice(0, 8);
         });
+        // Any fresh row write is activity — clear a prior "stalled?" flag.
+        setStaleRunIds((prev) => {
+          if (!prev.has(next.id)) return prev;
+          const copy = new Set(prev);
+          copy.delete(next.id);
+          return copy;
+        });
       })
       .subscribe();
 
@@ -954,7 +1008,8 @@ export default function OpenSwanConsole({
   const livePulse = useRef(new Animated.Value(0.4)).current;
   useEffect(() => {
     const hasLiveRun = visible && recentRuns.some((r) =>
-      r.status === 'running' || r.status === 'planning' || r.status === 'queued',
+      (r.status === 'running' || r.status === 'planning' || r.status === 'queued') &&
+      !staleRunIds.has(r.id),
     );
     if (!hasLiveRun) {
       livePulse.setValue(0.4);
@@ -968,13 +1023,14 @@ export default function OpenSwanConsole({
     );
     loop.start();
     return () => loop.stop();
-  }, [livePulse, recentRuns, visible]);
+  }, [livePulse, recentRuns, staleRunIds, visible]);
 
   const liveRunsCount = useMemo(() =>
     recentRuns.filter((r) =>
-      r.status === 'running' || r.status === 'planning' || r.status === 'queued',
+      (r.status === 'running' || r.status === 'planning' || r.status === 'queued') &&
+      !staleRunIds.has(r.id),
     ).length,
-  [recentRuns]);
+  [recentRuns, staleRunIds]);
 
   // ── Tool + subagent + memory previews (live on mode / task changes) ──
 
@@ -2965,10 +3021,14 @@ export default function OpenSwanConsole({
                       elapsedMs < 1000 ? `${elapsedMs}ms` :
                       elapsedMs < 60000 ? `${(elapsedMs / 1000).toFixed(1)}s` :
                       `${Math.floor(elapsedMs / 60000)}m${Math.floor((elapsedMs % 60000) / 1000)}s`;
+                    // A stale-heartbeat run keeps its status text but loses
+                    // the live pulse — the "stalled?" badge tells the truth.
+                    const isStale = staleRunIds.has(r.id);
                     const isLive =
-                      r.status === 'running' ||
-                      r.status === 'planning' ||
-                      r.status === 'queued';
+                      (r.status === 'running' ||
+                        r.status === 'planning' ||
+                        r.status === 'queued') &&
+                      !isStale;
                     // For live runs, the elapsed clock keeps ticking
                     // from started_at against now() so the user sees
                     // the time grow in real time. Recomputed each
@@ -3008,6 +3068,9 @@ export default function OpenSwanConsole({
                           <View style={styles.recentRunTitleRow}>
                             <Text style={styles.recentRunMode}>{r.mode}</Text>
                             <Text style={styles.recentRunStatus}>{r.status.toUpperCase()}</Text>
+                            {isStale ? (
+                              <Text style={[styles.recentRunStatus, { color: '#fbbf24' }]}>STALLED?</Text>
+                            ) : null}
                           </View>
                           <Text style={styles.recentRunTitle} numberOfLines={1}>{r.title || r.goal || '(untitled)'}</Text>
                           <Text style={styles.recentRunMeta}>

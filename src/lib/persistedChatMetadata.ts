@@ -161,6 +161,19 @@ export type PersistedChatBotMetadata = {
   // signal with no free-text/PII. See chatOutcomeSignals.ts. It is so small it
   // rides the 'minimal' persistence tier and is dropped only in 'tiny'.
   outcomeSignal?: PersistedOutcomeSignal | null;
+  // Coding-lane proof-of-work receipt ("edited N files · checks passed ·
+  // committed sha") surfaced from the OpenSwan typed tool loop. Bounded by
+  // compactVerificationReceipt (40 files / 20 checks; minimal tier tighter).
+  verificationReceipt?: PersistedVerificationReceipt | null;
+};
+
+export type PersistedVerificationReceipt = {
+  verdict: 'verified' | 'unverified' | 'failed';
+  editedFiles: string[];
+  checks: Array<{ name: string; passed: boolean }>;
+  committed: boolean;
+  commitRef?: string;
+  summary: string;
 };
 
 export type PersistedOutcomeSignal = {
@@ -208,6 +221,50 @@ function compactOutcomeSignal(
   if (lane) compacted.lane = lane;
   if (model) compacted.model = model;
   return compacted;
+}
+
+// Verification receipt compaction — shared by both persistence tiers so the
+// receipt is always bounded identically to the agent_run_events payload
+// (40 files / 20 checks at the compact tier; the minimal tier keeps a tighter
+// slice since it exists to shrink oversized rows). Defensive re-clamp: the
+// value is untrusted after a round-trip.
+function compactVerificationReceipt(
+  receipt?: PersistedVerificationReceipt | null,
+  tier: 'compact' | 'minimal' = 'compact',
+): PersistedVerificationReceipt | undefined {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return undefined;
+  const raw = receipt as Record<string, unknown>;
+  const maxFiles = tier === 'minimal' ? 8 : 40;
+  const maxChecks = tier === 'minimal' ? 6 : 20;
+  const maxPathLen = tier === 'minimal' ? 120 : 300;
+  const editedFiles = (Array.isArray(raw.editedFiles) ? raw.editedFiles : [])
+    .filter((f): f is string => typeof f === 'string' && !!f)
+    .slice(0, maxFiles)
+    .map((f) => truncateText(f, maxPathLen));
+  const checks = (Array.isArray(raw.checks) ? raw.checks : [])
+    .filter((c) => !!c && typeof c === 'object' && !Array.isArray(c))
+    .slice(0, maxChecks)
+    .map((c) => ({
+      name: truncateText(String((c as Record<string, unknown>).name || ''), 60),
+      passed: (c as Record<string, unknown>).passed === true,
+    }))
+    .filter((c) => !!c.name);
+  const committed = raw.committed === true;
+  // Nothing worth persisting: no edits, no checks, no commit.
+  if (editedFiles.length === 0 && checks.length === 0 && !committed) return undefined;
+  const verdict: PersistedVerificationReceipt['verdict'] =
+    raw.verdict === 'verified' || raw.verdict === 'failed' ? raw.verdict : 'unverified';
+  const commitRef = typeof raw.commitRef === 'string' && raw.commitRef
+    ? truncateText(raw.commitRef, 40)
+    : undefined;
+  return {
+    verdict,
+    editedFiles,
+    checks,
+    committed,
+    ...(commitRef ? { commitRef } : {}),
+    summary: truncateText(String(raw.summary || ''), 400),
+  };
 }
 
 // Reader — pull the flywheel signal back off a persisted bot message (e.g. to
@@ -706,7 +763,8 @@ function hasPersistedMetadata(metadata?: PersistedChatBotMetadata): boolean {
     !!metadata.computerFindings?.runId ||
     !!metadata.computerFindings?.sessionId ||
     (metadata.bestOfN?.candidates?.length || 0) > 0 ||
-    !!compactOutcomeSignal(metadata.outcomeSignal)
+    !!compactOutcomeSignal(metadata.outcomeSignal) ||
+    !!compactVerificationReceipt(metadata.verificationReceipt)
   );
 }
 
@@ -1302,6 +1360,7 @@ function compactPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
     computerFindings: compactComputerFindings(metadata.computerFindings),
     bestOfN: compactBestOfNRace(metadata.bestOfN),
     outcomeSignal: compactOutcomeSignal(metadata.outcomeSignal),
+    verificationReceipt: compactVerificationReceipt(metadata.verificationReceipt),
   };
 }
 
@@ -1413,6 +1472,10 @@ function minimalPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
     // is durable training data, so it rides the minimal tier and is dropped
     // only in the narrative-only 'tiny' fallback below.
     outcomeSignal: compactOutcomeSignal(metadata.outcomeSignal),
+    // Proof-of-work receipt survives the minimal tier with tighter slices —
+    // it is the honest "what changed / did checks pass / was it committed"
+    // record for the message.
+    verificationReceipt: compactVerificationReceipt(metadata.verificationReceipt, 'minimal'),
   };
 }
 

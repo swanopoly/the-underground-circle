@@ -57,6 +57,8 @@ import {
   withDesignAppRuntimeCaptureMetadata,
 } from './designAppRuntimeManifest';
 import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
+import { formatVerificationReceipt } from './verificationReceiptCore';
+import type { VerificationReceipt } from './verificationReceiptCore';
 
 // ─── Shared shapes ──────────────────────────────────────────────────────────
 
@@ -104,6 +106,11 @@ export type LegacyToolLoopResult = {
     cache_read_tokens: number;
     cache_creation_tokens: number;
   };
+  /** Coding-lane proof-of-work receipt ("edited N files · checks passed ·
+   *  committed sha") assembled by the typed-core runtime from this turn's tool
+   *  events. Optional/additive: the legacy loop and subagentRegistry never set
+   *  it, and no consumer requires it. */
+  verificationReceipt?: VerificationReceipt;
 };
 
 /** Legacy gate signature (OpenSwanRunCallbacks.onToolApproval). */
@@ -711,16 +718,33 @@ export function buildLegacyToolLoopResult(args: {
   /** Result of the runtime's no-tools finalization call, when it ran. */
   finalizationText?: string | null;
   usage?: LegacyToolLoopResult['usage'];
+  /** Proof-of-work receipt from the runtime's verification-receipt pass. */
+  verificationReceipt?: VerificationReceipt | null;
 }): LegacyToolLoopResult {
   const base = {
     toolEvents: args.toolEvents,
     ...(args.routing ? { routing: args.routing } : {}),
     ...(args.usage ? { usage: args.usage } : {}),
   };
+  // On non-clean terminals (edge failure, user abort, cap exhaustion) a
+  // '✓ Verified' verdict would render a success headline above an error/stop
+  // body — downgrade it to 'unverified' (summary regenerated) so partial work
+  // never reads as a clean success. 'failed'/'unverified' verdicts are already
+  // honest and pass through unchanged. The agent_run_events audit insert
+  // already recorded the raw receipt before this mapping runs.
+  const incompleteReceipt = (): { verificationReceipt: VerificationReceipt } | Record<string, never> => {
+    const receipt = args.verificationReceipt;
+    if (!receipt) return {};
+    if (receipt.verdict !== 'verified') return { verificationReceipt: receipt };
+    const downgraded: VerificationReceipt = { ...receipt, verdict: 'unverified', summary: '' };
+    downgraded.summary = formatVerificationReceipt(downgraded);
+    return { verificationReceipt: downgraded };
+  };
   if (args.edgeFailed) {
     return {
       response: args.runResult.text || TOOL_LOOP_EDGE_FAILURE_TEXT,
       ...base,
+      ...incompleteReceipt(),
       incomplete: true,
     };
   }
@@ -734,12 +758,17 @@ export function buildLegacyToolLoopResult(args: {
     return {
       response: [args.runResult.text || '', stopNote, progress].filter(Boolean).join('\n\n'),
       ...base,
+      ...incompleteReceipt(),
       incomplete: true,
       checkpoint: buildToolLoopCheckpoint(args.toolEvents, { maxRounds: args.maxRounds }),
     };
   }
   if (!args.runResult.hitMaxIterations) {
-    return { response: args.runResult.text, ...base };
+    return {
+      response: args.runResult.text,
+      ...base,
+      ...(args.verificationReceipt ? { verificationReceipt: args.verificationReceipt } : {}),
+    };
   }
   const finalText = args.runResult.text || args.finalizationText || '';
   const limitNote = `I reached my tool-step limit for this turn (${args.maxRounds} steps) before finishing. Tell me to continue and I'll pick up where I left off.`;
@@ -747,6 +776,7 @@ export function buildLegacyToolLoopResult(args: {
   return {
     response: [finalText || limitNote, progress].filter(Boolean).join('\n\n'),
     ...base,
+    ...incompleteReceipt(),
     incomplete: true,
     checkpoint: buildToolLoopCheckpoint(args.toolEvents, { maxRounds: args.maxRounds }),
   };

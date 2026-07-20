@@ -107,6 +107,7 @@ import {
 import type { ClaudeUsageSummary, ClaudeUsageByModel } from '../../../lib/claudeUsage';
 import AgentActivityFeed from '../../../components/AgentActivityFeed';
 import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
+import RunApprovalBanner from '../../../components/RunApprovalBanner';
 import ChatAttentionStrip from '../../../components/ChatAttentionStrip';
 import StandingGrantsPanel from '../../../components/StandingGrantsPanel';
 import ComputerTaskSchedulesPanel from '../../../components/ComputerTaskSchedulesPanel';
@@ -4138,6 +4139,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         })}
         circleId={circleId}
       />
+
+      {/* Tool-loop run approvals — visible + resolvable from the dashboard.
+          Gated on currentUserId (mirrors ChatTab): an empty userId would make
+          approve/reject a silent no-op (uuid column rejects ''). */}
+      {currentUserId ? <RunApprovalBanner circleId={circleId} userId={currentUserId} /> : null}
 
       {/* Standing "always allow" grants — review + revoke (plan §4d) */}
       <StandingGrantsPanel accentColor={accentColor} userId={currentUserId} />

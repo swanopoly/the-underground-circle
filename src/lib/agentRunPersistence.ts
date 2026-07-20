@@ -80,6 +80,37 @@ export async function recordSolverConsultationEvent(opts: {
   }
 }
 
+/** Timer period for {@link startRunHeartbeat} — well under RUN_STALL_STALE_MS (2 min). */
+export const RUN_HEARTBEAT_INTERVAL_MS = 60_000;
+
+/**
+ * Timer-driven run heartbeat (run-reaper wire, shared). Event-driven bumps
+ * alone starve during one long await — a long extended-thinking completion or
+ * a bridge exec can legally outlast RUN_STALL_DEAD_MS with zero events — so a
+ * live run must also beat on wall-clock time. Bumps `agent_runs.updated_at`
+ * every ~60s via a direct column update on purpose — NOT `updateRunStatus`,
+ * which resets `started_at` while status is 'running'. Fire-and-forget and
+ * non-fatal like every other telemetry write here. Returns a `stop()` that
+ * MUST be called on every terminal path (finalize / finally) so the timer
+ * never keeps beating for a finished run.
+ */
+export function startRunHeartbeat(runId: string): () => void {
+  const bump = () => {
+    supabase
+      .from('agent_runs')
+      .update({ updated_at: new Date().toISOString() })
+      .eq('id', runId)
+      .then(
+        ({ error }) => {
+          if (error) console.warn('[agentRunPersistence] heartbeat update failed:', error);
+        },
+        (e: unknown) => console.warn('[agentRunPersistence] heartbeat update failed:', e),
+      );
+  };
+  const timer = setInterval(bump, RUN_HEARTBEAT_INTERVAL_MS);
+  return () => clearInterval(timer);
+}
+
 export async function createPersistedRun(opts: CreatePersistedRunOptions): Promise<PersistedRunHandle | null> {
   const run = await createRun({
     circleId: opts.circleId,
@@ -93,9 +124,19 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
     roomId: opts.roomId,
     chatSessionId: opts.chatSessionId,
     parentRunId: opts.parentRunId,
-    metadata: opts.metadata,
+    // Run-reaper opt-in (fail-safe floor): `heartbeat: true` marks this run as
+    // provably heartbeating — event bumps + the wall-clock timer below — so the
+    // dashboard reapers may flip it to 'failed' on a dead heartbeat. Runs
+    // WITHOUT this flag (edge loops, legacy runtimes) must never be reaped;
+    // they get at most a soft "stalled?" badge.
+    metadata: { ...(opts.metadata || {}), heartbeat: true },
   });
   if (!run) return null;
+
+  // Wall-clock heartbeat for the whole run lifetime (creation → finalize):
+  // covers long single awaits (extended thinking, slow tools) where no event
+  // fires. Stopped in finalize on both the success and error paths.
+  const stopHeartbeat = startRunHeartbeat(run.id);
 
   const streamEvents = opts.streamEvents !== false;
 
@@ -117,7 +158,33 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
     cached: 0,
   };
 
+  // Heartbeat (run-reaper wire): bump agent_runs.updated_at on model/tool
+  // activity so runStallPolicyCore can tell a live run from a zombie. Direct
+  // column update on purpose — NOT updateRunStatus, which resets started_at
+  // when status is 'running'. Throttled so bursty tool loops don't hammer the
+  // row; fire-and-forget and non-fatal like every other telemetry write here.
+  const HEARTBEAT_MIN_INTERVAL_MS = 30_000;
+  let lastHeartbeatAtMs = 0;
+  const bumpHeartbeat = () => {
+    const nowMs = Date.now();
+    if (nowMs - lastHeartbeatAtMs < HEARTBEAT_MIN_INTERVAL_MS) return;
+    lastHeartbeatAtMs = nowMs;
+    supabase
+      .from('agent_runs')
+      .update({ updated_at: new Date(nowMs).toISOString() })
+      .eq('id', run.id)
+      .then(
+        ({ error }) => {
+          if (error) console.warn('[agentRunPersistence] heartbeat update failed:', error);
+        },
+        (e: unknown) => console.warn('[agentRunPersistence] heartbeat update failed:', e),
+      );
+  };
+
   const writeEvent = async (kind: string, payload: Record<string, unknown>) => {
+    // Heartbeat fires on every model/tool event — even when event streaming
+    // is disabled — so liveness stays truthful on latency-critical runs.
+    bumpHeartbeat();
     if (!streamEvents) return;
     try {
       await supabase.from('agent_run_events').insert({
@@ -239,6 +306,7 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
   };
 
   const finalize = async (result: AgentRunResult, err?: unknown) => {
+    stopHeartbeat();
     const status = err
       ? 'failed'
       : result.hitMaxIterations

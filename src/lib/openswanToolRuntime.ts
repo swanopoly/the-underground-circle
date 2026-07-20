@@ -12,6 +12,7 @@ import type { OpenSwanTaskPlan, OpenSwanToolName } from './openswanTaskPlanner';
 import type { SwanBotStructuredArtifact } from './swanbot';
 import type { ApprovalKind } from './agentRunSystem';
 import type { ChatComputerUserConstraints } from './chatComputerRequestRouter';
+import type { AutoApproveCategory } from './chatAutoApproveSettings';
 import type { ToolParallelPolicy } from './toolBatchParallelism';
 import { createFilesInRoomFromArtifact, createWorkspaceFromArtifact, type RoomArtifactApplyResult, type WorkspaceCreationResult } from './chatWorkspace';
 import { focusRoomWorkspaceFile, primeRoomWorkspaceLaunch } from './roomWorkspaceLauncher';
@@ -4169,9 +4170,13 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
   if (tool.startsWith('desktop.')) {
     // Read-only tools (list apps, screen size, screenshot, wait_for_app)
     // auto-approve — they observe state, they don't change it. Every
-    // write path (launch/focus/type/keys/click/open_url/open_path)
-    // routes through HITL via the `desktop_action` auto-approve
-    // category which the user can opt into 'auto' via the banner.
+    // write path (launch/focus/type/keys/click/open_url/open_path) is
+    // 'ask' and routes through maybeRequestToolApproval, where
+    // toolAutoApproveCategory maps desktop.* to the `desktop_action`
+    // auto-approve category and the user's "Remember: auto-approve"
+    // choice (RunApprovalBanner / HitlApprovalBanner checkbox) is
+    // honored via unifiedApprovalPolicyCore — the pay/delete/login/grant
+    // floor still always asks.
     const readOnlyTools = new Set([
       'desktop.list_running_apps',
       'desktop.list_installed_apps',
@@ -5598,6 +5603,157 @@ function renderTaskLine(task: Record<string, any>): string {
   return `- [${task.status}] ${task.title}${task.priority ? ` (${task.priority})` : ''}${task.assigned_to ? ` — assignee: ${task.assigned_to}` : ''} — id: ${String(task.id).slice(0, 8)}`;
 }
 
+/**
+ * approval-resume: cross-run approval honor. Each chat turn creates a NEW
+ * agent run, so an approval the user grants AFTER a turn ends (e.g. via
+ * RunApprovalBanner) lives on the previous run's row — the run-scoped lookup
+ * in `maybeRequestToolApproval` can never see it, and the retry turn would
+ * ask again. This second lookup is deliberately narrow: same circle, same
+ * title, requested within the last 15 minutes, and honored ONLY on an exact
+ * toolApprovalKey match. Pending rows from other runs are never honored
+ * (those stay run-scoped).
+ *
+ * Single-use consume semantics (audit + no blanket pass):
+ * - The NEWEST exact-key row in the window decides. A newer 'rejected' row
+ *   VETOES an older approval (newest-intent-wins, mirroring the run-scoped
+ *   resolver's block rule).
+ * - An approved row is honored at most once ACROSS runs: honoring stamps
+ *   `payload.consumedByRunId` via a conditional update (lost race → not
+ *   honored, fall back to the normal ask flow). Rows consumed by ANOTHER run
+ *   are skipped; rows consumed by THIS run keep passing, so multiple gate
+ *   layers checking the same call inside the same retry run all pass instead
+ *   of deadlocking mid-dispatch.
+ * - On honor, a run-scoped 'approved' copy is recorded on the EXECUTING run
+ *   (pre-consumed, so other runs' cross-run lookups skip it) — the audit
+ *   trail shows the gated call went through approval, and run-scoped
+ *   resolvers return 'pass' for subsequent checks in this run.
+ * Fail-closed: any error just falls back to the normal ask flow.
+ */
+async function findCrossRunApprovedToolPass(
+  circleId: string,
+  title: string,
+  tool: string,
+  args: Record<string, unknown>,
+  runId: string,
+): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from('agent_run_approvals')
+      .select('id,status,payload')
+      .eq('circle_id', circleId)
+      .eq('title', title)
+      .in('status', ['approved', 'auto_approved', 'rejected'])
+      .gte('requested_at', new Date(Date.now() - 15 * 60 * 1000).toISOString())
+      .order('requested_at', { ascending: false })
+      .limit(8);
+    if (error || !Array.isArray(data)) return null;
+    const key = buildOpenSwanToolApprovalKey(tool, args);
+    for (const row of data as OpenSwanRuntimeApprovalRow[]) {
+      const status = String(row.status || '').toLowerCase();
+      const payload = row.payload && typeof row.payload === 'object'
+        ? (row.payload as Record<string, unknown>)
+        : null;
+      const payloadKey = payload ? payload.toolApprovalKey : null;
+      if (typeof payloadKey !== 'string' || payloadKey !== key) continue;
+      // Rows are newest-first: the first exact-key match is the user's latest
+      // intent. A newer rejection vetoes any older approval in the window.
+      if (status === 'rejected') return null;
+      if (status !== 'approved' && status !== 'auto_approved') continue;
+      const rowId = String(row.id || '');
+      if (!rowId) continue;
+      const consumedBy = payload && typeof payload.consumedByRunId === 'string'
+        ? payload.consumedByRunId
+        : null;
+      // Already consumed by THIS run → keep honoring so every gate layer for
+      // the same call in the same retry run passes. Consumed by another run →
+      // spent; keep scanning (an older unconsumed duplicate approval, if any,
+      // is still older intent than this approval, so honoring it is fine).
+      if (consumedBy) {
+        if (consumedBy === runId) return rowId;
+        continue;
+      }
+      // Conditionally consume: only succeeds if no other run raced us.
+      const { data: stamped, error: stampError } = await supabase
+        .from('agent_run_approvals')
+        .update({ payload: { ...(payload || {}), consumedByRunId: runId } })
+        .eq('id', rowId)
+        .is('payload->>consumedByRunId', null)
+        .select('id');
+      if (stampError || !Array.isArray(stamped) || stamped.length === 0) continue;
+      // Audit: record a run-scoped approved copy on the executing run so the
+      // run history shows this gated call passed approval. Pre-consumed so no
+      // OTHER run's cross-run lookup can honor the copy; run-scoped lookups in
+      // THIS run resolve 'pass' from it. Best-effort — the consume stamp above
+      // already made the honor decision.
+      await supabase
+        .from('agent_run_approvals')
+        .insert({
+          run_id: runId,
+          circle_id: circleId,
+          approval_kind: 'privileged_action',
+          title,
+          description: `Cross-run approval honored (source: ${rowId.slice(0, 8)})`,
+          status: 'approved',
+          resolved_at: new Date().toISOString(),
+          payload: {
+            tool,
+            args,
+            toolApprovalKey: key,
+            toolApprovalKeyVersion: 1,
+            honoredCrossRunApprovalId: rowId,
+            consumedByRunId: runId,
+          },
+        })
+        .then(({ error: copyError }) => {
+          if (copyError) console.warn('[OpenSwanToolRuntime] cross-run approval audit copy failed:', copyError.message);
+        });
+      return rowId;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * auto-approve-memory: map a runtime tool name to its `AutoApproveCategory`
+ * bucket (chatAutoApproveSettings) so the tool loop can honor the user's
+ * "Remember: auto-approve <category>" choice. The mapping is deliberately
+ * TOOL-NAME-PREFIX based, NOT `policy.family` based — desktop.* reuses family
+ * 'browser' (see getBaseOpenSwanToolPolicy) so family would conflate desktop
+ * and browser actions under one checkbox. Pure + total: unknown/absent tools
+ * return null, which means "no category applies — keep the normal ask flow"
+ * (fail-closed; gmail.write / vault.* / github.* etc. stay uncategorized on
+ * purpose). `browser.fill_credential_field` returns null explicitly: entering
+ * credentials is login-floor territory and must never category-auto-approve.
+ * Shared with RunApprovalBanner's checkbox so the gate and the UI derive the
+ * SAME category from the same tool name.
+ */
+export function toolAutoApproveCategory(tool: string): AutoApproveCategory | null {
+  const t = String(tool || '');
+  if (t === 'browser.fill_credential_field') return null;
+  // Arbitrary-code escape hatches: AppleScript can `do shell script "..."` and
+  // Shortcuts can wrap the same, i.e. these are local shell execution with a
+  // different name. local.run_shell/git.run are deliberately uncategorized
+  // (args-gated by shellCommandPolicy); these two must not ride the
+  // "Desktop apps (launch / type / keys)" checkbox either — always ask.
+  if (t === 'desktop.run_applescript' || t === 'desktop.shortcuts_run') return null;
+  if (t.startsWith('desktop.')) return 'desktop_action';
+  if (t.startsWith('browser.')) return 'browser_click';
+  if (t.startsWith('wp.')) return 'external_publish';
+  // Memory writes: save/pin/unpin/forget plus own-user memory management.
+  // (`memory.forget` is a reversible soft-delete — the row is flagged
+  // inactive, not dropped — so it rides the memory_write bucket.)
+  if (t === 'save_memory' || t === 'user_memory.manage' || t.startsWith('memory.')) return 'memory_write';
+  // Skill writes — skills.manage files create/update/delete proposals.
+  if (t === 'skills.manage') return 'skill_write';
+  // Automation create/run — schedule_action queues a new scheduled
+  // automation; toggle_enabled pauses/resumes an existing one.
+  if (t === 'schedule_action') return 'automation_create';
+  if (t === 'automations.toggle_enabled') return 'automation_run';
+  return null;
+}
+
 async function maybeRequestToolApproval(
   tool: OpenSwanRuntimeToolName,
   args: Record<string, unknown>,
@@ -5624,6 +5780,75 @@ async function maybeRequestToolApproval(
     }
     if (plan.approvalTier === 'auto') return null;
   }
+  // auto-approve-memory: honor the user's per-category "Remember:
+  // auto-approve" settings (chatAutoApproveSettings) at the tool-loop
+  // chokepoint via unifiedApprovalPolicyCore. Precedence inside the core:
+  // user-forbidden ('never') → blocked; the always-confirm floor
+  // (pay/delete/login/grant — args-detected via constraintBlocksToolCall,
+  // plus substring-matched on category AND tool name) → require_approval —
+  // it beats every auto path; a category the user set to 'auto' → skip the
+  // approval row. An explicit circle policy (non-'ask') wins over the user
+  // default, mirroring resolveAutoApproveDecision. Any read/import error
+  // falls through to the normal ask flow (fail-closed).
+  //
+  // NOTE: 'auto_approve' does NOT return early here. It only sets
+  // `categoryAuto`, honored below AFTER the run-scoped approval lookup, so an
+  // approval the user explicitly REJECTED in this run (block) or one still
+  // pending (defer) keeps precedence over a category the user later flipped
+  // to 'auto' mid-run. No-run-context calls honor it before the fail-closed
+  // no_run_context return (no run-scoped rows can exist without a runId).
+  let categoryAuto = false;
+  const autoApproveCategory = toolAutoApproveCategory(tool);
+  if (autoApproveCategory) {
+    try {
+      const [{ readCircleAutoApprove, readUserAutoApprove }, { resolveApprovalDecision }, { constraintBlocksToolCall }] = await Promise.all([
+        import('./chatAutoApproveSettings'),
+        import('./unifiedApprovalPolicyCore'),
+        import('./chatComputerRequestRouter'),
+      ]);
+      const [circleSettings, userSettings] = await Promise.all([
+        readCircleAutoApprove(context.circleId).catch(() => null),
+        readUserAutoApprove(context.userId).catch(() => null),
+      ]);
+      const merged: Record<string, string> = {};
+      for (const [cat, choice] of Object.entries(userSettings || {})) {
+        if (choice) merged[cat] = choice;
+      }
+      for (const [cat, choice] of Object.entries(circleSettings || {})) {
+        if (choice && choice !== 'ask') merged[cat] = choice;
+      }
+      const autoCategories = Object.keys(merged).filter((c) => merged[c] === 'auto');
+      const neverCategories = Object.keys(merged).filter((c) => merged[c] === 'never');
+      // The real pay/delete/login/grant floor is ARGS-based (e.g. a
+      // browser.click_role on "Place order") — the core's substring match on
+      // category/tool name alone cannot see it, so compute the same verdict
+      // the runtime floor backstop uses and feed it in as isFloorAction. The
+      // backstop deliberately defers to this gate for 'ask' tools, so this is
+      // where the floor must beat category-auto.
+      const floorVerdict = constraintBlocksToolCall(context.userConstraints ?? null, tool, args);
+      const categoryDecision = resolveApprovalDecision({
+        toolApprovalMode: policy.approvalMode,
+        mutatesState: policy.mutatesState,
+        externalSideEffect: policy.externalSideEffect,
+        category: autoApproveCategory,
+        userAutoApprove: autoCategories,
+        userConstraintsBlock: neverCategories,
+        isFloorAction: floorVerdict.floorConfirmRequired ? String(floorVerdict.floorCategory || 'sensitive') : false,
+        tool,
+      });
+      if (categoryDecision.kind === 'auto_approve') categoryAuto = true;
+      if (categoryDecision.kind === 'blocked') {
+        return {
+          approvalId: '',
+          status: 'rejected',
+          message: `${tool} refused: ${categoryDecision.reason}. The tool was not run.`,
+        };
+      }
+      // 'require_approval' → fall through to the standard ask flow below.
+    } catch {
+      // Fail-closed: any unexpected error keeps the normal ask flow.
+    }
+  }
   // Fail-closed (P64, backlog #2): an 'ask' tool with no run context can't have
   // its approval recorded or later verified, so it must NOT execute ungated.
   // The floor backstop (maybeBlockToolByConstraint) already fails closed for
@@ -5631,6 +5856,10 @@ async function maybeRequestToolApproval(
   // ordinary non-floor 'ask' mutations (desktop/browser writes etc.), which
   // previously slipped through here as a silent skip.
   if (!context.runId) {
+    // Without a runId there are no run-scoped rejected/pending rows to
+    // outrank a category the user set to 'auto' — honor it here so no-run
+    // category-auto calls keep executing instead of failing closed.
+    if (categoryAuto) return null;
     return {
       approvalId: '',
       status: 'no_run_context',
@@ -5678,6 +5907,18 @@ async function maybeRequestToolApproval(
       message: decision.message,
     };
   }
+
+  // decision.kind === 'new': no run-scoped rejection (block) or pending row
+  // (defer) claimed precedence — NOW a category the user auto-approved may
+  // skip the approval row (same placement as the cross-run pass below).
+  if (categoryAuto) return null;
+
+  // Before creating a fresh approval row, honor an exact-match approval the
+  // user granted on a PREVIOUS run in the last 15 minutes (approve → retry
+  // turn actually resumes instead of re-asking). The helper consumes the row
+  // (single-use) and records a run-scoped approved copy on THIS run.
+  const crossRunPassId = await findCrossRunApprovedToolPass(context.circleId, title, tool, args, context.runId);
+  if (crossRunPassId) return null;
 
   const toolApprovalKey = buildOpenSwanToolApprovalKey(tool, args);
 

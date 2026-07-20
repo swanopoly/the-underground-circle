@@ -46,6 +46,7 @@ import {
   type FollowupActionKind,
 } from '../src/lib/crossSurfaceFollowupCore';
 import { encodeEntityHandle, decodeEntityHandle } from '../src/lib/entityHandleCore';
+import { deriveOutcomeVerdict } from '../src/lib/chatOutcomeSignals';
 
 let passes = 0;
 let failures = 0;
@@ -522,6 +523,38 @@ function main(): void {
   } catch (e) {
     failures += 1;
     console.error(`FAIL: (HOSTILE) sweep threw: ${(e as Error)?.message}`);
+  }
+
+  // ── ChatTab wiring regression (followup-chips QA finding) ──────────────────
+  // retry_run must be REACHABLE end-to-end. Mirrors ChatTab.addBotMessage's
+  // exact derivation for an error turn with NO recovery options
+  // (extra.hadError === true): deriveOutcomeVerdict → 'failed'; canRetry is
+  // decoupled from hasRecoveryOptions (hadError || hasRecovery) → retry_run
+  // emitted; and ChatTab's visibleFollowupChips suppression predicate (drop
+  // only when item.recoveryOptions is non-empty, deferring to the recovery
+  // card) does NOT fire — so the chip actually renders.
+  {
+    const recoveryOptions: unknown[] = []; // error turn; recovery flow yielded nothing
+    const hadError = true;
+    const hasRecovery = recoveryOptions.length > 0;
+    const verdict = deriveOutcomeVerdict({
+      hadError,
+      hadRecoveryOptions: hasRecovery,
+      approvalPending: false,
+      producedArtifact: false,
+      producedText: true,
+    });
+    assertEq(verdict, 'failed', 'error turn without recovery options → failed verdict');
+    const chips = deriveCrossSurfaceFollowups({
+      verdict,
+      hasRecoveryOptions: hasRecovery,
+      canRetry: hadError || hasRecovery,
+      approvalPending: false,
+    }).followups;
+    const retry = chips.find((f) => f.kind === 'retry_run');
+    assert(!!retry, 'retry_run chip emitted for a plain error turn (canRetry decoupled from recovery options)');
+    const suppressedByRecoveryCard = recoveryOptions.length > 0;
+    assert(!suppressedByRecoveryCard && !!retry, 'retry_run survives ChatTab suppression (no recovery options) → visible chip');
   }
 
   if (failures > 0) {

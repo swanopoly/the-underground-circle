@@ -11,11 +11,13 @@
  * surface, 10px radius, 1px borders. Kind pill uses a fixed accent so
  * users can scan "publish" vs "external_send" quickly.
  */
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, ScrollView } from 'react-native';
 import { useAgentRunApprovals, resolveRunApproval, type AgentRunApproval, type ApprovalKind } from '../services/runApprovalsService';
 import { renderApprovalAction } from '../lib/approvalPayloadRenderer';
 import { classifyApprovalAge, type ApprovalStaleness } from '../lib/approvalPreviewCore';
+import { toolAutoApproveCategory } from '../lib/openswanToolRuntime';
+import { AUTO_APPROVE_CATEGORY_LABELS, writeUserAutoApprove } from '../lib/chatAutoApproveSettings';
 
 // Risk badge (from the approval payload's approvalPreview.risk, set by
 // openswanToolRuntime) so a user sees WHAT they're approving at a glance —
@@ -42,20 +44,51 @@ interface Props {
   circleId: string;
   userId: string;
   accentColor?: string;
+  /**
+   * approval-resume: fires after a resolveRunApproval succeeds, with the full
+   * approval row + the decision. ChatTab uses this to auto-send a continuation
+   * turn ("approval granted — retry that tool call") so Approve actually
+   * resumes the stalled task instead of waiting for the user to type
+   * "continue". Optional/additive — other mounts (OfficeTab) can omit it.
+   */
+  onResolved?: (approval: AgentRunApproval, status: 'approved' | 'rejected') => void;
+  /**
+   * approval-resume: reports the live pending-approval count (including 0) so
+   * the host can reflect "needs your approval" state — e.g. ChatTab's
+   * runStatus pill. Optional/additive.
+   */
+  onPendingChange?: (pendingCount: number) => void;
 }
 
-function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; userId: string; onResolve: (id: string, status: 'approved' | 'rejected') => Promise<void>; }) {
+function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; userId: string; onResolve: (item: AgentRunApproval, status: 'approved' | 'rejected') => Promise<void>; }) {
   const [busy, setBusy] = useState<'approving' | 'rejecting' | null>(null);
+  const [remember, setRemember] = useState(false);
   const accent = KIND_ACCENTS[item.approval_kind] || KIND_ACCENTS.privileged_action;
+
+  // auto-approve-memory: derive the tool's auto-approve category from the
+  // SAME exported helper the tool-loop gate uses (toolAutoApproveCategory),
+  // so ticking the checkbox here is honored by maybeRequestToolApproval on
+  // the next call. Null (uncategorized tool, credential fill, no payload
+  // tool) → no checkbox; those always ask.
+  const rememberCategory = useMemo(() => {
+    const tool = (item.payload as any)?.tool;
+    return typeof tool === 'string' ? toolAutoApproveCategory(tool) : null;
+  }, [item.payload]);
 
   const handle = useCallback(async (status: 'approved' | 'rejected') => {
     setBusy(status === 'approved' ? 'approving' : 'rejecting');
     try {
-      await onResolve(item.id, status);
+      await onResolve(item, status);
+      // "Remember this" — approve + ticked checkbox persists the category as
+      // auto-approved for future tool calls (mirrors HitlApprovalBanner).
+      // Reject + remember is deliberately not offered — never auto-deny.
+      if (status === 'approved' && remember && rememberCategory) {
+        await writeUserAutoApprove(userId, rememberCategory, 'auto').catch(() => {});
+      }
     } finally {
       setBusy(null);
     }
-  }, [item.id, onResolve]);
+  }, [item, onResolve, remember, rememberCategory, userId]);
 
   const ageLabel = useMemo(() => {
     const ms = Date.now() - new Date(item.requested_at).getTime();
@@ -126,6 +159,21 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
       {item.description && item.description !== action.headline ? (
         <Text style={styles.descriptionText} numberOfLines={3}>{item.description}</Text>
       ) : null}
+      {rememberCategory ? (
+        <Pressable
+          onPress={() => setRemember((prev) => !prev)}
+          style={styles.rememberRow}
+          accessibilityRole="button"
+          accessibilityLabel={`Remember: auto-approve ${AUTO_APPROVE_CATEGORY_LABELS[rememberCategory]}`}
+        >
+          <View style={[styles.rememberBox, remember && styles.rememberBoxChecked]}>
+            {remember ? <Text style={styles.rememberCheck}>{'✓'}</Text> : null}
+          </View>
+          <Text style={styles.rememberLabel} numberOfLines={1}>
+            Remember: auto-approve {AUTO_APPROVE_CATEGORY_LABELS[rememberCategory].toLowerCase()}
+          </Text>
+        </Pressable>
+      ) : null}
       <View style={styles.buttonRow}>
         <Pressable
           style={({ pressed }) => [styles.rejectButton, pressed && styles.buttonPressed, busy && styles.buttonDisabled]}
@@ -148,15 +196,23 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
   );
 }
 
-export default function RunApprovalBanner({ circleId, userId }: Props) {
+export default function RunApprovalBanner({ circleId, userId, onResolved, onPendingChange }: Props) {
   const { approvals, pendingCount, refresh } = useAgentRunApprovals(circleId);
 
-  const onResolve = useCallback(async (id: string, status: 'approved' | 'rejected') => {
-    await resolveRunApproval(id, status, userId);
+  // approval-resume: surface the pending count (incl. 0) so the host can
+  // reflect a "needs your approval" state. Must run before the early return
+  // below so a drop back to 0 is still reported.
+  useEffect(() => {
+    onPendingChange?.(pendingCount);
+  }, [pendingCount, onPendingChange]);
+
+  const onResolve = useCallback(async (item: AgentRunApproval, status: 'approved' | 'rejected') => {
+    const result = await resolveRunApproval(item.id, status, userId);
     // Optimistic — realtime will confirm; this keeps the UI snappy if
     // the channel is lagging.
     refresh();
-  }, [userId, refresh]);
+    if (result.ok) onResolved?.(item, status);
+  }, [userId, refresh, onResolved]);
 
   if (pendingCount === 0) return null;
 
@@ -290,6 +346,35 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 6,
     marginTop: 2,
+  },
+  rememberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 2,
+    marginBottom: 8,
+    paddingVertical: 4,
+  },
+  rememberBox: {
+    width: 14,
+    height: 14,
+    borderRadius: 3,
+    borderWidth: 1,
+    borderColor: '#475569',
+    backgroundColor: '#0a0f1c',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rememberBoxChecked: {
+    borderColor: '#22c55e',
+    backgroundColor: '#22c55e22',
+  },
+  rememberCheck: { color: '#22c55e', fontSize: 10, fontWeight: '800', lineHeight: 12 },
+  rememberLabel: {
+    color: '#94a3b8',
+    fontSize: 10,
+    fontFamily: 'monospace',
+    letterSpacing: 0.3,
   },
   rejectButton: {
     flex: 1,

@@ -9,8 +9,10 @@
  * different schemas and different write paths — keeping them separate
  * avoids confusing UI reads with kill-switch rows and vice versa.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { resolveApprovalExpiresAt } from '../lib/chatAttentionQueue';
+import { classifyApprovalAge } from '../lib/approvalPreviewCore';
 
 export type ApprovalKind =
   | 'tool_use'
@@ -56,7 +58,21 @@ export async function getPendingRunApprovals(circleId: string): Promise<AgentRun
     // just doesn't show. Don't crash the chat.
     return [];
   }
-  return (data || []) as AgentRunApproval[];
+  // Nothing sweeps DB rows to status 'expired' (timeout_seconds is stored but
+  // unenforced), so filter dead rows here — mirroring the P12 pattern used for
+  // HitlApprovalBanner — instead of letting a stale pending approval pin
+  // ChatTab's "Needs your approval" pill (and the banner) indefinitely. Doing
+  // it at this single read point keeps the banner list, its pending count,
+  // and the run pill in agreement. Rows with no timeout (timeout <= 0 →
+  // resolveApprovalExpiresAt null) fall back to classifyApprovalAge's 30-min
+  // 'expired' tier as a staleness cap. Hiding a timed-out row only narrows
+  // what can be approved — never widens what executes.
+  const now = Date.now();
+  return ((data || []) as AgentRunApproval[]).filter((row) => {
+    const expiresAt = resolveApprovalExpiresAt(row.requested_at, row.timeout_seconds);
+    if (expiresAt !== null) return expiresAt > now;
+    return classifyApprovalAge(now - Date.parse(row.requested_at)) !== 'expired';
+  });
 }
 
 // ─── Writes ────────────────────────────────────────────────────────
@@ -102,6 +118,13 @@ export function useAgentRunApprovals(circleId?: string): {
 } {
   const [approvals, setApprovals] = useState<AgentRunApproval[]>([]);
 
+  // Per-mount channel-topic suffix. supabase.channel() returns the EXISTING
+  // instance for a duplicate topic, so two mounts (Chat + Office banners) with
+  // a fixed `agent_run_approvals:${circleId}` topic would share one channel and
+  // whichever unmounts first would removeChannel() it out from under the other.
+  // A unique topic per mount gives each hook instance its own channel.
+  const instanceId = useRef(Math.random().toString(36).slice(2)).current;
+
   const refresh = useCallback(async () => {
     if (!circleId) return;
     const rows = await getPendingRunApprovals(circleId);
@@ -114,7 +137,7 @@ export function useAgentRunApprovals(circleId?: string): {
     refresh();
 
     const channel = supabase
-      .channel(`agent_run_approvals:${circleId}`)
+      .channel(`agent_run_approvals:${circleId}:${instanceId}`)
       .on(
         'postgres_changes',
         {

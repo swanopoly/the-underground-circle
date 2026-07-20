@@ -86,6 +86,7 @@ import AssignPickerCard, { type AssignPickerAgent } from './chat/AssignPickerCar
 import BridgeDiagCard from './chat/BridgeDiagCard';
 import PreflightBlockersCard, { type PreflightBlockerItem } from './chat/PreflightBlockersCard';
 import QuickReplyChips from './chat/QuickReplyChips';
+import FollowupChipRow from './chat/FollowupChipRow';
 import ChatAutomationPlanCard from './chat/ChatAutomationPlanCard';
 import { probeBridges, type BridgeProbeResult } from '../../../lib/bridgeHealthDiag';
 import { getBridgeUrl } from '../../../lib/bridgeEnvironment';
@@ -142,6 +143,7 @@ import AnimatedPopup from '../../../components/chat-animations/AnimatedPopup';
 import ThinkingDots from '../../../components/chat-animations/ThinkingDots';
 import ThinkingLabel from '../../../components/chat-animations/ThinkingLabel';
 import { pickThinkingVerb } from '../../../lib/thinkingVerbs';
+import { initStreamHealth, advanceStreamHealth, describeStreamHealth } from '../../../lib/streamHealthCore';
 import ComputerUseConsole from '../../../components/computer-use/ComputerUseConsole';
 import ChatCostFooter from '../../../components/ChatCostFooter';
 import DesktopBridgeStatusChip from '../../../components/DesktopBridgeStatusChip';
@@ -192,7 +194,9 @@ import {
   type ChatSlashCommand,
 } from '../../../lib/chatSlashCommands';
 import { buildEmptyChatSuggestions } from '../../../lib/capabilityOverviewCore';
-import { matchStopResolution as matchChatStopResolution } from '../../../lib/chatStopMessageCore';
+import { matchStopResolution as matchChatStopResolution, resolveChatStopMessage } from '../../../lib/chatStopMessageCore';
+import { assessStreamDegeneracy, describeStreamDegeneracy } from '../../../lib/streamDegeneracyCore';
+import { formatVerificationReceipt } from '../../../lib/verificationReceiptCore';
 import { guardChatSend } from '../../../lib/chatSendGuardCore';
 import ChatArtifacts from '../../../components/chat/ChatArtifacts';
 // V2 Builder adds copy/download/publish toolbar, device frames, and an
@@ -234,6 +238,11 @@ import {
   type ChatOutcomeVerdict,
   type ChatUserSignal,
 } from '../../../lib/chatOutcomeSignals';
+import {
+  deriveCrossSurfaceFollowups,
+  type CrossSurfaceFollowup,
+} from '../../../lib/crossSurfaceFollowupCore';
+import { extractGitReferences } from '../../../lib/taskPRLinkageCore';
 import {
   buildChatInfluenceReferences,
 } from '../../../lib/chatAgentService';
@@ -912,6 +921,11 @@ type ChatMessage = {
    *  tiny enums so it becomes BlackSwan training data. See chatOutcomeSignals. */
   outcomeSignal?: { verdict: ChatOutcomeVerdict; signal?: ChatUserSignal; lane?: string; model?: string } | null;
   quickReplies?: string[];    // tappable suggested replies (e.g. clarification answers)
+  /** Cross-surface follow-up chips (create Feed task / open run / approve /
+   *  retry) derived at finalize time by crossSurfaceFollowupCore. NOT
+   *  persisted — cheap to re-derive and keeps message rows bounded.
+   *  LOCKSTEP: mirrored in src/lib/chatMessageTypes.ts (decomposition U0). */
+  crossSurfaceFollowups?: CrossSurfaceFollowup[];
   delegatedTo?: string;       // subagent that handled this message
   delegatedSubagents?: string[];
   runId?: string | null;
@@ -961,6 +975,14 @@ type ChatBotMessageExtra = {
   quickReplies?: string[];
   localOnly?: boolean;
   runId?: string | null;
+  /**
+   * followup-chips: set true by error-path callers so the outcome verdict can
+   * reach 'failed' (deriveOutcomeVerdict) independently of recoveryOptions —
+   * without it the retry_run chip's emission condition (failed/partial +
+   * canRetry) was exactly its suppression condition (recoveryOptions present)
+   * and the chip was provably unreachable.
+   */
+  hadError?: boolean;
   agentPlan?: AgentPlanDraft | Record<string, unknown>;
   taskPlan?: OpenSwanTaskPlan;
   toolEvents?: OpenSwanToolEvent[];
@@ -1795,6 +1817,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [streamingBuildText, setStreamingBuildText] = useState<string>('');
   const [streamingBuildPhase, setStreamingBuildPhase] = useState<string | null>(null);
   const streamingBuildCleanupRef = useRef<null | (() => void)>(null);
+  // Ownership token for the shared run-UI (runStatus / botTyping / coding
+  // workbench). Each run that establishes that UI bumps the counter and
+  // captures its value; a late terminal (a cancelled stream's catch) only
+  // resets the UI when the counter is unchanged — i.e. no newer run (e.g. a
+  // superseding launchBuildStream) has taken the UI over in the meantime.
+  // A ref-equality check on streamingBuildCleanupRef is NOT enough: the
+  // abort rejection lands within a microtask of cancel(), before
+  // launchBuildStream's awaits finish and it reassigns the ref.
+  const chatUiOwnerRef = useRef(0);
   // Builder revision history — last 10 artifacts per thread, newest-first.
   // Loaded on thread switch; pushed whenever latestBuildArtifact changes.
   const [builderRevisions, setBuilderRevisions] = useState<BuilderRevision[]>([]);
@@ -4003,6 +4034,78 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   const [showRunHistory, setShowRunHistory] = useState(false);
   const [retryingLedgerCheck, setRetryingLedgerCheck] = useState<{ messageId: string; checkId: string } | null>(null);
   const [runStatus, setRunStatus] = useState<'idle' | 'running' | 'delegated' | 'waiting_approval'>('idle');
+  // approval-resume: live pending agent_run_approvals count, reported by the
+  // RunApprovalBanner mount below. When a turn finalizes (runStatus back to
+  // 'idle') while an approval request is still pending, flip the run pill to
+  // 'waiting_approval' ("Needs your approval") instead of sitting silent —
+  // and clear it once the approvals resolve.
+  const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
+  useEffect(() => {
+    if (botTyping) {
+      // A live turn owns the thinking label — never clobber it with the
+      // approval-pill copy, and clear a leftover pill label so an unrelated
+      // turn doesn't "think" under "Needs your approval".
+      if (runStatus === 'waiting_approval' && currentRunStep === 'Needs your approval') {
+        setCurrentRunStep('');
+      }
+      return;
+    }
+    if (pendingApprovalCount > 0 && runStatus === 'idle') {
+      setRunStatus('waiting_approval');
+      setCurrentRunStep('Needs your approval');
+    } else if (pendingApprovalCount === 0 && runStatus === 'waiting_approval') {
+      setRunStatus('idle');
+      setCurrentRunStep('');
+    }
+    // NOTE: `currentRunStep` is intentionally read (not depended on) — it is
+    // declared later in the component, so listing it here would evaluate the
+    // binding during render before initialization (TDZ). The clobber-clear
+    // only needs to run when botTyping/runStatus flip, which are deps.
+  }, [pendingApprovalCount, runStatus, botTyping]);
+  // approval-resume (multi-approve): approving several banner cards must not
+  // launch overlapping continuation turns (or silently drop the second card's
+  // resume behind the send lock / stale-idle runStatus window). Approved-but-
+  // unresumed approvals queue here; ONE combined continuation turn is
+  // dispatched when no send is in flight, and the "resuming" notice prints
+  // only at actual dispatch. Approvals granted while a turn is running are
+  // drained when that turn ends (runStatus idle + typing done), which keeps
+  // them inside the runtime's 15-minute cross-run approval honor window.
+  const queuedApprovalResumesRef = useRef<Array<{ id: string; tool: string }>>([]);
+  const approvalResumeInFlightRef = useRef(false);
+  const flushQueuedApprovalResumesRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    if (runStatus === 'idle' && !botTyping) {
+      approvalResumeInFlightRef.current = false;
+      flushQueuedApprovalResumesRef.current();
+    }
+  }, [runStatus, botTyping]);
+  // Re-assigned every render so the drain effect and the banner's onResolved
+  // always invoke the freshest closure (addBotMessage/sendMessage are declared
+  // later in this component; they are only dereferenced at call time, after
+  // render, so the late declaration is safe).
+  flushQueuedApprovalResumesRef.current = () => {
+    if (queuedApprovalResumesRef.current.length === 0) return;
+    // One continuation at a time — the in-flight ref is synchronous, so a
+    // second Approve tapped inside the stale-idle window (before
+    // setRunStatus('running') commits) still queues instead of double-sending.
+    if (approvalResumeInFlightRef.current) return;
+    // A live loop picks run-scoped approvals up on its next round by itself;
+    // the turn-end drain effect above flushes anything still queued.
+    if (runStatus === 'running' || runStatus === 'delegated' || botTyping) return;
+    // A send is mid-dispatch (350ms lock window): don't collide into
+    // sendMessage's silent return — the turn-end drain will retry.
+    if (sendLockRef.current) return;
+    const queued = queuedApprovalResumesRef.current.splice(0, queuedApprovalResumesRef.current.length);
+    approvalResumeInFlightRef.current = true;
+    const toolLabels = Array.from(new Set(queued.map((q) => q.tool)));
+    // The "resuming" notice prints ONLY at actual dispatch — never before a
+    // guard that could silently drop the continuation.
+    addBotMessage(`✅ Approval${queued.length > 1 ? 's' : ''} granted — resuming ${toolLabels.join(', ')} now.`, undefined, { localOnly: true });
+    const lines = queued.map((q) => `Approval ${q.id.slice(0, 8)} for ${q.tool} was granted.`);
+    void sendMessage(
+      `${lines.join(' ')} For each approved tool call that has not already executed since its approval, retry that exact call with the same arguments now — skip any that already completed. Then continue the task.`,
+    );
+  };
   // Drives the rotating "is noodling / is pondering / is cooking …"
   // verbs in the typing indicator. Ticks only while the bot is
   // actually typing so the interval doesn't run forever in the
@@ -4010,7 +4113,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // always sees the full rotation from the start.
   const [thinkingVerbIndex, setThinkingVerbIndex] = useState(0);
   useEffect(() => {
-    if (!botTyping || runStatus !== 'idle') {
+    // 'waiting_approval' must not freeze the rotation: an unrelated pending
+    // approval pins runStatus there while ordinary turns still type (many
+    // paths never set 'running'), and the typing indicator renders for both.
+    if (!botTyping || (runStatus !== 'idle' && runStatus !== 'waiting_approval')) {
       setThinkingVerbIndex(0);
       return;
     }
@@ -4655,6 +4761,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // all three paths behave identically (same UI, same error handling).
   const launchBuildStream = useCallback(async (brief: string, systemExtra?: string, friendlyLabel?: string) => {
     const display = friendlyLabel || brief;
+    // Take ownership of the shared run-UI SYNCHRONOUSLY (before any await)
+    // so a chat stream we are about to cancel below can't tear down the
+    // typing indicator / workbench its late catch would otherwise reset.
+    chatUiOwnerRef.current += 1;
     startCodingWorkbench(`/build-page ${display}`);
     setBotTyping(true);
     setStreamingBuildText('');
@@ -5523,6 +5633,48 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     };
     const messageAgentSubjectMetadata = extra?.agentSubjectMetadata
       || selectedAgentSubjectContext.agentSubjectMetadata;
+    // Flywheel: derive the outcome verdict from the data already in scope so
+    // it can be stamped onto the row once persisted (Cursor-Tab precedent).
+    // Deterministic + fail-safe: recovery affordances => partial, an approval/
+    // blocker gate => blocked, clean artifact/text => completed. Hoisted ABOVE
+    // the message literal so the cross-surface follow-up chips derived from it
+    // ride the same setMessages render below.
+    const followupApprovalPending = extra?.chatAutomationPlanPreview?.approvalRequired === true
+      || (extra?.computerPreflightBlockers?.items?.length || 0) > 0;
+    const followupHasRecovery = (extra?.recoveryOptions?.length || 0) > 0;
+    const followupHadError = extra?.hadError === true;
+    const finalizeVerdict = deriveOutcomeVerdict({
+      hadError: followupHadError,
+      hadRecoveryOptions: followupHasRecovery,
+      approvalPending: followupApprovalPending,
+      producedArtifact: (artifacts?.length || 0) > 0
+        || (extra?.browserPlans?.length || 0) > 0
+        || (extra?.computerFindings?.items?.length || 0) > 0
+        || (extra?.bestOfN?.candidates?.length || 0) > 0,
+      producedText: (content || '').trim().length > 0,
+    });
+    // crossSurfaceFollowupCore: turn the finalized structural outcome into a
+    // ranked chip row (FollowupChipRow) so a finished turn doesn't dead-end in
+    // chat. Mission/task handles are deliberately omitted — ChatTab has no
+    // thread→mission binding today — so the live chip set is create_feed_task,
+    // retry_run, request_approval, open_run. NOT persisted (derivable; keeps
+    // message rows bounded).
+    const crossSurfaceFollowups = deriveCrossSurfaceFollowups({
+      verdict: finalizeVerdict,
+      artifactCount: artifacts?.length || 0,
+      hasBrowserProof: (extra?.browserPlans?.length || 0) > 0
+        || (extra?.computerFindings?.items?.length || 0) > 0,
+      gitReferences: extractGitReferences({ deliverable: content, toolEvents: extra?.toolEvents }),
+      contextRun: extra?.runId ? { kind: 'run', id: extra.runId } : null,
+      hasRecoveryOptions: followupHasRecovery,
+      // Decoupled from hasRecoveryOptions: an error turn is retryable even
+      // when the recovery flow produced no options. When recoveryOptions ARE
+      // present, visibleFollowupChips defers to the recovery card and drops
+      // the retry chip — so this independent signal is what makes retry_run
+      // reachable at all (error, no recovery options → visible chip).
+      canRetry: followupHadError || followupHasRecovery,
+      approvalPending: followupApprovalPending,
+    }).followups;
     const msg: ChatMessage = {
       id: msgId,
       content,
@@ -5556,6 +5708,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       computerFindings: extra?.computerFindings,
       bestOfN: extra?.bestOfN,
       quickReplies: autoQuickReplies,
+      crossSurfaceFollowups: crossSurfaceFollowups.length > 0 ? crossSurfaceFollowups : undefined,
       taskPlan: extra?.taskPlan,
       toolEvents: extra?.toolEvents,
       verificationResults: extra?.verificationResults,
@@ -5597,21 +5750,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (messageThreadId) {
       saveRecoverableChatMessage(messageThreadId, msg);
     }
-    // Flywheel: derive the outcome verdict from the data already in scope so
-    // it can be stamped onto the row once persisted (Cursor-Tab precedent).
-    // Deterministic + fail-safe: recovery affordances => partial, an approval/
-    // blocker gate => blocked, clean artifact/text => completed.
-    const finalizeVerdict = deriveOutcomeVerdict({
-      hadError: false,
-      hadRecoveryOptions: (extra?.recoveryOptions?.length || 0) > 0,
-      approvalPending: extra?.chatAutomationPlanPreview?.approvalRequired === true
-        || (extra?.computerPreflightBlockers?.items?.length || 0) > 0,
-      producedArtifact: (artifacts?.length || 0) > 0
-        || (extra?.browserPlans?.length || 0) > 0
-        || (extra?.computerFindings?.items?.length || 0) > 0
-        || (extra?.bestOfN?.candidates?.length || 0) > 0,
-      producedText: (content || '').trim().length > 0,
-    });
+    // (finalizeVerdict is derived above the message literal so the follow-up
+    // chips could reuse it; it is stamped onto the persisted row below.)
     if (currentUserId && messageThreadId) {
       persistChatTabBotMessageWithRetry({
         circleId,
@@ -5769,6 +5909,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     });
     addBotMessage(`${details.title}: ${failureMessage}${recovery.message}`, undefined, {
       localOnly: true,
+      hadError: true,
       recoveryOptions: recovery.recoveryOptions,
       recoveryReliability: recovery.recoveryReliability,
       source: details.messageSource || {
@@ -9835,6 +9976,19 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               let streamPendingMsg: ReturnType<typeof addPendingBotMessage> | null = null;
               let streamSourceForRecovery: ChatMessageSource | null = null;
               let streamInterruptedResult: import('../../../lib/swanbotStream').StreamChatResult | undefined;
+              // Degeneracy cutoff: when the mid-stream loop detector trips, this
+              // carries the calm user-facing one-liner into the interrupted
+              // branch below (so the partial gets stuck_loop copy, not the
+              // generic "connection dropped" wording).
+              let streamDegeneracyStop: string | null = null;
+              // Stream-liveness: the handle's cancel fn, hoisted so the catch
+              // can clear streamingBuildCleanupRef ONLY when it still points at
+              // THIS stream (launchBuildStream can overwrite the shared ref).
+              let streamHandleCancel: (() => void) | null = null;
+              // Run-UI ownership token captured when this stream establishes
+              // runStatus/botTyping; the catch's UI resets are gated on the
+              // counter still matching (see chatUiOwnerRef).
+              let streamUiOwner = 0;
               try {
                 const { buildStreamableSystemPrompt } = await import('../../../lib/swanbot');
                 const { streamChatResponse } = await import('../../../lib/swanbotStream');
@@ -9884,9 +10038,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     streamTools = undefined;
                   }
                 }
-                const pendingMsg = addPendingBotMessage('');
+                // Stream-liveness (a): seed the bubble with a thinking verb —
+                // an empty-string bubble reads as dead air until the first
+                // token. onDelta below replaces the content wholesale, so the
+                // seed never mixes with real output.
+                const pendingMsg = addPendingBotMessage(`${pickThinkingVerb(Math.floor(Date.now() / 1500))}…`);
                 streamPendingMsgId = pendingMsg.id;
                 streamPendingMsg = pendingMsg;
+                streamUiOwner = ++chatUiOwnerRef.current;
                 setRunStatus('running');
                 let accumulated = '';
                 let streamingUsage: SwanBotStructuredResponse['usage'] | undefined;
@@ -9904,6 +10063,43 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 };
                 streamSourceForRecovery = streamSource;
                 await new Promise<void>((resolve, reject) => {
+                  // Stream-liveness (b): streamHealthCore watchdog. Pure
+                  // byte-truth transport state machine — handshake/byte events
+                  // stamp the idle clock; a ~5s idle tick escalates
+                  // healthy → slow → stalled so the UI tells the truth about a
+                  // silently hung SSE feed instead of rotating verbs forever.
+                  let healthState = initStreamHealth();
+                  let healthInterval: ReturnType<typeof setInterval> | null = null;
+                  let healthStepShown = false;
+                  let settledStream = false;
+                  // Degeneracy cutoff: open/fine-tuned models can lock into a
+                  // repetition loop while the transport stays perfectly healthy.
+                  // Check the accumulated text every ~1500 new chars; on a
+                  // degenerate verdict cut the stream off instead of filling
+                  // the bubble to max_tokens. `degeneracyStopped` also makes
+                  // onDelta a no-op afterwards (swanbotStream's coalesce
+                  // setTimeout can still fire once post-cancel).
+                  let degeneracyStopped = false;
+                  let lastDegeneracyCheckLen = 0;
+                  const clearHealthWatchdog = () => {
+                    if (healthInterval) { clearInterval(healthInterval); healthInterval = null; }
+                    if (healthStepShown) { healthStepShown = false; setCurrentRunStep(''); }
+                  };
+                  // Single settle chokepoint: EVERY terminal (done, error,
+                  // cancel, stall) clears the interval + the health run-step so
+                  // no timer outlives the stream.
+                  const settleResolve = () => {
+                    if (settledStream) return;
+                    settledStream = true;
+                    clearHealthWatchdog();
+                    resolve();
+                  };
+                  const settleReject = (err: Error) => {
+                    if (settledStream) return;
+                    settledStream = true;
+                    clearHealthWatchdog();
+                    reject(err);
+                  };
                   const handle = streamChatResponse({
                     messages: [
                       { role: 'system', content: systemPrompt },
@@ -9915,9 +10111,54 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     // treats an absent/empty `tools` as the unchanged text-only
                     // request, so the default flag-off path sends no tools.
                     ...(streamTools ? { tools: streamTools } : {}),
+                    // Exact handshake instant (200 + readable body): start the
+                    // idle clock here so pre-handshake auth/fetch time can never
+                    // be misread as a stall.
+                    onOpen: () => {
+                      healthState = advanceStreamHealth(healthState, { kind: 'handshake', nowMs: Date.now() });
+                    },
                     onDelta: (text) => {
+                      // Settled terminal (degeneracy stop, cancel, stall):
+                      // ignore late/coalesced deltas. swanbotStream's 80ms
+                      // coalesce timer can fire once post-cancel and would
+                      // otherwise clobber the interrupted-notice bubble the
+                      // catch just wrote.
+                      if (degeneracyStopped || settledStream) return;
+                      const prevHealth = healthState.health;
+                      healthState = advanceStreamHealth(healthState, { kind: 'byte', nowMs: Date.now() });
+                      // Recovery edge: a byte after slow/stalled copy clears it.
+                      if (healthStepShown && (prevHealth === 'slow' || prevHealth === 'stalled') && healthState.health === 'streaming') {
+                        healthStepShown = false;
+                        setCurrentRunStep('');
+                      }
                       accumulated += text;
                       streamAccumulated = accumulated;
+                      // Degeneracy cutoff: cheap periodic check (pure core,
+                      // conservative by construction — only egregious loops
+                      // trip it). On a degenerate verdict, classify the
+                      // terminal as `interrupted` FIRST so the catch's
+                      // partial-preserving branch keeps the good prefix
+                      // instead of the bubble-deleting batch fallback
+                      // silently re-running the whole turn.
+                      if (accumulated.length - lastDegeneracyCheckLen >= 1500) {
+                        lastDegeneracyCheckLen = accumulated.length;
+                        const verdict = assessStreamDegeneracy(accumulated);
+                        if (verdict.degenerate) {
+                          degeneracyStopped = true;
+                          streamDegeneracyStop = describeStreamDegeneracy(verdict)
+                            || 'The response started repeating itself, so I stopped it early.';
+                          streamInterruptedResult = {
+                            toolUses: [],
+                            stopReason: null,
+                            status: 'interrupted',
+                            incomplete: true,
+                            interruptReason: 'error_event',
+                          };
+                          try { handle.cancel(); } catch { /* already closed */ }
+                          settleReject(new Error(streamDegeneracyStop));
+                          return;
+                        }
+                      }
                       updateBotMessage(pendingMsg.id, { content: accumulated, isPending: false });
                     },
                     onUsage: (usage) => {
@@ -9932,20 +10173,93 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                         streamToolUses = result.toolUses;
                         streamStopReason = result.stopReason;
                       }
-                      resolve();
+                      settleResolve();
                     },
                     // W5 (P39): the second argument carries the interrupted
                     // terminal result (partial toolUses/stopReason) — capture
                     // it so the catch can tell pre-handshake from mid-stream.
                     onError: (msg, result) => {
                       streamInterruptedResult = result;
-                      reject(new Error(msg));
+                      settleReject(new Error(msg));
                     },
                   });
+                  streamHandleCancel = handle.cancel;
+                  // Stream-liveness: baseline handshake stamp at handle
+                  // creation. The fetch has no timeout, so a connection that
+                  // hangs BEFORE the 200/SSE handshake never fires
+                  // onOpen/onError — without this stamp lastByteAtMs stays
+                  // null, idle ticks no-op forever, and a pre-handshake hang
+                  // wedges the run. The onOpen re-stamp above keeps
+                  // exact-timing accuracy once the handshake really lands.
+                  healthState = advanceStreamHealth(healthState, { kind: 'handshake', nowMs: Date.now() });
+                  // Stream-liveness (c): cancel wedge fix. swanbotStream's
+                  // cancel terminals resolve `done` to null WITHOUT firing
+                  // onDone/onError, so a cancelled stream used to leave this
+                  // Promise pending forever (wedged runStatus + typing dots).
+                  // A pre-stream error also resolves null, but its onError has
+                  // already rejected synchronously, so this reject is a no-op.
+                  void handle.done.then((r) => {
+                    if (r !== null) return;
+                    if (accumulated.length > 0 && !streamInterruptedResult) {
+                      // Partial text is on screen — classify as interrupted so
+                      // the catch's partial-preserving branch keeps it. Never
+                      // overwrite an existing classification: the degeneracy
+                      // stop stamps 'error_event' before cancelling, and this
+                      // null-terminal must not relabel it 'broken_pipe'.
+                      streamInterruptedResult = {
+                        toolUses: [],
+                        stopReason: null,
+                        status: 'interrupted',
+                        incomplete: true,
+                        interruptReason: 'broken_pipe',
+                      };
+                    }
+                    settleReject(new Error('stream cancelled'));
+                  });
+                  // Idle watchdog: ~5s ticks measure silence against the
+                  // phase-aware budgets (generous pre-first-token TTFT, tighter
+                  // inter-token) and surface truthful slow/stalled copy.
+                  // Guarded on settledStream: a synchronous pre-stream error
+                  // (e.g. strict local-AI block) settles DURING the
+                  // streamChatResponse() call above — the settle chokepoint
+                  // has already cleared a still-null healthInterval, so
+                  // creating the interval here would leak it forever.
+                  healthInterval = settledStream ? null : setInterval(() => {
+                    healthState = advanceStreamHealth(healthState, { kind: 'idle_tick', nowMs: Date.now() });
+                    const health = healthState.health;
+                    if (health === 'stalled') {
+                      if (accumulated.length > 0) {
+                        // Route through the partial-preserving interrupted
+                        // branch below (never the bubble-deleting batch retry).
+                        streamInterruptedResult = {
+                          toolUses: [],
+                          stopReason: null,
+                          status: 'interrupted',
+                          incomplete: true,
+                          interruptReason: 'broken_pipe',
+                        };
+                      }
+                      // No output yet → leave streamInterruptedResult unset so
+                      // the terminal classifies 'failed' (retry-safe batch
+                      // fallback: nothing was delivered).
+                      try { handle.cancel(); } catch { /* already closed */ }
+                      settleReject(new Error('Stream stalled — no bytes from the model for too long'));
+                      return;
+                    }
+                    if (health === 'slow') {
+                      healthStepShown = true;
+                      setCurrentRunStep(describeStreamHealth('slow'));
+                      if (accumulated === '') {
+                        updateBotMessage(pendingMsg.id, { content: describeStreamHealth('slow') });
+                      }
+                    }
+                  }, 5000);
                   // Store cancel handle in case we need to abort
                   streamingBuildCleanupRef.current = handle.cancel;
                 });
-                streamingBuildCleanupRef.current = null;
+                if (streamingBuildCleanupRef.current === streamHandleCancel) {
+                  streamingBuildCleanupRef.current = null;
+                }
                 // Phase 2 seam (DEFAULT OFF): if this escalation-capable stream
                 // produced a tool_use (or stopped with stop_reason==='tool_use'),
                 // upgrade THIS turn into the OpenSwan tool loop, reusing every
@@ -10067,7 +10381,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     recordChatLaneOutcomeNow(laneOutcome);
                   } catch {}
                   if (laneOutcome.status === 'interrupted' && streamAccumulated.length > 0) {
-                    const interruptedContent = `${streamAccumulated}\n\n⚠️ _Stream interrupted — the answer above may be incomplete. Say "continue" to pick up from here._`;
+                    // Degeneracy cutoff: this stop was OURS (looping content,
+                    // healthy transport) — use the stuck_loop copy instead of
+                    // the generic "stream interrupted / say continue" wording;
+                    // continuing a degenerate answer would resume the loop.
+                    const interruptedContent = streamDegeneracyStop
+                      ? `${streamAccumulated}\n\n⚠️ _${streamDegeneracyStop} ${resolveChatStopMessage('stuck_loop').message}_`
+                      : `${streamAccumulated}\n\n⚠️ _Stream interrupted — the answer above may be incomplete. Say "continue" to pick up from here._`;
                     const interruptedSource: ChatMessageSource = streamSourceForRecovery || {
                       actor: agentName,
                       surface: 'main_chat_stream',
@@ -10119,16 +10439,47 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                         },
                       });
                     }
-                    streamingBuildCleanupRef.current = null;
-                    setRunStatus('idle');
-                    setBotTyping(false);
-                    stopCodingWorkbench();
+                    if (streamingBuildCleanupRef.current === streamHandleCancel) {
+                      streamingBuildCleanupRef.current = null;
+                    }
+                    // Ownership guard: only reset the shared run-UI when no
+                    // newer run (e.g. a superseding build stream) owns it.
+                    if (chatUiOwnerRef.current === streamUiOwner) {
+                      setRunStatus('idle');
+                      setBotTyping(false);
+                      stopCodingWorkbench();
+                    }
                     return;
                   }
                 } catch (boundaryErr) {
                   // The boundary is observability + a stop decision — its own
                   // failure must never take down the legacy fallback.
                   console.warn('[ChatTab] lane-outcome normalize failed:', boundaryErr);
+                }
+                // Stream-liveness (c): explicit cancellation is NON-retryable —
+                // re-running the turn as batch would resurrect a request the
+                // user (or a superseding build stream) just stopped. A partial
+                // answer was already preserved by the interrupted branch above
+                // (the done-null wedge fix stamps an interrupted result when
+                // text exists); with zero output, drop the orphan bubble and
+                // reset the run UI.
+                if (streamErr instanceof Error && streamErr.message === 'stream cancelled') {
+                  if (streamPendingMsgId && streamAccumulated.length === 0) {
+                    const orphanId = streamPendingMsgId;
+                    setMessages(prev => prev.filter((message) => message.id !== orphanId));
+                    if (activeThreadId) void removePendingBotMessage(activeThreadId, orphanId).catch(() => {});
+                  }
+                  if (streamingBuildCleanupRef.current === streamHandleCancel) {
+                    streamingBuildCleanupRef.current = null;
+                  }
+                  // Ownership guard: only reset the shared run-UI when no
+                  // newer run (e.g. a superseding build stream) owns it.
+                  if (chatUiOwnerRef.current === streamUiOwner) {
+                    setRunStatus('idle');
+                    setBotTyping(false);
+                    stopCodingWorkbench();
+                  }
+                  return;
                 }
                 // P62: pre-handshake failure / zero-text interruption → batch
                 // fallback. Remove the stream's empty pending bubble first —
@@ -10253,11 +10604,22 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               .filter((e) => e.status === 'passed')
               .map((e) => e.summary)
               .filter(Boolean);
-            const botResponse = (structured.response && structured.response.trim())
+            // Verification receipt (honest proof-of-work): the typed tool
+            // loop already computed "edited N files · checks passed ·
+            // committed sha" — surface the bounded summary line at the top
+            // of the answer instead of leaving it buried in the hidden
+            // agent_run_events table.
+            const verificationReceiptLine = structured.verificationReceipt
+              ? formatVerificationReceipt(structured.verificationReceipt)
+              : '';
+            const baseBotResponse = (structured.response && structured.response.trim())
               ? structured.response
               : (successfulToolSummaries.length > 0
                   ? `Done:\n- ${successfulToolSummaries.join('\n- ')}`
                   : '');
+            const botResponse = verificationReceiptLine
+              ? [verificationReceiptLine, baseBotResponse].filter(Boolean).join('\n\n')
+              : baseBotResponse;
             const { wikiRefs, researchRefs } = await buildChatInfluenceReferences({
               prompt: cleanContent,
               response: botResponse,
@@ -10347,6 +10709,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   browserPlans: structured.browserPlans,
                   browserPlanEvents: structured.browserPlanEvents,
                   routing: structured.routing,
+                  // Bounded at persist time by compactVerificationReceipt
+                  // (40 files / 20 checks) so message rows stay small.
+                  verificationReceipt: structured.verificationReceipt || undefined,
                 },
                 onError: (error) => {
                   console.error('[ChatTab] Unexpected error persisting bot msg:', error);
@@ -10421,6 +10786,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             } else {
               addBotMessage(appendCustomerSafeRecoveryMessage(`${errorMessage} Technical details were saved for recovery.`, recovery.message), undefined, {
                 localOnly: true,
+                hadError: true,
                 recoveryOptions: recovery.recoveryOptions,
                 recoveryReliability: recovery.recoveryReliability,
                 source: errorSource,
@@ -11726,6 +12092,82 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return curr.timestamp.getTime() - prev.timestamp.getTime() < 300000;
   };
 
+  // followup-chips: dispatch one tapped cross-surface follow-up chip
+  // (FollowupChipRow). create_feed_task mirrors /mission create's pending-key
+  // + event + tab-switch pattern (missionChatCommands) so FeedTab's already
+  // -listening uc:open-task-create consumer opens CreateTaskModal pre-filled;
+  // Office-surface chips ride the existing uc:switch-tab event; retry seeds
+  // the composer with the prior user prompt (onRaceAgain pattern).
+  const handleFollowupChipPress = (followup: CrossSurfaceFollowup, item: ChatMessage) => {
+    const goTab = (tab: string) => {
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab } })); } catch {}
+        return;
+      }
+      try {
+        navigation.setParams?.({ tab, _tabTs: Date.now() });
+      } catch {
+        navigation.navigate?.('CircleDetail', { circleId, tab, _tabTs: Date.now() });
+      }
+    };
+    switch (followup.kind) {
+      case 'create_feed_task': {
+        const title = (followup.seedCommand || '').replace(/^\/task new\s*/i, '').trim();
+        if (Platform.OS === 'web' && typeof window !== 'undefined') {
+          try { window.localStorage.setItem('uc_pending_task_create', title); } catch {}
+          try { window.dispatchEvent(new CustomEvent('uc:open-task-create', { detail: { title } })); } catch {}
+        }
+        // Native has no uc:open-task-create listener; landing on FEED is the
+        // best-effort equivalent there.
+        goTab('FEED');
+        return;
+      }
+      case 'open_run':
+      case 'request_approval':
+        goTab('OFFICE');
+        return;
+      case 'retry_run': {
+        const priorPrompt = findPriorUserPromptForMessage(messages, item.id);
+        if (priorPrompt) {
+          setInput(priorPrompt);
+          inputRef.current?.focus();
+        } else if (followup.handle) {
+          goTab('OFFICE');
+        } else {
+          inputRef.current?.focus();
+        }
+        return;
+      }
+      default: {
+        // Future kinds (mission/room/task handles are not derived in ChatTab
+        // today): seed the command when one exists, else open the surface.
+        if (followup.seedCommand) {
+          setInput(followup.seedCommand);
+          inputRef.current?.focus();
+        } else if (followup.surface === 'feed') goTab('FEED');
+        else if (followup.surface === 'rooms') goTab('ROOMS');
+        else if (followup.surface === 'office') goTab('OFFICE');
+      }
+    }
+  };
+
+  // followup-chips: suppress the retry chip when the message already renders a
+  // retry affordance — the recovery-options card or AgentReceiptCard's Retry
+  // button (prior prompt + failed/partial/blocked verdict, mirroring the
+  // receipt's own canRetry gate in renderContent).
+  const visibleFollowupChips = (item: ChatMessage): CrossSurfaceFollowup[] => {
+    const chips = item.crossSurfaceFollowups || [];
+    if (chips.length === 0) return chips;
+    return chips.filter((chip) => {
+      if (chip.kind !== 'retry_run') return true;
+      if ((item.recoveryOptions?.length || 0) > 0) return false;
+      const verdict = item.outcomeSignal?.verdict;
+      const receiptRetries = (verdict === 'failed' || verdict === 'partial' || verdict === 'blocked')
+        && !!findPriorUserPromptForMessage(messages, item.id);
+      return !receiptRetries;
+    });
+  };
+
   // ─── Render Message ──────────────────────────────────────────────────────
 
   const renderMessage = ({ item, index }: { item: ChatMessage; index: number }) => {
@@ -11878,6 +12320,17 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 replies={item.quickReplies}
                 accentColor={accentColor}
                 onPick={(reply) => { void sendMessage(reply); }}
+              />
+            ) : null}
+            {item.crossSurfaceFollowups && item.crossSurfaceFollowups.length > 0 ? (
+              /* followup-chips: cross-surface follow-up row derived by
+                 crossSurfaceFollowupCore at finalize time — create Feed task /
+                 open run / approve / retry. Renders null when the retry
+                 suppression filter empties the set. */
+              <FollowupChipRow
+                followups={visibleFollowupChips(item)}
+                accentColor={accentColor}
+                onPress={(followup) => handleFollowupChipPress(followup, item)}
               />
             ) : null}
             {item.isBot ? (
@@ -12707,7 +13160,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           instead of reading a static "is working" line. The dot pulses
           via the shared `uc-tab-dot-pulse` keyframe used on tab dots
           elsewhere (sibling of the Quick Actions button-dot pattern). */}
-      {botTyping && runStatus === 'idle' && (
+      {botTyping && (runStatus === 'idle' || runStatus === 'waiting_approval') && (
         <>
           {codingWorkbenchPrompt && !showWorkbenchSidecar && (
             <CodingWorkbenchPreview
@@ -13612,9 +14065,44 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
       {/* HITL pending approvals — v2 M3d writes to agent_run_approvals
           from `approvals.request`; surface inline so users can
-          approve/reject without leaving chat. */}
+          approve/reject without leaving chat. approval-resume: when the
+          user approves after the turn already finalized, auto-send a
+          continuation turn so the agent actually retries the gated tool
+          (cross-run approval honor in the runtime makes it pass) instead
+          of waiting for the user to guess they should type "continue". */}
       {currentUserId ? (
-        <RunApprovalBanner circleId={circleId} userId={currentUserId} accentColor={accentColor} />
+        <RunApprovalBanner
+          circleId={circleId}
+          userId={currentUserId}
+          accentColor={accentColor}
+          onPendingChange={setPendingApprovalCount}
+          onResolved={(approval, status) => {
+            if (status !== 'approved') return;
+            // Ownership gate (fail closed): getPendingRunApprovals is
+            // circle-wide, so this banner also shows approvals filed by
+            // OpenSwan console sessions, Office runs, automation-executor and
+            // other members' agents. Those origin runs resume THEMSELVES via
+            // the run-scoped approval pass — a chat continuation for a tool
+            // call this chat never made would double-execute it (cross-run
+            // honor) or mutate with improvised arguments. Only auto-resume
+            // when the approval's run is one this chat surface originated —
+            // i.e. its run_id is stamped on one of our own messages. (A
+            // payload surface tag is NOT trusted here: OpenSwanConsole also
+            // runs under surface 'main_chat', so a tag can't distinguish this
+            // tab from a console session.) Rows without a matching run just
+            // show the banner (fail closed — no auto-resume).
+            const approvalPayload = (approval.payload || null) as Record<string, unknown> | null;
+            const isChatOwnedRun = !!approval.run_id && messages.some((m) => m.runId === approval.run_id);
+            if (!isChatOwnedRun) return;
+            const payloadTool = approvalPayload?.tool;
+            const toolName = typeof payloadTool === 'string' && payloadTool ? payloadTool : 'the approved action';
+            // Multi-approve safety: queue + single combined continuation via
+            // the flush ref (declared next to the run pill state). Approvals
+            // granted mid-turn drain when the turn ends.
+            queuedApprovalResumesRef.current.push({ id: approval.id, tool: toolName });
+            flushQueuedApprovalResumesRef.current();
+          }}
+        />
       ) : null}
 
       <EnhancedInput

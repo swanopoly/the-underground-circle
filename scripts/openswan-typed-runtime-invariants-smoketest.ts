@@ -8,9 +8,10 @@
  *   OST-G2 — the session runtime keeps the wired/dark seam split of 2026-07-01
  *            (f9c9a0b): the T2 progressive-disclosure seam is LIVE
  *            (getProgressiveOpenSwanTools called, resolveAdditionalTools passed
- *            into the typed-core run) while T8 parallelism stays dark
- *            (parallelToolConcurrency pinned to 1; toolParallelPolicyProvider
- *            comment-only).
+ *            into the typed-core run) while T8 PARALLELISM stays dark
+ *            (parallelToolConcurrency pinned to 1). Since 2026-07-20 the
+ *            toolParallelPolicyProvider itself is LIVE — supplied for
+ *            replay-safety side-effect classification only, not concurrency.
  *   OST-G3 — agentExecutionCore.runAgent advertises an additive-only tool set:
  *            without resolveAdditionalTools the set is identical turn-over-turn;
  *            with one it only GROWS (never shrinks).
@@ -135,7 +136,14 @@ assert(
   sessionSrc.split('\n').some((l) => l.trim() === 'resolveAdditionalTools,'),
   'resolveAdditionalTools is passed LIVE into the typed-core run (wired 2026-07-01)',
 );
-assert(allMentionsAreComments(sessionSrc, 'toolParallelPolicyProvider'), 'toolParallelPolicyProvider is comment-only in session runtime (dark)');
+// Replay-safety wire (2026-07-20): the T8 policy provider is now passed LIVE —
+// for side-effect CLASSIFICATION (toolReplaySafetyCore's verify-first gate on
+// failed mutating tools), not parallelism: parallelToolConcurrency stays
+// pinned to 1 (asserted above) so dispatch order is unchanged.
+assert(
+  hasLiveMention(sessionSrc, 'toolParallelPolicyProvider: createOpenSwanToolParallelPolicyProvider('),
+  'toolParallelPolicyProvider is passed LIVE into the typed-core run (replay-safety classification, 2026-07-20)',
+);
 
 // ── OST-G4: typed run-ledger token rollups stay complete ───────────────────
 assert(
