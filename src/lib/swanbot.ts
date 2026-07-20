@@ -2461,6 +2461,25 @@ async function callSwanBotAIStructured(
       if (data.provider_routed) routing.provider_routed = data.provider_routed;
       if (data.provider_model) routing.provider_model = data.provider_model;
       if (data.routing_fallback) routing.routing_fallback = data.routing_fallback;
+      // When the edge/tools produced NO artifacts (marketplace / open / BlackSwan
+      // models that emit only markdown), mine the answer TEXT for reusable
+      // save/copy/apply artifacts — fenced code (+ inferred filename/language), a
+      // validated diff, a command runbook, a link set — so those responses aren't
+      // left with nothing to save. Skipped when the edge already returned artifacts.
+      const { extractResponseArtifacts } = await import('./responseArtifactExtractCore');
+      const minedArtifacts: SwanBotStructuredArtifact[] =
+        data.artifacts && data.artifacts.length
+          ? []
+          : extractResponseArtifacts(data.response).map((a) =>
+              a.kind === 'links'
+                ? { kind: 'summary' as const, title: a.title, content: a.content }
+                : {
+                    kind: 'code' as const,
+                    title: a.title,
+                    content: a.content,
+                    metadata: { language: a.language, fileName: a.suggestedFilename },
+                  },
+            );
       return {
         response: data.response,
         usage: data.usage,
@@ -2469,7 +2488,9 @@ async function callSwanBotAIStructured(
         // from the edge as kind:'code' with metadata.language — upgrade them
         // to kind:'table' (raw csv stays in content). All other artifacts
         // pass through unchanged.
-        artifacts: ((data.artifacts || []) as SwanBotStructuredArtifact[]).map(upgradeCsvCodeArtifactToTable),
+        artifacts: [...((data.artifacts || []) as SwanBotStructuredArtifact[]), ...minedArtifacts].map(
+          upgradeCsvCodeArtifactToTable,
+        ),
         ...(Object.keys(routing).length > 0 ? { routing } : {}),
       };
     }
