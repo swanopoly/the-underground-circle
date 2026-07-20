@@ -14,6 +14,8 @@ import {
   loadAllSkills,
   loadEnabledSkillsForSoul,
 } from '../../../../lib/skillRegistry';
+import { listLibrarySkills, type LibrarySkillMetadata } from '../../../../lib/skillLibrary';
+import { classifySkillPortability, PORTABILITY_LABELS, RISK_COLORS, RISK_LABELS } from '../../../../lib/skillPortabilityHeuristic';
 
 interface Props {
   visible: boolean;
@@ -30,6 +32,7 @@ const COST_COLORS: Record<string, string> = {
 export default function SkillAdminPanel({ visible, circleId, soulKey, userId, onClose }: Props) {
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
   const [enabledIds, setEnabledIds] = useState<Set<string>>(new Set());
+  const [librarySkills, setLibrarySkills] = useState<LibrarySkillMetadata[]>([]);
   const [loading, setLoading] = useState(true);
   const [toggling, setToggling] = useState<string | null>(null);
 
@@ -37,11 +40,12 @@ export default function SkillAdminPanel({ visible, circleId, soulKey, userId, on
     if (!visible) return;
     let cancelled = false;
     setLoading(true);
-    Promise.all([loadAllSkills(), loadEnabledSkillsForSoul(circleId, soulKey)])
-      .then(([all, enabled]) => {
+    Promise.all([loadAllSkills(), loadEnabledSkillsForSoul(circleId, soulKey), listLibrarySkills(circleId)])
+      .then(([all, enabled, library]) => {
         if (cancelled) return;
         setAllSkills(all);
         setEnabledIds(new Set(enabled.map(s => s.id)));
+        setLibrarySkills(library);
       })
       .catch(err => console.warn('[SkillAdminPanel] load failed:', err))
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -134,6 +138,34 @@ export default function SkillAdminPanel({ visible, circleId, soulKey, userId, on
             </ScrollView>
           )}
 
+          {!loading && librarySkills.length > 0 && (
+            <View style={styles.librarySection}>
+              <Text style={styles.libraryTitle}>LIBRARY SKILLS (SKILL.md)</Text>
+              <Text style={styles.libraryHint}>
+                Portability and risk below are a best-effort heuristic guessed from each skill's name/description/tags — not a real classification. Verify by reading the skill before trusting it.
+              </Text>
+              <ScrollView style={{ maxHeight: 200 }} contentContainerStyle={styles.list}>
+                {librarySkills.map(skill => {
+                  const classification = classifySkillPortability(skill);
+                  return (
+                    <View key={skill.id} style={styles.libraryRow}>
+                      <View style={styles.skillHeader}>
+                        <Text style={styles.skillName}>{skill.name}</Text>
+                        <View style={styles.skillBadges}>
+                          <Text style={styles.portabilityBadge}>{PORTABILITY_LABELS[classification.portabilityLabel]}</Text>
+                          <Text style={[styles.riskBadge, { color: RISK_COLORS[classification.risk], borderColor: `${RISK_COLORS[classification.risk]}55`, backgroundColor: `${RISK_COLORS[classification.risk]}12` }]}>
+                            {RISK_LABELS[classification.risk]}
+                          </Text>
+                        </View>
+                      </View>
+                      <Text style={styles.skillDesc}>{skill.description}</Text>
+                    </View>
+                  );
+                })}
+              </ScrollView>
+            </View>
+          )}
+
           <View style={styles.footer}>
             <Text style={styles.footerCount}>{enabledIds.size} skill{enabledIds.size !== 1 ? 's' : ''} enabled</Text>
             <Pressable
@@ -196,6 +228,22 @@ const styles = StyleSheet.create({
   toggleOff: { color: '#64748b', borderColor: '#334155', backgroundColor: '#0f172a' },
   skillDesc: { fontSize: 10, color: '#94a3b8', lineHeight: 14 },
   toolsList: { fontSize: 9, color: '#475569', fontFamily: 'monospace' },
+  librarySection: { gap: 6, borderTopWidth: 1, borderTopColor: '#1e293b', paddingTop: 10, marginTop: 2 },
+  libraryTitle: { color: '#f8fafc', fontSize: 10, fontWeight: '900', letterSpacing: 1.2, fontFamily: 'monospace' },
+  libraryHint: { color: '#5b6b82', fontSize: 9, lineHeight: 13, fontStyle: 'italic' },
+  libraryRow: {
+    padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#1e293b',
+    backgroundColor: '#0b1220', gap: 4,
+  },
+  portabilityBadge: {
+    fontSize: 8, fontWeight: '900', letterSpacing: 0.5, fontFamily: 'monospace',
+    color: '#94a3b8', borderColor: '#33415555', borderWidth: 1, backgroundColor: '#33415520',
+    paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4,
+  },
+  riskBadge: {
+    fontSize: 8, fontWeight: '900', letterSpacing: 0.5, fontFamily: 'monospace',
+    borderWidth: 1, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4,
+  },
   footer: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 },
   footerCount: { fontSize: 10, color: '#64748b', fontFamily: 'monospace' },
   doneBtn: {
