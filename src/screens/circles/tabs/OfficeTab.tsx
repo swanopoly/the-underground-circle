@@ -11,6 +11,7 @@ import { OFFICE_DESK_POSITIONS, OFFICE_FLOOR_HEIGHT, OFFICE_FLOOR_WIDTH } from '
 import CustomizePanel, { TelegramConfig } from './office/CustomizePanel';
 import McpPanel from './office/McpPanel';
 import FileLeasePanel from './office/FileLeasePanel';
+import ApprovalInboxPanel from './office/ApprovalInboxPanel';
 import type { OfficeCommand } from './office/OfficeChat';
 import {
   OfficeAgent,
@@ -4013,6 +4014,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
           currently have claimed, so nobody edits the same file twice.
           Collapsed by default; silent-count badge only. */}
       <FileLeasePanel userId={currentUserId} />
+      {/* Persistent "what's waiting on a human" inbox — unifies the
+          agent_approvals + agent_run_approvals queues into one collapsed,
+          badge-counted panel instead of transient overlay banners. */}
+      <ApprovalInboxPanel circleId={circleId} userId={currentUserId} />
       <OfficeConnectBridgesSection circleId={circleId} />
 
       {/* Marquee ticker removed — too noisy for the Office view */}
