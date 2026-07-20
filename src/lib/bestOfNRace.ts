@@ -30,6 +30,7 @@
 
 import { resolveModelForSoul } from './serviceProfileSouls';
 import { BLACKSWAN_ENDPOINT_MODEL_ID } from './blackswanRouting';
+import { reconcileParallelResults } from './parallelResultConsensusCore';
 
 export const BEST_OF_N_MAX_CANDIDATES = 4;
 
@@ -300,6 +301,30 @@ export async function runBestOfNRace(
         judgement: null,
         winner,
         judgeNote: 'only candidate to succeed — no judging needed',
+      }),
+    };
+  }
+
+  // ── Consensus short-circuit: if the successful candidates already agree
+  // (deterministic majority vote — no model call), skip the paid judge and
+  // return the agreed answer. Only fires on a clear 'accept'; plurality/tie
+  // fall through to the judge and split/none fall through to escalate, both
+  // preserving the existing judge path unchanged. winnerIndex is an original
+  // index into `candidates`, exactly like `candidates[judgement.winnerIndex]`.
+  const consensus = reconcileParallelResults(candidates);
+  if (consensus.recommendedAction === 'accept' && consensus.winnerIndex !== null) {
+    const winner = candidates[consensus.winnerIndex];
+    return {
+      prompt: task,
+      candidates,
+      judgement: null,
+      winner,
+      formattedReport: buildReport({
+        task,
+        candidates,
+        judgement: null,
+        winner,
+        judgeNote: `consensus: ${consensus.votedCount} candidates agreed — no judge needed`,
       }),
     };
   }
