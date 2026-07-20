@@ -4984,6 +4984,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       provider_routed?: string;
       provider_model?: string;
       routing_fallback?: { provider: string; reason: string };
+      blackswan_ghost_retry?: boolean;
     } = {};
     if (!aiResponse && isMarketplacePrefix && circleId && effectiveModel) {
       const slashIdx = effectiveModel.indexOf("/");
@@ -5165,61 +5166,138 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       }
     }
 
-    if (!aiResponse) {
-      if (marketplaceRequested) {
+    // 2026-07-20: "ghost retry" \u2014 when BlackSwan's own response was caught
+    // as garbled (aiResponse is the static BLACKSWAN_GARBLE_FALLBACK_MESSAGE
+    // set by stripBlackSwanReasoningText above), that string is truthy, so
+    // it used to skip this whole Claude-fallback block entirely and reach
+    // the user as-is: an apology instead of a real answer, on what live
+    // testing this session found is 60-80% of realistic BlackSwan turns.
+    // Since buildBlackSwanSystemPrompt()'s output is a plain, model-agnostic
+    // string with no BlackSwan-model dependency, Claude can answer "as
+    // BlackSwan" here with zero persona refactor \u2014 same mechanism already
+    // shipped for tool-heavy BlackSwan turns via BLACKSWAN_TOOL_EXECUTOR_
+    // MODEL_ID, just triggered by a garbled reply instead of tool intent.
+    const wasBlackSwanGarbled = aiResponse === BLACKSWAN_GARBLE_FALLBACK_MESSAGE;
+    if (!aiResponse || wasBlackSwanGarbled) {
+      // For a garbled-BlackSwan ghost retry, a missing key or exhausted
+      // budget must NOT turn into a hard error \u2014 aiResponse already holds a
+      // valid (if unhelpful) honest fallback message the user can still
+      // see. Only the genuine "produced nothing at all" case (!aiResponse)
+      // has nothing to lose by hard-failing here, so it keeps that behavior.
+      let skipGhostRetry = false;
+      if (marketplaceRequested || wasBlackSwanGarbled) {
         const budgetResponse = await maybeCircleClaudeBudgetExceededResponse(supabase, circleId);
         if (budgetResponse) {
-          await failSwanBotV1Run(supabase, swanBotV1RunId, "Claude budget cap blocked Anthropic fallback.");
-          return budgetResponse;
+          if (wasBlackSwanGarbled) {
+            skipGhostRetry = true;
+          } else {
+            await failSwanBotV1Run(supabase, swanBotV1RunId, "Claude budget cap blocked Anthropic fallback.");
+            return budgetResponse;
+          }
         }
       }
-      if (!anthropicKey) {
-        await failSwanBotV1Run(supabase, swanBotV1RunId, byokMissingMessage("anthropic"));
-        return errResponse(400, "key_missing", byokMissingMessage("anthropic"));
-      }
-      // Fall back to Claude (using requested model or default Haiku)
-      const claudeModelKey = effectiveModel?.startsWith("claude-opus")
-        ? "claude-opus"
-        : effectiveModel?.startsWith("claude-sonnet")
-          ? "claude-sonnet"
-          : effectiveModel?.startsWith("claude-haiku")
-            ? "claude-haiku"
-            : null;
-      const result = await callClaude(frozenPrompt, volatilePrompt, message, {
-        modelKey: claudeModelKey,
-        conversationMessages,
-        thinkingLevel: thinkingLevel || "balanced",
-        maxTokens,
-        apiKey: anthropicKey.apiKey,
-        supabase,
-        circleId,
-        userId,
-        enableTools: true,
-      });
-      aiResponse = result.text;
-      structuredToolActions = result.toolActions || [];
-      finalStopReason = result.stopReason;
-      finalIterationCount = result.iterations;
-
-      // If tools were used, append a summary of actions taken
-      if (result.toolActions && result.toolActions.length > 0) {
-        const actionSummary = result.toolActions.map(a => {
-          const status = a.result?.success ? '\u2705' : '\u274C';
-          return `${status} **${a.tool}**: ${JSON.stringify(a.input).slice(0, 100)}`;
-        }).join('\n');
-        if (aiResponse && !aiResponse.includes('create_task') && !aiResponse.includes('update_task')) {
-          aiResponse += `\n\n---\n*Actions taken:*\n${actionSummary}`;
+      if (!skipGhostRetry && !anthropicKey) {
+        if (wasBlackSwanGarbled) {
+          skipGhostRetry = true;
+        } else {
+          await failSwanBotV1Run(supabase, swanBotV1RunId, byokMissingMessage("anthropic"));
+          return errResponse(400, "key_missing", byokMissingMessage("anthropic"));
         }
       }
+      if (!skipGhostRetry) {
+        // Fall back to Claude (using requested model or default Haiku) \u2014 a
+        // garbled-BlackSwan ghost retry always uses Haiku (BlackSwan's own
+        // "cheap tier" spirit) and BlackSwan's short persona prompt instead
+        // of the full Claude-shaped combinedSystemPrompt/frozenPrompt, and
+        // never enables direct tool execution \u2014 matching BlackSwan's own
+        // persona contract ("You can't create tasks or take other actions
+        // directly in this reply").
+        const claudeModelKey = wasBlackSwanGarbled
+          ? "claude-haiku"
+          : effectiveModel?.startsWith("claude-opus")
+            ? "claude-opus"
+            : effectiveModel?.startsWith("claude-sonnet")
+              ? "claude-sonnet"
+              : effectiveModel?.startsWith("claude-haiku")
+                ? "claude-haiku"
+                : null;
+        // A garbled-BlackSwan ghost retry is an OPTIONAL upgrade attempt on
+        // top of a BlackSwan call that already succeeded (just garbled) —
+        // if callClaude itself throws (transient network/API error), that
+        // must not turn an already-available honest fallback message into
+        // a raw 500; catch it and keep aiResponse as-is. The genuine
+        // (non-BlackSwan) fallback path had no local try/catch before this
+        // feature existed either, so it deliberately keeps re-throwing on
+        // failure here — unchanged, pre-existing behavior.
+        try {
+        const result = await callClaude(
+          wasBlackSwanGarbled ? blackSwanSystemPrompt : frozenPrompt,
+          wasBlackSwanGarbled ? "" : volatilePrompt,
+          message,
+          {
+            modelKey: claudeModelKey,
+            conversationMessages,
+            thinkingLevel: thinkingLevel || "balanced",
+            maxTokens,
+            apiKey: anthropicKey!.apiKey,
+            supabase,
+            circleId,
+            userId,
+            enableTools: !wasBlackSwanGarbled,
+          },
+        );
+        aiResponse = result.text;
+        structuredToolActions = result.toolActions || [];
+        finalStopReason = result.stopReason;
+        finalIterationCount = result.iterations;
+        // Only flag the ghost retry as having fired when it actually
+        // produced real content — if Claude's own call also comes back
+        // empty, aiResponse falls through to the defensive reset below and
+        // the response the user sees is the plain honest fallback message
+        // again, not a Claude-answered one, so this should stay false then.
+        if (wasBlackSwanGarbled && result.text) nonRelayRouting.blackswan_ghost_retry = true;
 
-      tokenBreakdown = {
-        model: result.model,
-        input_tokens: result.inputTokens,
-        output_tokens: result.outputTokens,
-        cache_creation_tokens: result.cacheCreationTokens,
-        cache_read_tokens: result.cacheReadTokens,
-        total_tokens: result.inputTokens + result.outputTokens,
-      };
+        // If tools were used, append a summary of actions taken
+        if (result.toolActions && result.toolActions.length > 0) {
+          const actionSummary = result.toolActions.map(a => {
+            const status = a.result?.success ? '\u2705' : '\u274C';
+            return `${status} **${a.tool}**: ${JSON.stringify(a.input).slice(0, 100)}`;
+          }).join('\n');
+          if (aiResponse && !aiResponse.includes('create_task') && !aiResponse.includes('update_task')) {
+            aiResponse += `\n\n---\n*Actions taken:*\n${actionSummary}`;
+          }
+        }
+
+        tokenBreakdown = {
+          model: result.model,
+          input_tokens: result.inputTokens,
+          output_tokens: result.outputTokens,
+          cache_creation_tokens: result.cacheCreationTokens,
+          cache_read_tokens: result.cacheReadTokens,
+          total_tokens: result.inputTokens + result.outputTokens,
+        };
+        } catch (ghostRetryError: any) {
+          if (wasBlackSwanGarbled) {
+            console.warn("[swanbot-ai] BlackSwan ghost retry via Claude failed, keeping honest fallback message:", ghostRetryError?.message || ghostRetryError);
+          } else {
+            throw ghostRetryError;
+          }
+        }
+      }
+    }
+    // Genuinely reachable, not just a type-checker formality: skipGhostRetry
+    // (no key/budget) and the try/catch above both already leave the
+    // existing message untouched, but a ghost retry that runs successfully
+    // and still comes back with empty text needs a landing message. Uses
+    // the BlackSwan-flavored text only for an actual BlackSwan garble — the
+    // generic (non-BlackSwan) fallback path gets its own generic message
+    // instead, since it was never a BlackSwan turn and previously could
+    // reach this point with aiResponse left empty/falsy (no message at
+    // all); either way this must never be null for the calls below.
+    if (!aiResponse) {
+      aiResponse = wasBlackSwanGarbled
+        ? BLACKSWAN_GARBLE_FALLBACK_MESSAGE
+        : "I couldn't generate a response just now — please try again.";
     }
 
     // Image-only model UX: exactly one notice line, prepended to the visible
@@ -5244,6 +5322,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
           provider_model: nonRelayRouting.provider_model,
         } : {}),
         ...(nonRelayRouting.routing_fallback ? { routing_fallback: nonRelayRouting.routing_fallback } : {}),
+        ...(nonRelayRouting.blackswan_ghost_retry ? { blackswan_ghost_retry: true } : {}),
       },
     });
 
@@ -5283,6 +5362,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         artifacts: mapToolActionsToArtifacts(structuredToolActions),
         ...(nonRelayRouting.provider_routed ? { provider_routed: nonRelayRouting.provider_routed, provider_model: nonRelayRouting.provider_model } : {}),
         ...(nonRelayRouting.routing_fallback ? { routing_fallback: nonRelayRouting.routing_fallback } : {}),
+        ...(nonRelayRouting.blackswan_ghost_retry ? { blackswan_ghost_retry: true } : {}),
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
