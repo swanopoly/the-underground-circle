@@ -256,6 +256,20 @@ function main(): void {
       ],
     });
     assertEq(noFeedback.source, 'default', '(2) non-corrective last turn -> no feedback');
+
+    // REGRESSION (round-8 QA): a shorter-correction on an already-DETAILED base — from a
+    // verbose profile hint OR a long current message — must not collapse to the neutral
+    // 'normal' verbosity, whose empty directive would silently revert the correction on
+    // exactly the long answers it targets. The feedback layer must never emit '' directive.
+    const shorterOnDetailed = resolveResponseRegister({
+      currentMessage: 'ok',
+      priorMessages: [{ role: 'user', content: 'that was too long' }],
+      profileHint: { preferredResponseLength: 'thorough' },
+    });
+    assertEq(shorterOnDetailed.source, 'feedback', '(2) shorter-on-detailed-base -> source feedback');
+    assert(shorterOnDetailed.directive.length > 0, '(2) shorter-on-detailed-base -> NON-empty directive (no silent no-op)');
+    assert(shorterOnDetailed.verbosity !== 'normal', '(2) shorter-on-detailed-base -> not the unrenderable neutral normal');
+    assert(rankOf(shorterOnDetailed.verbosity) < rankOf('normal'), '(2) shorter-on-detailed-base -> verbosity ranks below normal');
   }
 
   // ─── (3) STICKY + COMMAND ───────────────────────────────────────────────────

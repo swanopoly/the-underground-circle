@@ -102,6 +102,7 @@ function isCleanLabel(s: string): boolean {
     const c = ch.codePointAt(0) as number;
     if (c < 0x20 || c === 0x7f || (c >= 0x80 && c <= 0x9f)) return false;
     if (c === 0x2028 || c === 0x2029) return false;
+    if (c === 0x061c) return false; // ARABIC LETTER MARK (bidi-control sibling of LRM/RLM)
     if (c === 0x200b || c === 0x200c || c === 0x200d || c === 0x200e || c === 0x200f) return false;
     if (c === 0x2060 || c === 0xfeff || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069)) return false;
     if (c >= 0xe0000 && c <= 0xe007f) return false;
@@ -459,7 +460,7 @@ function main(): void {
     const r = deriveCrossMemberContext(baseFocus, [
       { memberId: 'a', memberName: `Ca${LS}rol${PS}`, kind: 'active_run', missionId: 'm1', title: `Fix ${EMOJI} bug` },
       { memberId: 'b', memberName: `Bad${LONE_HI}end`, kind: 'active_run', taskId: 't1', title: `Tag${TAG}here` },
-      { memberId: 'c', memberName: `Zero${ZWSP}Width${WJ}`, kind: 'active_run', roomId: 'r1', title: `${RLO}flip${BOM}` },
+      { memberId: 'c', memberName: `Zero${ZWSP}Width${WJ}${String.fromCharCode(0x061c)}Mark`, kind: 'active_run', roomId: 'r1', title: `${RLO}flip${BOM}` },
     ], { nowMs: NOW, maxPerTeammate: 5 });
     assert(resultWellFormed(r), 'unicode: result well-formed after scrubbing');
     const fa = r.facts.find((f) => f.memberId === 'a')!;
@@ -470,7 +471,8 @@ function main(): void {
     assert(!hasLoneSurrogate(fb.memberName), 'unicode: lone surrogate stripped from name');
     assertExcludes(fb.itemTitle, TAG, 'unicode: Unicode Tag char stripped from title');
     const fc = r.facts.find((f) => f.memberId === 'c')!;
-    assert(isCleanLabel(fc.memberName), 'unicode: zero-width / word-joiner stripped');
+    assert(isCleanLabel(fc.memberName), 'unicode: zero-width / word-joiner / ARABIC LETTER MARK stripped');
+    assertExcludes(fc.memberName, String.fromCharCode(0x061c), 'unicode: ARABIC LETTER MARK (061c) stripped from name');
     assert(isCleanLabel(fc.itemTitle), 'unicode: bidi override / BOM stripped');
     assert(!hasLoneSurrogate(r.block as string), 'unicode: block has no lone surrogate');
     assert(isCleanLabel(r.facts[0].note), 'unicode: note stays clean');

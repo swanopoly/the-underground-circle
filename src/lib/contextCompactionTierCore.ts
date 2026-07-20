@@ -458,9 +458,14 @@ export function planCompactionTier(input?: CompactionTierInput | null): Compacti
     let candidates: number[] = [];
     let reason: string;
 
-    if (afterBoth > hardLimit) {
+    if (afterBoth > hardLimit && protectedList.length > 0) {
       // (1) EMERGENCY — even max drop+summarise can't fit the hard window. Shave
       // the largest protected messages so the caller can trim before forwarding.
+      // Guarded on protectedList.length > 0: with no shave targets (e.g. messages
+      // absent but a large caller estimate) hard_truncate could only emit an empty
+      // candidate set — an internally-inconsistent "truncate but nothing to shave"
+      // plan. That degenerate case flows to branch (3) -> tier 'none' while
+      // overHardLimit=true still signals the over-window condition to the caller.
       tier = 'hard_truncate';
       overageTokens = afterBoth - hardLimit;
       candidates = selectHardTruncateCandidates(protectedList, overageTokens);
@@ -489,10 +494,19 @@ export function planCompactionTier(input?: CompactionTierInput | null): Compacti
       } else if (freeableByDropTokens > 0 && afterDrop <= target) {
         tier = 'drop_tool_noise'; // cheapest — a free local drop clears the pressure
         reason = 'tier drop_tool_noise: est ' + est + 't afterDrop ' + afterDrop + 't under target ' + target + 't';
-      } else {
+      } else if (freeableBySummarizeTokens > 0) {
         tier = 'summarize_oldest'; // drop + summarise (safe from 400: afterBoth ≤ hard)
         reason = 'tier summarize_oldest: est ' + est + 't afterDrop ' + afterDrop + 't afterBoth ' +
           afterBoth + 't target ' + target + 't hard ' + hardLimit + 't';
+      } else {
+        // Drop alone can't reach target, but nothing unprotected/non-tool remains to
+        // summarise (freeableBySummarizeTokens === 0), so drop+summarise would reach
+        // the identical end state (afterBoth === afterDrop) while paying for a no-op
+        // summariser call. Stay on the cheaper free drop tier. Reaching this else
+        // guarantees not-both-zero (branch above), so freeableByDropTokens > 0 here.
+        tier = 'drop_tool_noise';
+        reason = 'tier drop_tool_noise: est ' + est + 't afterDrop ' + afterDrop +
+          't over target ' + target + 't nothing summarizable';
       }
     }
 

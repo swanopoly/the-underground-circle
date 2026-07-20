@@ -151,8 +151,16 @@ function wellFormedPlan(p: CompactionTierPlan): boolean {
     prev = c;
   }
   // emergency equivalence: tier==='hard_truncate' ⟺ overHardLimit && afterBoth>hardLimit
+  //   && there is something to shave. The last term matters for the degenerate case
+  //   (over the hard window but no protected messages to truncate, e.g. messages
+  //   absent): that plan is 'none' with overHardLimit=true and no candidates, and must
+  //   NOT be treated as an inconsistent emergency. Real emergencies always carry >=1
+  //   candidate (the core only sets hard_truncate when protectedList.length > 0).
   const isEmergency = p.tier === 'hard_truncate';
-  const cond = p.overHardLimit && p.projectedTokensAfterDropAndSummarize > p.hardLimitTokens;
+  const cond =
+    p.overHardLimit &&
+    p.projectedTokensAfterDropAndSummarize > p.hardLimitTokens &&
+    p.hardTruncateCandidates.length > 0;
   if (isEmergency !== cond) return false;
   if (!isEmergency && (p.hardTruncateOverageTokens !== 0 || p.hardTruncateCandidates.length !== 0)) return false;
   if (isEmergency && (p.hardTruncateOverageTokens <= 0 || p.hardTruncateCandidates.length === 0)) return false;
@@ -216,6 +224,40 @@ function main(): void {
     assertEq(p.freeableBySummarizeTokens, 0, '(A2) nothing summarizable');
     assertEq(p.projectedTokensAfterDrop, 100_000, '(A2) afterDrop = 100000');
     assert(!p.reason.includes('summarize'), '(A2) reason does not mention summarise');
+  }
+
+  // ─── (A2b) REGRESSION: over trigger, a free drop does NOT reach target, and there
+  //     is nothing summarizable → stay on the cheaper drop tier (drop+summarise would
+  //     free 0, i.e. a no-op summariser call). Was wrongly escalating to summarize_oldest.
+  {
+    const msgs: CompactionTierMessageView[] = [
+      view(100_000, { tool: true }), // one unprotected tool_result → drop 100000 chars = 25000 tok
+      view(500),
+      view(500),
+    ];
+    const p = planCompactionTier({ estimatedTokens: 160_000, contextWindowTokens: W, keepRecentCount: 2, messages: msgs });
+    assert(wellFormedPlan(p), '(A2b) well-formed');
+    assertEq(p.freeableBySummarizeTokens, 0, '(A2b) nothing summarizable');
+    assert(p.projectedTokensAfterDrop > p.targetTokens, '(A2b) drop alone does NOT reach target');
+    assertEq(p.tier, 'drop_tool_noise', '(A2b) nothing to summarise → cheaper drop tier, not summarize_oldest');
+    assert(!p.reason.includes('summarize'), '(A2b) reason does not mention summarise');
+  }
+
+  // ─── (A2c) REGRESSION: a large caller estimate over the hard window but NO messages
+  //     to shave (empty/absent messages) must NOT produce an inconsistent hard_truncate
+  //     plan with an empty candidate set. It flows to 'none' while overHardLimit=true.
+  {
+    const p = planCompactionTier({ estimatedTokens: 900_000, contextWindowTokens: W, messages: [] });
+    assert(wellFormedPlan(p), '(A2c) well-formed (no empty-candidate hard_truncate)');
+    assertEq(p.overHardLimit, true, '(A2c) overHardLimit still signals the over-window condition');
+    assert(!(p.tier === 'hard_truncate' && p.hardTruncateCandidates.length === 0), '(A2c) never hard_truncate with nothing to shave');
+    assertEq(p.tier, 'none', '(A2c) no shave targets → none');
+    assertEq(p.hardTruncateCandidates.length, 0, '(A2c) no candidates');
+    assertEq(p.hardTruncateOverageTokens, 0, '(A2c) no overage on a non-emergency tier');
+    // omitting `messages` entirely reaches the same degenerate-safe plan
+    const p2 = planCompactionTier({ estimatedTokens: 900_000, contextWindowTokens: W });
+    assert(wellFormedPlan(p2), '(A2c) well-formed with messages omitted');
+    assertEq(p2.tier, 'none', '(A2c) messages omitted → none, not empty hard_truncate');
   }
 
   // ─── (A3) drop insufficient but drop+summarise fits → summarize_oldest ───────

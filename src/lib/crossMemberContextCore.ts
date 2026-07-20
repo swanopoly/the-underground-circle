@@ -261,9 +261,11 @@ function scrubChars(s: string, controlsToSpace: boolean): string {
       if (controlsToSpace) out += ' ';
       continue;
     }
-    // Zero-width (200b-200f), word joiner (2060), BOM (feff), bidi overrides
-    // (202a-202e), bidi isolates (2066-2069) -> drop.
+    // ARABIC LETTER MARK (061c), zero-width (200b-200f), word joiner (2060), BOM
+    // (feff), bidi overrides (202a-202e), bidi isolates (2066-2069) -> drop. 061c is
+    // a bidi-control sibling of LRM/RLM (200e/200f); strip it for the same reason.
     if (
+      cp === 0x061c ||
       (cp >= 0x200b && cp <= 0x200f) ||
       cp === 0x2060 ||
       cp === 0xfeff ||

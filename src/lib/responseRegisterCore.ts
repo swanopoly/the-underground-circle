@@ -482,8 +482,17 @@ function detectFeedbackAdjustment(priorMessages: unknown): FeedbackAdjustment | 
 }
 
 function applyFeedback(base: Axes, fb: FeedbackAdjustment): Axes {
+  // A corrective step must never land on 'normal': that axis has no rendered
+  // VERBOSITY_CLAUSE, so a shorter-correction on a 'detailed' base (verbose profile
+  // or a long current message) would collapse to the byte-identical no-op directive
+  // '' — the exact silent-revert this feedback layer exists to prevent, and precisely
+  // when the answer WAS long. Skip past 'normal' one more step in the feedback direction.
+  let verbosity = stepVerbosity(base.verbosity, fb.delta);
+  if (verbosity === 'normal' && fb.delta !== 0) {
+    verbosity = stepVerbosity(verbosity, fb.delta > 0 ? 1 : -1); // detailed->brief, brief->detailed
+  }
   return {
-    verbosity: stepVerbosity(base.verbosity, fb.delta),
+    verbosity,
     format: fb.forceFormat && isFormat(fb.forceFormat) ? fb.forceFormat : base.format,
     posture: fb.forcePosture && isPosture(fb.forcePosture) ? fb.forcePosture : base.posture,
     formality: base.formality,
