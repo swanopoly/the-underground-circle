@@ -1,6 +1,7 @@
 import { supabase } from './supabase';
 import { loadMemories, type MemoryEntry } from './agentRunSystem';
 import { buildPromptMemoryBundle, loadStartupMemory, type PromptMemoryReference } from './memoryService';
+import { filterNovelAgainstAnchors } from './memoryNoveltyFilterCore';
 import { loadUserMemory } from './userMemory';
 
 export type OpenSwanMemoryStores = {
@@ -38,15 +39,27 @@ function formatUserProfile(memories: MemoryEntry[], dedupAgainst?: string): stri
   // verbatim in the user-authored notes block. Two sources writing the
   // same fact (user notes + inferred profile) burns tokens and risks the
   // model treating near-duplicates as separate signals.
-  const normalizedDedup = dedupAgainst
-    ? dedupAgainst.toLowerCase().replace(/\s+/g, ' ')
-    : null;
-  const deduped = normalizedDedup
-    ? ranked.filter((memory) => {
-        const needle = memory.content.slice(0, 40).toLowerCase().replace(/\s+/g, ' ').trim();
-        if (needle.length < 12) return true; // too short to be a reliable dedup match
-        return !normalizedDedup.includes(needle);
-      })
+  // Anchor-relative novelty: drop a profile row whose fact is already present in the
+  // always-included user-notes anchor blob (dedupAgainst). Supersedes the brittle
+  // 40-char-prefix substring check — filterNovelAgainstAnchors explodes the blob into
+  // anchor lines and matches on normalized content, so it catches near-duplicates the
+  // prefix scan missed. Fail-open + information-preserving: every dropped row's fact
+  // still lives in the notes anchor, so nothing leaves the prompt. chainAcceptedCandidates
+  // is off — anchor-only novelty; item-vs-item ranking stays with the rank core.
+  const deduped = dedupAgainst
+    ? (() => {
+        const verdict = filterNovelAgainstAnchors(
+          ranked.map((memory, i) => ({
+            id: String(i),
+            text: `${memory.title}: ${memory.content}`,
+            source: memory.memory_kind,
+          })),
+          dedupAgainst,
+          { chainAcceptedCandidates: false },
+        );
+        const keptIds = new Set(verdict.keep.map((k) => k.id));
+        return ranked.filter((_, i) => keptIds.has(String(i)));
+      })()
     : ranked;
   if (deduped.length === 0) return '';
   return `## User Profile\n${
