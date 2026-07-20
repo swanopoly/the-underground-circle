@@ -2587,37 +2587,39 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   // trip the density check above, so this catches that response via a much
   // safer signal.
   //
-  // Originally a bare count (>=8 short bold spans). An independent review
-  // fleet found and verified that a raw count false-positives hard on
-  // completely ordinary bolded lists this app produces routinely — an
-  // 8-person weekly streak digest ("**Chris**: 5-day streak", one bold name
-  // per line), an 8-step plan ("**Step 1:** ...", one bold label per step).
-  // Both are 8+ DISTINCT bold spans with no real repetition, nothing like
-  // the original evidence's spans, which shared content words across many
-  // of them ("specific task details" in 2 spans, "SIXTY" in 2 spans, etc.).
-  // Now requires that repetition: at least 3 distinct content words (3+
-  // chars, stopwords excluded) each appear inside 2+ different bold spans —
-  // verified this still catches the original evidence (content words like
-  // "task"/"specific"/"details"/"sixty" recur across spans) while a
-  // digest/step-list bolding 8+ genuinely distinct items does not.
+  // Originally a bare count (>=8 short bold spans), then a "3+ distinct
+  // content words each shared across 2+ spans" check. A second independent
+  // review found and verified the word-sharing version STILL false-
+  // positives on a realistic genuine shape: a structured status grid where
+  // distinct labels legitimately share a CATEGORY word (e.g. "**Task
+  // Status:**"/"**Task Owner:**"/"**Deploy Status:**"/"**Deploy Owner:**")
+  // — single shared words like "task"/"deploy"/"status"/"owner" are common
+  // in genuine structured summaries, not just in the garbled evidence.
+  // Now requires shared 2-WORD phrases (bigrams), not single words: at
+  // least 2 distinct bigrams (e.g. "specific task", "task details") each
+  // appearing inside 2+ different spans. Verified this still catches the
+  // original evidence ("specific task details" recurs verbatim across 2
+  // spans) while a digest/step-list/status-grid sharing only single
+  // category words across otherwise-distinct labels does not.
   const boldSpans = text.match(/\*\*[^*]{1,60}\*\*/g) || [];
   if (boldSpans.length >= 8) {
     const spanStopwords = new Set(["a", "an", "the", "and", "or", "but", "is", "was", "are", "were", "has", "have", "had", "not", "no", "it", "this", "that", "to", "of", "in", "on", "at", "for", "with", "as", "if", "they"]);
-    const wordSpanCounts = new Map<string, number>();
+    const bigramSpanCounts = new Map<string, number>();
     for (const span of boldSpans) {
       const spanWords = (span.toLowerCase().match(/[a-z]+/g) || []).filter((w) => w.length >= 3 && !spanStopwords.has(w));
-      const seenInSpan = new Set<string>();
-      for (const w of spanWords) {
-        if (seenInSpan.has(w)) continue;
-        seenInSpan.add(w);
-        wordSpanCounts.set(w, (wordSpanCounts.get(w) || 0) + 1);
+      const bigramsInSpan = new Set<string>();
+      for (let i = 0; i + 2 <= spanWords.length; i++) {
+        bigramsInSpan.add(spanWords.slice(i, i + 2).join(" "));
+      }
+      for (const bigram of bigramsInSpan) {
+        bigramSpanCounts.set(bigram, (bigramSpanCounts.get(bigram) || 0) + 1);
       }
     }
-    let wordsSharedAcrossSpans = 0;
-    for (const count of wordSpanCounts.values()) {
-      if (count >= 2) wordsSharedAcrossSpans++;
+    let bigramsSharedAcrossSpans = 0;
+    for (const count of bigramSpanCounts.values()) {
+      if (count >= 2) bigramsSharedAcrossSpans++;
     }
-    if (wordsSharedAcrossSpans >= 3) return true;
+    if (bigramsSharedAcrossSpans >= 2) return true;
   }
 
   // Repetition-loop detector: any 20+ char sliding window that recurs 3+
@@ -2706,26 +2708,28 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   // fires. Flags any exact 4-word phrase (12+ chars, to skip trivial
   // stopword n-grams) that recurs 4+ times anywhere in the response.
   //
-  // Deliberately skips windows starting within the first 2 words of their
-  // containing sentence — an independent review fleet found and verified
-  // that without this exclusion, a genuine templated/parallel answer (4
-  // reminders/FAQ entries that intentionally open the same way, e.g. "You
-  // should always check in ..." or "**Q: How do I ...**") false-positives:
-  // a real shared opener phrase produces not just itself but also several
-  // "shifted" overlapping windows starting 1 word later, which also recur
-  // 4 times as an artifact of the sliding scan, not because of any actual
-  // garbling. Genuine loop garbling (the live evidence) repeats its phrase
-  // in scattered, non-opener positions, so excluding true sentence-openers
-  // still catches it while sparing legitimate parallel-structure answers.
-  const sentenceSegments = text.split(/[.!?\n]+/).map((s) => s.trim().toLowerCase().replace(/\s+/g, " ")).filter(Boolean);
-  const wordPositionInSentence: number[] = [];
-  for (const segment of sentenceSegments) {
-    segment.split(" ").forEach((_, idx) => wordPositionInSentence.push(idx));
-  }
+  // A "skip windows at the start of their sentence" exclusion was tried
+  // here, to spare a genuine templated/parallel answer (4 reminders/FAQ
+  // entries intentionally opening the same way) from being flagged just
+  // because the shared opener also produces several "shifted" overlapping
+  // windows that incidentally repeat too. A follow-up review found and
+  // verified that exclusion was a net-negative straight regression: a
+  // short sentence repeated verbatim ("I can't create plan." x4) — a very
+  // plausible, common degenerate-loop shape, since every occurrence sits
+  // at its sentence's start — stopped being detected at all once excluded,
+  // and the sentence/word tokenizers used slightly different splitting
+  // logic, so the position lookup could silently desync on any input
+  // containing period-bearing tokens (abbreviations, "e.g.", decimals),
+  // exempting phrases that were never near a real sentence start. Reverted
+  // to the plain count-only version. This means a genuine, intentionally
+  // templated 4-item reminders/FAQ list can still trip this check — a
+  // known, accepted trade-off (documented rather than silently left
+  // unverified): reliably catching real degenerate loops matters more for
+  // this function's fail-closed purpose than avoiding a rare templated-
+  // answer false positive.
   const words = text.toLowerCase().replace(/\s+/g, " ").trim().split(" ");
   const phraseCounts = new Map<string, number>();
   for (let i = 0; i + 4 <= words.length; i++) {
-    if ((wordPositionInSentence[i] ?? 99) < 2) continue;
     const phrase = words.slice(i, i + 4).join(" ");
     if (phrase.length < 12) continue;
     const count = (phraseCounts.get(phrase) || 0) + 1;
@@ -2795,17 +2799,23 @@ function stripBlackSwanReasoningTextRaw(text: string | null): string | null {
   // user's request..." — and only the closing tag itself appears in the
   // text) — take content after the LAST such occurrence.
   //
-  // Guards against tripping on genuine prose that merely mentions/quotes
-  // the tag (e.g. "...a stray </think> tag before the real answer...") —
-  // also found and verified by the same review — by requiring the text
-  // right after the tag NOT read like a description of the tag itself;
-  // real model-emitted delimiters are never immediately followed by a word
-  // like "tag"/"marker" naming what they are. When that guard trips, the
-  // text is left untouched (still containing the tag), which correctly
-  // falls through to the garbling check below and degrades to the honest
-  // fallback message rather than showing truncated, confusing text — an
-  // acceptable outcome for what should be an exceedingly rare edge case
-  // for this app's actual question domain.
+  // A word-allowlist guard was tried here ("tag"/"marker"/...) to avoid
+  // tripping on genuine prose that merely mentions/quotes the literal tag
+  // (e.g. "...a stray </think> tag before the real answer..."). A
+  // follow-up review found and verified that approach is an unwinnable
+  // whack-a-mole: any other ordinary noun after the mention ("element",
+  // "sequence", ...) still slips past the allowlist and gets truncated,
+  // and — since only the LAST occurrence's guard result was applied — an
+  // earlier, properly-guarded mention didn't protect the text either once
+  // a second, unguarded mention appeared later. Removed the guard entirely
+  // rather than keep chasing individual words. This means genuine prose
+  // that mentions the tag as a topic can get truncated into a mangled
+  // fragment — a known, accepted trade-off (documented rather than
+  // silently left unverified): this is an exceedingly rare scenario for
+  // this app's actual question domain (an accountability tool has little
+  // reason to discuss LLM reasoning-tag internals), while a lone closing
+  // tag with a real answer after it (the case this step exists for) is a
+  // routine, observed-live shape worth reliably salvaging.
   const closeTagRe = /<\/think>\s*/gi;
   let lastCloseEnd = -1;
   let closeMatch: RegExpExecArray | null;
@@ -2814,8 +2824,7 @@ function stripBlackSwanReasoningTextRaw(text: string | null): string | null {
   }
   if (lastCloseEnd >= 0) {
     const afterClose = trimmed.slice(lastCloseEnd).trim();
-    const looksLikeTagMention = /^[`'")\]]*\s*(?:tag|tags|marker|markers|block|blocks|token|delimiter)\b/i.test(afterClose);
-    if (afterClose && !looksLikeTagMention) trimmed = afterClose;
+    if (afterClose) trimmed = afterClose;
   }
 
   const reasoningPrefix = /^\s*(?:Thinking Process|Thought Process|Reasoning|Chain[- ]of[- ]Thought)\s*:\s*/i;

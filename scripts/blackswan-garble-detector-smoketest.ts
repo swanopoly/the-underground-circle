@@ -410,24 +410,29 @@ assert(
   'a genuine reply with 4 short "today"-ending sentences is NOT flagged',
   looksLikeGarbledBlackSwanOutput("🦢 Nice work! You checked in today. You finished your task today. You're on track today.") === false,
 );
-// Fixed via independent review fleet (2026-07-17): flagging ANY 4-word
-// phrase repeating 4+ times (with no exclusion for sentence-openers)
-// false-positived on genuine templated/parallel answers — a reminders list
-// or an FAQ where every entry intentionally opens the same way produces a
-// real shared opener phrase PLUS several overlapping "shifted" windows
-// starting 1 word later, which also recur 4 times as a sliding-scan
-// artifact, not because of any actual garbling.
+// An earlier version of this check excluded windows starting at a
+// sentence's opening words, specifically so a templated/parallel answer
+// (a reminders list or FAQ where every entry intentionally opens the same
+// way) wouldn't trip it. A follow-up review found and verified that
+// exclusion was a net-negative regression: it also stopped catching a
+// short garbled sentence repeated verbatim ("I can't create plan." x4,
+// every occurrence necessarily sentence-initial), a common real loop
+// shape — and the exclusion's position bookkeeping could silently desync
+// on any input containing period-bearing tokens (abbreviations, "e.g."),
+// exempting phrases nowhere near a real sentence start. Reverted to plain
+// count-only. Known, accepted trade-off (documented rather than silently
+// left unverified): a genuine templated 4-item reminders/FAQ list can
+// still trip this check — reliably catching real degenerate loops matters
+// more here than avoiding this rarer false positive.
 assert(
-  'a genuine templated reminders list (4 entries sharing an opener) is NOT flagged',
+  'KNOWN TRADE-OFF: a genuine templated reminders list (4 entries sharing an opener) IS flagged',
   looksLikeGarbledBlackSwanOutput(
     'You should always check in with your team lead before deploying. You should always check in on the staging environment first. You should always check in with QA before merging. You should always check in on your calendar for conflicts.',
-  ) === false,
+  ) === true,
 );
 assert(
-  'a genuine FAQ-style answer (4 entries sharing a "**Q: How do I" opener) is NOT flagged',
-  looksLikeGarbledBlackSwanOutput(
-    '**Q: How do I check in?** Tap the check-in button on your home screen.\n\n**Q: How do I add a task?** Use the + button in the Feed tab.\n\n**Q: How do I invite teammates?** Go to Circle settings and share the invite link.\n\n**Q: How do I change my streak goal?** Open Settings > Streak Preferences.',
-  ) === false,
+  'a genuine short sentence repeated verbatim (sentence-initial each time) is flagged — the regression this reversion fixes',
+  looksLikeGarbledBlackSwanOutput("I can't create plan. I can't create plan. I can't create plan. I can't create plan.") === true,
 );
 
 // ─── stripBlackSwanReasoningText ───────────────────────────────────────────
@@ -480,31 +485,29 @@ assert(
     typeof multiBlock === 'string' && !multiBlock.includes('<think>') && !multiBlock.includes('</think>') && multiBlock.includes('Final real answer'),
   );
 }
-// Fixed via independent review fleet (2026-07-17): the unanchored
-// closing-tag match used to also TRUNCATE genuine prose that merely
-// mentions the literal tag as a topic (e.g. explaining what leaked
-// reasoning markup looks like) — the real content before the mention was
-// silently and permanently lost, and the mangled remainder slipped past
-// the garbling check entirely (no more "</think>" left in it to catch).
-// Now the tag-mention guard leaves the text untouched instead of
-// truncating it — since it's still untouched, it still literally contains
-// "</think>" and correctly falls through to the garbling check, degrading
-// to the honest fallback message. That's the acceptable outcome here: for
-// what should be an exceedingly rare edge case (a user asking BlackSwan to
-// explain reasoning-tag internals) in this app's actual question domain,
-// showing the honest "couldn't form a clear answer" message is far better
-// than either truncated garbage or a heuristic guess at reconstruction.
+// The closing-tag match is unanchored and matches the literal "</think>"
+// substring wherever it occurs, including inside genuine prose that
+// merely mentions/quotes the tag as a topic (e.g. explaining what leaked
+// reasoning markup looks like) — a word-allowlist guard was tried to
+// detect that case ("tag"/"marker"/...) and leave the text untouched
+// instead of truncating it. A follow-up review found and verified that
+// guard was an unwinnable whack-a-mole (any other ordinary noun after the
+// mention, like "element"/"sequence", still slipped past it and got
+// truncated) plus a related bug (only the LAST mention's guard result was
+// applied, so an earlier properly-guarded mention didn't protect the text
+// once a later, unguarded mention appeared). Removed the guard entirely.
+// KNOWN, accepted trade-off (documented rather than silently left
+// unverified): genuine prose that mentions the tag as a topic can get
+// truncated into a mangled fragment shown to the user. This is an
+// exceedingly rare scenario for this app's actual question domain (little
+// reason for an accountability tool to discuss LLM reasoning-tag
+// internals), while reliably salvaging a real answer after a lone closing
+// tag (the case this step exists for) is a routine, observed-live shape.
 assert(
-  "genuine prose that mentions the </think> tag as a topic is NOT truncated into garbage (falls back to the honest message instead)",
+  'KNOWN TRADE-OFF: genuine prose mentioning the </think> tag as a topic IS truncated (no guard — see comment above)',
   stripBlackSwanReasoningText(
     "Great question! In this app, a model's raw completion sometimes contains a stray </think> tag before the real answer — that's just leaked reasoning markup, not part of your task list.",
-  )?.startsWith("I couldn't form a clear answer") === true,
-);
-assert(
-  "a backtick-wrapped mention of the `</think>` marker is NOT truncated into garbage (falls back to the honest message instead)",
-  stripBlackSwanReasoningText('Some raw completions include a `</think>` marker before the real answer. length: 12 tasks left this week.')?.startsWith(
-    "I couldn't form a clear answer",
-  ) === true,
+  ) === 'tag before the real answer — that\'s just leaked reasoning markup, not part of your task list.',
 );
 assert(
   'a closed <think> block with nothing written after it is still treated as garbled (no real answer to salvage)',
