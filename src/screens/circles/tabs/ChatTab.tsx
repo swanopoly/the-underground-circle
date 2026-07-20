@@ -2012,6 +2012,25 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     ),
     [chatAgentTargets],
   );
+  // Context-pack preview for send-to-agent: what actually gets dispatched
+  // can differ from the raw message text — bridge providers (claude-code/
+  // codex/gemini/cursor) get the agent's terminalConfig.defaultPrompt
+  // prepended (applyTerminalProfileToTask above), which the user has no way
+  // to see today before sending. Selecting an agent now shows exactly what
+  // will be sent instead of dispatching immediately, matching the research
+  // doc's "show what will be shared with each agent" principle — this
+  // preview computation deliberately mirrors dispatchAssignedAgentTask's own
+  // profiling logic for display only; the actual dispatch still recomputes
+  // it itself, this never substitutes for that.
+  const [sendToAgentPreview, setSendToAgentPreview] = useState<{ item: ChatMessage; agent: AssignableAgent; text: string } | null>(null);
+  const openSendToAgentPreview = useCallback((item: ChatMessage, agent: AssignableAgent) => {
+    const normalizedProvider = (agent.provider || '').toLowerCase().replace(/\s+/g, '-');
+    const bridgeProviders = ['claude-code', 'codex', 'gemini', 'gemini-cli', 'cursor'];
+    const text = bridgeProviders.includes(normalizedProvider)
+      ? applyTerminalProfileToTask(item.content, agent.terminalConfig)
+      : item.content;
+    setSendToAgentPreview({ item, agent, text });
+  }, []);
   const [activeSpiritId, setActiveSpiritId] = useState<string | null>(null);
   const [soulLearningRefs, setSoulLearningRefs] = useState<ResearchDocumentReference[]>([]);
   const [soulMemoryRefs, setSoulMemoryRefs] = useState<PromptMemoryReference[]>([]);
@@ -5814,6 +5833,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // exist yet at the point this useCallback's deps array is evaluated).
   const handleSendMessageToAgent = useCallback(async (item: ChatMessage, agent: AssignableAgent) => {
     setSendToAgentFor(null);
+    setSendToAgentPreview(null);
     setBotTyping(true);
     try {
       const response = await dispatchAssignedAgentTask(agent, item.content);
@@ -12118,41 +12138,68 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         visible={sendToAgentFor != null}
         animationType="fade"
         transparent
-        onRequestClose={() => setSendToAgentFor(null)}
+        onRequestClose={() => { setSendToAgentFor(null); setSendToAgentPreview(null); }}
       >
-        <Pressable style={styles.sendToAgentScrim} onPress={() => setSendToAgentFor(null)}>
+        <Pressable
+          style={styles.sendToAgentScrim}
+          onPress={() => { setSendToAgentFor(null); setSendToAgentPreview(null); }}
+        >
           <Pressable style={styles.sendToAgentCard} onPress={() => {}}>
-            <Text style={styles.sendToAgentTitle}>Send to agent</Text>
-            <Text style={styles.sendToAgentSubtitle} numberOfLines={2}>
-              {sendToAgentFor?.content || ''}
-            </Text>
-            {sendToAgentTargets.map((target: ChatAgentTarget<AssignableAgent>) => (
-              <Pressable
-                key={target.id}
-                onPress={() => {
-                  if (sendToAgentFor && target.agent) {
-                    void handleSendMessageToAgent(sendToAgentFor, target.agent as AssignableAgent);
-                  }
-                }}
-                style={({ hovered, pressed }: any) => [
-                  styles.sendToAgentRow,
-                  { borderColor: `${target.color}30` },
-                  hovered && { backgroundColor: `${target.color}14`, borderColor: `${target.color}70` },
-                  pressed && { transform: [{ scale: 0.99 }] },
-                ]}
-                accessibilityRole="button"
-              >
-                <View style={[styles.controlAgentIcon, { backgroundColor: `${target.color}22` }]}>
-                  <Text style={[styles.controlAgentIconText, { color: target.color }]} numberOfLines={1}>
-                    {target.icon}
-                  </Text>
+            {sendToAgentPreview ? (
+              <>
+                <Text style={styles.sendToAgentTitle}>Send to {sendToAgentPreview.agent.name}</Text>
+                <Text style={styles.sendToAgentSubtitle}>This is exactly what will be sent:</Text>
+                <ScrollView style={styles.sendToAgentPreviewBox}>
+                  <Text style={styles.sendToAgentPreviewText}>{sendToAgentPreview.text}</Text>
+                </ScrollView>
+                <View style={styles.sendToAgentPreviewActions}>
+                  <Pressable onPress={() => setSendToAgentPreview(null)} style={styles.sendToAgentCancel}>
+                    <Text style={styles.sendToAgentCancelText}>Back</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => void handleSendMessageToAgent(sendToAgentPreview.item, sendToAgentPreview.agent)}
+                    style={styles.sendToAgentConfirm}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.sendToAgentConfirmText}>Send</Text>
+                  </Pressable>
                 </View>
-                <Text style={styles.sendToAgentRowLabel}>{target.label}</Text>
-              </Pressable>
-            ))}
-            <Pressable onPress={() => setSendToAgentFor(null)} style={styles.sendToAgentCancel}>
-              <Text style={styles.sendToAgentCancelText}>Cancel</Text>
-            </Pressable>
+              </>
+            ) : (
+              <>
+                <Text style={styles.sendToAgentTitle}>Send to agent</Text>
+                <Text style={styles.sendToAgentSubtitle} numberOfLines={2}>
+                  {sendToAgentFor?.content || ''}
+                </Text>
+                {sendToAgentTargets.map((target: ChatAgentTarget<AssignableAgent>) => (
+                  <Pressable
+                    key={target.id}
+                    onPress={() => {
+                      if (sendToAgentFor && target.agent) {
+                        openSendToAgentPreview(sendToAgentFor, target.agent as AssignableAgent);
+                      }
+                    }}
+                    style={({ hovered, pressed }: any) => [
+                      styles.sendToAgentRow,
+                      { borderColor: `${target.color}30` },
+                      hovered && { backgroundColor: `${target.color}14`, borderColor: `${target.color}70` },
+                      pressed && { transform: [{ scale: 0.99 }] },
+                    ]}
+                    accessibilityRole="button"
+                  >
+                    <View style={[styles.controlAgentIcon, { backgroundColor: `${target.color}22` }]}>
+                      <Text style={[styles.controlAgentIconText, { color: target.color }]} numberOfLines={1}>
+                        {target.icon}
+                      </Text>
+                    </View>
+                    <Text style={styles.sendToAgentRowLabel}>{target.label}</Text>
+                  </Pressable>
+                ))}
+                <Pressable onPress={() => setSendToAgentFor(null)} style={styles.sendToAgentCancel}>
+                  <Text style={styles.sendToAgentCancelText}>Cancel</Text>
+                </Pressable>
+              </>
+            )}
           </Pressable>
         </Pressable>
       </Modal>
@@ -17429,6 +17476,40 @@ const styles = StyleSheet.create({
     color: '#64748b',
     fontSize: 11,
     fontWeight: '600',
+  },
+  sendToAgentPreviewBox: {
+    maxHeight: 220,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    backgroundColor: '#04070d',
+    padding: 10,
+  },
+  sendToAgentPreviewText: {
+    color: '#cbd5e1',
+    fontSize: 12,
+    lineHeight: 17,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  sendToAgentPreviewActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+  },
+  sendToAgentConfirm: {
+    borderWidth: 1,
+    borderColor: '#22c55e70',
+    backgroundColor: '#14532d40',
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+  },
+  sendToAgentConfirmText: {
+    color: '#86efac',
+    fontSize: 11,
+    fontWeight: '800',
   },
   liveMiniDot: {
     width: 6,
