@@ -400,6 +400,7 @@ import { executeComputerTaskWithAgent, refreshComputerTaskCapabilityBuildoutFrom
 import { executeDirectImageConversionRequest } from '../../../lib/directImageConversionRuntime';
 import { executeDirectLocalFileRequest, routeHasDirectLocalFileActionItems } from '../../../lib/directLocalFileRuntime';
 import { listApiKeys } from '../../../lib/llmProviders';
+import { isPendingClarificationFresh } from '../../../lib/chatSessionResumptionCore';
 import {
   buildImplicitBusinessModelProfiles,
   loadCircleBusinessModelProfiles,
@@ -3942,7 +3943,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     if (!clarificationStorageKey || typeof localStorage === 'undefined') return;
     try {
       const entries = [...pendingClarificationRef.current.entries()]
-        .filter(([, value]) => Date.now() - value.askedAt < 15 * 60 * 1000)
+        .filter(([, value]) => isPendingClarificationFresh(value.askedAt, Date.now()))
         .slice(-5);
       if (entries.length === 0) localStorage.removeItem(clarificationStorageKey);
       else localStorage.setItem(clarificationStorageKey, JSON.stringify(Object.fromEntries(entries)));
@@ -3962,7 +3963,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       let hydrated = false;
       for (const [key, value] of Object.entries(parsed)) {
         if (!value || typeof value.askedAt !== 'number') continue;
-        if (Date.now() - value.askedAt >= 15 * 60 * 1000) continue;
+        if (!isPendingClarificationFresh(value.askedAt, Date.now())) continue;
         if (!pendingClarificationRef.current.has(key)) {
           pendingClarificationRef.current.set(key, value);
           hydrated = true;
@@ -6713,7 +6714,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       if (pendingClarify) {
         pendingClarificationRef.current.delete(clarifyKey);
         persistPendingClarifications();
-        const fresh = Date.now() - pendingClarify.askedAt < 15 * 60 * 1000;
+        const fresh = isPendingClarificationFresh(pendingClarify.askedAt, Date.now());
         const cancelled = /\b(nevermind|never\s*mind|cancel|forget it|forget that|skip it|no thanks|stop)\b/i.test(content);
         // A reply ending in "?" is almost certainly a new question, not the
         // answer to ours — don't fold it into the pending task; let it route
