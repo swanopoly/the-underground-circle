@@ -5114,48 +5114,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return `**${agent.name}** [AI draft via ${viaLabel}]:\n\n${aiResp}`;
   }, [circleId, currentUserId, currentUserName, resolveOpenSwanConnection]);
 
-  // "Send to agent" on an already-sent message — reuses dispatchAssignedAgentTask
-  // unmodified (same dispatch path the composer's pinned-target flow uses),
-  // just triggered from a specific past message instead of fresh composer
-  // input. Mirrors the composer flow's addBotMessage/error-recovery shape
-  // exactly (ChatTab.tsx selected-agent dispatch above) so receipts and
-  // failures look and behave the same either way.
-  const handleSendMessageToAgent = useCallback(async (item: ChatMessage, agent: AssignableAgent) => {
-    setSendToAgentFor(null);
-    setBotTyping(true);
-    try {
-      const response = await dispatchAssignedAgentTask(agent, item.content);
-      addBotMessage(response, undefined, {
-        source: {
-          actor: agent.name,
-          surface: 'message_send_to_agent',
-          provider: agent.provider,
-          selectedModel: agent.model || selectedModel || null,
-        },
-      });
-    } catch (err: any) {
-      await addRecoverableChatErrorMessage({
-        title: `**${agent.name}** failed`,
-        task: item.content,
-        error: err,
-        executionKind: 'message_send_to_agent',
-        source: 'message_send_to_agent_error',
-        touched: ['surface:main_chat', 'surface:message_send_to_agent', 'src/lib/bridgeTaskDispatcher.ts', 'src/lib/customAgentBridgeDispatcher.ts'],
-        messageSource: {
-          actor: agent.name,
-          surface: 'message_send_to_agent_error',
-          provider: agent.provider,
-          selectedModel: agent.model || selectedModel || null,
-        },
-      });
-    } finally {
-      setBotTyping(false);
-      setTimeout(() => {
-        void refreshAssignableAgentsRef.current?.();
-      }, 1500);
-    }
-  }, [dispatchAssignedAgentTask, selectedModel]);
-
   const spawnDedicatedOpenSwanSession = useCallback(async (agent: AssignableAgent, task: string): Promise<string> => {
     const config = await resolveOpenSwanConnection();
     if (!config) {
@@ -5841,6 +5799,54 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       },
     });
   };
+
+  // "Send to agent" on an already-sent message — reuses dispatchAssignedAgentTask
+  // unmodified (same dispatch path the composer's pinned-target flow uses),
+  // just triggered from a specific past message instead of fresh composer
+  // input. Mirrors the composer flow's addBotMessage/error-recovery shape
+  // exactly so receipts and failures look and behave the same either way.
+  // Declared here (after addBotMessage/addRecoverableChatErrorMessage, not
+  // immediately after dispatchAssignedAgentTask above) deliberately — both
+  // are plain consts redefined every render, not memoized, so this callback
+  // must be declared after them to reference them in its own dependency
+  // array; declaring it earlier and listing them as deps would throw
+  // "Cannot access before initialization" on every render (they wouldn't
+  // exist yet at the point this useCallback's deps array is evaluated).
+  const handleSendMessageToAgent = useCallback(async (item: ChatMessage, agent: AssignableAgent) => {
+    setSendToAgentFor(null);
+    setBotTyping(true);
+    try {
+      const response = await dispatchAssignedAgentTask(agent, item.content);
+      addBotMessage(response, undefined, {
+        source: {
+          actor: agent.name,
+          surface: 'message_send_to_agent',
+          provider: agent.provider,
+          selectedModel: agent.model || selectedModel || null,
+        },
+      });
+    } catch (err: any) {
+      await addRecoverableChatErrorMessage({
+        title: `**${agent.name}** failed`,
+        task: item.content,
+        error: err,
+        executionKind: 'message_send_to_agent',
+        source: 'message_send_to_agent_error',
+        touched: ['surface:main_chat', 'surface:message_send_to_agent', 'src/lib/bridgeTaskDispatcher.ts', 'src/lib/customAgentBridgeDispatcher.ts'],
+        messageSource: {
+          actor: agent.name,
+          surface: 'message_send_to_agent_error',
+          provider: agent.provider,
+          selectedModel: agent.model || selectedModel || null,
+        },
+      });
+    } finally {
+      setBotTyping(false);
+      setTimeout(() => {
+        void refreshAssignableAgentsRef.current?.();
+      }, 1500);
+    }
+  }, [dispatchAssignedAgentTask, selectedModel, addBotMessage, addRecoverableChatErrorMessage]);
 
   const addPendingBotMessage = (content: string, extra?: { taskPlan?: OpenSwanTaskPlan }) => {
     const msgId = `bot-pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
