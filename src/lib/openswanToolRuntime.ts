@@ -9693,7 +9693,24 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         if (!appName) return { ok: false, resultsText: 'appName is required.' } as any;
         const { runAppReachabilityProbe } = await import('./appReachabilityProbe');
         const { report, text } = await runAppReachabilityProbe(appName);
-        return { ok: true, status: report.status, chatCanFix: report.chatCanFix, resultsText: text } as any;
+        // Reconcile the live reachability report against the standard desktop surface
+        // ladder so the return also carries WHERE to start, any precondition to satisfy
+        // first, and a user-action hint when the top surface is blocked. (The ladder here
+        // is the sensible desktop default; a plan-specific order would be higher-fidelity.)
+        const { reconcileLiveSurfaceViability } = await import('./liveSurfaceViabilityCore');
+        const viability = reconcileLiveSurfaceViability({
+          preferredSurfaceOrder: ['desktop_bridge', 'desktop_a11y', 'desktop_vision'],
+          reachability: report,
+        });
+        return {
+          ok: true,
+          status: report.status,
+          chatCanFix: report.chatCanFix,
+          startSurface: viability.startSurface,
+          precondition: viability.startPrecondition?.kind ?? null,
+          userAction: viability.userAction,
+          resultsText: viability.userAction ? `${text}\n${viability.userAction}` : text,
+        } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
     case 'desktop.photoshop_manage_layers': {
