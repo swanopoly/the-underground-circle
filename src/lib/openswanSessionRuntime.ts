@@ -56,6 +56,7 @@ import { estimateRunCostUsd } from './runCostRollupCore';
 import { resolveCapabilityFallback } from './capabilityFallbackCore';
 import { getModelCapabilityFlags } from './modelCapabilities';
 import { getModelContextWindow } from './modelContextBudgetCore';
+import { evaluateTurnSpend } from './turnSpendGovernorCore';
 import { appendOpenSwanTranscriptEvent, buildOpenSwanTranscriptKey, upsertOpenSwanTranscriptHeader, type OpenSwanSessionTranscript } from './openswanTranscripts';
 import { executeOpenSwanVerificationPlan, type OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import { getSwanBotStructuredResponse, executeToolUseLoop, buildStreamableSystemPrompt, type SwanBotContext, type SwanBotStructuredArtifact, type SwanBotStructuredResponse } from './swanbot';
@@ -879,6 +880,22 @@ async function runTypedCoreToolLoop(args: {
       runAndFixState = markNudgeSent(runAndFixState);
       return { appendUserNote: nudge.note };
     }
+    // Turn-spend backstop (lowest-priority nudge, after legacy + run-and-fix): price
+    // this turn's accrued burn and, if it breaches the turn cap or the next round is
+    // projected to, append ONE soft steer to wrap up. With no per-turn/circle budget
+    // threaded here it only fires the $50 absolute backstop + next-round-breach —
+    // inert on normal cent-level turns; a genuine runaway-turn safety net.
+    const spendUsage = finalizeLoopUsage(usageAcc);
+    const accruedTurnUsd = spendUsage
+      ? estimateRunCostUsd({
+          model: loopModel,
+          inputTokens: spendUsage.input_tokens,
+          outputTokens: spendUsage.output_tokens,
+          cachedTokens: spendUsage.cache_read_tokens,
+        })
+      : 0;
+    const gov = evaluateTurnSpend({ accruedTurnUsd, roundsCompleted: round.iteration });
+    if (gov.action !== 'continue') return { appendUserNote: gov.reason };
     return legacy;
   };
 
