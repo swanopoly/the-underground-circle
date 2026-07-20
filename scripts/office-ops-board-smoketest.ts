@@ -75,7 +75,15 @@ console.log('\n[1] building board — nesting, orphans, ordering');
       parent_run_id: 'root-1',
       delegated_to: 'coder',
       started_at: iso(-60_000),
-      metadata: { delegationDepth: 1, runtimeToolActions: [{ tool: 'fs.read', title: 'fs > read', status: 'completed' }] },
+      metadata: {
+        delegationDepth: 1,
+        runtimeToolActions: [{ tool: 'fs.read', title: 'fs > read', status: 'completed' }],
+        agentSubjectKey: 'office::coder',
+        agentDisplayName: 'Coder Agent',
+        agentDbId: 'agent-db-coder',
+        agentSessionKey: 'session::coder',
+        legacyAgentIds: ['coder', 'office::coder', 'legacy::coder'],
+      },
     }),
     run({ id: 'child-1b', status: 'queued', parent_run_id: 'root-1', delegated_to: 'reviewer', started_at: iso(-30_000) }),
     run({ id: 'orphan-1', status: 'running', parent_run_id: 'missing-parent', delegated_to: 'tester', started_at: iso(-20_000) }),
@@ -92,6 +100,14 @@ console.log('\n[1] building board — nesting, orphans, ordering');
   check('child depth from metadata', root1?.children[0]?.depth === 1);
   check('child agentName from delegated_to', root1?.children[0]?.agentName === 'Coder');
   check('child stepHint from runtimeToolActions', root1?.children[0]?.stepHint === 'fs > read');
+  check('child subjectKey from metadata', root1?.children[0]?.subjectKey === 'office::coder');
+  check('child subject display from metadata', root1?.children[0]?.subjectDisplayName === 'Coder Agent');
+  check('child subject db id from metadata', root1?.children[0]?.subjectDbId === 'agent-db-coder');
+  check(
+    'child subject aliases dedupe subject key',
+    JSON.stringify(root1?.children[0]?.subjectAliases) === JSON.stringify(['agent-db-coder', 'session::coder', 'coder', 'legacy::coder']),
+    JSON.stringify(root1?.children[0]?.subjectAliases),
+  );
   const orphan = board.building.find((n) => n.runId === 'orphan-1');
   check('orphan renders as root', !!orphan);
   check('orphan flagged subagent', orphan?.isSubagent === true);
@@ -339,8 +355,32 @@ console.log('\n[A] accountability index — outcomes, window, keying, cost');
 {
   const runs: AgentRunLike[] = [
     // Research Agent: one success 2h ago, one FAILURE 20m ago (newer → lastLine)
-    run({ id: 'r1', status: 'completed', title: 'Summarize docs', delegated_to: 'research_agent', completed_at: iso(-2 * 60 * 60 * 1000), estimated_cost: 0.12 }),
-    run({ id: 'r2', status: 'failed', title: 'Fetch external corpus', delegated_to: 'research_agent', completed_at: iso(-20 * 60_000), estimated_cost: 0.031 }),
+    run({
+      id: 'r1',
+      status: 'completed',
+      title: 'Summarize docs',
+      delegated_to: 'research_agent',
+      completed_at: iso(-2 * 60 * 60 * 1000),
+      estimated_cost: 0.12,
+      metadata: {
+        agentSubjectKey: 'office::researcher',
+        agentDisplayName: 'Research Agent',
+        legacyAgentIds: ['research_agent', 'legacy::research'],
+      },
+    }),
+    run({
+      id: 'r2',
+      status: 'failed',
+      title: 'Fetch external corpus',
+      delegated_to: 'research_agent',
+      completed_at: iso(-20 * 60_000),
+      estimated_cost: 0.031,
+      metadata: {
+        agentSubjectKey: 'office::researcher',
+        agentDisplayName: 'Research Agent',
+        legacyAgentIds: ['research_agent', 'legacy::research'],
+      },
+    }),
     // Coder: one success 5m ago
     run({ id: 'r3', status: 'completed', title: 'Fix login flow', delegated_to: 'coder', completed_at: iso(-5 * 60_000), estimated_cost: 0.5 }),
     // Outside the 24h window — excluded
@@ -354,6 +394,8 @@ console.log('\n[A] accountability index — outcomes, window, keying, cost');
 
   const research = index.get('research agent');
   check('delegated_to keys by prettified lowercased name', !!research);
+  check('subject key also indexes accountability', index.get('office::researcher')?.failed24h === 1);
+  check('legacy alias also indexes accountability', index.get('legacy::research')?.completed24h === 1);
   check('newest finished run wins the line (failure)', !!research && research.lastLine.startsWith('❌ Fetch external corpus'));
   check('failure tone is danger', research?.tone === 'danger');
   check('counts: 1 completed + 1 failed', research?.completed24h === 1 && research?.failed24h === 1);

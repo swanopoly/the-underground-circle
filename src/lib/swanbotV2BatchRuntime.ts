@@ -67,10 +67,12 @@ import {
   buildV2BatchRunTitle,
   buildV2BatchTerminalRow,
   buildV2BatchErrorRow,
+  buildV2BatchTargetAgentMetadata,
   V2_BATCH_RUN_VERSION,
   V2_BATCH_RUN_SURFACE,
   V2_BATCH_DEFAULT_TARGET_AGENT,
   V2_BATCH_MAX_ITERATIONS,
+  type V2BatchTargetAgentSubject,
 } from './swanbotV2BatchRuntimeCore';
 
 /** Same shape as the batch lane's private `V2BodyError` (`swanbot.ts`). */
@@ -110,6 +112,8 @@ export type SwanbotV2BatchContext = {
   maxIterations?: number;
   /** Persisted target-agent name. Default `BlackSwan` (edge parity). */
   targetAgentName?: string;
+  /** Persisted target-agent subject metadata, if the caller resolved one. */
+  targetAgentSubject?: V2BatchTargetAgentSubject | null;
   /** Chat mode override; default derived from `thinkingLevel` (fast→talk, else build). */
   mode?: string;
   /** Optional pre-dispatch approval gate — session-path parity (runbook §2.6). */
@@ -156,6 +160,8 @@ export async function runSwanbotV2Batch(
 
   const mode = (typeof extra.mode === 'string' && extra.mode) || resolveV2BatchMode(thinkingLevel);
   const targetAgentName = extra.targetAgentName || V2_BATCH_DEFAULT_TARGET_AGENT;
+  const targetAgentSubject = extra.targetAgentSubject || null;
+  const targetAgentMetadata = buildV2BatchTargetAgentMetadata(targetAgentName, targetAgentSubject);
   const maxIterations = Math.max(1, Math.floor(extra.maxIterations || V2_BATCH_MAX_ITERATIONS));
 
   // The frozen system prompt is caller-built (§2.2). Fold in the per-turn
@@ -176,7 +182,7 @@ export async function runSwanbotV2Batch(
     model: loopModel,
     mode,
     title: buildV2BatchRunTitle(mode, message),
-    metadata: { version: V2_BATCH_RUN_VERSION, targetAgent: targetAgentName },
+    metadata: { version: V2_BATCH_RUN_VERSION, ...targetAgentMetadata },
   });
 
   // ── DE-RISK #1 (CRITICAL — started_at parity). ───────────────────────────
@@ -332,6 +338,7 @@ export async function runSwanbotV2Batch(
             .update(
               buildV2BatchErrorRow({
                 targetAgentName,
+                targetAgentSubject,
                 errorMessage: 'swanbot-ai relay failure',
                 completedAt: new Date().toISOString(),
               }),
@@ -368,6 +375,7 @@ export async function runSwanbotV2Batch(
         finalStopReason: v2.stopReason,
         usage,
         targetAgentName,
+        targetAgentSubject,
         rawStopReason: String(runResult.stopReason),
         completedAt: new Date().toISOString(),
       });
@@ -391,6 +399,7 @@ export async function runSwanbotV2Batch(
           .update(
             buildV2BatchErrorRow({
               targetAgentName,
+              targetAgentSubject,
               errorMessage: err,
               completedAt: new Date().toISOString(),
             }),

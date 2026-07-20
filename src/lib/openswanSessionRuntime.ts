@@ -95,6 +95,7 @@ import {
 } from './designAppRuntimeManifest';
 import { persistAgentRunLedgerPreview, persistRuntimeToolActions } from './agentRunLedgerPersistence';
 import { buildRouteDecisionRecordFromRuntime, buildRouteDecisionTelemetryPayload } from './routeDecisionTelemetry';
+import { buildAgentRuntimeSubject, type AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 
 export type OpenSwanRunStage =
   | 'booting'
@@ -565,6 +566,7 @@ async function runTypedCoreToolLoop(args: {
   surface: 'main_chat' | 'room_chat';
   mode?: string | null;
   maxToolRounds?: number;
+  agentSubject?: AgentRuntimeSubjectMetadata | null;
   toolApprovalGate?: LegacyToolApprovalGate;
   onStage?: (stage: OpenSwanRunStage, label: string) => void;
   /**
@@ -792,6 +794,7 @@ async function runTypedCoreToolLoop(args: {
         systemPrompt: args.systemPrompt,
         tools: [],
         messages: [{ role: 'user', content: args.codingPlanSplit.plannerPrompt }],
+        agentSubject: args.agentSubject,
       }));
       if (!planError && planData) {
         const planParsed = parseSwanbotToolTurnData(planData);
@@ -822,6 +825,7 @@ async function runTypedCoreToolLoop(args: {
         systemPrompt: args.systemPrompt,
         tools: toAnthropicToolShapes(tools),
         messages,
+        agentSubject: args.agentSubject,
       }));
       if (error || !data) {
         // Legacy parity: a terminal edge failure ends the turn with the
@@ -1058,6 +1062,7 @@ async function runTypedCoreToolLoop(args: {
           systemPrompt: args.systemPrompt,
           tools: toAnthropicToolShapes(assembledTools),
           messages: runResult.messages,
+          agentSubject: args.agentSubject,
         }),
       });
       finalizationText = extractAssistantText((finalData as any)?.content)
@@ -1183,6 +1188,23 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     buildAgenticCodingPrompt(cleanMessage, { surface: opts.surface, profile }),
   ].filter(Boolean).join('\n\n');
   const runSurface = opts.runSurface || opts.surface;
+  const runtimeSubject = buildAgentRuntimeSubject({
+    id: opts.context.agentSubjectKey || opts.context.agentId || `openswan:${opts.surface}`,
+    name: opts.context.agentName || 'OpenSwan',
+    sessionKey: opts.context.agentSessionKey || opts.context.agentSubjectKey || opts.context.agentId || undefined,
+    providerType: 'openswan' as any,
+    spirit: opts.context.spiritId || undefined,
+  }, {
+    dbAgentId: opts.context.agentDbId || null,
+  });
+  const runtimeMemoryAliases = Array.from(new Set([
+    ...runtimeSubject.memoryAgentAliases,
+    ...(opts.context.agentLegacyIds || []),
+  ].map(value => String(value || '').trim()).filter(Boolean)));
+  const runtimeRunAliases = Array.from(new Set([
+    ...runtimeSubject.runAgentAliases,
+    ...(opts.context.agentLegacyIds || []),
+  ].map(value => String(value || '').trim()).filter(Boolean)));
   const taskPlan = buildOpenSwanTaskPlan(cleanMessage, profile, entities);
   const runtimeToolNames = selectRuntimeToolNames(taskPlan, opts.mode || null);
   const toolRoundBudget = getToolRoundBudget(taskPlan, opts.mode || null);
@@ -1304,6 +1326,17 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
           recommendedTools: taskPlan.recommendedTools,
           connectedProviders: connectedProviders ? Array.from(connectedProviders) : [],
           ...(opts.metadata || {}),
+          agentSubjectKey: runtimeSubject.subjectKey,
+          agentId: runtimeSubject.runAgentId,
+          agentName: runtimeSubject.displayName,
+          agentDisplayName: runtimeSubject.displayName,
+          agentDbId: runtimeSubject.dbAgentId,
+          agentSessionKey: runtimeSubject.sessionKey,
+          legacyAgentIds: runtimeSubject.legacyIds,
+          agentLegacyIds: runtimeSubject.legacyIds,
+          runAgentAliases: runtimeRunAliases,
+          memoryAgentAliases: runtimeMemoryAliases,
+          agentSubject: runtimeSubject.metadata,
         },
       })
     : null;
@@ -1494,7 +1527,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       model: opts.context.model || undefined,
       chatHistory: opts.context.chatHistory,
       roomId: opts.roomId,
-      parentAgentId: opts.context.agentId || undefined,
+      parentAgentId: runtimeSubject.runAgentId,
       parentMode: opts.mode || null,
     });
     for (const result of delegated.results) {
@@ -1615,9 +1648,10 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     userId: opts.context.userId,
     query: cleanMessage,
     roomId: opts.roomId,
-    agentId: opts.context.agentId,
-    agentName: opts.context.agentName,
-    spiritId: opts.context.spiritId,
+    agentId: runtimeSubject.memoryAgentId,
+    agentAliases: runtimeMemoryAliases,
+    agentName: runtimeSubject.displayName,
+    spiritId: runtimeSubject.spiritId || opts.context.spiritId,
     surface: opts.surface,
     taskKind: taskPlan.kind,
     profile,
@@ -1649,7 +1683,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       memoryReferences: summarizeMemoryReferences(memoryBundle.references),
       memoriesUsed: memoryBundle.references.map((ref) => ref.title),
       memoryContextPreview: memoryBundle.combined.slice(0, 1200),
-      spiritId: opts.context.spiritId || null,
+      spiritId: runtimeSubject.spiritId || opts.context.spiritId || null,
       posture: {
         mode: opts.mode || null,
         surface: postureSurface,
@@ -1800,6 +1834,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
             toolApprovalGate: opts.onToolApproval,
             onStage: (stage, label) => emitStage(opts, stage, label),
             codingPlanSplit,
+            agentSubject: runtimeSubject.metadata,
             signal: opts.signal,
           })
         : await executeToolUseLoop({
@@ -1816,6 +1851,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
             surface: surfaceForTools,
             mode: opts.mode || null,
             maxToolRounds: toolRoundBudget,
+            agentSubject: runtimeSubject.metadata,
             toolApprovalGate: opts.onToolApproval,
           });
       // Steering scope closes with the loop. A thrown loop skips this line,
@@ -2193,7 +2229,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         profile: taskPlan.profile,
         prompt: cleanMessage,
         response: structured.response,
-        spiritId: opts.context.spiritId || null,
+        spiritId: runtimeSubject.spiritId || opts.context.spiritId || null,
         memoryReferences: memoryBundle.references,
         verificationResults,
         artifacts: (structured.artifacts || []).map((artifact) => ({ kind: artifact.kind, title: artifact.title })),
@@ -2220,7 +2256,6 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
           },
         })) || transcript;
 
-      const runtimeAgentId = opts.context.agentId || `openswan:${opts.surface}`;
       const modeSummaryArtifacts = buildModeSummaryArtifacts({
         mode: opts.mode || null,
         summary: modeOutcomeSummary,
@@ -2238,6 +2273,8 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
             resolvedSessionProfile: taskPlan.profile,
             routingIntent: runtimeRoute.intent,
             taskKind: taskPlan.kind,
+            agentSubjectKey: runtimeSubject.subjectKey,
+            agentSubject: runtimeSubject.metadata,
             verificationPlan: taskPlan.verification,
             modeOutcomeSummary,
             runtimeToolActions,
@@ -2288,13 +2325,17 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         openswanTranscriptKey: transcriptKey,
         openswanTranscriptEventCount: transcript.events.length,
         openswanTranscriptUpdatedAt: transcript.updatedAt,
+        agentSubjectKey: runtimeSubject.subjectKey,
+        agentSubject: runtimeSubject.metadata,
+        runAgentAliases: runtimeRunAliases,
+        memoryAgentAliases: runtimeMemoryAliases,
       });
       void captureOpenSwanOutcomeMemory({
         circleId: opts.context.circleId,
         userId: opts.context.userId,
-        agentId: runtimeAgentId,
-        agentName: opts.context.agentName || 'OpenSwan',
-        spiritId: opts.context.spiritId || null,
+        agentId: runtimeSubject.memoryAgentId,
+        agentName: runtimeSubject.displayName,
+        spiritId: runtimeSubject.spiritId || opts.context.spiritId || null,
         taskKind: taskPlan.kind,
         profile: taskPlan.profile,
         title: opts.title || cleanMessage.slice(0, 100) || 'OpenSwan Session',
@@ -2311,7 +2352,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       profile: taskPlan.profile,
       prompt: cleanMessage,
       response: structured.response,
-      spiritId: opts.context.spiritId || null,
+      spiritId: runtimeSubject.spiritId || opts.context.spiritId || null,
       memoryReferences: memoryBundle.references,
       verificationResults,
       artifacts: (structured.artifacts || []).map((artifact) => ({ kind: artifact.kind, title: artifact.title })),

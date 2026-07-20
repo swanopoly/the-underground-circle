@@ -10,6 +10,8 @@
  * helper) and by ChatTab's automation intercept.
  */
 
+import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
+
 export interface AutomationProposal {
   triggerType: 'schedule' | 'event';
   cronExpression?: string;
@@ -21,6 +23,38 @@ export interface AutomationProposal {
   outputTarget: 'activity' | 'chat' | 'silent';
   agent: string;
   confidence: number;
+}
+
+export function buildAutomationProposalInsertRow(opts: {
+  proposal: AutomationProposal;
+  circleId: string;
+  userId: string;
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
+}): Record<string, unknown> {
+  const { proposal, circleId, userId, agentSubjectMetadata } = opts;
+  const agentDisplayName = String(agentSubjectMetadata?.agentDisplayName || '').trim();
+  const eventConfig = agentSubjectMetadata
+    ? { ...(proposal.eventConfig || {}), agentSubjectMetadata }
+    : proposal.eventConfig;
+  const row: Record<string, unknown> = {
+    circle_id: circleId,
+    created_by: userId,
+    name: proposal.name,
+    description: proposal.description,
+    icon: '⚡',
+    trigger_type: proposal.triggerType,
+    agent: agentDisplayName || proposal.agent,
+    prompt: proposal.prompt,
+    output_target: proposal.outputTarget,
+    enabled: true,
+  };
+  if (proposal.triggerType === 'schedule' && proposal.cronExpression) {
+    row.cron_expression = proposal.cronExpression;
+  }
+  if (eventConfig) {
+    row.event_config = eventConfig;
+  }
+  return row;
 }
 
 const DAYS: Record<string, number> = {

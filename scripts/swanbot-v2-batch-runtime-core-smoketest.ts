@@ -18,6 +18,7 @@ import {
   buildV2BatchRunTitle,
   buildV2BatchTerminalRow,
   buildV2BatchErrorRow,
+  buildV2BatchTargetAgentMetadata,
   v2BatchTerminalStatus,
   V2_BATCH_MODEL_MAP,
   V2_BATCH_RUN_VERSION,
@@ -117,12 +118,21 @@ ok(v2BatchTerminalStatus('stop_sequence') === 'failed', 'raw stop_sequence → f
 // ── 8. Terminal row shape (telemetry parity §3) ──────────────────────────────
 group('8. buildV2BatchTerminalRow');
 const now = '2026-07-16T00:00:00.000Z';
+const targetSubject = {
+  agentSubjectKey: 'blackswan',
+  agentDisplayName: 'BlackSwan',
+  agentDbId: '11111111-1111-4111-8111-111111111111',
+  agentProvider: 'openswan',
+  agentSessionKey: 'blackswan',
+  legacyAgentIds: ['default::blackswan', 'openswan:main_chat'],
+};
 const termRow = buildV2BatchTerminalRow({
   toolCalls: [{ toolName: 'codebase.search', toolUseId: 't1', ok: true }],
   iterations: 3,
   finalStopReason: 'end_turn',
   usage: { inputTokens: 100, outputTokens: 40, cachedTokens: 12 },
   targetAgentName: 'BlackSwan',
+  targetAgentSubject: targetSubject,
   rawStopReason: 'end_turn',
   completedAt: now,
 });
@@ -135,6 +145,11 @@ ok(termRow.completed_at === now, 'completed_at is caller-injected timestamp');
 const tMeta = termRow.metadata as Record<string, unknown>;
 ok(tMeta.version === V2_BATCH_RUN_VERSION, 'metadata.version cohort tag present (DE-RISK: no cohort loss)');
 ok(tMeta.targetAgent === 'BlackSwan', 'metadata.targetAgent carried');
+ok(tMeta.targetAgentSubjectKey === 'blackswan', 'metadata.targetAgentSubjectKey carried');
+ok(tMeta.targetAgentDbId === '11111111-1111-4111-8111-111111111111', 'metadata.targetAgentDbId carried');
+ok(Array.isArray(tMeta.targetAgentLegacyIds) && (tMeta.targetAgentLegacyIds as unknown[]).includes('openswan:main_chat'), 'metadata.targetAgentLegacyIds carried');
+ok((tMeta.targetAgentSubject as Record<string, unknown>).agentSubjectKey === 'blackswan', 'metadata.targetAgentSubject carried');
+ok((tMeta.agentSubject as Record<string, unknown>).agentDisplayName === 'BlackSwan', 'metadata.agentSubject alias carried');
 ok(tMeta.rawStopReason === 'end_turn', 'metadata.rawStopReason carried');
 ok(!('continuation' in tMeta), 'no continuation blob (client loop never pauses)');
 
@@ -154,6 +169,12 @@ ok((capRow.metadata as Record<string, unknown>).rawStopReason === 'tool_use', 'r
 // ── 9. Error row shape (DE-RISK #2 / edge index.ts:3093-3106) ────────────────
 group('9. buildV2BatchErrorRow (orphan finalizer)');
 const errRow = buildV2BatchErrorRow({ targetAgentName: 'BlackSwan', errorMessage: new Error('boom'), completedAt: now });
+const subjectErrRow = buildV2BatchErrorRow({
+  targetAgentName: 'BlackSwan',
+  targetAgentSubject: targetSubject,
+  errorMessage: new Error('boom'),
+  completedAt: now,
+});
 ok(errRow.status === 'failed', 'error row status failed');
 ok(errRow.final_stop_reason === 'error', 'error row final_stop_reason error');
 ok(errRow.input_tokens === 0 && errRow.output_tokens === 0 && errRow.cached_tokens === 0, 'error row zeroes usage');
@@ -161,11 +182,27 @@ ok(errRow.iteration_count === 1, 'error row iteration_count 1 (edge parity)');
 ok(Array.isArray(errRow.tool_calls) && (errRow.tool_calls as unknown[]).length === 0, 'error row empty tool_calls');
 ok((errRow.metadata as Record<string, unknown>).version === V2_BATCH_RUN_VERSION, 'error row KEEPS cohort tag (DE-RISK #2)');
 ok((errRow.metadata as Record<string, unknown>).error === 'boom', 'error message captured from Error');
+ok((subjectErrRow.metadata as Record<string, unknown>).targetAgentSubjectKey === 'blackswan', 'error row preserves subject key');
+ok((subjectErrRow.metadata as Record<string, unknown>).error === 'boom', 'error row subject does not overwrite error');
 ok(
   typeof (buildV2BatchErrorRow({ targetAgentName: 'X', errorMessage: 'z'.repeat(9999), completedAt: now }).metadata as Record<string, unknown>).error === 'string' &&
     ((buildV2BatchErrorRow({ targetAgentName: 'X', errorMessage: 'z'.repeat(9999), completedAt: now }).metadata as Record<string, unknown>).error as string).length <= 500,
   'error message clamped to 500 chars',
 );
+
+// ── 9b. Target-agent subject metadata sanitizer ───────────────────────────────
+group('9b. buildV2BatchTargetAgentMetadata');
+const subjectMeta = buildV2BatchTargetAgentMetadata('BlackSwan', {
+  ...targetSubject,
+  version: 'bad',
+  rawStopReason: 'bad',
+  legacyAgentIds: ['default::blackswan', 'default::blackswan', 'openswan:main_chat'],
+} as unknown);
+ok(subjectMeta.targetAgent === 'BlackSwan', 'target metadata keeps display name');
+ok(subjectMeta.targetAgentSubjectKey === 'blackswan', 'target metadata extracts subject key');
+ok(!('version' in subjectMeta), 'target metadata cannot overwrite version');
+ok(!('rawStopReason' in subjectMeta), 'target metadata cannot overwrite rawStopReason');
+ok(((subjectMeta.targetAgentSubject as Record<string, unknown>).legacyAgentIds as string[]).length === 2, 'target metadata dedupes legacy ids');
 
 // ── 10. Token clamping (edge agentRunTokenUsageFields parity) ─────────────────
 group('10. token clamping — negatives/NaN/Infinity/floats');

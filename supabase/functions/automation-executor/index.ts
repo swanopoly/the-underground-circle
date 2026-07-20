@@ -728,6 +728,93 @@ const LANG_TO_EXT: Record<string, string> = {
   ruby: "ruby", php: "php", swift: "swift", kotlin: "kotlin",
 };
 
+type SanitizedAgentSubjectMetadata = {
+  agentSubjectKey?: string;
+  agentDisplayName?: string;
+  agentDbId?: string;
+  agentProvider?: string;
+  agentSessionKey?: string;
+  agentSpiritId?: string;
+  legacyAgentIds: string[];
+};
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function boundedString(value: unknown, maxLength = 180): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > maxLength ? trimmed.slice(0, maxLength) : trimmed;
+}
+
+function boundedStringArray(value: unknown, maxItems = 16, maxLength = 180): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of value) {
+    const str = boundedString(item, maxLength);
+    if (!str || seen.has(str)) continue;
+    seen.add(str);
+    out.push(str);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+function sanitizeAgentSubjectMetadata(input: unknown): SanitizedAgentSubjectMetadata | null {
+  if (!isPlainObject(input)) return null;
+  const agentSubjectKey = boundedString(input.agentSubjectKey);
+  const agentDisplayName = boundedString(input.agentDisplayName);
+  const legacyAgentIds = boundedStringArray(input.legacyAgentIds);
+  const out: SanitizedAgentSubjectMetadata = { legacyAgentIds };
+  const optionalFields: Array<[keyof Omit<SanitizedAgentSubjectMetadata, "legacyAgentIds">, unknown, number]> = [
+    ["agentSubjectKey", agentSubjectKey, 180],
+    ["agentDisplayName", agentDisplayName, 180],
+    ["agentDbId", input.agentDbId, 180],
+    ["agentProvider", input.agentProvider, 80],
+    ["agentSessionKey", input.agentSessionKey, 180],
+    ["agentSpiritId", input.agentSpiritId, 180],
+  ];
+  for (const [key, value, maxLength] of optionalFields) {
+    const str = typeof value === "string" ? boundedString(value, maxLength) : value;
+    if (typeof str === "string") out[key] = str;
+  }
+  return out.agentSubjectKey || out.agentDisplayName || out.legacyAgentIds.length > 0 ? out : null;
+}
+
+function readSavedAgentSubjectMetadata(automation: Record<string, unknown>): SanitizedAgentSubjectMetadata | null {
+  const eventConfig = isPlainObject(automation.event_config) ? automation.event_config : {};
+  return sanitizeAgentSubjectMetadata(eventConfig.agentSubjectMetadata)
+    || sanitizeAgentSubjectMetadata(eventConfig.agentSubject)
+    || sanitizeAgentSubjectMetadata(eventConfig.agent_subject_metadata);
+}
+
+function agentSubjectMetadataFields(
+  agentSubjectMetadata?: SanitizedAgentSubjectMetadata | null,
+): Record<string, unknown> {
+  if (!agentSubjectMetadata) return {};
+  return {
+    agentSubject: agentSubjectMetadata,
+    agentSubjectKey: agentSubjectMetadata.agentSubjectKey,
+    targetAgentSubjectKey: agentSubjectMetadata.agentSubjectKey,
+    targetAgentName: agentSubjectMetadata.agentDisplayName,
+    targetAgentDbId: agentSubjectMetadata.agentDbId,
+    targetAgentLegacyIds: agentSubjectMetadata.legacyAgentIds,
+  };
+}
+
+function withAgentSubjectMetadata<T extends Record<string, unknown>>(
+  metadata: T,
+  agentSubjectMetadata?: SanitizedAgentSubjectMetadata | null,
+): T & Record<string, unknown> {
+  return {
+    ...metadata,
+    ...agentSubjectMetadataFields(agentSubjectMetadata),
+  };
+}
+
 /**
  * Execute parsed room file actions against the database.
  * Returns a summary of what was done.
@@ -898,6 +985,7 @@ async function routeOutput(
   text: string,
   webhookUrl?: string,
   automationName?: string,
+  agentSubjectMetadata?: SanitizedAgentSubjectMetadata | null,
 ) {
   // Skip output if AI said SKIP
   if (text.trim() === "SKIP") return;
@@ -923,6 +1011,10 @@ async function routeOutput(
         title: `Automation: ${automationName || "Task"}`,
         body: text.slice(0, 2000),
         status: "completed",
+        metadata: withAgentSubjectMetadata({
+          automation_name: automationName || null,
+          source: "automation",
+        }, agentSubjectMetadata),
       });
       break;
 
@@ -1011,7 +1103,10 @@ async function routeOutput(
             agent_name: agentName,
             content: text,
             message_type: "agent_output",
-            metadata: { automation: automationName, source: "automation" },
+            metadata: withAgentSubjectMetadata(
+              { automation: automationName, source: "automation" },
+              agentSubjectMetadata,
+            ),
           });
         } catch (e) {
           console.warn(`Room output failed for ${outputTarget}:`, e);
@@ -1171,6 +1266,8 @@ interface AutomationRequest {
   eventPayload?: any;
   retryCount?: number;
   dryRun?: boolean; // If true, run AI but don't route output or create tasks
+  agentSubject?: unknown;
+  agentSubjectMetadata?: unknown;
 }
 
 const MAX_RETRIES = 2;
@@ -1219,6 +1316,8 @@ Deno.serve(async (req: Request) => {
     const body: AutomationRequest = await req.json();
     const { automationId, circleId, triggerSource, eventPayload, retryCount = 0, dryRun = false } = body;
     const triggeredBy = authedUser?.id ?? body.triggeredBy ?? null;
+    const requestAgentSubjectMetadata = sanitizeAgentSubjectMetadata(body.agentSubject)
+      || sanitizeAgentSubjectMetadata(body.agentSubjectMetadata);
 
     if (!automationId || !circleId) {
       return jsonResponse({ error: "Missing automationId or circleId" }, 400);
@@ -1259,6 +1358,9 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "Automation is disabled" }, 400);
     }
 
+    const agentSubjectMetadata = requestAgentSubjectMetadata || readSavedAgentSubjectMetadata(automation);
+    const initialInputContext = agentSubjectMetadataFields(agentSubjectMetadata);
+
     // 2. Create run record
     const { data: run } = await supabase
       .from("automation_runs")
@@ -1268,6 +1370,7 @@ Deno.serve(async (req: Request) => {
         status: "running",
         trigger_source: triggerSource,
         triggered_by: triggeredBy || null,
+        ...(agentSubjectMetadata ? { input_context: initialInputContext } : {}),
       })
       .select("id")
       .single();
@@ -1332,7 +1435,7 @@ Deno.serve(async (req: Request) => {
 
             if (!dryRun) {
               const noActivityTarget = automation.output_target || "chat";
-              await routeOutput(supabase, noActivityTarget, circleId, automation.agent || "BlackSwan", noActivityMsg, automation.webhook_url, automation.name);
+              await routeOutput(supabase, noActivityTarget, circleId, automation.agent || "BlackSwan", noActivityMsg, automation.webhook_url, automation.name, agentSubjectMetadata);
               await supabase.from("agent_activity").insert({
                 circle_id: circleId,
                 agent_name: automation.agent || "BlackSwan",
@@ -1342,7 +1445,10 @@ Deno.serve(async (req: Request) => {
                 title: `🤖 ${automation.name}`,
                 body: noActivityMsg,
                 status: "completed",
-                metadata: { automation_id: automationId, run_id: runId, github_events: 0 },
+                metadata: withAgentSubjectMetadata(
+                  { automation_id: automationId, run_id: runId, github_events: 0 },
+                  agentSubjectMetadata,
+                ),
               });
             }
 
@@ -1354,6 +1460,10 @@ Deno.serve(async (req: Request) => {
                 completed_at: new Date().toISOString(),
                 duration_ms: Date.now() - startTime,
                 error_message: logSteps.join("\n"),
+                input_context: {
+                  ...initialInputContext,
+                  log: logSteps,
+                },
               }).eq("id", runId);
             }
             return new Response(
@@ -1415,7 +1525,7 @@ Deno.serve(async (req: Request) => {
 
             if (!dryRun) {
               const target = automation.output_target || "chat";
-              await routeOutput(supabase, target, circleId, automation.agent || "BlackSwan", skipMsg, automation.webhook_url, automation.name);
+              await routeOutput(supabase, target, circleId, automation.agent || "BlackSwan", skipMsg, automation.webhook_url, automation.name, agentSubjectMetadata);
               await supabase.from("agent_activity").insert({
                 circle_id: circleId,
                 agent_name: automation.agent || "BlackSwan",
@@ -1425,7 +1535,10 @@ Deno.serve(async (req: Request) => {
                 title: `🤖 ${automation.name}`,
                 body: skipMsg,
                 status: "completed",
-                metadata: { automation_id: automationId, run_id: runId, inactive_count: 0 },
+                metadata: withAgentSubjectMetadata(
+                  { automation_id: automationId, run_id: runId, inactive_count: 0 },
+                  agentSubjectMetadata,
+                ),
               });
             }
 
@@ -1436,6 +1549,10 @@ Deno.serve(async (req: Request) => {
                 completed_at: new Date().toISOString(),
                 duration_ms: Date.now() - startTime,
                 error_message: logSteps.join("\n"),
+                input_context: {
+                  ...initialInputContext,
+                  log: logSteps,
+                },
               }).eq("id", runId);
             }
             return new Response(
@@ -1487,6 +1604,10 @@ Deno.serve(async (req: Request) => {
                 completed_at: new Date().toISOString(),
                 duration_ms: Date.now() - startTime,
                 error_message: logSteps.join("\n"),
+                input_context: {
+                  ...initialInputContext,
+                  log: logSteps,
+                },
               }).eq("id", runId);
             }
             return new Response(
@@ -1722,7 +1843,10 @@ ${contextString}`;
         userId: automation.created_by || null,
         source: "automation-executor",
         aiResult,
-        metadata: { automation_id: automation.id, automation_name: automation.name, trigger_type: automation.trigger_type },
+        metadata: withAgentSubjectMetadata(
+          { automation_id: automation.id, automation_name: automation.name, trigger_type: automation.trigger_type },
+          agentSubjectMetadata,
+        ),
       });
 
       // 6a-gh. Mark GitHub events as processed (if github_summary)
@@ -1777,7 +1901,10 @@ ${contextString}`;
                 reason: action.reason || `Proposed by ${automation.name}`,
                 proposed_by: automation.agent || "BlackSwan",
                 source: automation.name?.toLowerCase().includes("dca") ? "dca" : "automation",
-                metadata: { automation_id: automationId, run_id: runId, raw: action },
+                metadata: withAgentSubjectMetadata(
+                  { automation_id: automationId, run_id: runId, raw: action },
+                  agentSubjectMetadata,
+                ),
               });
             }
             await logStep(`✓ ${tradeActions.length} trade action(s) queued for user approval`);
@@ -1831,6 +1958,7 @@ ${contextString}`;
           aiResult.text,
           automation.webhook_url,
           automation.name,
+          agentSubjectMetadata,
         );
         if (outputTarget !== "silent") {
           await logStep(`✓ Output delivered to ${outputTarget}`);
@@ -1849,7 +1977,7 @@ ${contextString}`;
         title: `🤖 ${automation.name}`,
         body: activityBody.slice(0, 2000),
         status: "completed",
-        metadata: {
+        metadata: withAgentSubjectMetadata({
           automation_id: automationId,
           run_id: runId,
           model: modelId,
@@ -1857,7 +1985,7 @@ ${contextString}`;
           cost: aiResult.estimatedCost,
           trigger: triggerSource,
           output_target: outputTarget,
-        },
+        }, agentSubjectMetadata),
       });
       } // end if (!dryRun)
 
@@ -1868,6 +1996,7 @@ ${contextString}`;
 
       // Build rich input_context with everything the agent saw and did
       const richContext: Record<string, any> = {
+        ...initialInputContext,
         // Execution trace
         log: logSteps,
         // Circle info
@@ -2088,7 +2217,10 @@ ${contextString}`;
             completed_at: new Date().toISOString(),
             duration_ms: durationMs,
             error_message: execErr.message,
-            input_context: { log: logSteps },
+            input_context: {
+              ...initialInputContext,
+              log: logSteps,
+            },
           })
           .eq("id", runId);
       }
@@ -2103,7 +2235,10 @@ ${contextString}`;
         title: `🤖 ${automation.name}`,
         body: `❌ Failed: ${execErr.message}\n\n${logSteps.join("\n")}`.slice(0, 2000),
         status: "failed",
-        metadata: { automation_id: automationId, run_id: runId, trigger: triggerSource },
+        metadata: withAgentSubjectMetadata(
+          { automation_id: automationId, run_id: runId, trigger: triggerSource },
+          agentSubjectMetadata,
+        ),
       });
 
       // Update automation last_error
@@ -2175,6 +2310,8 @@ ${contextString}`;
               body: JSON.stringify({
                 automationId, circleId, triggerSource: "retry",
                 triggeredBy, eventPayload, retryCount: nextRetry,
+                agentSubject: agentSubjectMetadata || undefined,
+                agentSubjectMetadata: agentSubjectMetadata || undefined,
               }),
             }).catch(() => {});
           }

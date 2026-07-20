@@ -19,6 +19,7 @@ import type { AgentStatus, OfficeAgent } from './officeAgents';
 
 export interface AgentRunLike {
   id: string;
+  agent_id?: string | null;
   title?: string | null;
   status: string;
   surface?: string | null;
@@ -83,6 +84,12 @@ export interface OfficeRunNode {
   title: string;
   /** delegated_to role (prettified) or surface/title-derived agent label. */
   agentName: string;
+  /** Canonical runtime subject key when run metadata carries one. */
+  subjectKey?: string;
+  subjectDisplayName?: string;
+  subjectDbId?: string;
+  /** Legacy ids / session keys / memory aliases used to attach live runs. */
+  subjectAliases: string[];
   status: string;
   isSubagent: boolean;
   parentRunId?: string;
@@ -262,6 +269,88 @@ function deriveAgentName(run: AgentRunLike): string {
   return SURFACE_AGENT_LABELS[surface] || 'Agent';
 }
 
+function metadataRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function cleanSubjectString(value: unknown): string | undefined {
+  if (typeof value !== 'string' && typeof value !== 'number') return undefined;
+  const text = String(value).replace(/\s+/g, ' ').trim();
+  return text || undefined;
+}
+
+function collectSubjectStrings(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(collectSubjectStrings);
+  const text = cleanSubjectString(value);
+  return text ? [text] : [];
+}
+
+function uniqueSubjectStrings(values: unknown[], ignored: string[] = []): string[] {
+  const ignoredKeys = new Set(ignored.map((value) => value.trim().toLowerCase()).filter(Boolean));
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    for (const text of collectSubjectStrings(value)) {
+      const key = text.toLowerCase();
+      if (ignoredKeys.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      out.push(text);
+    }
+  }
+  return out;
+}
+
+function deriveRunSubjectIdentity(run: AgentRunLike): {
+  subjectKey?: string;
+  subjectDisplayName?: string;
+  subjectDbId?: string;
+  subjectAliases: string[];
+} {
+  const meta = metadataRecord(run.metadata);
+  const agentSubject = metadataRecord(meta.agentSubject);
+  const targetSubject = metadataRecord(meta.targetAgentSubject);
+  const subjectKey = cleanSubjectString(meta.agentSubjectKey)
+    || cleanSubjectString(meta.targetAgentSubjectKey)
+    || cleanSubjectString(agentSubject.agentSubjectKey)
+    || cleanSubjectString(targetSubject.agentSubjectKey)
+    || cleanSubjectString(run.agent_id);
+  const subjectDisplayName = cleanSubjectString(meta.agentDisplayName)
+    || cleanSubjectString(meta.agentName)
+    || cleanSubjectString(meta.targetAgentName)
+    || cleanSubjectString(meta.targetAgent)
+    || cleanSubjectString(agentSubject.agentDisplayName)
+    || cleanSubjectString(targetSubject.agentDisplayName);
+  const subjectDbId = cleanSubjectString(meta.agentDbId)
+    || cleanSubjectString(meta.targetAgentDbId)
+    || cleanSubjectString(agentSubject.agentDbId)
+    || cleanSubjectString(targetSubject.agentDbId);
+  const subjectSessionKey = cleanSubjectString(meta.agentSessionKey)
+    || cleanSubjectString(meta.sessionKey)
+    || cleanSubjectString(meta.session_key)
+    || cleanSubjectString(agentSubject.agentSessionKey)
+    || cleanSubjectString(targetSubject.agentSessionKey);
+  const subjectAliases = uniqueSubjectStrings([
+    subjectDbId,
+    subjectSessionKey,
+    meta.legacyAgentIds,
+    meta.agentLegacyIds,
+    meta.targetAgentLegacyIds,
+    meta.runAgentAliases,
+    meta.memoryAgentAliases,
+    agentSubject.legacyAgentIds,
+    targetSubject.legacyAgentIds,
+  ], [subjectKey || '', subjectDisplayName || '']);
+
+  return {
+    subjectKey,
+    subjectDisplayName,
+    subjectDbId,
+    subjectAliases,
+  };
+}
+
 function deriveStepHint(
   run: AgentRunLike,
   providedHints?: Record<string, string>,
@@ -368,11 +457,16 @@ export function buildOfficeBuildingBoard(
 
     const title = (typeof run.title === 'string' && run.title.trim()) || 'Untitled run';
     const startedAt = run.started_at || run.created_at || undefined;
+    const subject = deriveRunSubjectIdentity(run);
 
     return {
       runId: run.id,
       title: truncateText(title, 120),
       agentName: deriveAgentName(run),
+      subjectKey: subject.subjectKey,
+      subjectDisplayName: subject.subjectDisplayName,
+      subjectDbId: subject.subjectDbId,
+      subjectAliases: subject.subjectAliases,
       status: run.status,
       isSubagent,
       parentRunId: run.parent_run_id || undefined,
@@ -620,31 +714,42 @@ export function buildOfficeAgentAccountabilityIndex(
     const endedMs = parseTimestampMs(run.completed_at) ?? parseTimestampMs(run.created_at);
     if (endedMs == null || endedMs > nowMs || nowMs - endedMs > windowMs) continue;
 
-    const key = deriveAgentName(run).trim().toLowerCase();
-    if (!key) continue;
+    const subject = deriveRunSubjectIdentity(run);
+    const keys = uniqueSubjectStrings([
+      deriveAgentName(run),
+      subject.subjectKey,
+      subject.subjectDisplayName,
+      subject.subjectDbId,
+      subject.subjectAliases,
+    ]).map((value) => value.trim().toLowerCase()).filter(Boolean);
+    if (keys.length === 0) continue;
 
     const failed = run.status === 'failed';
-    const entry = map.get(key) || {
-      lastLine: '',
-      tone: 'good' as const,
-      completed24h: 0,
-      failed24h: 0,
-      costUsd24h: 0,
-      lastMs: -1,
-    };
-    if (failed) entry.failed24h += 1; else entry.completed24h += 1;
-    entry.costUsd24h += toFiniteNumber(run.estimated_cost);
+    const applyToEntry = (key: string) => {
+      const entry = map.get(key) || {
+        lastLine: '',
+        tone: 'good' as const,
+        completed24h: 0,
+        failed24h: 0,
+        costUsd24h: 0,
+        lastMs: -1,
+      };
+      if (failed) entry.failed24h += 1; else entry.completed24h += 1;
+      entry.costUsd24h += toFiniteNumber(run.estimated_cost);
 
-    if (endedMs > entry.lastMs) {
-      entry.lastMs = endedMs;
-      const title = truncateText(
-        (typeof run.title === 'string' && run.title.trim()) || 'Untitled run',
-        ACCOUNTABILITY_TITLE_MAX,
-      );
-      entry.lastLine = `${failed ? '❌' : '✅'} ${title} · ${formatRelativeTime(nowMs - endedMs)}`;
-      entry.tone = failed ? 'danger' : 'good';
-    }
-    map.set(key, entry);
+      if (endedMs > entry.lastMs) {
+        entry.lastMs = endedMs;
+        const title = truncateText(
+          (typeof run.title === 'string' && run.title.trim()) || 'Untitled run',
+          ACCOUNTABILITY_TITLE_MAX,
+        );
+        entry.lastLine = `${failed ? '❌' : '✅'} ${title} · ${formatRelativeTime(nowMs - endedMs)}`;
+        entry.tone = failed ? 'danger' : 'good';
+      }
+      map.set(key, entry);
+    };
+
+    keys.forEach(applyToEntry);
   }
 
   const out = new Map<string, OfficeAgentAccountability>();

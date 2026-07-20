@@ -491,18 +491,18 @@ function ThreadRow({
   );
 }
 
-// ─── Styles — black rail with restrained action accents and rainbow hover ───
+// ─── Styles — near-black rail with restrained action accents and rainbow hover ───
 
 const styles = StyleSheet.create({
   rail: {
     width: 280,
-    backgroundColor: '#000000',
+    backgroundColor: '#0A0A0A',
     borderRightWidth: 1,
     borderRightColor: '#1a1a1a',
   },
   railCollapsed: {
     width: 48,
-    backgroundColor: '#000000',
+    backgroundColor: '#0A0A0A',
     borderRightWidth: 1,
     borderRightColor: '#1a1a1a',
     paddingTop: 12,
@@ -513,7 +513,7 @@ const styles = StyleSheet.create({
     width: 32, height: 32, borderRadius: 8,
     alignItems: 'center', justifyContent: 'center',
     borderWidth: 1, borderColor: '#262626',
-    backgroundColor: '#000000',
+    backgroundColor: '#0A0A0A',
   },
   iconBtnActive: { borderColor: '#ffffff', backgroundColor: '#0a0a0a' },
   iconText: { color: '#ffffff', fontWeight: '800', fontSize: 16 },
@@ -532,7 +532,7 @@ const styles = StyleSheet.create({
   headerCollapseBtn: {
     width: 24, height: 24, borderRadius: 6,
     alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: '#262626', backgroundColor: '#000000',
+    borderWidth: 1, borderColor: '#262626', backgroundColor: '#0A0A0A',
   },
   headerCollapseBtnText: { color: '#a3a3a3', fontWeight: '900', fontSize: 14, lineHeight: 14 },
 

@@ -32,6 +32,7 @@ import type { OpenSwanTaskPlan } from './openswanTaskPlanner';
 import type { OpenSwanToolEvent } from './openswanToolRuntime';
 import type { OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import type { AutomationProposal } from './automationChatBuilder';
+import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 import type { BridgeProbeResult } from './bridgeHealthDiag';
 import type { PreflightBlockerItem } from '../screens/circles/tabs/chat/PreflightBlockersCard';
 import type { SearchResultRow } from '../screens/circles/tabs/chat/SearchResultsCard';
@@ -69,6 +70,7 @@ export type ChatMessage = {
   memoryRefs?: PromptMemoryReference[];
   memoryRecommendations?: OpenSwanMemoryRecommendation[];
   source?: ChatMessageSource;
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   usage?: SwanBotStructuredResponse['usage'];
   executionStream?: OpenSwanExecutionContract[];
   agentPlan?: AgentPlanDraft | Record<string, unknown>;
@@ -101,6 +103,8 @@ export type ChatMessage = {
    *  "every Friday at 5pm post a weekly summary". When present, the
    *  message renders an AutomationProposalCard with a CREATE button. */
   automationProposal?: AutomationProposal;
+  /** Agent subject snapshot used when the proposal is accepted later. */
+  automationAgentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   /** Search results from `/search <query>`. Renders as a clickable
    *  list with JUMP buttons per row. */
   searchResults?: { query: string; rows: SearchResultRow[] };
@@ -144,6 +148,7 @@ export type ChatBotMessageExtra = {
   wikiRefs?: WikiArticleReference[];
   researchRefs?: ResearchDocumentReference[];
   automationProposal?: AutomationProposal;
+  automationAgentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   searchResults?: { query: string; rows: SearchResultRow[] };
   commandsHelp?: boolean;
   assignPickerAgents?: AssignPickerAgent[];
@@ -151,6 +156,7 @@ export type ChatBotMessageExtra = {
   showRunTrace?: boolean;
   routing?: SwanBotStructuredResponse['routing'];
   source?: ChatMessageSource;
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   usage?: SwanBotStructuredResponse['usage'] | null;
 };
 

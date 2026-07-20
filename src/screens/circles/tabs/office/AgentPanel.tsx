@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Animated, Platform, ActivityIndicator } from 'react-native';
 import { getAgentIdentityKey } from '../../../../lib/agentIdentity';
 import { OfficeAgent, getOfficeStatusColor, getOfficeStatusLabel } from '../../../../lib/officeAgents';
@@ -12,6 +12,7 @@ import {
   AgentAppearance, EnvironmentType,
 } from '../../../../lib/officeConfig';
 import { supabase } from '../../../../lib/supabase';
+import { buildAgentRuntimeSubject } from '../../../../lib/agentRuntimeSubject';
 interface Props {
   agent: OfficeAgent | null;
   onClose: () => void;
@@ -86,6 +87,10 @@ export default function AgentPanel({
   const scaleAnim = useRef(new Animated.Value(1)).current;
   const opacityAnim = useRef(new Animated.Value(1)).current;
   const isOverviewTabActive = panelTab === 'overview';
+  const agentSubject = useMemo(
+    () => agent ? buildAgentRuntimeSubject(agent, { dbAgentId }) : null,
+    [agent, dbAgentId],
+  );
 
   useEffect(() => {
     if (!agent) return;
@@ -320,9 +325,9 @@ export default function AgentPanel({
   }, [agent?.id]);
 
   useEffect(() => {
-    if (!(isOverviewTabActive || !!onRemoveAgent)) return;
+    if (!(isOverviewTabActive || panelTab === 'memory' || panelTab === 'runs' || panelTab === 'evolution' || !!onRemoveAgent)) return;
     ensureDbAgent();
-  }, [ensureDbAgent, isOverviewTabActive, onRemoveAgent]);
+  }, [ensureDbAgent, isOverviewTabActive, onRemoveAgent, panelTab]);
 
   const tabs = agent ? getAgentPanelTabs(agent) : [];
 
@@ -479,7 +484,14 @@ export default function AgentPanel({
       {panelTab === 'memory' && circleId && (
         <View nativeID="section-agent-memory" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
           {memoryPanelModule?.default ? (
-            <memoryPanelModule.default circleId={circleId} userId={userId || undefined} agentId={agent.id} agentName={agent.name} accentColor={agent.color || '#6366f1'} />
+            <memoryPanelModule.default
+              circleId={circleId}
+              userId={userId || undefined}
+              agentId={agentSubject?.memoryAgentId || agent.id}
+              agentAliases={agentSubject?.memoryAgentAliases || [agent.id]}
+              agentName={agent.name}
+              accentColor={agent.color || '#6366f1'}
+            />
           ) : (
             <View style={{ paddingVertical: 24, alignItems: 'center' }}>
               <ActivityIndicator size="small" color={agent.color || '#6366f1'} />
@@ -492,7 +504,13 @@ export default function AgentPanel({
       {panelTab === 'runs' && circleId && (
         <View nativeID="section-agent-runs" style={{ paddingHorizontal: 8, paddingBottom: 12 }}>
           {runsPanelModule?.default ? (
-            <runsPanelModule.default circleId={circleId} agentId={agent.id} agentName={agent.name} accentColor={agent.color || '#6366f1'} />
+            <runsPanelModule.default
+              circleId={circleId}
+              agentId={agentSubject?.runAgentId || agent.id}
+              agentAliases={agentSubject?.runAgentAliases || [agent.id]}
+              agentName={agent.name}
+              accentColor={agent.color || '#6366f1'}
+            />
           ) : (
             <View style={{ paddingVertical: 24, alignItems: 'center' }}>
               <ActivityIndicator size="small" color={agent.color || '#6366f1'} />

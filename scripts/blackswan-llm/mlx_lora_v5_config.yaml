@@ -17,6 +17,12 @@ learning_rate: 1e-4
 # 512, so the model was learning chopped-off endings for exactly the long
 # examples that matter most. 2048 covers the bulk of the corpus; the rare
 # >2048 example still truncates (mlx_lm logs a warning when it does).
+#
+# TEMPORARY 2048 -> 1024 workaround used for the 2026-07-15/16 manual
+# cycle (2 consecutive OOM aborts at 2048 under heavy concurrent memory
+# pressure). That cycle completed successfully and shipped; restored to
+# the documented 2048 default here. If OOM recurs under similar memory
+# pressure, drop this back to 1024 again (or free up memory first).
 max_seq_length: 2048
 steps_per_report: 25
 steps_per_eval: 100

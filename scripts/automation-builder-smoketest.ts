@@ -6,6 +6,7 @@
  * Run: `npx tsx scripts/automation-builder-smoketest.ts`
  */
 import {
+  buildAutomationProposalInsertRow,
   parseAutomationRequest,
   parseComputerTaskSchedule,
   looksLikeAutomationRequest,
@@ -198,6 +199,63 @@ console.log('\nparseComputerTaskSchedule');
   if (parseComputerTaskSchedule({ task: '', schedulePhrase: 'weekly' }) !== null) {
     fail('schedule: empty task → null', null);
   } else ok('empty task → null');
+}
+
+// ─── buildAutomationProposalInsertRow ────────────────────────────────────
+
+console.log('\nbuildAutomationProposalInsertRow');
+
+{
+  const proposal = parseAutomationRequest('every Friday at 5pm post a weekly summary');
+  const subject = {
+    agentSubjectKey: 'blackswan',
+    agentDisplayName: 'OpenSwan',
+    agentDbId: null,
+    agentSessionKey: 'blackswan',
+    legacyAgentIds: ['default::blackswan', 'openswan:main_chat'],
+  };
+  if (!proposal) {
+    fail('subject metadata row: proposal should parse', null);
+  } else {
+    const row = buildAutomationProposalInsertRow({
+      proposal,
+      circleId: 'circle-1',
+      userId: 'user-1',
+      agentSubjectMetadata: subject,
+    }) as any;
+    if (row.circle_id !== 'circle-1' || row.created_by !== 'user-1') fail('subject metadata row preserves owner ids', row);
+    else ok('subject metadata row preserves owner ids');
+    if (row.event_config?.agentSubjectMetadata?.agentSubjectKey !== 'blackswan') fail('subject metadata row stores canonical subject', row.event_config);
+    else ok('subject metadata row stores canonical subject');
+    if (row.agent !== 'OpenSwan') fail('subject metadata row uses subject display name', row);
+    else ok('subject metadata row uses subject display name');
+  }
+}
+
+{
+  const proposal = parseAutomationRequest('when someone pushes to github post a summary');
+  const subject = {
+    agentSubjectKey: 'scout',
+    agentDisplayName: 'Scout',
+    legacyAgentIds: ['local::scout'],
+  };
+  if (!proposal) {
+    fail('event metadata row: proposal should parse', null);
+  } else {
+    const row = buildAutomationProposalInsertRow({
+      proposal,
+      circleId: 'circle-1',
+      userId: 'user-1',
+      agentSubjectMetadata: subject,
+    }) as any;
+    if (row.event_config?.table !== proposal.eventConfig?.table || row.event_config?.event !== proposal.eventConfig?.event) {
+      fail('event metadata row preserves event config', row.event_config);
+    } else ok('event metadata row preserves event config');
+    if (row.event_config?.agentSubjectMetadata?.legacyAgentIds?.[0] !== 'local::scout') fail('event metadata row stores legacy aliases', row.event_config);
+    else ok('event metadata row stores legacy aliases');
+    if (row.agent !== 'Scout') fail('event metadata row uses selected subject display name', row);
+    else ok('event metadata row uses selected subject display name');
+  }
 }
 
 console.log('\n' + (failures > 0 ? `FAILED — ${failures} assertion(s)` : 'PASSED — all assertions ok'));

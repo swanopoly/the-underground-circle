@@ -1,7 +1,7 @@
 # The Underground Circle - App Stack Reference
 
 > Current app map for agents before writing code.
-> Last reviewed: 2026-06-29
+> Last reviewed: 2026-07-17
 
 `AGENTS.md` and `docs/AGENTS_ROADMAP.md` own agent workflow and runtime
 ownership. This file maps the app.
@@ -59,6 +59,8 @@ ownership. This file maps the app.
 | SwanBot/OpenSwan default readiness | `src/lib/swanbotOpenSwanReadiness.ts`, `scripts/swanbot-openswan-readiness-report.ts` |
 | Typed agent loop | `src/lib/agentExecutionCore.ts` |
 | OpenSwan session runtime | `src/lib/openswanSessionRuntime.ts` |
+| Agent runtime subject identity | `src/lib/agentRuntimeSubject.ts`, `src/lib/agentIdentityKey.ts`, `src/lib/agentIdentity.ts`, `src/lib/agentInvocation.ts`, `src/lib/agentRuntime.ts`, `src/lib/swanbotV2BatchRuntimeCore.ts` |
+| Agent subject display surfaces | `src/components/AutomationsPanel.tsx`, `src/components/OfficeTerminal.tsx`, `src/screens/circles/tabs/office/AgentMemoryPanel.tsx`, `src/screens/circles/tabs/office/AgentRunsPanel.tsx` |
 | Tool catalog | `src/lib/openswanToolRuntime.ts` |
 | Provider model resolution | `src/lib/serviceProfileSouls.ts` |
 | Cross-provider routing | `src/lib/crossProviderRouter.ts`, `src/lib/universalInvoke.ts` |
@@ -150,6 +152,14 @@ docs/
 7. Bot output is persisted to the active chat thread with compact metadata for
    source, routing, usage, artifacts, memory refs, browser plans, and runtime
    events.
+
+## Agent Subject Metadata
+
+`agentRuntimeSubject` normalizes Office, Chat, SwanBot, and OpenSwan agent ids
+into one subject key plus aliases. Automation proposals, `/automation run/test`,
+OpenSwan saved automations, specialized Chat/OpenSwan mode runs,
+`automation-executor`, the Automations dashboard, Office terminal,
+`AgentMemoryPanel`, and `AgentRunsPanel` preserve or display that metadata.
 
 ## Provider And Marketplace Flow
 

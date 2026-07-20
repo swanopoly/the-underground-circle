@@ -33,10 +33,15 @@ import AutomationsPanel from './AutomationsPanel';
 import TrainingDashboard from './TrainingDashboard';
 import SpawnAgentPanel from './SpawnAgentPanel';
 import { ProviderKey, PROVIDER_MODELS, LLMProvider, ThinkingLevel } from '../lib/llmProviders';
-import { PROVIDER_META } from '../lib/connectionManager';
+import { PROVIDER_META, type ProviderType } from '../lib/connectionManager';
 import { detectClaudeCodeBridge, execBridgeCommand } from '../lib/claudeCodeDetector';
 import { executeDeviceCommand } from '../lib/deviceManager';
 import { getAllModels, formatModelOption, type RegisteredModel } from '../lib/modelRegistry';
+import {
+  buildAgentRuntimeSubject,
+  isUuidLike,
+  type AgentRuntimeSubjectMetadata,
+} from '../lib/agentRuntimeSubject';
 
 // ─── BlackSwan Terminal Theme (Ollama-inspired monochrome) ───────────────────
 
@@ -167,6 +172,8 @@ interface Props {
     targetAgentId: string | null;
     targetAgentIds: string[] | null;
     targetAgentName: string;
+    targetAgentSubject?: AgentRuntimeSubjectMetadata | null;
+    targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
     model: string | null;
     senderId: string;
   }) => void;
@@ -205,6 +212,72 @@ function fmtTokenCost(n: number): string {
   if (!n) return '';
   if (n >= 1000) return `${(n / 1000).toFixed(1)}K tok`;
   return `${n} tok`;
+}
+
+function cleanTargetLookupName(value: string | null | undefined): string {
+  return String(value || '').trim().replace(/^@+/, '').trim().toLowerCase();
+}
+
+function buildTerminalAgentSubjectMetadata(agent: CircleOfficeAgent): AgentRuntimeSubjectMetadata {
+  return buildAgentRuntimeSubject({
+    id: agent.id,
+    name: agent.name,
+    providerType: agent.provider as ProviderType,
+    spirit: agent.spirit,
+  }, {
+    dbAgentId: isUuidLike(agent.id) ? agent.id : null,
+  }).metadata;
+}
+
+function uniqueTerminalAgentSubjects(
+  subjects: Array<AgentRuntimeSubjectMetadata | null | undefined>
+): AgentRuntimeSubjectMetadata[] {
+  const seen = new Set<string>();
+  const out: AgentRuntimeSubjectMetadata[] = [];
+  for (const subject of subjects) {
+    if (!subject?.agentSubjectKey || seen.has(subject.agentSubjectKey)) continue;
+    seen.add(subject.agentSubjectKey);
+    out.push(subject);
+  }
+  return out;
+}
+
+function buildTerminalTargetSubjectContext(params: {
+  agents: CircleOfficeAgent[];
+  targetAgentId: string | null;
+  targetAgentName: string;
+  targetAgentIds: string[] | null;
+}): {
+  targetAgentSubject: AgentRuntimeSubjectMetadata | null;
+  targetAgentSubjects: AgentRuntimeSubjectMetadata[] | null;
+} {
+  const byId = new Map(params.agents.map(agent => [agent.id, agent]));
+  const byName = new Map(
+    params.agents.map(agent => [cleanTargetLookupName(agent.name), agent])
+  );
+  const resolve = (id?: string | null, fallbackName?: string | null) => {
+    if (id && byId.has(id)) return buildTerminalAgentSubjectMetadata(byId.get(id)!);
+    const cleanName = cleanTargetLookupName(fallbackName);
+    if (cleanName && byName.has(cleanName)) return buildTerminalAgentSubjectMetadata(byName.get(cleanName)!);
+    return null;
+  };
+
+  const requestedTargetCount = params.targetAgentIds?.length
+    ? params.targetAgentIds.length
+    : params.targetAgentId
+      ? 1
+      : params.agents.length;
+  const selectedSubjects = params.targetAgentIds?.length
+    ? params.targetAgentIds.map(id => resolve(id))
+    : params.targetAgentId
+      ? [resolve(params.targetAgentId, params.targetAgentName)]
+      : params.agents.map(buildTerminalAgentSubjectMetadata);
+
+  const targetAgentSubjects = uniqueTerminalAgentSubjects(selectedSubjects);
+  return {
+    targetAgentSubject: requestedTargetCount === 1 && targetAgentSubjects.length === 1 ? targetAgentSubjects[0] : null,
+    targetAgentSubjects: targetAgentSubjects.length > 0 ? targetAgentSubjects : null,
+  };
 }
 
 // ─── Streaming indicator ─────────────────────────────────────────────────────
@@ -1692,6 +1765,13 @@ export default function OfficeTerminal({
       ? `${selectedModel}::${thinkingLevel}`
       : selectedModel;
 
+    const targetSubjectContext = buildTerminalTargetSubjectContext({
+      agents,
+      targetAgentId: targetAgentId ?? null,
+      targetAgentName: displayTargetName,
+      targetAgentIds: targetIds ?? null,
+    });
+
     const result = await sendTerminalCommand({
       circleId,
       senderId: userId,
@@ -1700,6 +1780,8 @@ export default function OfficeTerminal({
       targetAgentId: targetAgentId ?? undefined,
       targetAgentName: displayTargetName,
       targetAgentIds: targetIds,
+      targetAgentSubject: targetSubjectContext.targetAgentSubject,
+      targetAgentSubjects: targetSubjectContext.targetAgentSubjects,
       model: modelWithThinking,
     });
 
@@ -1720,6 +1802,8 @@ export default function OfficeTerminal({
           targetAgentId: targetAgentId ?? null,
           targetAgentIds: targetIds ?? null,
           targetAgentName: displayTargetName,
+          targetAgentSubject: targetSubjectContext.targetAgentSubject,
+          targetAgentSubjects: targetSubjectContext.targetAgentSubjects,
           model: modelWithThinking ?? null,
           senderId: userId,
         });

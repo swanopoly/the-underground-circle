@@ -19,17 +19,17 @@ import { Animated, Platform } from 'react-native';
 // This runs before ANY React rendering happens (imported first in App.tsx).
 if (typeof document !== 'undefined') {
   const s = document.documentElement.style;
-  s.backgroundColor = '#000000';
+  s.backgroundColor = '#0A0A0A';
   s.margin = '0';
   s.padding = '0';
   s.minHeight = '100vh';
-  document.body.style.backgroundColor = '#000000';
+  document.body.style.backgroundColor = '#0A0A0A';
   document.body.style.margin = '0';
   document.body.style.padding = '0';
   // Also set root div if it exists
   const root = document.getElementById('root');
   if (root) {
-    root.style.backgroundColor = '#000000';
+    root.style.backgroundColor = '#0A0A0A';
     root.style.minHeight = '100vh';
   }
 }

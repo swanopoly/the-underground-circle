@@ -108,6 +108,16 @@ export type V2BatchUsage = {
   cachedTokens: number;
 };
 
+export type V2BatchTargetAgentSubject = {
+  agentSubjectKey?: string;
+  agentDisplayName?: string;
+  agentDbId?: string | null;
+  agentProvider?: string | null;
+  agentSessionKey?: string | null;
+  agentSpiritId?: string | null;
+  legacyAgentIds?: string[];
+};
+
 /** Finite non-negative int, or 0 — parity with the edge's
  *  `agentRunTokenUsageFields` clamp (`index.ts:2402`-`2412`). */
 function clampCount(n: unknown): number {
@@ -124,6 +134,59 @@ function safeString(value: unknown): string {
   } catch {
     return '';
   }
+}
+
+function safeSubjectString(value: unknown, max = 180): string | undefined {
+  const trimmed = safeString(value).trim();
+  return trimmed ? trimmed.slice(0, max) : undefined;
+}
+
+function safeSubjectStringArray(value: unknown, maxItems = 12): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    const cleaned = safeSubjectString(item);
+    if (!cleaned || out.includes(cleaned)) continue;
+    out.push(cleaned);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+function sanitizeTargetAgentSubject(value: unknown): V2BatchTargetAgentSubject | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  try {
+    const input = value as Record<string, unknown>;
+    const subject: V2BatchTargetAgentSubject = {};
+    const subjectKey = safeSubjectString(input.agentSubjectKey);
+    const displayName = safeSubjectString(input.agentDisplayName);
+    const dbId = safeSubjectString(input.agentDbId);
+    const provider = safeSubjectString(input.agentProvider);
+    const sessionKey = safeSubjectString(input.agentSessionKey);
+    const spiritId = safeSubjectString(input.agentSpiritId);
+    const legacyAgentIds = safeSubjectStringArray(input.legacyAgentIds);
+    if (subjectKey) subject.agentSubjectKey = subjectKey;
+    if (displayName) subject.agentDisplayName = displayName;
+    if (dbId) subject.agentDbId = dbId;
+    if (provider) subject.agentProvider = provider;
+    if (sessionKey) subject.agentSessionKey = sessionKey;
+    if (spiritId) subject.agentSpiritId = spiritId;
+    if (legacyAgentIds.length > 0) subject.legacyAgentIds = legacyAgentIds;
+    return Object.keys(subject).length > 0 ? subject : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function buildV2BatchTargetAgentMetadata(targetAgentName: string, targetAgentSubject?: unknown): Record<string, unknown> {
+  const subject = sanitizeTargetAgentSubject(targetAgentSubject);
+  return {
+    targetAgent: targetAgentName,
+    ...(subject?.agentSubjectKey ? { targetAgentSubjectKey: subject.agentSubjectKey } : {}),
+    ...(subject?.agentDbId ? { targetAgentDbId: subject.agentDbId } : {}),
+    ...(subject?.legacyAgentIds?.length ? { targetAgentLegacyIds: subject.legacyAgentIds } : {}),
+    ...(subject ? { targetAgentSubject: subject, agentSubject: subject } : {}),
+  };
 }
 
 /**
@@ -152,6 +215,7 @@ export function buildV2BatchTerminalRow(args: {
   finalStopReason: V2BatchStopReason | string;
   usage: V2BatchUsage;
   targetAgentName: string;
+  targetAgentSubject?: unknown;
   rawStopReason: string;
   completedAt: string;
 }): Record<string, unknown> {
@@ -169,7 +233,7 @@ export function buildV2BatchTerminalRow(args: {
     // (the client loop never pauses) — edge parity `index.ts:3011`.
     metadata: {
       version: V2_BATCH_RUN_VERSION,
-      targetAgent: args.targetAgentName,
+      ...buildV2BatchTargetAgentMetadata(args.targetAgentName, args.targetAgentSubject),
       rawStopReason: args.rawStopReason,
     },
   };
@@ -186,6 +250,7 @@ export function buildV2BatchTerminalRow(args: {
  */
 export function buildV2BatchErrorRow(args: {
   targetAgentName: string;
+  targetAgentSubject?: unknown;
   errorMessage: unknown;
   completedAt: string;
 }): Record<string, unknown> {
@@ -202,7 +267,7 @@ export function buildV2BatchErrorRow(args: {
     completed_at: args.completedAt,
     metadata: {
       version: V2_BATCH_RUN_VERSION,
-      targetAgent: args.targetAgentName,
+      ...buildV2BatchTargetAgentMetadata(args.targetAgentName, args.targetAgentSubject),
       error: message.slice(0, 500),
     },
   };

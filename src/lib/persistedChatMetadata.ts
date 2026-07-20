@@ -16,12 +16,18 @@ import type { OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import type { ResearchDocumentReference } from './researchControl';
 import type { SwanBotStructuredArtifact, SwanBotStructuredResponse } from './swanbot';
 import type { WikiArticleReference } from './wikiData';
+import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 
 const LEGACY_CROWN_PREFIX = /^👑 \*\*OpenSwan:\*\* /u;
 const BOT_PREFIX = /^(🦢|🤖) \*\*[^*]{1,80}:\*\* /u;
 export const BOT_META_MARKER = '\n[[UC_CHAT_META]]';
 const MAX_PERSISTED_BOT_MESSAGE_CHARS = 9000;
 const MAX_PERSISTED_RESPONSE_CHARS = 6400;
+const AGENT_SUBJECT_ID_MAX = 160;
+const AGENT_SUBJECT_NAME_MAX = 120;
+const AGENT_SUBJECT_PROVIDER_MAX = 80;
+const AGENT_SUBJECT_ALIAS_MAX = 160;
+const AGENT_SUBJECT_ALIAS_LIMIT = 8;
 
 export type PersistedChatRecoveryOption = {
   id: string;
@@ -119,6 +125,7 @@ export type PersistedChatBotMetadata = {
     effectiveModel?: string | null;
     provider?: string | null;
   };
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   usage?: SwanBotStructuredResponse['usage'] | null;
   commandDecisions?: ChatCommandDecision[];
   artifacts?: SwanBotStructuredArtifact[];
@@ -436,6 +443,46 @@ function compactStringList(value: unknown, limit: number, maxChars: number): str
     : [];
 }
 
+function compactAgentSubjectString(value: unknown, maxChars: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, maxChars) : undefined;
+}
+
+function compactAgentSubjectMetadata(
+  metadata?: AgentRuntimeSubjectMetadata | null,
+): AgentRuntimeSubjectMetadata | undefined {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return undefined;
+  const raw = metadata as Record<string, unknown>;
+  const agentSubjectKey = compactAgentSubjectString(raw.agentSubjectKey, AGENT_SUBJECT_ID_MAX);
+  const agentDisplayName = compactAgentSubjectString(raw.agentDisplayName, AGENT_SUBJECT_NAME_MAX);
+  if (!agentSubjectKey || !agentDisplayName) return undefined;
+
+  const legacyAgentIds: string[] = [];
+  const rawLegacyAgentIds = Array.isArray(raw.legacyAgentIds) ? raw.legacyAgentIds : [];
+  for (const legacyId of rawLegacyAgentIds) {
+    const value = compactAgentSubjectString(legacyId, AGENT_SUBJECT_ALIAS_MAX);
+    if (!value || value === agentSubjectKey || legacyAgentIds.includes(value)) continue;
+    legacyAgentIds.push(value);
+    if (legacyAgentIds.length >= AGENT_SUBJECT_ALIAS_LIMIT) break;
+  }
+
+  const compacted: AgentRuntimeSubjectMetadata = {
+    agentSubjectKey,
+    agentDisplayName,
+    legacyAgentIds,
+  };
+  const agentDbId = compactAgentSubjectString(raw.agentDbId, AGENT_SUBJECT_ID_MAX);
+  if (agentDbId) compacted.agentDbId = agentDbId;
+  const agentProvider = compactAgentSubjectString(raw.agentProvider, AGENT_SUBJECT_PROVIDER_MAX);
+  if (agentProvider) compacted.agentProvider = agentProvider;
+  const agentSessionKey = compactAgentSubjectString(raw.agentSessionKey, AGENT_SUBJECT_ID_MAX);
+  if (agentSessionKey) compacted.agentSessionKey = agentSessionKey;
+  const agentSpiritId = compactAgentSubjectString(raw.agentSpiritId, AGENT_SUBJECT_ID_MAX);
+  if (agentSpiritId) compacted.agentSpiritId = agentSpiritId;
+  return compacted;
+}
+
 function compactRecoveryReliability(
   summary?: PersistedChatRecoveryReliabilitySummary | null,
   mode: 'full' | 'minimal' | 'tiny' = 'full',
@@ -631,6 +678,7 @@ function hasPersistedMetadata(metadata?: PersistedChatBotMetadata): boolean {
   return !!metadata && (
     !!metadata.localMessageId ||
     !!metadata.source ||
+    !!compactAgentSubjectMetadata(metadata.agentSubjectMetadata) ||
     !!metadata.usage ||
     (metadata.commandDecisions?.length || 0) > 0 ||
     (metadata.artifacts?.length || 0) > 0 ||
@@ -1123,6 +1171,7 @@ function compactPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
   return {
     localMessageId: metadata.localMessageId,
     source: metadata.source,
+    agentSubjectMetadata: compactAgentSubjectMetadata(metadata.agentSubjectMetadata),
     usage: metadata.usage,
     commandDecisions: metadata.commandDecisions?.slice(0, 8),
     artifacts: metadata.artifacts?.slice(0, 8).map((artifact) => ({
@@ -1261,6 +1310,7 @@ function minimalPersistedMetadata(metadata?: PersistedChatBotMetadata): Persiste
   return {
     localMessageId: metadata.localMessageId,
     source: metadata.source,
+    agentSubjectMetadata: compactAgentSubjectMetadata(metadata.agentSubjectMetadata),
     usage: metadata.usage,
     artifacts: metadata.artifacts?.slice(0, 4).map((artifact) => ({
       kind: artifact.kind,
@@ -1387,7 +1437,11 @@ export function readPersistedChatBotMetadata(content: string | null | undefined)
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as PersistedChatBotMetadata;
-    return parsed && typeof parsed === 'object' ? parsed : null;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const agentSubjectMetadata = compactAgentSubjectMetadata(parsed.agentSubjectMetadata);
+    return agentSubjectMetadata
+      ? { ...parsed, agentSubjectMetadata }
+      : { ...parsed, agentSubjectMetadata: undefined };
   } catch {
     return null;
   }
@@ -1404,6 +1458,7 @@ export function formatPersistedChatBotMessage(
   const normalizedMetadata = metadata
     ? {
         ...metadata,
+        agentSubjectMetadata: compactAgentSubjectMetadata(metadata.agentSubjectMetadata),
         recoveryOptions: compactRecoveryOptions(metadata.recoveryOptions, 5),
         recoveryReliability: compactRecoveryReliability(metadata.recoveryReliability),
         computerHandoff: compactComputerHandoff(metadata.computerHandoff),
@@ -1462,6 +1517,7 @@ export function formatPersistedChatBotMessage(
     const findingsMeta: PersistedChatBotMetadata = {
       localMessageId: normalizedMetadata?.localMessageId,
       source: normalizedMetadata?.source,
+      agentSubjectMetadata: normalizedMetadata?.agentSubjectMetadata,
       computerFindings: findingsOnly,
     };
     const suffix = `${BOT_META_MARKER}${JSON.stringify(findingsMeta)}`;

@@ -37,6 +37,15 @@ interface RequestBody {
   thinkingLevel?: "fast" | "balanced" | "deep"; // Controls extended thinking
   maxTokens?: number;
   targetAgentName?: string; // Name of the targeted agent (e.g. "MyBot") — defaults to "BlackSwan"
+  targetAgentId?: string;
+  targetAgentSubjectKey?: string;
+  targetAgentDbId?: string | null;
+  targetAgentLegacyIds?: string[];
+  agentSubject?: Record<string, unknown>;
+  agentSubjectMetadata?: Record<string, unknown>;
+  agentSubjectKey?: string;
+  agentDbId?: string | null;
+  agentLegacyIds?: string[];
   wikiContext?: string;
   // High-priority directive injected at the TOP of the system prompt. Used
   // by the Conversational Build orchestrator (src/lib/conversationalBuild.ts)
@@ -1044,6 +1053,64 @@ function summarizeSwanBotV1ToolActions(toolActions: ToolAction[] | undefined): a
   }));
 }
 
+function cleanAgentSubjectString(value: unknown, max = 180): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : undefined;
+}
+
+function cleanAgentSubjectStringArray(value: unknown, maxItems = 12): string[] {
+  const raw = Array.isArray(value) ? value : [];
+  const out: string[] = [];
+  for (const item of raw) {
+    const cleaned = cleanAgentSubjectString(item);
+    if (!cleaned || out.includes(cleaned)) continue;
+    out.push(cleaned);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+function isUuidLike(value: unknown): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
+}
+
+function normalizeSwanBotTargetAgentMetadata(input: Record<string, unknown>, targetAgentName: string): Record<string, unknown> {
+  const subject = input.agentSubject && typeof input.agentSubject === "object"
+    ? input.agentSubject as Record<string, unknown>
+    : input.agentSubjectMetadata && typeof input.agentSubjectMetadata === "object"
+      ? input.agentSubjectMetadata as Record<string, unknown>
+      : {};
+  const subjectKey = cleanAgentSubjectString(input.targetAgentSubjectKey)
+    || cleanAgentSubjectString(input.agentSubjectKey)
+    || cleanAgentSubjectString(subject.agentSubjectKey);
+  const dbId = cleanAgentSubjectString(input.targetAgentDbId)
+    || cleanAgentSubjectString(input.agentDbId)
+    || cleanAgentSubjectString(subject.agentDbId)
+    || (isUuidLike(input.targetAgentId) ? cleanAgentSubjectString(input.targetAgentId) : undefined);
+  const sessionKey = cleanAgentSubjectString(input.agentSessionKey)
+    || cleanAgentSubjectString(subject.agentSessionKey);
+  const legacyIds = cleanAgentSubjectStringArray([
+    ...cleanAgentSubjectStringArray(input.targetAgentLegacyIds),
+    ...cleanAgentSubjectStringArray(input.agentLegacyIds),
+    ...cleanAgentSubjectStringArray(subject.legacyAgentIds),
+  ]);
+  const out: Record<string, unknown> = { targetAgent: targetAgentName };
+  if (subjectKey) out.targetAgentSubjectKey = subjectKey;
+  if (dbId) out.targetAgentDbId = dbId;
+  if (legacyIds.length > 0) out.targetAgentLegacyIds = legacyIds;
+  if (subjectKey || dbId || sessionKey || legacyIds.length > 0) {
+    out.agentSubject = {
+      agentSubjectKey: subjectKey,
+      agentDisplayName: cleanAgentSubjectString(subject.agentDisplayName) || targetAgentName,
+      agentDbId: dbId || null,
+      agentSessionKey: sessionKey || null,
+      legacyAgentIds: legacyIds,
+    };
+  }
+  return out;
+}
+
 async function createSwanBotV1Run(
   supabase: any,
   args: {
@@ -1052,6 +1119,7 @@ async function createSwanBotV1Run(
     message: string;
     requestedModel?: string | null;
     targetAgentName?: string | null;
+    targetAgentMetadata?: Record<string, unknown>;
   },
 ): Promise<string | null> {
   try {
@@ -1068,6 +1136,7 @@ async function createSwanBotV1Run(
       metadata: {
         version: "swanbot-ai",
         targetAgent: args.targetAgentName || "BlackSwan",
+        ...(args.targetAgentMetadata || {}),
         requestedModel: args.requestedModel || null,
       },
     }).select("id").single();
@@ -1090,6 +1159,7 @@ async function completeSwanBotV1Run(
     model: string;
     targetAgentName?: string | null;
     requestedModel?: string | null;
+    targetAgentMetadata?: Record<string, unknown>;
     usage: {
       input_tokens?: number;
       output_tokens?: number;
@@ -1117,6 +1187,7 @@ async function completeSwanBotV1Run(
       metadata: {
         version: "swanbot-ai",
         targetAgent: args.targetAgentName || "BlackSwan",
+        ...(args.targetAgentMetadata || {}),
         requestedModel: args.requestedModel || null,
         model: args.model,
         usage: args.usage,
@@ -1133,6 +1204,7 @@ async function failSwanBotV1Run(
   supabase: any,
   runId: string | null,
   message: string,
+  targetAgentMetadata?: Record<string, unknown>,
 ): Promise<void> {
   if (!runId) return;
   try {
@@ -1147,6 +1219,7 @@ async function failSwanBotV1Run(
       completed_at: new Date().toISOString(),
       metadata: {
         version: "swanbot-ai",
+        ...(targetAgentMetadata || {}),
         error: String(message || "Unknown error").slice(0, 1000),
       },
     }).eq("id", runId);
@@ -3620,10 +3693,13 @@ Deno.serve(async (req: Request) => {
 
   let swanBotV1RunSupabase: any = null;
   let swanBotV1RunId: string | null = null;
+  let swanBotV1TargetAgentMetadata: Record<string, unknown> = {};
 
   try {
     const body: RequestBody = await req.json();
     const { message, circleId, userId: _ignoredUserId, model, thinkingLevel, maxTokens, targetAgentName, wikiContext, systemDirective } = body;
+    const targetAgentDisplayName = targetAgentName || "BlackSwan";
+    swanBotV1TargetAgentMetadata = normalizeSwanBotTargetAgentMetadata(body as unknown as Record<string, unknown>, targetAgentDisplayName);
     const user = await getAuthenticatedUser(req);
 
     if (!user) {
@@ -3796,7 +3872,11 @@ Deno.serve(async (req: Request) => {
                 modelId: tail,
                 inputTokens: anthropicShape.usage.input_tokens,
                 outputTokens: anthropicShape.usage.output_tokens,
-                metadata: { surface: "relay", tool_count: (body.tools as any[]).length },
+                metadata: {
+                  surface: "relay",
+                  tool_count: (body.tools as any[]).length,
+                  ...swanBotV1TargetAgentMetadata,
+                },
               });
               return new Response(
                 JSON.stringify({
@@ -3980,7 +4060,12 @@ Deno.serve(async (req: Request) => {
             outputTokens: Number(relayUsage.output_tokens) || 0,
             cacheCreationTokens: Number(relayUsage.cache_creation_input_tokens) || 0,
             cacheReadTokens: Number(relayUsage.cache_read_input_tokens) || 0,
-            metadata: { relay: true, ...(relayToolsDisabled ? { tools_disabled: true } : {}), ...(isMarketplaceRelay ? { marketplace_fallback: true } : {}) },
+            metadata: {
+              relay: true,
+              ...(relayToolsDisabled ? { tools_disabled: true } : {}),
+              ...(isMarketplaceRelay ? { marketplace_fallback: true } : {}),
+              ...swanBotV1TargetAgentMetadata,
+            },
           }),
         ).catch((err) => {
           console.warn("[swanbot-ai-relay] logClaudeUsage failed:", (err as any)?.message || err);
@@ -4015,7 +4100,8 @@ Deno.serve(async (req: Request) => {
       userId,
       message,
       requestedModel: model || null,
-      targetAgentName: targetAgentName || "BlackSwan",
+      targetAgentName: targetAgentDisplayName,
+      targetAgentMetadata: swanBotV1TargetAgentMetadata,
     });
 
     // Gather full circle context (includes relevant knowledge entries + memories)
@@ -4676,6 +4762,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         supabase,
         swanBotV1RunId,
         `Selected marketplace model could not be routed through ${nonRelayRouting.routing_fallback.provider}: ${nonRelayRouting.routing_fallback.reason}`,
+        swanBotV1TargetAgentMetadata,
       );
       return errResponse(
         400,
@@ -4728,12 +4815,12 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       if (marketplaceRequested) {
         const budgetResponse = await maybeCircleClaudeBudgetExceededResponse(supabase, circleId);
         if (budgetResponse) {
-          await failSwanBotV1Run(supabase, swanBotV1RunId, "Claude budget cap blocked Anthropic fallback.");
+          await failSwanBotV1Run(supabase, swanBotV1RunId, "Claude budget cap blocked Anthropic fallback.", swanBotV1TargetAgentMetadata);
           return budgetResponse;
         }
       }
       if (!anthropicKey) {
-        await failSwanBotV1Run(supabase, swanBotV1RunId, byokMissingMessage("anthropic"));
+        await failSwanBotV1Run(supabase, swanBotV1RunId, byokMissingMessage("anthropic"), swanBotV1TargetAgentMetadata);
         return errResponse(400, "key_missing", byokMissingMessage("anthropic"));
       }
       // Fall back to Claude (using requested model or default Haiku)
@@ -4793,7 +4880,8 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       finalStopReason,
       iterations: finalIterationCount,
       model: tokenBreakdown.model,
-      targetAgentName: targetAgentName || "BlackSwan",
+      targetAgentName: targetAgentDisplayName,
+      targetAgentMetadata: swanBotV1TargetAgentMetadata,
       requestedModel: model || null,
       usage: tokenBreakdown,
       toolActions: structuredToolActions,
@@ -4851,6 +4939,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       swanBotV1RunSupabase,
       swanBotV1RunId,
       error?.message || "Internal server error",
+      swanBotV1TargetAgentMetadata,
     );
     return new Response(
       JSON.stringify({ error: error.message || "Internal server error" }),

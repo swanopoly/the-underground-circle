@@ -499,7 +499,7 @@ function AnimatedMenuItem({
 const styles = StyleSheet.create({
   header: {
     height: 48,
-    backgroundColor: '#000000',
+    backgroundColor: '#0A0A0A',
     borderBottomWidth: 1,
     borderBottomColor: '#21262d',
     flexDirection: 'row',

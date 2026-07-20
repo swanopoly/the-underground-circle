@@ -1,3 +1,9 @@
+import {
+  buildAgentRuntimeSubject,
+  isUuidLike,
+  type AgentRuntimeSubjectMetadata,
+} from './agentRuntimeSubject';
+
 export type ChatAgentTargetStatus =
   | 'active'
   | 'building'
@@ -43,6 +49,11 @@ export interface ChatAgentTarget<TAgent extends ChatAgentLike = ChatAgentLike> {
   sessionKey?: string | null;
   priority: number;
   isDefault?: boolean;
+  agentSubjectKey?: string;
+  agentDbId?: string | null;
+  agentSessionKey?: string | null;
+  agentLegacyIds?: string[];
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata;
 }
 
 export const DEFAULT_CHAT_AGENT_TARGET_ID = 'chat-agent::openswan';
@@ -206,6 +217,28 @@ export function isOpenSwanChatAgentTarget(target: ChatAgentTarget | null | undef
   return !target || target.isDefault || normalizeChatAgentProvider(target.provider) === 'openswan';
 }
 
+function buildTargetSubjectFields<TAgent extends ChatAgentLike>(
+  agent: TAgent | null,
+  provider: string,
+  isDefault = false,
+): Pick<ChatAgentTarget<TAgent>, 'agentSubjectKey' | 'agentDbId' | 'agentSessionKey' | 'agentLegacyIds' | 'agentSubjectMetadata'> {
+  const subject = buildAgentRuntimeSubject({
+    id: isDefault ? 'default::blackswan' : (agent?.id || provider || 'agent'),
+    name: isDefault ? 'OpenSwan' : (agent?.name || getChatAgentProviderPreset(provider).label || 'Agent'),
+    sessionKey: isDefault ? (agent?.sessionKey || 'blackswan') : (agent?.sessionKey || undefined),
+    providerType: provider as any,
+  }, {
+    dbAgentId: agent?.id && isUuidLike(agent.id) ? agent.id : null,
+  });
+  return {
+    agentSubjectKey: subject.subjectKey,
+    agentDbId: subject.dbAgentId,
+    agentSessionKey: subject.sessionKey,
+    agentLegacyIds: subject.legacyIds,
+    agentSubjectMetadata: subject.metadata,
+  };
+}
+
 export function buildChatAgentTargets<TAgent extends ChatAgentLike>(
   agents: TAgent[],
 ): ChatAgentTarget<TAgent>[] {
@@ -243,6 +276,7 @@ export function buildChatAgentTargets<TAgent extends ChatAgentLike>(
       sessionKey: agent.sessionKey || null,
       priority: isDefault ? -10 : preset.priority,
       isDefault,
+      ...buildTargetSubjectFields(agent, provider, isDefault),
     });
   }
 
@@ -260,6 +294,7 @@ export function buildChatAgentTargets<TAgent extends ChatAgentLike>(
       source: 'preset',
       priority: -10,
       isDefault: true,
+      ...buildTargetSubjectFields<TAgent>(null, 'openswan', true),
     });
   }
 
@@ -308,6 +343,7 @@ export function resolveChatAgentTarget<TAgent extends ChatAgentLike>(
       source: 'preset',
       priority: -10,
       isDefault: true,
+      ...buildTargetSubjectFields<TAgent>(null, 'openswan', true),
     };
   }
   return targets.find((target) => target.id === selectedId)

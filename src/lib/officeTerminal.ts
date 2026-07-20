@@ -17,6 +17,7 @@
 
 import { supabase } from './supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
+import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 
 const TERMINAL_HISTORY_CACHE_TTL_MS = 15_000;
 const TERMINAL_RESPONSES_CACHE_TTL_MS = 15_000;
@@ -55,6 +56,8 @@ export interface SendCommandParams {
   targetAgentId?: string | null;
   targetAgentName?: string;
   targetAgentIds?: string[] | null;
+  targetAgentSubject?: AgentRuntimeSubjectMetadata | null;
+  targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
   model?: string | null;
 }
 
@@ -67,6 +70,8 @@ export interface BroadcastCommandPayload {
   targetAgentId: string | null;
   targetAgentName: string;
   targetAgentIds: string[] | null;
+  targetAgentSubject?: AgentRuntimeSubjectMetadata | null;
+  targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
   model: string | null;
   timestamp: string;
 }
@@ -125,7 +130,8 @@ export async function sendTerminalCommand(
   const {
     circleId, senderId, senderName,
     commandText, targetAgentId = null, targetAgentName = '@all',
-    targetAgentIds = null, model = null,
+    targetAgentIds = null, targetAgentSubject = null,
+    targetAgentSubjects = null, model = null,
   } = params;
 
   // Validate UUID fields — non-UUID agent IDs (e.g. 'default::blackswan') must be nullified
@@ -169,6 +175,8 @@ export async function sendTerminalCommand(
       targetAgentId,
       targetAgentName,
       targetAgentIds,
+      targetAgentSubject,
+      targetAgentSubjects,
       model,
       timestamp: new Date().toISOString(),
     } satisfies BroadcastCommandPayload,

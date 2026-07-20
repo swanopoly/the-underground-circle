@@ -28,6 +28,10 @@ import { soulKeyForProfile } from './serviceProfileSouls';
 import { OPENSWAN_RUNTIME_PLAN_VERSION } from './openswanRuntimePlan';
 import type { PromptMemoryReference } from './memoryService';
 import type { ConnectedProviderSet } from './serviceProfileSouls';
+import {
+  buildAgentRuntimeSubjectPayload,
+  type AgentRuntimeSubjectMetadata,
+} from './agentRuntimeSubject';
 
 // ─── Unified Types ──────────────────────────────────────────────────────────
 
@@ -71,6 +75,12 @@ export interface AgentRunRequest {
   prompt: string;
   agentId?: string;
   agentName?: string;
+  agentSubjectKey?: string;
+  agentDbId?: string | null;
+  agentSessionKey?: string | null;
+  agentLegacyIds?: string[];
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
+  targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
   model?: string;
   connectedProviders?: ConnectedProviderSet | string[];
   mode?: 'talk' | 'build' | 'plan' | 'execute' | 'review' | 'research' | 'support' | 'design';
@@ -365,6 +375,7 @@ export async function executeAgentRun(
               ? 'architect'
               : null;
   const activeSoulKey = soulKeyForProfile(profileResolution.resolvedProfile);
+  const subjectPayload = buildAgentRuntimeSubjectPayload(request);
 
   // Track the run in the unified system (non-blocking — don't fail if DB is unavailable)
   let runId: string | null = null;
@@ -374,6 +385,7 @@ export async function executeAgentRun(
       circleId, userId, surface: surface as any, title: prompt.slice(0, 100),
       goal: prompt.slice(0, 500), mode, model: resolvedModel, roomId: context?.roomId, taskId: context?.taskId,
       metadata: {
+        ...subjectPayload.runMetadata,
         runtimePlanVersion: OPENSWAN_RUNTIME_PLAN_VERSION,
         explicitMode: modePolicy.key,
         modeLabel: modePolicy.label,
@@ -399,7 +411,13 @@ export async function executeAgentRun(
     // Inject memory context
     try {
       const { buildMemoryContext } = await import('./agentRunSystem');
-      const memCtx = await buildMemoryContext(circleId, context?.roomId, userId, request.agentId, request.agentName);
+      const memCtx = await buildMemoryContext(
+        circleId,
+        context?.roomId,
+        userId,
+        subjectPayload.swanContextPatch.agentSubjectKey || request.agentId,
+        subjectPayload.swanContextPatch.agentName || request.agentName,
+      );
       if (memCtx) contextParts.push(memCtx);
     } catch {}
 
@@ -495,8 +513,7 @@ export async function executeAgentRun(
       userId,
       circleId,
       userName,
-      agentId: request.agentId,
-      agentName: request.agentName,
+      ...subjectPayload.swanContextPatch,
       model: resolvedModel || undefined,
       chatHistory: context?.chatHistory,
       sessionArchiveContext: context?.sessionArchiveContext,
@@ -596,6 +613,7 @@ export async function executeAgentRun(
           }
         }
         await mergeRunMetadata(runId, {
+          ...subjectPayload.runMetadata,
           runtimePlanVersion: OPENSWAN_RUNTIME_PLAN_VERSION,
           capabilityProfile: inferredProfileKey,
           impactDomain: inferredProfile?.impactDomain || null,

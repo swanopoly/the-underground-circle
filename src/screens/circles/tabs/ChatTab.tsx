@@ -236,8 +236,6 @@ import {
 } from '../../../lib/chatOutcomeSignals';
 import {
   buildChatInfluenceReferences,
-  persistMainChatBotMessageWithRetry,
-  updateMainChatBotMessageWithRetry,
 } from '../../../lib/chatAgentService';
 import { buildChatAutomationPlan, type ChatAutomationPlan } from '../../../lib/chatAutomationPlanner';
 import { UNIFIED_CONVERSATIONAL_INTENT_TYPES } from '../../../lib/chatConversationalCutoverParity';
@@ -330,6 +328,7 @@ import {
 import { detectAgenticCodingProfile } from '../../../lib/agenticCodingProfile';
 import { getSpiritById } from '../../../lib/agentSpirits';
 import { getAgentIdentityKey, loadAgentIdentities, type TerminalAgentOfficeConfig } from '../../../lib/agentIdentity';
+import { buildAgentRuntimeSubject, isUuidLike, type AgentRuntimeSubjectMetadata } from '../../../lib/agentRuntimeSubject';
 import { loadConnections } from '../../../lib/connectionManager';
 import { DEFAULT_AGENT, sessionsToAgents, type OfficeAgent } from '../../../lib/officeAgents';
 import { loadCircleOfficeAgents, type CircleOfficeAgent } from '../../../lib/circleOffice';
@@ -597,6 +596,97 @@ function buildSessionThinkingLabel(currentRunStep: string, verbIndex: number): s
   return pickThinkingVerb(verbIndex);
 }
 
+type ChatTabPersistBotMessageParams = {
+  circleId: string;
+  userId: string;
+  agentName: string;
+  content: string;
+  threadId: string | null | undefined;
+  metadata?: PersistedChatBotMetadata;
+  maxAttempts?: number;
+  onError?: (error: unknown) => void;
+  onPersisted?: (messageId: string) => void;
+};
+
+function persistChatTabBotMessageWithRetry(params: ChatTabPersistBotMessageParams): void {
+  const {
+    circleId,
+    userId,
+    agentName,
+    content,
+    threadId,
+    metadata,
+    maxAttempts = 3,
+    onError,
+    onPersisted,
+  } = params;
+
+  const persistAttempt = async (attempt = 0) => {
+    try {
+      const messageId = await persistChatMessage({
+        circleId,
+        userId,
+        content: formatPersistedChatBotMessage(agentName, content, metadata),
+        threadId,
+        isBot: true,
+        reactions: {},
+      });
+      if (messageId) onPersisted?.(messageId);
+    } catch (error) {
+      onError?.(error);
+      if (attempt < maxAttempts) {
+        setTimeout(() => {
+          void persistAttempt(attempt + 1);
+        }, 1000 * (attempt + 1));
+      }
+    }
+  };
+
+  void persistAttempt();
+}
+
+type ChatTabUpdateBotMessageParams = {
+  messageId: string;
+  agentName: string;
+  content: string;
+  metadata?: PersistedChatBotMetadata;
+  maxAttempts?: number;
+  onError?: (error: unknown) => void;
+};
+
+function updateChatTabBotMessageWithRetry(params: ChatTabUpdateBotMessageParams): void {
+  const {
+    messageId,
+    agentName,
+    content,
+    metadata,
+    maxAttempts = 3,
+    onError,
+  } = params;
+
+  const persistAttempt = async (attempt = 0) => {
+    try {
+      await updateChatMessageContent(
+        messageId,
+        formatPersistedChatBotMessage(agentName, content, metadata),
+      );
+    } catch (error) {
+      onError?.(error);
+      if (attempt < maxAttempts) {
+        setTimeout(() => {
+          void persistAttempt(attempt + 1);
+        }, 1000 * (attempt + 1));
+      }
+    }
+  };
+
+  void persistAttempt();
+}
+
+type PendingBotMessageRecordWithAgentSubject = PendingBotMessageRecord & {
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
+};
+
 // Memory-reference label formatters (8) extracted verbatim to the pure,
 // smoke-tested src/lib/chatMemoryLabelCore.ts (decomposition unit U1) and
 // imported above. Behavior-identical to the former inline copies.
@@ -625,6 +715,7 @@ function mapPersistedRowsToChatMessages(
       memoryRefs: metadata?.memoryRefs,
       memoryRecommendations: metadata?.memoryRecommendations,
       source: metadata?.source,
+      agentSubjectMetadata: metadata?.agentSubjectMetadata || undefined,
       usage: metadata?.usage || undefined,
       executionStream: metadata?.executionStream,
       agentPlan: metadata?.agentPlan,
@@ -654,6 +745,7 @@ function mapPersistedRowsToChatMessages(
 
 function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], agentName: string): ChatMessage[] {
   return records.map((record) => {
+    const pendingRecord = record as PendingBotMessageRecordWithAgentSubject;
     const timestampMs = Date.parse(record.createdAt);
     const isBot = record.isBot !== false;
     return {
@@ -669,6 +761,7 @@ function mapPendingBotRecordsToChatMessages(records: PendingBotMessageRecord[], 
       wikiRefs: record.wikiRefs as WikiArticleReference[] | undefined,
       researchRefs: record.researchRefs as ResearchDocumentReference[] | undefined,
       source: record.source as ChatMessageSource | undefined,
+      agentSubjectMetadata: pendingRecord.agentSubjectMetadata || undefined,
       usage: record.usage as SwanBotStructuredResponse['usage'] | undefined,
       memoriesUsed: record.memoriesUsed,
       memoryRefs: record.memoryRefs as PromptMemoryReference[] | undefined,
@@ -797,6 +890,7 @@ type ChatMessage = {
   memoryRefs?: PromptMemoryReference[];
   memoryRecommendations?: OpenSwanMemoryRecommendation[];
   source?: ChatMessageSource;
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   usage?: SwanBotStructuredResponse['usage'];
   executionStream?: OpenSwanExecutionContract[];
   agentPlan?: AgentPlanDraft | Record<string, unknown>;
@@ -829,6 +923,8 @@ type ChatMessage = {
    *  "every Friday at 5pm post a weekly summary". When present, the
    *  message renders an AutomationProposalCard with a CREATE button. */
   automationProposal?: AutomationProposal;
+  /** Agent subject snapshot used when the proposal is accepted later. */
+  automationAgentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   /** Search results from `/search <query>`. Renders as a clickable
    *  list with JUMP buttons per row. */
   searchResults?: { query: string; rows: SearchResultRow[] };
@@ -872,6 +968,7 @@ type ChatBotMessageExtra = {
   wikiRefs?: WikiArticleReference[];
   researchRefs?: ResearchDocumentReference[];
   automationProposal?: AutomationProposal;
+  automationAgentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   searchResults?: { query: string; rows: SearchResultRow[] };
   commandsHelp?: boolean;
   assignPickerAgents?: AssignPickerAgent[];
@@ -879,6 +976,7 @@ type ChatBotMessageExtra = {
   showRunTrace?: boolean;
   routing?: SwanBotStructuredResponse['routing'];
   source?: ChatMessageSource;
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   usage?: SwanBotStructuredResponse['usage'] | null;
 };
 
@@ -1296,7 +1394,7 @@ function getRecoveryReliabilityFromArchive(
 }
 
 function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRecord {
-  return {
+  const record: PendingBotMessageRecordWithAgentSubject = {
     localMessageId: message.id,
     content: message.content || '',
     createdAt: message.timestamp instanceof Date
@@ -1308,6 +1406,7 @@ function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRe
     replyTo: message.replyTo || null,
     reactions: message.reactions,
     source: message.source,
+    agentSubjectMetadata: message.agentSubjectMetadata || undefined,
     usage: message.usage,
     runId: message.runId,
     delegatedTo: message.delegatedTo,
@@ -1332,6 +1431,7 @@ function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRe
     verificationResults: message.verificationResults,
     routing: message.routing,
   };
+  return record;
 }
 
 function saveRecoverableChatMessage(threadId: string | null | undefined, message: ChatMessage): void {
@@ -1820,6 +1920,33 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     () => resolveChatAgentTarget(chatAgentTargets, selectedChatAgentId),
     [chatAgentTargets, selectedChatAgentId],
   );
+  const selectedAgentSubjectContext = useMemo<Pick<SwanBotContext,
+    'agentId' | 'agentName' | 'agentSubjectKey' | 'agentDbId' | 'agentSessionKey' | 'agentLegacyIds' | 'agentSubjectMetadata'
+  >>(() => {
+    const subjectKey = selectedChatAgentTarget?.agentSubjectKey || BLACKSWAN_ID;
+    const displayName = selectedChatAgentTarget?.label || agentName;
+    const dbId = selectedChatAgentTarget?.agentDbId || null;
+    const sessionKey = selectedChatAgentTarget?.agentSessionKey || selectedChatAgentTarget?.sessionKey || null;
+    const legacyIds = selectedChatAgentTarget?.agentLegacyIds || [];
+    const metadata = selectedChatAgentTarget?.agentSubjectMetadata
+      ? { ...selectedChatAgentTarget.agentSubjectMetadata, agentDisplayName: displayName }
+      : {
+          agentSubjectKey: subjectKey,
+          agentDisplayName: displayName,
+          agentDbId: dbId,
+          agentSessionKey: sessionKey,
+          legacyAgentIds: legacyIds,
+        };
+    return {
+      agentId: subjectKey,
+      agentName: displayName,
+      agentSubjectKey: subjectKey,
+      agentDbId: dbId,
+      agentSessionKey: sessionKey,
+      agentLegacyIds: legacyIds,
+      agentSubjectMetadata: metadata,
+    };
+  }, [agentName, selectedChatAgentTarget]);
   const [activeSpiritId, setActiveSpiritId] = useState<string | null>(null);
   const [soulLearningRefs, setSoulLearningRefs] = useState<ResearchDocumentReference[]>([]);
   const [soulMemoryRefs, setSoulMemoryRefs] = useState<PromptMemoryReference[]>([]);
@@ -4272,7 +4399,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     (async () => {
       try {
         const identities = await loadAgentIdentities();
-        const identityKey = getAgentIdentityKey({ id: BLACKSWAN_ID, name: agentName });
+        const identityKey = selectedAgentSubjectContext.agentSubjectKey
+          || getAgentIdentityKey({ id: BLACKSWAN_ID, name: agentName });
         const resolvedSpiritId = identities.get(identityKey)?.spiritId || getFallbackSpiritIdForSessionProfile(sessionProfile);
         if (!cancelled) {
           setActiveSpiritId(resolvedSpiritId);
@@ -4284,7 +4412,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
     })();
     return () => { cancelled = true; };
-  }, [agentName, sessionProfile]);
+  }, [agentName, selectedAgentSubjectContext, sessionProfile]);
 
   useEffect(() => {
     if (!activeSpiritId) {
@@ -4920,12 +5048,26 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       throw new Error(customResult.error || `${formatChatAgentProviderLabel(normalizedProvider)} bridge could not accept the task.`);
     }
 
+    const agentSubject = buildAgentRuntimeSubject({
+      id: agent.id,
+      name: agent.name,
+      sessionKey: agent.sessionKey || undefined,
+      providerType: normalizedProvider as any,
+      spirit: agent.spirit || undefined,
+    }, {
+      dbAgentId: isUuidLike(agent.id) ? agent.id : null,
+    });
     const aiResp = await getAIResponse(`[Task for ${agent.name}] ${task}`, {
       userId: currentUserId || '',
       circleId,
       userName: currentUserName,
-      agentId: agent.sessionKey || agent.id,
+      agentId: agentSubject.subjectKey,
       agentName: agent.name,
+      agentSubjectKey: agentSubject.subjectKey,
+      agentDbId: agentSubject.dbAgentId,
+      agentSessionKey: agentSubject.sessionKey,
+      agentLegacyIds: agentSubject.legacyIds,
+      agentSubjectMetadata: agentSubject.metadata,
       model: preferredModel,
       spiritId: agent.spirit || undefined,
     });
@@ -5190,6 +5332,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           recoveryReliability: botMetadata?.recoveryReliability || undefined,
           computerHandoff: botMetadata?.computerHandoff || undefined,
           source: botMetadata?.source,
+          agentSubjectMetadata: botMetadata?.agentSubjectMetadata || undefined,
           usage: botMetadata?.usage || undefined,
           routing: botMetadata?.routing || undefined,
           ...deriveChatActivityFlags(newMsg.content),
@@ -5378,6 +5521,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       surface: extra?.localOnly ? 'main_chat_local' : 'main_chat',
       selectedModel: selectedModel || null,
     };
+    const messageAgentSubjectMetadata = extra?.agentSubjectMetadata
+      || selectedAgentSubjectContext.agentSubjectMetadata;
     const msg: ChatMessage = {
       id: msgId,
       content,
@@ -5390,6 +5535,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       wikiRefs: extra?.wikiRefs,
       researchRefs: extra?.researchRefs,
       source: messageSource,
+      agentSubjectMetadata: messageAgentSubjectMetadata,
       usage: extra?.usage || undefined,
       delegatedTo: extra?.delegatedTo,
       delegatedSubagents: extra?.delegatedSubagents,
@@ -5415,6 +5561,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       verificationResults: extra?.verificationResults,
       routing: extra?.routing,
       automationProposal: extra?.automationProposal,
+      automationAgentSubjectMetadata: extra?.automationAgentSubjectMetadata,
       searchResults: extra?.searchResults,
       commandsHelp: extra?.commandsHelp,
       assignPickerAgents: extra?.assignPickerAgents,
@@ -5466,36 +5613,39 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       producedText: (content || '').trim().length > 0,
     });
     if (currentUserId && messageThreadId) {
-      persistMainChatBotMessageWithRetry({
+      persistChatTabBotMessageWithRetry({
         circleId,
         userId: currentUserId,
         agentName,
         content,
         threadId: messageThreadId,
-        localMessageId: msgId,
-        source: messageSource,
-        usage: extra?.usage || null,
-        artifacts,
-        wikiRefs: extra?.wikiRefs,
-        researchRefs: extra?.researchRefs,
-        memoriesUsed: extra?.memoriesUsed,
-        memoryRefs: extra?.memoryRefs,
-        memoryRecommendations: extra?.memoryRecommendations,
-        executionStream: extra?.executionStream,
-        agentPlan: extra?.agentPlan,
-        taskPlan: extra?.taskPlan,
-        toolEvents: extra?.toolEvents,
-        verificationResults: extra?.verificationResults,
-        browserPlans: extra?.browserPlans,
-        browserPlanEvents: extra?.browserPlanEvents,
-        browserSessions: extra?.browserSessions,
-        recoveryOptions: extra?.recoveryOptions,
-        recoveryReliability: extra?.recoveryReliability,
-        computerHandoff: extra?.computerHandoff,
-        chatAutomationPlanPreview: extra?.chatAutomationPlanPreview,
-        computerFindings: extra?.computerFindings,
-        bestOfN: extra?.bestOfN,
-        routing: extra?.routing,
+        metadata: {
+          localMessageId: msgId,
+          source: messageSource,
+          agentSubjectMetadata: messageAgentSubjectMetadata,
+          usage: extra?.usage || null,
+          artifacts,
+          wikiRefs: extra?.wikiRefs,
+          researchRefs: extra?.researchRefs,
+          memoriesUsed: extra?.memoriesUsed,
+          memoryRefs: extra?.memoryRefs,
+          memoryRecommendations: extra?.memoryRecommendations,
+          executionStream: extra?.executionStream,
+          agentPlan: extra?.agentPlan,
+          taskPlan: extra?.taskPlan,
+          toolEvents: extra?.toolEvents,
+          verificationResults: extra?.verificationResults,
+          browserPlans: extra?.browserPlans,
+          browserPlanEvents: extra?.browserPlanEvents,
+          browserSessions: extra?.browserSessions,
+          recoveryOptions: extra?.recoveryOptions,
+          recoveryReliability: extra?.recoveryReliability,
+          computerHandoff: extra?.computerHandoff,
+          chatAutomationPlanPreview: extra?.chatAutomationPlanPreview,
+          computerFindings: extra?.computerFindings,
+          bestOfN: extra?.bestOfN,
+          routing: extra?.routing,
+        },
         onError: (error) => {
           console.error('[ChatTab] Unexpected error persisting bot msg:', error);
         },
@@ -5551,6 +5701,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         addBotMessage(suggestion.message, undefined, {
           localOnly: true,
           automationProposal: suggestion.proposal,
+          automationAgentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
           source: {
             actor: 'OpenSwan',
             surface: 'chat_automation_suggestion',
@@ -5647,6 +5798,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         surface: 'main_chat_pending',
         selectedModel: selectedModel || null,
       },
+      agentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
       isPending: true,
     };
     setMessages(prev => [...prev, msg]);
@@ -6022,7 +6174,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   const updateBotMessage = (
     messageId: string,
-    patch: Partial<Pick<ChatMessage, 'content' | 'artifacts' | 'wikiRefs' | 'researchRefs' | 'runId' | 'taskPlan' | 'toolEvents' | 'verificationResults' | 'executionStream' | 'browserPlans' | 'browserPlanEvents' | 'browserSessions' | 'recoveryOptions' | 'recoveryReliability' | 'chatAutomationPlanPreview' | 'isPending' | 'memoriesUsed' | 'memoryRefs' | 'memoryRecommendations' | 'delegatedSubagents' | 'routing' | 'source' | 'usage'>>,
+    patch: Partial<Pick<ChatMessage, 'content' | 'artifacts' | 'wikiRefs' | 'researchRefs' | 'runId' | 'taskPlan' | 'toolEvents' | 'verificationResults' | 'executionStream' | 'browserPlans' | 'browserPlanEvents' | 'browserSessions' | 'recoveryOptions' | 'recoveryReliability' | 'chatAutomationPlanPreview' | 'isPending' | 'memoriesUsed' | 'memoryRefs' | 'memoryRecommendations' | 'delegatedSubagents' | 'routing' | 'source' | 'agentSubjectMetadata' | 'usage'>>,
   ) => {
     let nextMessageToPersist: ChatMessage | null = null;
     setMessages(prev => prev.map((message) => {
@@ -6043,34 +6195,38 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   const syncPersistedBotMessage = useCallback((message: ChatMessage | null | undefined) => {
     if (!message?.dbId || !message.isBot) return;
-    updateMainChatBotMessageWithRetry({
+    updateChatTabBotMessageWithRetry({
       messageId: message.dbId,
       agentName,
       content: message.content,
-      artifacts: message.artifacts,
-      wikiRefs: message.wikiRefs,
-      researchRefs: message.researchRefs,
-      memoriesUsed: message.memoriesUsed,
-      memoryRefs: message.memoryRefs,
-      memoryRecommendations: message.memoryRecommendations,
-      executionStream: message.executionStream,
-      taskPlan: message.taskPlan,
-      toolEvents: message.toolEvents,
-      verificationResults: message.verificationResults,
-      browserPlans: message.browserPlans,
-      browserPlanEvents: message.browserPlanEvents,
-      browserSessions: message.browserSessions,
-      recoveryOptions: message.recoveryOptions,
-      recoveryReliability: message.recoveryReliability,
-      chatAutomationPlanPreview: message.chatAutomationPlanPreview,
-      source: message.source,
-      usage: message.usage,
-      routing: message.routing,
+      metadata: {
+        localMessageId: message.id,
+        artifacts: message.artifacts,
+        wikiRefs: message.wikiRefs,
+        researchRefs: message.researchRefs,
+        memoriesUsed: message.memoriesUsed,
+        memoryRefs: message.memoryRefs,
+        memoryRecommendations: message.memoryRecommendations,
+        executionStream: message.executionStream,
+        taskPlan: message.taskPlan,
+        toolEvents: message.toolEvents,
+        verificationResults: message.verificationResults,
+        browserPlans: message.browserPlans,
+        browserPlanEvents: message.browserPlanEvents,
+        browserSessions: message.browserSessions,
+        recoveryOptions: message.recoveryOptions,
+        recoveryReliability: message.recoveryReliability,
+        chatAutomationPlanPreview: message.chatAutomationPlanPreview,
+        source: message.source,
+        agentSubjectMetadata: message.agentSubjectMetadata || selectedAgentSubjectContext.agentSubjectMetadata,
+        usage: message.usage,
+        routing: message.routing,
+      },
       onError: (error) => {
         console.error('[ChatTab] Unexpected error updating bot msg:', error);
       },
     });
-  }, [agentName]);
+  }, [agentName, selectedAgentSubjectContext.agentSubjectMetadata]);
 
   const applyBrowserPlanPatch = useCallback((
     messageId: string,
@@ -7038,7 +7194,11 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         addBotMessage(
           `I think you want to set up an automation. Confirm and I'll create it.`,
           undefined,
-          { localOnly: true, automationProposal: proposal },
+          {
+            localOnly: true,
+            automationProposal: proposal,
+            automationAgentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
+          },
         );
         return;
       }
@@ -7415,6 +7575,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         const outcome = await executeAutomationCommand(content, {
           circleId,
           userId: currentUserId || 'anonymous',
+          agentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
         });
         if (outcome) {
           addBotMessage(outcome.message, undefined, { localOnly: true });
@@ -9187,6 +9348,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         userId: currentUserId || 'anonymous',
         circleId,
         userName: currentUserName,
+        ...selectedAgentSubjectContext,
         model: selectedModel !== 'auto' ? selectedModel : undefined,
       });
       if (localCommandResponse) {
@@ -9512,6 +9674,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           userId: currentUserId || 'anonymous',
           circleId,
           userName: currentUserName,
+          ...selectedAgentSubjectContext,
           model: sendModel || undefined,
           sessionArchiveContext: sessionArchiveContext || undefined,
           connectedProviders: connectedProviderSet,
@@ -9541,6 +9704,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             userId: currentUserId || 'anonymous',
             userName: currentUserName,
             prompt: fullPrompt,
+            agentId: selectedAgentSubjectContext.agentSubjectKey,
+            agentName: selectedAgentSubjectContext.agentName,
+            agentSubjectKey: selectedAgentSubjectContext.agentSubjectKey,
+            agentDbId: selectedAgentSubjectContext.agentDbId,
+            agentSessionKey: selectedAgentSubjectContext.agentSessionKey,
+            agentLegacyIds: selectedAgentSubjectContext.agentLegacyIds,
+            agentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
             model: sendModel || undefined,
             mode: effectiveChatMode as any,
             connectedProviders: connectedProviderSet,
@@ -9675,6 +9845,13 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   currentMessage: cleanContent,
                   model: effectiveSelectedModel !== 'auto' ? effectiveSelectedModel : undefined,
                   userName: currentUserName,
+                  agentId: selectedAgentSubjectContext.agentId,
+                  agentName: selectedAgentSubjectContext.agentName,
+                  agentSubjectKey: selectedAgentSubjectContext.agentSubjectKey,
+                  agentDbId: selectedAgentSubjectContext.agentDbId,
+                  agentSessionKey: selectedAgentSubjectContext.agentSessionKey,
+                  agentLegacyIds: selectedAgentSubjectContext.agentLegacyIds,
+                  agentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
                   chatHistory,
                   sessionArchiveContext: sessionArchiveContext || undefined,
                 });
@@ -9830,15 +10007,19 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   });
                 }
                 if (currentUserId && activeThreadId) {
-                  persistMainChatBotMessageWithRetry({
+                  persistChatTabBotMessageWithRetry({
                     circleId,
                     userId: currentUserId,
                     agentName,
                     content: accumulated,
                     threadId: activeThreadId,
-                    localMessageId: pendingMsg.id,
-                    source: streamSource,
-                    usage: streamingUsage || null,
+                    metadata: {
+                      localMessageId: pendingMsg.id,
+                      source: streamSource,
+                      agentSubjectMetadata: pendingMsg.agentSubjectMetadata
+                        || selectedAgentSubjectContext.agentSubjectMetadata,
+                      usage: streamingUsage || null,
+                    },
                     onError: (error) => console.error('[ChatTab] persist streaming msg:', error),
                     onPersisted: (dbId) => {
                       void removePendingBotMessage(activeThreadId, pendingMsg.id).catch(() => {});
@@ -9916,15 +10097,19 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     }
                     if (currentUserId && activeThreadId && streamPendingMsgId) {
                       const interruptedMsgId = streamPendingMsgId;
-                      persistMainChatBotMessageWithRetry({
+                      persistChatTabBotMessageWithRetry({
                         circleId,
                         userId: currentUserId,
                         agentName,
                         content: interruptedContent,
                         threadId: activeThreadId,
-                        localMessageId: interruptedMsgId,
-                        source: interruptedSource,
-                        usage: null,
+                        metadata: {
+                          localMessageId: interruptedMsgId,
+                          source: interruptedSource,
+                          agentSubjectMetadata: streamPendingMsg?.agentSubjectMetadata
+                            || selectedAgentSubjectContext.agentSubjectMetadata,
+                          usage: null,
+                        },
                         onError: (error) => console.error('[ChatTab] persist interrupted stream msg:', error),
                         onPersisted: (dbId) => {
                           void removePendingBotMessage(activeThreadId, interruptedMsgId).catch(() => {});
@@ -10140,25 +10325,29 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               });
             }
             if (currentUserId && activeThreadId) {
-              persistMainChatBotMessageWithRetry({
+              persistChatTabBotMessageWithRetry({
                 circleId,
                 userId: currentUserId,
                 agentName,
                 content: botResponse,
                 threadId: activeThreadId,
-                localMessageId: pendingMessageId,
-                source: structuredSource,
-                usage: structured.usage || null,
-                artifacts: structured.artifacts,
-                wikiRefs,
-                researchRefs,
-                memoriesUsed: structured.memoriesUsed,
-                memoryRefs: structured.memoryReferences,
-                memoryRecommendations: structured.memoryRecommendations,
-                executionStream,
-                browserPlans: structured.browserPlans,
-                browserPlanEvents: structured.browserPlanEvents,
-                routing: structured.routing,
+                metadata: {
+                  localMessageId: pendingMessageId,
+                  source: structuredSource,
+                  agentSubjectMetadata: pendingMessage.agentSubjectMetadata
+                    || selectedAgentSubjectContext.agentSubjectMetadata,
+                  usage: structured.usage || null,
+                  artifacts: structured.artifacts,
+                  wikiRefs,
+                  researchRefs,
+                  memoriesUsed: structured.memoriesUsed,
+                  memoryRefs: structured.memoryReferences,
+                  memoryRecommendations: structured.memoryRecommendations,
+                  executionStream,
+                  browserPlans: structured.browserPlans,
+                  browserPlanEvents: structured.browserPlanEvents,
+                  routing: structured.routing,
+                },
                 onError: (error) => {
                   console.error('[ChatTab] Unexpected error persisting bot msg:', error);
                 },
@@ -10513,6 +10702,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       const visible = stripPersistedChatBotPrefix(row.content);
       const nextContent = formatPersistedChatBotMessage(agentName, visible, {
         ...(existing || {}),
+        agentSubjectMetadata: existing?.agentSubjectMetadata
+          || row.agentSubjectMetadata
+          || selectedAgentSubjectContext.agentSubjectMetadata,
         outcomeSignal: row.outcomeSignal,
       });
       if (nextContent === row.content) return;
@@ -10793,8 +10985,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const ok = await applyOpenSwanMemoryRecommendation({
       circleId,
       userId: currentUserId,
-      agentId: 'openswan:main_chat',
-      agentName,
+      agentId: selectedAgentSubjectContext.agentSubjectKey || BLACKSWAN_ID,
+      agentName: selectedAgentSubjectContext.agentName || agentName,
       recommendation,
     });
     if (!ok) {
@@ -10815,7 +11007,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         limit: 4,
       }).then(setSoulMemoryRefs).catch(() => {});
     }
-  }, [activeSpiritId, agentName, circleId, currentUserId]);
+  }, [activeSpiritId, agentName, circleId, currentUserId, selectedAgentSubjectContext]);
 
   // ─── Render Helpers ──────────────────────────────────────────────────────
 
@@ -11587,6 +11779,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 proposal={item.automationProposal}
                 circleId={circleId}
                 userId={currentUserId}
+                agentSubjectMetadata={item.automationAgentSubjectMetadata || selectedAgentSubjectContext.agentSubjectMetadata}
                 accentColor={accentColor}
               />
             ) : null}
@@ -13184,6 +13377,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             initialTask={openSwanInitialTask}
             circleId={circleId}
             userId={currentUserId}
+            agentSubjectMetadata={selectedAgentSubjectContext.agentSubjectMetadata}
             surface="main_chat"
             onClose={() => {
               setShowOpenSwanConsole(false);

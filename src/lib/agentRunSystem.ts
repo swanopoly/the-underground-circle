@@ -12,6 +12,7 @@ import type { BrowserPlanEvent } from './computerUse';
 import { devLog } from './devLog';
 import { mapLegacyToolEventToLedgerStatus, persistAgentRunToolEvent } from './agentRunLedgerPersistence';
 import { subscribeWithReconnect } from './subscribeWithReconnect';
+import { runMatchesAgent } from './agentRunSubjectSummary';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,7 @@ export type SessionMemoryMode = 'private' | 'shared';
 
 export interface AgentRun {
   id: string;
+  agent_id?: string;
   circle_id: string;
   user_id: string;
   surface: RunSurface;
@@ -51,6 +53,49 @@ export interface AgentRun {
   parent_run_id?: string;
   delegated_to?: string;
   metadata: Record<string, unknown>;
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(values.map(value => String(value || '').trim()).filter(Boolean)));
+}
+
+function metadataStringValues(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.flatMap(metadataStringValues);
+  return [];
+}
+
+function runMatchesAgentAliases(run: AgentRun, aliases: string[]): boolean {
+  const normalizedAliases = new Set(aliases.map(value => value.toLowerCase()));
+  if (normalizedAliases.size === 0) return true;
+  const meta = run.metadata || {};
+  const agentSubject = meta.agentSubject && typeof meta.agentSubject === 'object'
+    ? meta.agentSubject as Record<string, unknown>
+    : {};
+  const values = uniqueStrings([
+    run.agent_id,
+    run.delegated_to,
+    meta.agentSubjectKey as string | undefined,
+    meta.targetAgentSubjectKey as string | undefined,
+    meta.agentId as string | undefined,
+    meta.agent_id as string | undefined,
+    meta.agentName as string | undefined,
+    meta.agent_name as string | undefined,
+    meta.sessionKey as string | undefined,
+    meta.session_key as string | undefined,
+    meta.delegatedTo as string | undefined,
+    meta.assignedAgentId as string | undefined,
+    meta.assigned_agent_id as string | undefined,
+    agentSubject.agentSubjectKey as string | undefined,
+    agentSubject.agentDbId as string | undefined,
+    ...metadataStringValues(meta.legacyAgentIds),
+    ...metadataStringValues(meta.agentLegacyIds),
+    ...metadataStringValues(meta.targetAgentLegacyIds),
+    ...metadataStringValues(meta.runAgentAliases),
+    ...metadataStringValues(meta.memoryAgentAliases),
+    ...metadataStringValues(agentSubject.legacyAgentIds),
+  ]);
+  return values.some(value => normalizedAliases.has(value.toLowerCase()));
 }
 
 export interface RunStep {
@@ -502,21 +547,79 @@ export async function getRun(runId: string): Promise<AgentRun | null> {
 
 export async function listRuns(
   circleId: string,
-  opts?: { surface?: RunSurface; status?: RunStatus; roomId?: string; userId?: string; agentId?: string; limit?: number },
+  opts?: { surface?: RunSurface; status?: RunStatus; roomId?: string; userId?: string; agentId?: string; agentAliases?: string[]; limit?: number },
 ): Promise<AgentRun[]> {
-  let query = supabase.from('agent_runs').select('*').eq('circle_id', circleId).order('created_at', { ascending: false }).limit(opts?.limit || 50);
+  const requestedLimit = opts?.limit || 50;
+  const agentAliases = uniqueStrings([opts?.agentId, ...(opts?.agentAliases || [])]);
+  const queryLimit = agentAliases.length > 0 ? Math.max(requestedLimit, 200) : requestedLimit;
+  let query = supabase.from('agent_runs').select('*').eq('circle_id', circleId).order('created_at', { ascending: false }).limit(queryLimit);
   if (opts?.surface) query = query.eq('surface', opts.surface);
   if (opts?.status) query = query.eq('status', opts.status);
   if (opts?.roomId) query = query.eq('room_id', opts.roomId);
   if (opts?.userId) query = query.eq('user_id', opts.userId);
-  // agent_runs.agent_id is a UUID; skip the filter when the caller passed a
-  // non-UUID (e.g. a live session id like `codex::codex-70025`) to avoid 400s.
-  if (opts?.agentId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opts.agentId)) {
-    query = query.eq('agent_id', opts.agentId);
-  }
   const { data, error } = await query;
   if (error || !data) return [];
-  return data.map(mapRun);
+  const runs = data.map(mapRun);
+  return agentAliases.length === 0
+    ? runs
+    : runs.filter(run => runMatchesAgentAliases(run, agentAliases)).slice(0, requestedLimit);
+}
+
+export async function listRunsForAgentSubject(
+  circleId: string,
+  opts: {
+    surface?: RunSurface;
+    status?: RunStatus;
+    roomId?: string;
+    userId?: string;
+    agentId?: string;
+    agentAliases?: string[];
+    agentName?: string;
+    limit?: number;
+    scanPageSize?: number;
+    maxScanRows?: number;
+  },
+): Promise<AgentRun[]> {
+  const requestedLimit = Math.max(1, opts.limit || 50);
+  const agentAliases = uniqueStrings([opts.agentId, ...(opts.agentAliases || [])]);
+  if (agentAliases.length === 0 && !String(opts.agentName || '').trim()) {
+    return listRuns(circleId, opts);
+  }
+
+  const scanPageSize = Math.max(requestedLimit, Math.min(Math.max(opts.scanPageSize || 200, 50), 500));
+  const maxScanRows = Math.max(scanPageSize, opts.maxScanRows || 1000);
+  const matches: AgentRun[] = [];
+  let from = 0;
+
+  while (from < maxScanRows && matches.length < requestedLimit) {
+    const to = Math.min(from + scanPageSize - 1, maxScanRows - 1);
+    let query = supabase
+      .from('agent_runs')
+      .select('*')
+      .eq('circle_id', circleId)
+      .order('created_at', { ascending: false })
+      .range(from, to);
+    if (opts.surface) query = query.eq('surface', opts.surface);
+    if (opts.status) query = query.eq('status', opts.status);
+    if (opts.roomId) query = query.eq('room_id', opts.roomId);
+    if (opts.userId) query = query.eq('user_id', opts.userId);
+
+    const { data, error } = await query;
+    if (error || !data) {
+      if (error) console.error('[AgentRunSystem] listRunsForAgentSubject error:', error);
+      break;
+    }
+
+    for (const run of data.map(mapRun)) {
+      if (runMatchesAgent(run, agentAliases, opts.agentName || '')) matches.push(run);
+      if (matches.length >= requestedLimit) break;
+    }
+
+    if (data.length < scanPageSize) break;
+    from += scanPageSize;
+  }
+
+  return matches.slice(0, requestedLimit);
 }
 
 export async function listChildRuns(
@@ -869,6 +972,7 @@ export async function loadMemories(opts: {
   circleId: string;
   roomId?: string;
   agentId?: string;
+  agentAliases?: string[];
   userId?: string;
   scopes?: MemoryScope[];
   limit?: number;
@@ -945,18 +1049,21 @@ export async function loadMemories(opts: {
     if (data) results.push(...data.map(mapMemory));
   }
 
-  const wantsAgent = !!opts.agentId && (!!opts.scopes && opts.scopes.includes('agent'));
-  if (wantsAgent && opts.agentId) {
+  const agentLookupIds = uniqueStrings([opts.agentId, ...(opts.agentAliases || [])]);
+  const wantsAgent = agentLookupIds.length > 0 && (!!opts.scopes && opts.scopes.includes('agent'));
+  if (wantsAgent) {
     let agentQuery = supabase
       .from('memory_entries')
       .select('*')
       .eq('circle_id', opts.circleId)
       .eq('scope', 'agent')
-      .eq('agent_id', opts.agentId)
       .eq('visibility', 'private')
       .eq('is_active', true)
       .order('updated_at', { ascending: false })
       .limit(20);
+    agentQuery = agentLookupIds.length === 1
+      ? agentQuery.eq('agent_id', agentLookupIds[0])
+      : agentQuery.in('agent_id', agentLookupIds);
 
     if (opts.userId) agentQuery = agentQuery.eq('user_id', opts.userId);
 
@@ -1279,7 +1386,7 @@ export async function executeTrackedRun(opts: {
 
 function mapRun(d: any): AgentRun {
   return {
-    id: d.id, circle_id: d.circle_id, user_id: d.user_id, surface: d.surface,
+    id: d.id, agent_id: d.agent_id, circle_id: d.circle_id, user_id: d.user_id, surface: d.surface,
     room_id: d.room_id, task_id: d.task_id, chat_session_id: d.chat_session_id,
     title: d.title, goal: d.goal, mode: d.mode, model: d.model, provider: d.provider,
     status: d.status, plan_summary: d.plan_summary,

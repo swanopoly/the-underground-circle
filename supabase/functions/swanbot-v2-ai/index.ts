@@ -2352,6 +2352,10 @@ type RunContinuation = {
   mode: Mode;
   model: string;
   targetAgentName: string;
+  targetAgentSubjectKey?: string;
+  targetAgentDbId?: string | null;
+  targetAgentLegacyIds?: string[];
+  agentSubject?: Record<string, unknown>;
   systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }>;
   toolNames?: string[];
   pendingToolUseIds: string[];
@@ -2359,6 +2363,63 @@ type RunContinuation = {
   continuationCount?: number;
   pausedAt: string;
 };
+
+function cleanSubjectString(value: unknown, max = 180): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : undefined;
+}
+
+function cleanSubjectStringArray(value: unknown, maxItems = 12): string[] {
+  const raw = Array.isArray(value) ? value : [];
+  const out: string[] = [];
+  for (const item of raw) {
+    const cleaned = cleanSubjectString(item);
+    if (!cleaned || out.includes(cleaned)) continue;
+    out.push(cleaned);
+    if (out.length >= maxItems) break;
+  }
+  return out;
+}
+
+function isUuidLike(value: unknown): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
+}
+
+function normalizeTargetAgentMetadata(input: Record<string, unknown>, targetAgentName: string): Record<string, unknown> {
+  const subject = input.agentSubject && typeof input.agentSubject === "object"
+    ? input.agentSubject as Record<string, unknown>
+    : input.agentSubjectMetadata && typeof input.agentSubjectMetadata === "object"
+      ? input.agentSubjectMetadata as Record<string, unknown>
+      : {};
+  const subjectKey = cleanSubjectString(input.targetAgentSubjectKey)
+    || cleanSubjectString(input.agentSubjectKey)
+    || cleanSubjectString(subject.agentSubjectKey);
+  const dbId = cleanSubjectString(input.targetAgentDbId)
+    || cleanSubjectString(input.agentDbId)
+    || cleanSubjectString(subject.agentDbId)
+    || (isUuidLike(input.targetAgentId) ? cleanSubjectString(input.targetAgentId) : undefined);
+  const sessionKey = cleanSubjectString(input.agentSessionKey)
+    || cleanSubjectString(subject.agentSessionKey);
+  const legacyIds = cleanSubjectStringArray([
+    ...cleanSubjectStringArray(input.targetAgentLegacyIds),
+    ...cleanSubjectStringArray(input.agentLegacyIds),
+    ...cleanSubjectStringArray(subject.legacyAgentIds),
+  ]);
+  const agentSubject: Record<string, unknown> = {
+    agentSubjectKey: subjectKey,
+    agentDisplayName: cleanSubjectString(subject.agentDisplayName) || targetAgentName,
+    agentDbId: dbId || null,
+    agentSessionKey: sessionKey || null,
+    legacyAgentIds: legacyIds,
+  };
+  const out: Record<string, unknown> = { targetAgent: targetAgentName };
+  if (subjectKey) out.targetAgentSubjectKey = subjectKey;
+  if (dbId) out.targetAgentDbId = dbId;
+  if (legacyIds.length > 0) out.targetAgentLegacyIds = legacyIds;
+  if (subjectKey || dbId || sessionKey || legacyIds.length > 0) out.agentSubject = agentSubject;
+  return out;
+}
 
 type SwanBotV2FinalStopReason = "end_turn" | "max_tokens" | "client_pending" | "error";
 
@@ -2558,6 +2619,10 @@ async function runLoop(args: {
   userMessage: string;
   mode: Mode;
   targetAgentName: string;
+  targetAgentSubjectKey?: string;
+  targetAgentDbId?: string | null;
+  targetAgentLegacyIds?: string[];
+  agentSubject?: Record<string, unknown>;
   supabase: SupabaseEdgeClient;
   circleId: string;
   userId: string;
@@ -2570,7 +2635,23 @@ async function runLoop(args: {
    *  before the next Anthropic turn. */
   resumeToolResults?: SwanBotResumeToolResult[];
 }): Promise<RunLoopTerminal | RunLoopPending> {
-  const { apiKey, model, userMessage, mode, targetAgentName, supabase, circleId, userId, runId, resumeFrom, resumeToolResults } = args;
+  const {
+    apiKey,
+    model,
+    userMessage,
+    mode,
+    targetAgentName,
+    targetAgentSubjectKey,
+    targetAgentDbId,
+    targetAgentLegacyIds,
+    agentSubject,
+    supabase,
+    circleId,
+    userId,
+    runId,
+    resumeFrom,
+    resumeToolResults,
+  } = args;
   const activeTools = resumeFrom
     ? resolveToolsByName(resumeFrom.toolNames)
     : selectToolsForTurn(userMessage, mode);
@@ -2727,6 +2808,10 @@ async function runLoop(args: {
         mode,
         model,
         targetAgentName,
+        targetAgentSubjectKey,
+        targetAgentDbId,
+        targetAgentLegacyIds,
+        agentSubject,
         systemBlocks,
         toolNames: activeTools.map((tool) => tool.name),
         pendingToolUseIds: clientUses.map((u) => u.id),
@@ -2856,6 +2941,7 @@ Deno.serve(async (req: Request) => {
   let mode: Mode;
   let model: string;
   let targetAgentName: string;
+  let targetAgentMetadata: Record<string, unknown> = {};
   let runId: string | null = null;
   let resumeFrom: RunContinuation | undefined;
   let resumeToolResults: SwanBotResumeToolResult[] | undefined;
@@ -2900,6 +2986,12 @@ Deno.serve(async (req: Request) => {
     mode = cont.mode;
     model = cont.model;
     targetAgentName = cont.targetAgentName;
+    targetAgentMetadata = normalizeTargetAgentMetadata({
+      targetAgentSubjectKey: cont.targetAgentSubjectKey,
+      targetAgentDbId: cont.targetAgentDbId,
+      targetAgentLegacyIds: cont.targetAgentLegacyIds,
+      agentSubject: cont.agentSubject,
+    }, targetAgentName);
     runId = runRow.id as string;
     resumeFrom = cont;
     const validatedResults = validateSwanBotResumeToolResults(body.toolResults, cont.pendingToolUseIds || []);
@@ -2925,6 +3017,7 @@ Deno.serve(async (req: Request) => {
     }
     model = resolvedModel;
     targetAgentName = body.targetAgentName || "BlackSwan";
+    targetAgentMetadata = normalizeTargetAgentMetadata(body, targetAgentName);
 
     // Create the agent_runs row up front so tool events have a parent.
     try {
@@ -2938,7 +3031,7 @@ Deno.serve(async (req: Request) => {
         provider: "anthropic",
         status: "running",
         started_at: new Date().toISOString(),
-        metadata: { version: "swanbot-v2-ai", targetAgent: targetAgentName },
+        metadata: { version: "swanbot-v2-ai", ...targetAgentMetadata },
       }).select("id").single();
       if (run) runId = run.id;
     } catch {}
@@ -2947,6 +3040,10 @@ Deno.serve(async (req: Request) => {
   try {
     const result = await runLoop({
       apiKey, model, userMessage: message ?? "", mode, targetAgentName,
+      targetAgentSubjectKey: targetAgentMetadata.targetAgentSubjectKey as string | undefined,
+      targetAgentDbId: targetAgentMetadata.targetAgentDbId as string | null | undefined,
+      targetAgentLegacyIds: targetAgentMetadata.targetAgentLegacyIds as string[] | undefined,
+      agentSubject: targetAgentMetadata.agentSubject as Record<string, unknown> | undefined,
       supabase, circleId, userId, runId,
       resumeFrom, resumeToolResults,
     });
@@ -2969,7 +3066,7 @@ Deno.serve(async (req: Request) => {
           ...agentRunTokenUsageFields(result.usage),
           metadata: {
             version: "swanbot-v2-ai",
-            targetAgent: targetAgentName,
+            ...targetAgentMetadata,
             continuation: sanitizeContinuationForStorage(result.continuation),
           },
         }).eq("id", runId);
@@ -2977,7 +3074,7 @@ Deno.serve(async (req: Request) => {
       void logClaudeUsage(supabase, {
         circleId, userId, source: "swanbot-v2-ai", model,
         usage: result.usage,
-        metadata: { mode, runId, iterations: result.iterations, targetAgentName, pending: true },
+        metadata: { mode, runId, iterations: result.iterations, targetAgentName, pending: true, ...targetAgentMetadata },
       });
       return jsonResponse({
         pending: true,
@@ -3008,7 +3105,7 @@ Deno.serve(async (req: Request) => {
         completed_at: new Date().toISOString(),
         // Clear the continuation blob on terminal completion — the run
         // isn't paused anymore, don't confuse later dashboards.
-        metadata: { version: "swanbot-v2-ai", targetAgent: targetAgentName, rawStopReason: result.stopReason },
+        metadata: { version: "swanbot-v2-ai", ...targetAgentMetadata, rawStopReason: result.stopReason },
       }).eq("id", runId);
     }
 
@@ -3035,6 +3132,7 @@ Deno.serve(async (req: Request) => {
         rawStopReason: result.stopReason,
         toolCallCount: result.toolCalls?.length ?? 0,
         usage: result.usage,
+        ...targetAgentMetadata,
       },
     });
 
@@ -3047,7 +3145,7 @@ Deno.serve(async (req: Request) => {
       source: "swanbot-v2-ai",
       model,
       usage: result.usage,
-      metadata: { mode, runId, iterations: result.iterations, targetAgentName },
+      metadata: { mode, runId, iterations: result.iterations, targetAgentName, ...targetAgentMetadata },
     });
 
     return jsonResponse({
@@ -3103,7 +3201,7 @@ Deno.serve(async (req: Request) => {
           iteration_count: 1,
           final_stop_reason: "error",
           ...(transient ? {} : { completed_at: new Date().toISOString() }),
-          metadata: { error: msg, version: "swanbot-v2-ai", transient },
+          metadata: { error: msg, version: "swanbot-v2-ai", transient, ...targetAgentMetadata },
         }).eq("id", runId);
         await supabase.from("agent_run_events").insert({ run_id: runId, kind: "error", payload: { message: msg, transient } });
       }

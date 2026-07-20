@@ -28,6 +28,11 @@ export type MemoryNamespace =
   | 'external_agent_user_context';
 
 export type AgentMemoryPromotionKind = 'success' | 'blocker';
+
+function uniqueMemoryIds(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(values.map(value => String(value || '').trim()).filter(Boolean)));
+}
+
 export type PromptMemoryReference = {
   id: string;
   title: string;
@@ -267,13 +272,17 @@ export async function loadStartupMemory(opts: {
   userId: string;
   roomId?: string;
   agentId?: string;
+  agentAliases?: string[];
 }): Promise<string> {
+  const agentLookupIds = uniqueMemoryIds([opts.agentId, ...(opts.agentAliases || [])]);
+  const agentLookupSet = new Set(agentLookupIds);
   const allMemories = await loadMemories({
     circleId: opts.circleId,
     roomId: opts.roomId,
     agentId: opts.agentId,
+    agentAliases: opts.agentAliases,
     userId: opts.userId,
-    scopes: opts.agentId ? ['circle', 'room', 'user', 'session', 'agent'] : ['circle', 'room', 'user', 'session'],
+    scopes: agentLookupIds.length > 0 ? ['circle', 'room', 'user', 'session', 'agent'] : ['circle', 'room', 'user', 'session'],
     limit: 40,
   });
 
@@ -293,7 +302,7 @@ export async function loadStartupMemory(opts: {
     : null;
   const activeSoulKey = soulInfo?.soulKey || null;
   const agentPrivate = startupMemories
-    .filter(m => m.scope === 'agent' && (!opts.agentId || m.agent_id === opts.agentId))
+    .filter(m => m.scope === 'agent' && (agentLookupSet.size === 0 || agentLookupSet.has(String(m.agent_id || ''))))
     .sort((a, b) => new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime())
     .sort((a, b) => {
       const aSoul = getMemorySoulKey(a);
@@ -1121,6 +1130,7 @@ export async function buildPromptMemoryBundle(opts: {
   query: string;
   roomId?: string;
   agentId?: string;
+  agentAliases?: string[];
   agentName?: string;
   spiritId?: string | null;
   surface?: string;
@@ -1149,6 +1159,7 @@ export async function buildPromptMemoryBundle(opts: {
       userId: opts.userId,
       roomId: opts.roomId,
       agentId: opts.agentId,
+      agentAliases: opts.agentAliases,
     }),
     resolvedSoulKey
       ? loadSoulWisdomWithFallback({
@@ -1185,6 +1196,7 @@ export async function buildPromptMemoryBundle(opts: {
           circleId: opts.circleId,
           userId: opts.userId,
           agentId: opts.agentId,
+          agentAliases: opts.agentAliases,
           agentName: opts.agentName,
           soulKey: resolvedSoulKey || undefined,
           query: opts.query,
@@ -2721,15 +2733,19 @@ export async function retrieveAgentMemories(opts: {
   circleId: string;
   userId: string;
   agentId: string;
+  agentAliases?: string[];
   agentName?: string;
   types?: string[];
   limit?: number;
   soulKey?: string;
   query?: string;
 }): Promise<MemoryEntry[]> {
+  const lookupIds = uniqueMemoryIds([opts.agentId, ...(opts.agentAliases || [])]);
+  const lookupSet = new Set(lookupIds);
   const agentScopedMemories = await loadMemories({
     circleId: opts.circleId,
     agentId: opts.agentId,
+    agentAliases: opts.agentAliases,
     userId: opts.userId,
     scopes: ['agent'],
     limit: 120,
@@ -2744,7 +2760,7 @@ export async function retrieveAgentMemories(opts: {
 
   const memories = [
     ...agentScopedMemories,
-    ...legacyMemories.filter(mem => mem.metadata?.agentId === opts.agentId),
+    ...legacyMemories.filter(mem => lookupSet.has(String(mem.metadata?.agentId || ''))),
   ];
   const activeSoulKey = opts.soulKey || (await getAgentSoulInfo({
     circleId: opts.circleId,
@@ -2776,7 +2792,7 @@ export async function retrieveAgentMemories(opts: {
   }
 
   return Array.from(deduped.values())
-    .filter(mem => (mem.agent_id || mem.metadata?.agentId) === opts.agentId)
+    .filter(mem => lookupSet.has(String(mem.agent_id || mem.metadata?.agentId || '')))
     .filter(mem => allowedTypes.size === 0 || allowedTypes.has(String(mem.metadata?.source || '')))
     .map(mem => {
       let score = 0;

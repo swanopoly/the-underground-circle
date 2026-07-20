@@ -81,6 +81,7 @@ async function formatRuntimeMemory(args: {
   userId: string;
   roomId?: string;
   agentId?: string;
+  agentAliases?: string[];
 }): Promise<string> {
   const scopes = args.agentId
     ? ['circle', 'room', 'session', 'agent'] as const
@@ -92,6 +93,7 @@ async function formatRuntimeMemory(args: {
     userId: args.userId,
     roomId: args.roomId,
     agentId: args.agentId,
+    agentAliases: args.agentAliases,
     scopes: [...scopes],
     limit: 24,
   }))
@@ -159,6 +161,7 @@ export async function buildOpenSwanMemoryStores(args: {
   query: string;
   roomId?: string;
   agentId?: string;
+  agentAliases?: string[];
   agentName?: string;
   spiritId?: string | null;
   surface?: string;
@@ -194,6 +197,7 @@ export async function buildOpenSwanMemoryStores(args: {
       userId: args.userId,
       roomId: args.roomId,
       agentId: args.agentId,
+      agentAliases: args.agentAliases,
     }),
     buildPromptMemoryBundle({
       circleId: args.circleId,
@@ -236,4 +240,3 @@ export async function buildOpenSwanMemoryStores(args: {
     references: promptBundle.references,
   };
 }
-

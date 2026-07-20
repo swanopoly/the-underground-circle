@@ -7,6 +7,12 @@ import { supabase } from './supabase';
 import { CircleOfficeAgent, BLACKSWAN_AGENT_ID } from './circleOffice';
 import { loadBudgetConfig, checkHardLimit } from './budgetAlerts';
 import { getStrictLocalAiModeMessage, shouldBlockExternalAiProvider } from './privacyMode';
+import {
+  buildAgentRuntimeSubject,
+  isUuidLike,
+  type AgentRuntimeSubject,
+  type AgentRuntimeSubjectMetadata,
+} from './agentRuntimeSubject';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -17,6 +23,12 @@ export interface InvocationRequest {
   senderId?: string;
   targetAgentId?: string;
   targetAgentName: string;
+  agentSubjectKey?: string;
+  agentDbId?: string | null;
+  agentSessionKey?: string | null;
+  agentLegacyIds?: string[];
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata;
+  targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
   promptName?: string;
   promptLabel?: string;
   model?: string | null;
@@ -129,12 +141,136 @@ function isBlackSwanAgent(agent: CircleOfficeAgent): boolean {
   return agent.provider === 'blackswan' || agent.id === BLACKSWAN_AGENT_ID;
 }
 
+function uniqueSubjectIds(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(values.map(value => String(value || '').trim()).filter(Boolean)));
+}
+
+function cleanTargetAgentDisplayName(value: string | null | undefined): string | null {
+  const cleaned = String(value || '').trim().replace(/^@+/, '').trim();
+  if (!cleaned || cleaned.toLowerCase() === 'all') return null;
+  return cleaned;
+}
+
+function buildInvocationAgentSubject(agent: CircleOfficeAgent, req: InvocationRequest): AgentRuntimeSubject {
+  const displayName = cleanTargetAgentDisplayName(req.targetAgentName) || agent.name || 'Agent';
+  const base = buildAgentRuntimeSubject({
+    id: req.targetAgentId || agent.id,
+    name: displayName,
+    providerType: agent.provider as any,
+    spirit: agent.spirit,
+  }, {
+    dbAgentId: req.agentDbId || (isUuidLike(agent.id) ? agent.id : null),
+  });
+  const supplied = findSubjectMetadataForAgent(req, agent);
+  const subjectKey = supplied?.agentSubjectKey || req.agentSubjectKey || base.subjectKey;
+  const dbAgentId = supplied?.agentDbId ?? req.agentDbId ?? base.dbAgentId;
+  const sessionKey = supplied?.agentSessionKey ?? req.agentSessionKey ?? base.sessionKey;
+  const legacyIds = uniqueSubjectIds([
+    ...base.legacyIds,
+    ...(supplied?.legacyAgentIds || []),
+    ...(req.agentLegacyIds || []),
+  ]).filter(alias => alias !== subjectKey);
+  const metadata: AgentRuntimeSubjectMetadata = {
+    ...base.metadata,
+    ...supplied,
+    agentSubjectKey: subjectKey,
+    agentDisplayName: supplied?.agentDisplayName || displayName,
+    agentDbId: dbAgentId,
+    agentProvider: supplied?.agentProvider ?? base.providerType,
+    agentSessionKey: sessionKey,
+    agentSpiritId: supplied?.agentSpiritId ?? base.spiritId,
+    legacyAgentIds: legacyIds,
+  };
+  const aliases = uniqueSubjectIds([
+    subjectKey,
+    dbAgentId,
+    sessionKey,
+    agent.id,
+    req.targetAgentId,
+    displayName,
+    ...base.memoryAgentAliases,
+    ...legacyIds,
+  ]);
+  return {
+    ...base,
+    displayName,
+    subjectKey,
+    dbAgentId,
+    sessionKey,
+    memoryAgentId: subjectKey,
+    runAgentId: subjectKey,
+    memoryAgentAliases: aliases,
+    runAgentAliases: aliases,
+    legacyIds,
+    metadata,
+  };
+}
+
+function buildInvocationSwanBotContext(subject: AgentRuntimeSubject) {
+  return {
+    agentId: subject.subjectKey,
+    agentName: subject.displayName,
+    agentSubjectKey: subject.subjectKey,
+    agentDbId: subject.dbAgentId,
+    agentSessionKey: subject.sessionKey,
+    agentLegacyIds: subject.legacyIds,
+    agentSubjectMetadata: subject.metadata,
+  };
+}
+
+function normalizeSubjectLookupValue(value: string | null | undefined): string | null {
+  const normalized = String(value || '').trim().replace(/^@+/, '').trim().toLowerCase();
+  return normalized || null;
+}
+
+function metadataMatchesAgent(subject: AgentRuntimeSubjectMetadata, agent: CircleOfficeAgent): boolean {
+  const agentLookups = new Set(
+    uniqueSubjectIds([
+      agent.id,
+      agent.name,
+      isUuidLike(agent.id) ? agent.id : null,
+    ]).map(value => normalizeSubjectLookupValue(value)).filter(Boolean)
+  );
+  const subjectLookups = uniqueSubjectIds([
+    subject.agentSubjectKey,
+    subject.agentDbId,
+    subject.agentSessionKey,
+    subject.agentDisplayName,
+    ...subject.legacyAgentIds,
+  ]).map(value => normalizeSubjectLookupValue(value)).filter(Boolean);
+  return subjectLookups.some(value => agentLookups.has(value));
+}
+
+function findSubjectMetadataForAgent(
+  req: InvocationRequest,
+  agent: CircleOfficeAgent,
+): AgentRuntimeSubjectMetadata | undefined {
+  if (req.agentSubjectMetadata && metadataMatchesAgent(req.agentSubjectMetadata, agent)) {
+    return req.agentSubjectMetadata;
+  }
+  return (req.targetAgentSubjects || []).find(subject => metadataMatchesAgent(subject, agent));
+}
+
+function buildPerAgentInvocationRequest(
+  req: InvocationRequest,
+  agent: CircleOfficeAgent,
+): InvocationRequest {
+  const agentSubjectMetadata = findSubjectMetadataForAgent(req, agent);
+  return {
+    ...req,
+    targetAgentId: agent.id,
+    targetAgentName: `@${agent.name}`,
+    ...(agentSubjectMetadata ? { agentSubjectMetadata } : {}),
+  };
+}
+
 async function invokeBlackSwan(
   command: string,
   circleId: string,
   senderId: string,
   model?: string | null,
   targetAgentName?: string,
+  agentSubject?: AgentRuntimeSubjectMetadata | null,
 ): Promise<AgentInvocationResult> {
   const start = Date.now();
   if (shouldBlockExternalAiProvider('anthropic')) {
@@ -149,7 +285,17 @@ async function invokeBlackSwan(
 
   try {
     const { data, error } = await supabase.functions.invoke('swanbot-ai', {
-      body: { message: command, circleId, userId: senderId, model: cleanModel || null, targetAgentName: targetAgentName || undefined },
+      body: {
+        message: command,
+        circleId,
+        userId: senderId,
+        model: cleanModel || null,
+        targetAgentName: agentSubject?.agentDisplayName || targetAgentName || undefined,
+        targetAgentSubjectKey: agentSubject?.agentSubjectKey,
+        targetAgentDbId: agentSubject?.agentDbId || undefined,
+        targetAgentLegacyIds: agentSubject?.legacyAgentIds,
+        agentSubject: agentSubject || undefined,
+      },
     });
 
     const latencyMs = Date.now() - start;
@@ -759,6 +905,8 @@ export async function invokeDirect(
   const claudeCode = isClaudeCodeAgent(agent);
   const geminiCli = isGeminiCliAgent(agent);
   const byoLLM = isBYOLLMAgent(agent);
+  const agentSubject = buildInvocationAgentSubject(agent, req);
+  const swanBotContext = buildInvocationSwanBotContext(agentSubject);
 
   const resolvedUrl = agent.gatewayUrl || gatewayUrl;
   if (!resolvedUrl && !blackSwan && !claudeCode && !geminiCli && !byoLLM) {
@@ -783,7 +931,7 @@ export async function invokeDirect(
         const geminiResult = await getSwanBotResponse(req.command, {
           userId: req.senderId || req.messageId,
           circleId: req.circleId,
-          agentId: agent.id,
+          ...swanBotContext,
         });
         return {
           success: true,
@@ -795,7 +943,7 @@ export async function invokeDirect(
         return { success: false, error: `Gemini fallback failed: ${err.message}` };
       }
     }
-    return invokeBlackSwan(req.command, req.circleId, req.senderId || req.messageId, req.model, agent.name);
+    return invokeBlackSwan(req.command, req.circleId, req.senderId || req.messageId, req.model, agentSubject.displayName, agentSubject.metadata);
   }
 
   if (claudeCode) {
@@ -858,6 +1006,8 @@ export async function invokeAndStream(
   const claudeCode = isClaudeCodeAgent(agent);
   const geminiCli = isGeminiCliAgent(agent);
   const byoLLM = isBYOLLMAgent(agent);
+  const agentSubject = buildInvocationAgentSubject(agent, req);
+  const swanBotContext = buildInvocationSwanBotContext(agentSubject);
 
   // Resolve the actual gateway URL to use:
   // 1. Use agent's stored gatewayUrl if available
@@ -936,7 +1086,7 @@ export async function invokeAndStream(
           const geminiResult = await getSwanBotResponse(req.command, {
             userId: req.senderId || req.messageId,
             circleId: req.circleId,
-            agentId: agent.id,
+            ...swanBotContext,
           });
           result = {
             success: true,
@@ -949,7 +1099,7 @@ export async function invokeAndStream(
         }
       } else {
         console.log(`[agentInvocation] Invoking BlackSwan via swanbot-ai edge function (model: ${req.model || 'auto'}, agent: ${agent.name})`);
-        result = await invokeBlackSwan(req.command, req.circleId, req.senderId || req.messageId, req.model, agent.name);
+        result = await invokeBlackSwan(req.command, req.circleId, req.senderId || req.messageId, req.model, agentSubject.displayName, agentSubject.metadata);
       }
     } else if (claudeCode) {
       console.log(`[agentInvocation] Invoking Claude Code via bridge: ${resolvedUrl}/exec`);
@@ -1066,11 +1216,7 @@ export async function invokeAllAgents(
   // Invoke all in parallel
   const promises = onlineAgents.map(agent =>
     invokeAndStream(
-      {
-        ...req,
-        targetAgentId: agent.id,
-        targetAgentName: `@${agent.name}`,
-      },
+      buildPerAgentInvocationRequest(req, agent),
       agent,
       gatewayUrl,
       authToken
@@ -1103,11 +1249,7 @@ export async function invokeSelectedAgents(
 
   const promises = selectedAgents.map(agent =>
     invokeAndStream(
-      {
-        ...req,
-        targetAgentId: agent.id,
-        targetAgentName: `@${agent.name}`,
-      },
+      buildPerAgentInvocationRequest(req, agent),
       agent,
       gatewayUrl,
       authToken

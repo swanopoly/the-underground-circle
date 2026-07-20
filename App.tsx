@@ -79,7 +79,7 @@ function setAutoConnectCircleIdDeferred(circleId: string) {
 }
 
 function AppRouteFallback() {
-  return <View style={{ flex: 1, backgroundColor: '#000' }} />;
+  return <View style={{ flex: 1, backgroundColor: '#0A0A0A' }} />;
 }
 
 /** Redeem a pending invite token after login */
@@ -458,7 +458,7 @@ export default function App() {
 const styles = StyleSheet.create({
   loading: {
     flex: 1,
-    backgroundColor: '#000000',
+    backgroundColor: '#0A0A0A',
     justifyContent: 'center',
     alignItems: 'center',
   },

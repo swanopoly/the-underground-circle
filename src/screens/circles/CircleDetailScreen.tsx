@@ -673,12 +673,12 @@ function TabBarScroller({ tabs, activeTab, accentColor, isMobile, onTabPress }: 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000000',
+    backgroundColor: '#0A0A0A',
   },
   loadingOverlay: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 100,
-    backgroundColor: '#000000',
+    backgroundColor: '#0A0A0A',
   },
   loadingPill: {
     position: 'absolute',
@@ -725,6 +725,7 @@ const styles = StyleSheet.create({
   // Header
   header: {
     paddingTop: Platform.OS === 'web' ? 4 : 44,
+    backgroundColor: '#0A0A0A',
     borderBottomWidth: 1,
     borderBottomColor: '#2a2a2a',
     width: '100%',
@@ -782,7 +783,7 @@ const styles = StyleSheet.create({
     height: 28,
     alignItems: 'center' as any,
     justifyContent: 'center' as any,
-    backgroundColor: '#000000',
+    backgroundColor: '#0A0A0A',
     zIndex: 10,
     ...(Platform.OS === 'web' ? { cursor: 'pointer' } as any : {}),
   },
@@ -805,11 +806,11 @@ const styles = StyleSheet.create({
   },
   tabFadeLeft: {
     left: 24,
-    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(to right, #000000, transparent)' } as any : {}),
+    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(to right, #0A0A0A, transparent)' } as any : {}),
   },
   tabFadeRight: {
     right: 24,
-    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(to left, #000000, transparent)' } as any : {}),
+    ...(Platform.OS === 'web' ? { backgroundImage: 'linear-gradient(to left, #0A0A0A, transparent)' } as any : {}),
   },
 
   // Tab pill style (replaces old underline tabs and hamburger menu)

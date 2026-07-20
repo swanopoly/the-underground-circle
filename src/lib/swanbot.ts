@@ -21,6 +21,7 @@ import { getStrictLocalAiModeMessage, isStrictLocalAiModeEnabled, shouldBlockExt
 import type { OpenSwanMemoryStores } from './openswanMemoryStores';
 import type { OpenSwanChatMode } from './openswanModePolicy';
 import type { OpenSwanResolvedSkill } from './openswanSkillResolution';
+import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 import type { ConnectedProviderSet } from './serviceProfileSouls';
 import { detectAutomationVerificationGate } from './desktopAutomationSafety';
 import { buildUserTaskPipelinePromptBlock } from './userTaskPipelines';
@@ -154,6 +155,11 @@ export type SwanBotContext = {
   userName?: string;
   agentId?: string;
   agentName?: string;
+  agentSubjectKey?: string;
+  agentDbId?: string | null;
+  agentSessionKey?: string | null;
+  agentLegacyIds?: string[];
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata;
   discordContext?: string;
   model?: string | null;
   thinkingLevel?: 'fast' | 'balanced' | 'deep';
@@ -204,12 +210,97 @@ export type SwanBotContext = {
   appTrainedModelAvailable?: boolean;
 };
 
+function getContextAgentSubjectKey(context: SwanBotContext): string | undefined {
+  return context.agentSubjectKey || context.agentId || undefined;
+}
+
+function getContextAgentLegacyIds(context: SwanBotContext): string[] {
+  const subjectKey = getContextAgentSubjectKey(context);
+  const values = [
+    ...(context.agentLegacyIds || []),
+    context.agentId,
+    context.agentSessionKey,
+  ];
+  return Array.from(new Set(values.map(value => String(value || '').trim()).filter(Boolean)))
+    .filter((value) => value !== subjectKey);
+}
+
+function buildSwanBotAgentSubjectPayload(context: SwanBotContext): AgentRuntimeSubjectMetadata | null {
+  if (context.agentSubjectMetadata?.agentSubjectKey) return context.agentSubjectMetadata;
+  const subjectKey = getContextAgentSubjectKey(context) || getAgentIdentityKey({
+    id: context.agentId || context.agentSessionKey || '',
+    name: context.agentName || 'Agent',
+    sessionKey: context.agentSessionKey || undefined,
+  });
+  if (!subjectKey && !context.agentName) return null;
+  const canonicalKey = subjectKey || context.agentName || 'agent';
+  const legacyIds = getContextAgentLegacyIds({
+    ...context,
+    agentSubjectKey: canonicalKey,
+  });
+  return {
+    agentSubjectKey: canonicalKey,
+    agentDisplayName: context.agentName || canonicalKey,
+    agentDbId: context.agentDbId || null,
+    agentSessionKey: context.agentSessionKey || null,
+    legacyAgentIds: legacyIds,
+  };
+}
+
+type SwanBotRelaySubjectOptions = {
+  targetAgentName?: string | null;
+  targetAgentSubjectKey?: string | null;
+  targetAgentDbId?: string | null;
+  targetAgentLegacyIds?: string[] | null;
+  agentSubject?: AgentRuntimeSubjectMetadata | null;
+  agentSubjectKey?: string | null;
+  agentDbId?: string | null;
+  agentLegacyIds?: string[] | null;
+};
+
+function cleanRelaySubjectString(value: string | null | undefined): string | undefined {
+  const trimmed = String(value || '').trim();
+  return trimmed || undefined;
+}
+
+function cleanRelaySubjectArray(values: string[] | null | undefined): string[] | undefined {
+  const out = Array.from(new Set((values || []).map((value) => String(value || '').trim()).filter(Boolean)));
+  return out.length > 0 ? out : undefined;
+}
+
+function buildSwanBotRelaySubjectFields(opts: SwanBotRelaySubjectOptions): Record<string, unknown> {
+  const subject = opts.agentSubject || null;
+  const targetAgentName = cleanRelaySubjectString(opts.targetAgentName)
+    || cleanRelaySubjectString(subject?.agentDisplayName);
+  const subjectKey = cleanRelaySubjectString(opts.targetAgentSubjectKey)
+    || cleanRelaySubjectString(opts.agentSubjectKey)
+    || cleanRelaySubjectString(subject?.agentSubjectKey);
+  const dbId = cleanRelaySubjectString(opts.targetAgentDbId)
+    || cleanRelaySubjectString(opts.agentDbId)
+    || cleanRelaySubjectString(subject?.agentDbId || undefined);
+  const legacyIds = cleanRelaySubjectArray(opts.targetAgentLegacyIds)
+    || cleanRelaySubjectArray(opts.agentLegacyIds)
+    || cleanRelaySubjectArray(subject?.legacyAgentIds);
+  return {
+    ...(targetAgentName ? { targetAgentName } : {}),
+    ...(subjectKey ? { targetAgentSubjectKey: subjectKey, agentSubjectKey: subjectKey } : {}),
+    ...(dbId ? { targetAgentDbId: dbId, agentDbId: dbId } : {}),
+    ...(legacyIds ? { targetAgentLegacyIds: legacyIds, agentLegacyIds: legacyIds } : {}),
+    ...(subject ? { agentSubject: subject } : {}),
+  };
+}
+
 async function resolveContextSpiritId(context: SwanBotContext): Promise<string | null> {
   if (context.spiritId) return context.spiritId;
-  if (!context.agentId && !context.agentName) return null;
+  const subjectKey = getContextAgentSubjectKey(context);
+  if (!subjectKey && !context.agentName) return null;
   try {
     const identities = await loadAgentIdentities();
-    const identityKey = getAgentIdentityKey({ id: context.agentId || '', name: context.agentName || '' });
+    const identityKey = subjectKey || getAgentIdentityKey({
+      id: context.agentId || '',
+      name: context.agentName || '',
+      sessionKey: context.agentSessionKey || undefined,
+    });
     return identities.get(identityKey)?.spiritId || null;
   } catch (error) {
     console.warn('[SwanBot] Failed to resolve spirit identity for wiki infusion:', error);
@@ -236,8 +327,12 @@ function buildOpenSwanRuntimeContextBundle(args: {
   ].join('\n'));
 
   const identityLines = ['## Runtime Bundle · IDENTITY.md'];
+  const contextSubjectKey = getContextAgentSubjectKey(context);
   if (context.agentName) identityLines.push(`Agent name: ${context.agentName}`);
   if (context.agentId) identityLines.push(`Agent id: ${context.agentId}`);
+  if (contextSubjectKey) identityLines.push(`Agent subject key: ${contextSubjectKey}`);
+  const legacyIds = getContextAgentLegacyIds(context);
+  if (legacyIds.length) identityLines.push(`Legacy agent ids: ${legacyIds.slice(0, 6).join(', ')}`);
   if (identity?.customProfileName) identityLines.push(`Custom profile: ${identity.customProfileName}`);
   if (identity?.boundAiProvider || identity?.boundModel) {
     identityLines.push(`Preferred runtime: ${identity?.boundAiProvider || 'unknown'} / ${identity?.boundModel || 'unknown'}`);
@@ -1027,6 +1122,7 @@ async function callSwanBotV2(
   thinkingLevel: 'fast' | 'balanced' | 'deep' = 'balanced',
   _maxTokens = 4096,
   systemDirective?: string,
+  agentSubject?: AgentRuntimeSubjectMetadata | null,
 ): Promise<V2CallResult> {
   if (shouldBlockExternalAiProvider('anthropic')) return { text: null };
   // Shared source of truth with the edge (swanbotContinuationBudgetCore) so the
@@ -1050,6 +1146,11 @@ async function callSwanBotV2(
       mode: thinkingLevel === 'fast' ? 'talk' : 'build',
       model: model || undefined,
       systemDirective,
+      targetAgentName: agentSubject?.agentDisplayName,
+      targetAgentSubjectKey: agentSubject?.agentSubjectKey,
+      targetAgentDbId: agentSubject?.agentDbId || undefined,
+      targetAgentLegacyIds: agentSubject?.legacyAgentIds,
+      agentSubject: agentSubject || undefined,
       legacy: { conversationMessages },
     }, captureBodyError);
     if (!response) return { text: null, bodyError };
@@ -2307,6 +2408,7 @@ async function callSwanBotAI(
   thinkingLevel: 'fast' | 'balanced' | 'deep' = 'balanced',
   maxTokens = 4096,
   systemDirective?: string,
+  agentSubject?: AgentRuntimeSubjectMetadata | null,
 ): Promise<SwanBotEdgeCallResult | null> {
   // Phase M4 router: v2 (typed loop) is now the DEFAULT; `/v2 off` opts
   // a device back into v1. On any v2 transport failure we still fall
@@ -2326,6 +2428,7 @@ async function callSwanBotAI(
           v2 = await callSwanBotV2(
             message, circleId, userId, discordContext, model, wikiContext,
             conversationMessages, thinkingLevel, maxTokens, systemDirective,
+            agentSubject,
           );
         } catch (v2Err) {
           // A thrown error IS a transport-level failure (invoke/network) —
@@ -2390,6 +2493,11 @@ async function callSwanBotAI(
           model: model || undefined,
           maxTokens,
           thinkingLevel,
+          targetAgentName: agentSubject?.agentDisplayName,
+          targetAgentSubjectKey: agentSubject?.agentSubjectKey,
+          targetAgentDbId: agentSubject?.agentDbId || undefined,
+          targetAgentLegacyIds: agentSubject?.legacyAgentIds,
+          agentSubject: agentSubject || undefined,
           // High-priority behavior directive prepended to the frozen system
           // prompt on the server. Used by the conversational build
           // orchestrator to enforce the ask-questions-first protocol.
@@ -2433,6 +2541,7 @@ async function callSwanBotAIStructured(
   conversationMessages?: Array<{ role: string; content: string }>,
   thinkingLevel: 'fast' | 'balanced' | 'deep' = 'balanced',
   maxTokens = 4096,
+  agentSubject?: AgentRuntimeSubjectMetadata | null,
 ): Promise<SwanBotStructuredResponse | null> {
   if (shouldBlockExternalAiProvider('anthropic')) {
     console.warn('[SwanBot] Strict local AI mode blocked structured swanbot-ai');
@@ -2453,6 +2562,11 @@ async function callSwanBotAIStructured(
         model: model || undefined,
         maxTokens,
         thinkingLevel,
+        targetAgentName: agentSubject?.agentDisplayName,
+        targetAgentSubjectKey: agentSubject?.agentSubjectKey,
+        targetAgentDbId: agentSubject?.agentDbId || undefined,
+        targetAgentLegacyIds: agentSubject?.legacyAgentIds,
+        agentSubject: agentSubject || undefined,
       },
     });
     if (error || data?.error) return null;
@@ -2675,9 +2789,10 @@ async function buildSystemPromptAsync(
         const stores = context.memoryStores || await withTimeout(import('./openswanMemoryStores').then(({ buildOpenSwanMemoryStores }) => buildOpenSwanMemoryStores({
           circleId: context.circleId,
           userId: context.userId,
-          query: currentMessage || '',
-          agentId: context.agentId,
-          agentName: context.agentName,
+	          query: currentMessage || '',
+	          agentId: getContextAgentSubjectKey(context),
+	          agentAliases: getContextAgentLegacyIds(context),
+	          agentName: context.agentName,
           spiritId: contextSpiritIdResolved,
           surface: 'main_chat',
           limit: 8,
@@ -2703,7 +2818,7 @@ async function buildSystemPromptAsync(
           circleId: context.circleId,
           soulKey: activeSoulKey,
           userId: context.userId,
-          agentId: context.agentId,
+          agentId: getContextAgentSubjectKey(context),
           queryText: currentMessage,
         }));
         const wisdomBlock = formatSoulWisdomBlock(wisdom);
@@ -2816,11 +2931,16 @@ async function buildSystemPromptAsync(
   // identity/spirit consumed by the runtime bundle after the wave.
   addContextTask(async () => {
     try {
-      if (context.agentId || context.agentName) {
+      const subjectKey = getContextAgentSubjectKey(context);
+      if (subjectKey || context.agentName) {
         const { getAgentIdentityKey, loadAgentIdentities } = await import('./agentIdentity');
         const { getSpiritById } = await import('./agentSpirits');
         const identities = await loadAgentIdentities();
-        const identityKey = getAgentIdentityKey({ id: context.agentId || '', name: context.agentName || '' });
+        const identityKey = subjectKey || getAgentIdentityKey({
+          id: context.agentId || '',
+          name: context.agentName || '',
+          sessionKey: context.agentSessionKey || undefined,
+        });
         identity = identities.get(identityKey);
         if (identity) {
           spirit = identity.spiritId ? (getSpiritById(identity.spiritId) || null) : null;
@@ -3521,9 +3641,10 @@ async function getSwanBotResponseImpl(
     ? (context.memoryStores || await import('./openswanMemoryStores').then(({ buildOpenSwanMemoryStores }) => buildOpenSwanMemoryStores({
         circleId: context.circleId,
         userId: context.userId,
-        query: cleaned,
-        agentId: context.agentId,
-        agentName: context.agentName,
+	        query: cleaned,
+	        agentId: getContextAgentSubjectKey(context),
+	        agentAliases: getContextAgentLegacyIds(context),
+	        agentName: context.agentName,
         spiritId,
         surface: 'main_chat',
         limit: 8,
@@ -3559,6 +3680,7 @@ async function getSwanBotResponseImpl(
   if (buildDirective) {
     (enrichedContext as any).systemDirective = buildDirective;
   }
+  const agentSubjectPayload = buildSwanBotAgentSubjectPayload(enrichedContext);
   // Carry the (advisory) collaboration plan so buildSystemPromptAsync and any
   // downstream reader describe the SAME arrangement that was resolved here.
   // Carried metadata only — it never changes which model the Tier ladder calls.
@@ -3669,6 +3791,7 @@ async function getSwanBotResponseImpl(
             userId: enrichedContext.userId,
             surface: 'main_chat',
             mode: typeof enrichedContext.modeKey === 'string' ? enrichedContext.modeKey : null,
+            agentSubject: agentSubjectPayload,
           });
           // An incomplete loop with ZERO tool events means the edge call itself
           // failed (e.g. relay 400 marketplace_provider_unavailable) — fall
@@ -3793,6 +3916,7 @@ async function getSwanBotResponseImpl(
       enrichedContext.thinkingLevel || 'balanced',
       enrichedContext.maxTokens || 4096,
       (enrichedContext as any).systemDirective,
+      agentSubjectPayload,
     );
     const aiResponse = aiResult?.response || null;
     if (aiResponse) {
@@ -3840,6 +3964,7 @@ async function getSwanBotResponseImpl(
             enrichedContext.thinkingLevel || 'balanced',
             enrichedContext.maxTokens || 4096,
             (enrichedContext as any).systemDirective,
+            agentSubjectPayload,
           );
           const failoverText = failoverResult?.response || null;
           if (failoverText) {
@@ -3984,9 +4109,10 @@ async function getSwanBotStructuredResponseImpl(
     ? (context.memoryStores || await import('./openswanMemoryStores').then(({ buildOpenSwanMemoryStores }) => buildOpenSwanMemoryStores({
         circleId: context.circleId,
         userId: context.userId,
-        query: cleaned,
-        agentId: context.agentId,
-        agentName: context.agentName,
+	        query: cleaned,
+	        agentId: getContextAgentSubjectKey(context),
+	        agentAliases: getContextAgentLegacyIds(context),
+	        agentName: context.agentName,
         spiritId,
         surface: 'main_chat',
         limit: 8,
@@ -4023,6 +4149,7 @@ async function getSwanBotStructuredResponseImpl(
         enrichedContext.conversationMessages,
         enrichedContext.thinkingLevel || 'balanced',
         enrichedContext.maxTokens || 4096,
+        buildSwanBotAgentSubjectPayload(enrichedContext),
       )
     : null;
 
@@ -4132,6 +4259,15 @@ export async function executeToolUseLoop(opts: {
   mode?: string | null;
   /** Optional tighter cap for cost-sensitive OpenSwan surfaces. */
   maxToolRounds?: number;
+  /** Optional compact subject metadata forwarded to swanbot-ai relay usage. */
+  targetAgentName?: string | null;
+  targetAgentSubjectKey?: string | null;
+  targetAgentDbId?: string | null;
+  targetAgentLegacyIds?: string[] | null;
+  agentSubject?: AgentRuntimeSubjectMetadata | null;
+  agentSubjectKey?: string | null;
+  agentDbId?: string | null;
+  agentLegacyIds?: string[] | null;
   /**
    * Optional gate fired before every tool dispatch. Resolves to 'approve'
    * or 'reject'. Rejected tool calls feed a "User declined this action"
@@ -4302,6 +4438,7 @@ export async function executeToolUseLoop(opts: {
   // surfaces what served the turn via the prepended notice + routing metadata.
   let loopModel = opts.model;
   let blackSwanFailoverNotice: string | null = null;
+  const relaySubjectFields = buildSwanBotRelaySubjectFields(opts);
 
   const maxRounds = Math.max(1, Math.min(MAX_TOOL_ROUNDS, opts.maxToolRounds ?? MAX_TOOL_ROUNDS));
   // Completion proof-check fires at most once per turn (see the done-branch).
@@ -4335,6 +4472,7 @@ export async function executeToolUseLoop(opts: {
           tools: anthropicTools,
           tool_messages: messages.length > 1 ? messages : undefined,
           system_override: opts.systemPrompt,
+          ...relaySubjectFields,
         },
       }));
       if (data && !error) break;
@@ -4782,6 +4920,7 @@ export async function executeToolUseLoop(opts: {
             },
           ],
           system_override: opts.systemPrompt,
+          ...relaySubjectFields,
         },
       });
       finalText = extractAssistantText((finalData as any)?.content) || String((finalData as any)?.response || '');
@@ -4894,6 +5033,14 @@ export async function maybeEscalateStreamedTurnToToolLoop(opts: {
   surface?: 'main_chat' | 'room_chat' | 'office' | 'task_run';
   mode?: string | null;
   maxToolRounds?: number;
+  targetAgentName?: string | null;
+  targetAgentSubjectKey?: string | null;
+  targetAgentDbId?: string | null;
+  targetAgentLegacyIds?: string[] | null;
+  agentSubject?: AgentRuntimeSubjectMetadata | null;
+  agentSubjectKey?: string | null;
+  agentDbId?: string | null;
+  agentLegacyIds?: string[] | null;
   /** Pre-resolved allow-list (defaults to the pinned core + `tools.search`). */
   allowedToolNames?: string[];
   toolApprovalGate?: (call: { name: string; input: any }) => Promise<'approve' | 'reject'>;
@@ -4932,6 +5079,14 @@ export async function maybeEscalateStreamedTurnToToolLoop(opts: {
     surface,
     mode: opts.mode,
     maxToolRounds: opts.maxToolRounds,
+    targetAgentName: opts.targetAgentName,
+    targetAgentSubjectKey: opts.targetAgentSubjectKey,
+    targetAgentDbId: opts.targetAgentDbId,
+    targetAgentLegacyIds: opts.targetAgentLegacyIds,
+    agentSubject: opts.agentSubject,
+    agentSubjectKey: opts.agentSubjectKey,
+    agentDbId: opts.agentDbId,
+    agentLegacyIds: opts.agentLegacyIds,
     toolApprovalGate: opts.toolApprovalGate,
   });
   return { escalated: true, ...loop };
@@ -4955,6 +5110,11 @@ export async function buildStreamableSystemPrompt(opts: {
   userName?: string;
   agentId?: string;
   agentName?: string;
+  agentSubjectKey?: string;
+  agentDbId?: string | null;
+  agentSessionKey?: string | null;
+  agentLegacyIds?: string[];
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata;
   chatHistory?: string;
   sessionArchiveContext?: string;
   modeKey?: OpenSwanChatMode | string | null;
@@ -4978,6 +5138,11 @@ export async function buildStreamableSystemPrompt(opts: {
     userName: opts.userName,
     agentId: opts.agentId,
     agentName: opts.agentName,
+    agentSubjectKey: opts.agentSubjectKey,
+    agentDbId: opts.agentDbId,
+    agentSessionKey: opts.agentSessionKey,
+    agentLegacyIds: opts.agentLegacyIds,
+    agentSubjectMetadata: opts.agentSubjectMetadata,
     model: opts.model,
     chatHistory: opts.chatHistory,
     sessionArchiveContext: opts.sessionArchiveContext,

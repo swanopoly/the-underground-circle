@@ -24,7 +24,7 @@ export interface ThemeColors {
 const DEFAULT_THEME: ThemeColors = {
   primary: '#6366f1',
   accent: '#22c55e',
-  background: '#000000',
+  background: '#0A0A0A',
   card: '#222222',
   border: '#2a2a2a',
   text: '#ffffff',

@@ -1,7 +1,7 @@
 # CLAUDE.md - The Underground Circle
 
 > Project context for Claude Code, OpenSwan, Codex, Gemini, and other agents.
-> Last reviewed: 2026-07-13
+> Last reviewed: 2026-07-17
 
 Start with `AGENTS.md`. `docs/AGENTS_ROADMAP.md` is canonical for ownership,
 phase status, SQL status, and runtime rules. This file is a current app review
@@ -53,7 +53,7 @@ npm run bridge
 - Chat: main agent surface, model picker, chat automation, computer task
   routing, memory references, artifacts, threads, and persisted bot metadata.
 - Office: live agent dashboard, local bridge visibility, activity feed,
-  controls, memory, approvals, and agent identity.
+  terminal, controls, memory/run panels, approvals, and agent identity.
 - Feed: goals, plans, missions, tasks, proof of work, and team operating loop.
 - Rooms: project rooms, files, services, room chat, task execution, playground.
 - Marketplace: user/circle integrations, provider keys, model/provider catalog,
@@ -75,6 +75,7 @@ Canonical owners are in `docs/AGENTS_ROADMAP.md`; this is the practical map:
 | v2 SwanBot tool loop | `supabase/functions/swanbot-v2-ai/index.ts`, `supabase/functions/_shared/swanbot-continuation.ts` |
 | Typed model/tool loop | `src/lib/agentExecutionCore.ts` |
 | OpenSwan sessions | `src/lib/openswanSessionRuntime.ts` |
+| Agent subject identity | `src/lib/agentRuntimeSubject.ts`, `src/lib/agentIdentityKey.ts`, `src/lib/agentIdentity.ts` |
 | Tool catalog | `src/lib/openswanToolRuntime.ts` |
 | Provider profile model choice | `src/lib/serviceProfileSouls.ts` |
 | Cross-provider fallback | `src/lib/crossProviderRouter.ts`, `src/lib/universalInvoke.ts` |
@@ -223,6 +224,14 @@ persisted chat rows, and connected-agent buildout prompts.
 ## Memory, Skills, And Approvals
 
 - User memory: `src/lib/userMemory.ts`.
+- Agent memory/run identity: `src/lib/agentRuntimeSubject.ts` resolves stable
+  subject keys and legacy aliases across Office, Chat, SwanBot, and OpenSwan;
+  Office-originated SwanBot calls and v2 batch telemetry preserve the same
+  subject metadata. Automation proposals, `/automation run/test`, OpenSwan
+  saved automations, specialized Chat/OpenSwan mode runs, `automation-executor`,
+  the Automations dashboard, Office terminal, `AgentMemoryPanel`, and
+  `AgentRunsPanel` preserve or display that metadata. Pure key normalization
+  lives in `src/lib/agentIdentityKey.ts`.
 - Circle memory bank: `src/lib/memoryBankKinds.ts`,
   `src/lib/memoryBankChatCommands.ts`, `src/services/sharedMemory.ts`.
 - Skill library: `src/lib/skillLibrary.ts`, `src/lib/skillLibraryWrite.ts`,

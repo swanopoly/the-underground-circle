@@ -19,25 +19,12 @@ import {
   removeThreadMember,
   renameThread,
 } from '../../../../lib/circleChatThreads';
-import { SESSION_DELEGATION_MODE_OPTIONS, SESSION_PROFILE_OPTIONS, type SessionCodingProfile, type SessionDelegationMode } from '../../../../lib/chatSessionProfile';
+import type { SessionCodingProfile, SessionDelegationMode } from '../../../../lib/chatSessionProfile';
 import { supabase } from '../../../../lib/supabase';
 import OpenSwanServiceMenu from './OpenSwanServiceMenu';
 import SkillAdminPanel from './SkillAdminPanel';
 import { soulKeyForProfile } from '../../../../lib/serviceProfileSouls';
 import { copyToClipboard } from '../../../../lib/dataExport';
-
-function shortModelLabel(modelId: string): string {
-  const part = modelId.split('/').pop() || modelId;
-  return part
-    .replace(/:[a-z0-9_-]+$/i, '')
-    .replace(/\b(20\d{4,6})\b/g, '')
-    .replace(/[_-]+/g, ' ')
-    .replace(/\b(\w)/g, (c) => c.toUpperCase())
-    .replace(/\bClaude\s*/i, '')
-    .replace(/\bGpt\b/i, 'GPT')
-    .trim()
-    .slice(0, 22);
-}
 
 interface Props {
   threadId: string | null;
@@ -53,17 +40,12 @@ interface Props {
   onRetryOpenSwanGateway?: (() => void | Promise<void>) | undefined;
   refreshToken?: number;
   onThreadUpdated?: () => void;
-  selectedModel?: string;
   sessionProfile?: SessionCodingProfile;
   delegationMode?: SessionDelegationMode;
   onSessionProfileChange?: (profile: SessionCodingProfile) => void;
   onDelegationModeChange?: (mode: SessionDelegationMode) => void;
   onOpenControlPanel?: () => void;
   onOpenRunHistory?: () => void;
-  resolvedAutoModel?: string | null;
-  /** WHY Auto picked that model — one short clause shown next to the id
-   *  (P11 transparency: Cursor shows the model, we show the reason). */
-  autoModelReason?: string | null;
   /**
    * Open another thread in the chat surface (plan §4b) — used by the
    * lineage chip to jump to the parent this thread continues.
@@ -86,15 +68,12 @@ export default function ChatThreadHeader({
   onRetryOpenSwanGateway,
   refreshToken = 0,
   onThreadUpdated,
-  selectedModel = 'auto',
   sessionProfile = 'senior',
   delegationMode = 'auto',
   onSessionProfileChange,
   onDelegationModeChange,
   onOpenControlPanel,
   onOpenRunHistory,
-  resolvedAutoModel,
-  autoModelReason,
   onOpenThread,
 }: Props) {
   const [thread, setThread] = useState<CircleChatThread | null>(null);
@@ -125,18 +104,14 @@ export default function ChatThreadHeader({
 
   const isOwner = !!currentUserId && thread.created_by === currentUserId;
   const isCircleThread = thread.visibility === 'circle';
+  if (isCircleThread) return null;
+
   const visibilityLabel =
-    thread.visibility === 'circle' ? 'CIRCLE'
-    : thread.visibility === 'shared' ? `SHARED · ${members.length}`
+    thread.visibility === 'shared' ? `SHARED · ${members.length}`
     : 'PRIVATE';
   const visibilityTone =
-    thread.visibility === 'circle' ? '#f59e0b'
-    : thread.visibility === 'shared' ? '#f59e0b'
+    thread.visibility === 'shared' ? '#f59e0b'
     : '#94a3b8';
-  const currentProfile = SESSION_PROFILE_OPTIONS.find(option => option.id === sessionProfile) || SESSION_PROFILE_OPTIONS[0];
-  const currentDelegationMode = SESSION_DELEGATION_MODE_OPTIONS.find(option => option.id === delegationMode) || SESSION_DELEGATION_MODE_OPTIONS[0];
-  const isAllAuto = currentProfile.id === 'auto' && currentDelegationMode.id === 'auto';
-
   const handleSaveTitle = async () => {
     const next = draftTitle.trim();
     if (!next || next === thread.title) { setEditing(false); return; }
@@ -239,34 +214,6 @@ export default function ChatThreadHeader({
               ) : null}
             </View>
           ) : null}
-          {(onSessionProfileChange || onDelegationModeChange) && (
-            <Pressable onPress={() => setShowServiceMenu(true)} style={styles.serviceBtn}>
-              {isAllAuto ? (
-                resolvedAutoModel ? (
-                  <>
-                    <Text style={[styles.serviceBtnTag, { color: '#f59e0b' }]}>Auto</Text>
-                    <Text style={[styles.serviceBtnSep]}>→</Text>
-                    <Text style={[styles.serviceBtnTag, { color: '#94a3b8' }]}>{shortModelLabel(resolvedAutoModel)}</Text>
-                    {autoModelReason ? (
-                      <Text style={[styles.serviceBtnTag, { color: '#64748b' }]} numberOfLines={1}>
-                        · {autoModelReason}
-                      </Text>
-                    ) : null}
-                    <Text style={styles.serviceBtnCaret}>▾</Text>
-                  </>
-                ) : (
-                  <Text style={[styles.serviceBtnTag, { color: '#f59e0b' }]}>Auto ▾</Text>
-                )
-              ) : (
-                <>
-                  <Text style={[styles.serviceBtnTag, { color: currentProfile.color }]}>{currentProfile.shortLabel}</Text>
-                  <Text style={styles.serviceBtnSep}>·</Text>
-                  <Text style={[styles.serviceBtnTag, { color: currentDelegationMode.color }]}>{currentDelegationMode.shortLabel}</Text>
-                  <Text style={styles.serviceBtnCaret}>▾</Text>
-                </>
-              )}
-            </Pressable>
-          )}
         </View>
       </View>
 
@@ -526,16 +473,6 @@ const styles = StyleSheet.create({
   },
   metaModel: { color: '#64748b', fontSize: 10, fontWeight: '700' },
   metaModelMuted: { color: '#475569', fontSize: 10, fontWeight: '700' },
-  serviceBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 8, paddingVertical: 4,
-    borderRadius: 6, borderWidth: 1, borderColor: '#1e293b',
-    backgroundColor: '#0b1220',
-  },
-  serviceBtnLabel: { color: '#94a3b8', fontSize: 9, fontWeight: '900', letterSpacing: 1, fontFamily: 'monospace' },
-  serviceBtnTag: { fontSize: 9, fontWeight: '900', letterSpacing: 0.6, fontFamily: 'monospace' },
-  serviceBtnSep: { color: '#475569', fontSize: 9, fontWeight: '900' },
-  serviceBtnCaret: { color: '#64748b', fontSize: 9, fontWeight: '900' },
   actions: { flexDirection: 'row', gap: 6 },
   actionBtn: {
     paddingHorizontal: 10, paddingVertical: 6,

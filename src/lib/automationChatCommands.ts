@@ -39,6 +39,8 @@ import {
   type CircleAutomation,
   type AutomationRun,
 } from '../services/automationService';
+import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
+import { getAgentSubjectSummary, type AutomationAgentSubjectSummary } from './automationSubjectMetadata';
 
 export type AutomationCommandResult = {
   message: string;
@@ -48,6 +50,7 @@ export type AutomationCommandResult = {
 export type AutomationCommandContext = {
   circleId: string;
   userId: string;
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
 };
 
 function helpMessage(): string {
@@ -69,6 +72,26 @@ function helpMessage(): string {
 
 function short(id: string): string {
   return id.slice(0, 8);
+}
+
+function compactSubjectKey(value: string): string {
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+    return short(value);
+  }
+  if (value.length <= 32) return value;
+  return `${value.slice(0, 29)}...`;
+}
+
+function formatSubjectSuffix(subject: AutomationAgentSubjectSummary | null): string {
+  if (!subject) return '';
+  const displayName = subject.label;
+  const subjectKey = subject.subjectKey ? compactSubjectKey(subject.subjectKey) : null;
+  if (displayName && subjectKey && displayName.toLowerCase() !== subjectKey.toLowerCase()) {
+    return ` · subject ${displayName} (\`${subjectKey}\`)`;
+  }
+  if (displayName) return ` · subject ${displayName}`;
+  if (subjectKey) return ` · subject \`${subjectKey}\``;
+  return '';
 }
 
 function fuzzyMatch(needle: string, automations: CircleAutomation[]): CircleAutomation | null {
@@ -97,11 +120,12 @@ function ambiguityMessage(needle: string, automations: CircleAutomation[]): stri
 
 function formatAutomationLine(a: CircleAutomation): string {
   const state = a.enabled ? '✓' : '⏸';
+  const subject = formatSubjectSuffix(getAgentSubjectSummary(a.eventConfig));
   const lastRun = a.lastRunAt
     ? ` — last ran ${formatRelative(a.lastRunAt)}`
     : '';
   const error = a.lastError ? ` · ⚠️ ${a.lastError.slice(0, 80)}` : '';
-  return `${state} **${a.name}** (\`${short(a.id)}\`) — ${a.triggerType}${lastRun}${error}`;
+  return `${state} **${a.name}** (\`${short(a.id)}\`) — ${a.triggerType}${subject}${lastRun}${error}`;
 }
 
 function formatRelative(iso: string): string {
@@ -117,8 +141,9 @@ function formatRelative(iso: string): string {
 function formatRunLine(run: AutomationRun): string {
   const when = formatRelative(run.startedAt);
   const duration = run.durationMs ? ` · ${Math.round(run.durationMs / 100) / 10}s` : '';
+  const subject = formatSubjectSuffix(getAgentSubjectSummary(run.inputContext));
   const error = run.errorMessage ? ` · ${run.errorMessage.slice(0, 80)}` : '';
-  return `• ${run.status.toUpperCase()} ${when}${duration}${error}`;
+  return `• ${run.status.toUpperCase()} ${when}${duration}${subject}${error}`;
 }
 
 // ─── Subcommands ──────────────────────────────────────────────────────────
@@ -180,7 +205,11 @@ async function resolveAndAct(
 
 async function runSubcommand(needle: string, ctx: AutomationCommandContext): Promise<AutomationCommandResult> {
   return resolveAndAct(needle, ctx, async (a) => {
-    const result = await triggerAutomation(a.id, ctx.circleId);
+    const result = await triggerAutomation(
+      a.id,
+      ctx.circleId,
+      ctx.agentSubjectMetadata ? { agentSubjectMetadata: ctx.agentSubjectMetadata } : undefined,
+    );
     if (result.error) return { success: false, message: `Trigger failed: ${result.error}` };
     return {
       success: true,
@@ -191,7 +220,11 @@ async function runSubcommand(needle: string, ctx: AutomationCommandContext): Pro
 
 async function testSubcommand(needle: string, ctx: AutomationCommandContext): Promise<AutomationCommandResult> {
   return resolveAndAct(needle, ctx, async (a) => {
-    const result = await testAutomation(a.id, ctx.circleId);
+    const result = await testAutomation(
+      a.id,
+      ctx.circleId,
+      ctx.agentSubjectMetadata ? { agentSubjectMetadata: ctx.agentSubjectMetadata } : undefined,
+    );
     if (result.error) return { success: false, message: `Test failed: ${result.error}` };
     return {
       success: true,

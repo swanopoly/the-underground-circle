@@ -10,7 +10,7 @@
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#0a0a0a"
+      "backgroundColor": "#0A0A0A"
     },
     "ios": {
       "supportsTablet": true
@@ -18,7 +18,7 @@
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#000000"
+        "backgroundColor": "#0A0A0A"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
@@ -27,8 +27,8 @@
       "favicon": "./assets/favicon.png",
       "name": "The Underground Circle",
       "shortName": "TUC",
-      "backgroundColor": "#000000",
-      "themeColor": "#000000",
+      "backgroundColor": "#0A0A0A",
+      "themeColor": "#0A0A0A",
       "meta": {
         "title": "The Underground Circle",
         "description": "Social accountability circles for people who actually work. Track goals, connect wallets, manage AI agents, and grow together."

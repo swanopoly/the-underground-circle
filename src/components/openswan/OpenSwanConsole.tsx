@@ -87,6 +87,8 @@ import {
   type CircleAutomation,
   type TriggerType,
 } from '../../services/automationService';
+import type { AgentRuntimeSubjectMetadata } from '../../lib/agentRuntimeSubject';
+import { getAgentSubjectSummary } from '../../lib/automationSubjectMetadata';
 
 // Rough output-budget heuristic per mode. Used by the cost preview to give
 // the user a conservative preflight estimate before LAUNCH.
@@ -532,6 +534,8 @@ interface Props {
   circleId?: string | null;
   /** Current user id — needed for the prune audit trail. */
   userId?: string | null;
+  /** Current chat/agent subject — saved automations use this for run and memory attribution. */
+  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
   /** Which surface this launch will run on. Tool filter depends on this. */
   surface?: ToolSurface;
   onClose: () => void;
@@ -579,6 +583,7 @@ export default function OpenSwanConsole({
   initialTask,
   circleId,
   userId,
+  agentSubjectMetadata,
   surface = 'main_chat',
   onClose,
   onSubmit,
@@ -1763,7 +1768,11 @@ export default function OpenSwanConsole({
     setAutomationActionId(automation.id);
     setAutomationActionError(null);
     try {
-      const { error } = await triggerAutomation(automation.id, circleId);
+      const savedSubject = getAgentSubjectSummary(automation.eventConfig);
+      const triggerOptions = savedSubject || !agentSubjectMetadata
+        ? undefined
+        : { agentSubjectMetadata };
+      const { error } = await triggerAutomation(automation.id, circleId, triggerOptions);
       if (error) setAutomationActionError(error);
       await refreshAutomations();
       if (!error) {
@@ -1778,7 +1787,7 @@ export default function OpenSwanConsole({
       setAutomationActionId(null);
       actionLock.current = false;
     }
-  }, [automationActionId, circleId, refreshAutomations]);
+  }, [agentSubjectMetadata, automationActionId, circleId, refreshAutomations]);
 
   const handleSaveTaskAsAutomation = useCallback(async () => {
     if (savingAutomation) return;
@@ -1806,6 +1815,7 @@ export default function OpenSwanConsole({
         prompt,
         model: currentModel && currentModel !== 'auto' ? currentModel : undefined,
         outputTarget: 'activity',
+        agentSubjectMetadata: agentSubjectMetadata || undefined,
       });
       if (error) {
         setSaveAutomationMessage(error);
@@ -1823,7 +1833,7 @@ export default function OpenSwanConsole({
     } finally {
       setSavingAutomation(false);
     }
-  }, [savingAutomation, circleId, launchTask, mode, saveAutomationCadence, saveAutomationCron, saveAutomationName, currentModel, refreshAutomations]);
+  }, [savingAutomation, circleId, launchTask, mode, saveAutomationCadence, saveAutomationCron, saveAutomationName, currentModel, agentSubjectMetadata, refreshAutomations]);
 
   // Clear the transient run-now feedback timer on unmount.
   useEffect(() => () => {

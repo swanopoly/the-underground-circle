@@ -56,6 +56,7 @@ import {
   buildDesignAppRuntimeToolCaptureMetadata,
   withDesignAppRuntimeCaptureMetadata,
 } from './designAppRuntimeManifest';
+import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 
 // ─── Shared shapes ──────────────────────────────────────────────────────────
 
@@ -73,6 +74,17 @@ export type SwanBotRoutingInfo = {
   provider_routed?: string;
   provider_model?: string;
   routing_fallback?: { provider: string; reason: string };
+};
+
+export type SwanbotRelaySubjectFields = {
+  targetAgentName?: string | null;
+  targetAgentSubjectKey?: string | null;
+  targetAgentDbId?: string | null;
+  targetAgentLegacyIds?: string[] | null;
+  agentSubject?: AgentRuntimeSubjectMetadata | null;
+  agentSubjectKey?: string | null;
+  agentDbId?: string | null;
+  agentLegacyIds?: string[] | null;
 };
 
 /** Legacy `executeToolUseLoop` return shape (+ optional aggregated usage —
@@ -500,6 +512,38 @@ export function toAnthropicToolShapes(
   }));
 }
 
+function cleanRelaySubjectString(value: string | null | undefined): string | undefined {
+  const trimmed = String(value || '').trim();
+  return trimmed || undefined;
+}
+
+function cleanRelaySubjectArray(values: string[] | null | undefined): string[] | undefined {
+  const out = Array.from(new Set((values || []).map((value) => String(value || '').trim()).filter(Boolean)));
+  return out.length > 0 ? out : undefined;
+}
+
+function buildRelaySubjectPayload(args: SwanbotRelaySubjectFields): Record<string, unknown> {
+  const subject = args.agentSubject || null;
+  const targetAgentName = cleanRelaySubjectString(args.targetAgentName)
+    || cleanRelaySubjectString(subject?.agentDisplayName);
+  const subjectKey = cleanRelaySubjectString(args.targetAgentSubjectKey)
+    || cleanRelaySubjectString(args.agentSubjectKey)
+    || cleanRelaySubjectString(subject?.agentSubjectKey);
+  const dbId = cleanRelaySubjectString(args.targetAgentDbId)
+    || cleanRelaySubjectString(args.agentDbId)
+    || cleanRelaySubjectString(subject?.agentDbId || undefined);
+  const legacyIds = cleanRelaySubjectArray(args.targetAgentLegacyIds)
+    || cleanRelaySubjectArray(args.agentLegacyIds)
+    || cleanRelaySubjectArray(subject?.legacyAgentIds);
+  return {
+    ...(targetAgentName ? { targetAgentName } : {}),
+    ...(subjectKey ? { targetAgentSubjectKey: subjectKey, agentSubjectKey: subjectKey } : {}),
+    ...(dbId ? { targetAgentDbId: dbId, agentDbId: dbId } : {}),
+    ...(legacyIds ? { targetAgentLegacyIds: legacyIds, agentLegacyIds: legacyIds } : {}),
+    ...(subject ? { agentSubject: subject } : {}),
+  };
+}
+
 /**
  * Builds the exact `swanbot-ai` invoke body the legacy loop sent per round:
  * `message` always carries the original user prompt; `tool_messages` only
@@ -513,7 +557,7 @@ export function buildSwanbotToolTurnBody(args: {
   systemPrompt: string;
   tools: Array<{ name: string; description: string; input_schema: Record<string, unknown> }>;
   messages: AgentMessage[];
-}): Record<string, unknown> {
+} & SwanbotRelaySubjectFields): Record<string, unknown> {
   return {
     message: args.userMessage,
     circleId: args.circleId,
@@ -524,6 +568,7 @@ export function buildSwanbotToolTurnBody(args: {
       ? args.messages.map((m) => ({ role: m.role, content: m.content }))
       : undefined,
     system_override: args.systemPrompt,
+    ...buildRelaySubjectPayload(args),
   };
 }
 
@@ -631,7 +676,7 @@ export function buildCapExhaustionFinalizationBody(args: {
   systemPrompt: string;
   tools: Array<{ name: string; description: string; input_schema: Record<string, unknown>; input_examples?: Array<Record<string, unknown>> }>;
   messages: AgentMessage[];
-}): Record<string, unknown> {
+} & SwanbotRelaySubjectFields): Record<string, unknown> {
   return {
     message: args.userMessage,
     circleId: args.circleId,
@@ -643,6 +688,7 @@ export function buildCapExhaustionFinalizationBody(args: {
       { role: 'user', content: CAP_EXHAUSTION_FINALIZATION_NOTE },
     ],
     system_override: args.systemPrompt,
+    ...buildRelaySubjectPayload(args),
   };
 }
 

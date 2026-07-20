@@ -97,6 +97,7 @@ import type {
   OfficeTokenTrackerCard as OfficeTokenTrackerCardModel,
 } from '../../../lib/officeOpsBoard';
 import type { AgentRun } from '../../../lib/agentRunSystem';
+import type { AgentPlanPersisted } from '../../../lib/agentPlanMode';
 import {
   classifyRunFreshness,
   freshnessRank,
@@ -109,6 +110,7 @@ import HitlApprovalBanner from '../../../components/HitlApprovalBanner';
 import ChatAttentionStrip from '../../../components/ChatAttentionStrip';
 import StandingGrantsPanel from '../../../components/StandingGrantsPanel';
 import ComputerTaskSchedulesPanel from '../../../components/ComputerTaskSchedulesPanel';
+import OfficeAgentPlanQueue, { officeAgentPlanQueueHasContent } from '../../../components/office/OfficeAgentPlanQueue';
 import RunHistoryDrawer from '../../../components/chat/RunHistoryDrawer';
 import {
   buildChatAttentionState,
@@ -160,6 +162,7 @@ import {
   invokeAllAgents,
   invokeSelectedAgents,
 } from '../../../lib/agentInvocation';
+import { buildAgentRuntimeSubject, isUuidLike, type AgentRuntimeSubjectMetadata } from '../../../lib/agentRuntimeSubject';
 import { getCircleSessionMemoryMode, getActiveRuns } from '../../../lib/agentRunSystem';
 import { buildOfficeRoster } from '../../../lib/officeRoster';
 import { useUserApiKeys } from '../../../lib/llmProviders';
@@ -319,6 +322,88 @@ function pickFreshestRunFreshness(
   return best;
 }
 
+function normalizeOpsLookupKey(value: unknown): string | null {
+  const text = String(value || '').trim().toLowerCase();
+  return text || null;
+}
+
+function flattenOpsLookupValues(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(flattenOpsLookupValues);
+  const text = String(value || '').trim();
+  return text ? [text] : [];
+}
+
+function uniqueOpsLookupKeys(values: unknown[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    for (const text of flattenOpsLookupValues(value)) {
+      const key = normalizeOpsLookupKey(text);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(key);
+    }
+  }
+  return out;
+}
+
+function buildOpsRunNodeLookupKeys(node: OfficeRunNode): string[] {
+  return uniqueOpsLookupKeys([
+    node.agentName,
+    node.subjectKey,
+    node.subjectDisplayName,
+    node.subjectDbId,
+    node.subjectAliases,
+  ]);
+}
+
+function buildOfficeAgentRunLookupKeys(agent: OfficeAgent): string[] {
+  const subject = buildAgentRuntimeSubject(agent, {
+    dbAgentId: isUuidLike(agent.id) ? agent.id : null,
+  });
+  return uniqueOpsLookupKeys([
+    agent.name,
+    agent.id,
+    agent.sessionKey,
+    getAgentIdentityKey(agent),
+    subject.subjectKey,
+    subject.dbAgentId,
+    subject.sessionKey,
+    subject.identityKey,
+    subject.memoryAgentAliases,
+    subject.runAgentAliases,
+    subject.legacyIds,
+  ]);
+}
+
+function getOpsRunNodesForAgent(
+  agent: OfficeAgent,
+  nodesByKey: Map<string, OfficeRunNode[]>,
+): OfficeRunNode[] {
+  const out: OfficeRunNode[] = [];
+  const seen = new Set<string>();
+  for (const key of buildOfficeAgentRunLookupKeys(agent)) {
+    for (const node of nodesByKey.get(key) || []) {
+      if (seen.has(node.runId)) continue;
+      seen.add(node.runId);
+      out.push(node);
+    }
+  }
+  return out;
+}
+
+function getOpsAccountabilityForAgent(
+  agent: OfficeAgent,
+  index: Map<string, OfficeAgentAccountabilityModel> | null | undefined,
+): OfficeAgentAccountabilityModel | undefined {
+  if (!index) return undefined;
+  for (const key of buildOfficeAgentRunLookupKeys(agent)) {
+    const entry = index.get(key);
+    if (entry) return entry;
+  }
+  return undefined;
+}
+
 export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady }: Props) {
   const surfaceState = useOfficeSurfaceState();
   const [selectedAgent, setSelectedAgent] = useState<OfficeAgent | null>(null);
@@ -423,6 +508,54 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     const timer = setInterval(load, 30_000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [circleId]);
+
+  // Saved Chat plans that are ready for Office/SwanBot/OpenSwan handoff. The
+  // queue is informational here; execution stays in Chat until the typed Office
+  // execution contract lands.
+  const [officeAgentPlans, setOfficeAgentPlans] = useState<AgentPlanPersisted[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const { listAgentPlans } = await import('../../../lib/agentPlanPersistence');
+        const plans = await listAgentPlans({ circleId, limit: 20 });
+        if (!cancelled) setOfficeAgentPlans(plans);
+      } catch { /* dashboard extra - never break Office */ }
+    };
+    void load();
+    const timer = setInterval(() => { void load(); }, 60_000);
+    const channel = supabase
+      .channel(`office-agent-plans:${circleId}`)
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'agent_plans',
+        filter: `circle_id=eq.${circleId}`,
+      }, () => { void load(); })
+      .subscribe();
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      supabase.removeChannel(channel);
+    };
+  }, [circleId]);
+  const visibleAgentPlans = useMemo(
+    () => officeAgentPlans.filter((plan) => plan.status !== 'completed' && plan.status !== 'archived'),
+    [officeAgentPlans],
+  );
+  const handleOpenAgentPlanChat = useCallback((plan: AgentPlanPersisted) => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    try {
+      window.dispatchEvent(new CustomEvent('uc:switch-tab', {
+        detail: {
+          tab: 'CHAT',
+          source: 'office_agent_plan_queue',
+          agentPlanId: plan.id,
+          agentPlanStatus: plan.status,
+        },
+      }));
+    } catch { /* web-only dashboard convenience */ }
+  }, []);
 
   // ── Office ops board (Building Now + Token Tracker) ──────────────────────
   // D6 pattern: lazy-import loader, bounded pure models, silent failures.
@@ -559,16 +692,16 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     };
   }, [circleId]);
 
-  // Map building run nodes to roster agents by case-insensitive agentName.
-  // Limitation: OfficeRunNode.agentName is derived from delegated_to / a
-  // "Name: " title prefix / surface label, so runs without an explicit agent
-  // label (e.g. "Chat agent") won't attach to a specific roster agent.
+  // Map building run nodes to roster agents by both display name and canonical
+  // subject identity. Display-name matching remains the fallback; subject keys
+  // let Office attach runs written as `agentSubjectKey` / DB id / session alias.
   const opsRunNodesByAgent = useMemo(() => {
     const map = new Map<string, OfficeRunNode[]>();
     const visit = (node: OfficeRunNode) => {
-      const key = node.agentName.trim().toLowerCase();
-      const list = map.get(key);
-      if (list) list.push(node); else map.set(key, [node]);
+      for (const key of buildOpsRunNodeLookupKeys(node)) {
+        const list = map.get(key);
+        if (list) list.push(node); else map.set(key, [node]);
+      }
       node.children.forEach(visit);
     };
     (opsBoard?.building ?? []).forEach(visit);
@@ -1059,6 +1192,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     targetAgentId: string | null;
     targetAgentIds: string[] | null;
     targetAgentName: string;
+    targetAgentSubject?: AgentRuntimeSubjectMetadata | null;
+    targetAgentSubjects?: AgentRuntimeSubjectMetadata[] | null;
     model: string | null;
     senderId: string;
   }) => {
@@ -1073,6 +1208,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       command: params.command,
       senderId: params.senderId,
       targetAgentName: params.targetAgentName,
+      agentSubjectMetadata: params.targetAgentSubject || undefined,
+      targetAgentSubjects: params.targetAgentSubjects || null,
       model: params.model,
     };
 
@@ -1153,6 +1290,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
         command: cmd.commandText,
         senderId: cmd.senderId,
         targetAgentName: cmd.targetAgentName,
+        agentSubjectMetadata: cmd.targetAgentSubject || undefined,
+        targetAgentSubjects: cmd.targetAgentSubjects || null,
         model: cmd.model,
       };
 
@@ -2188,8 +2327,8 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
     // idle → building/active, building → active, activity → "Working: <run>".
     // No evidence and offline/error rows pass through untouched — see
     // officeOpsBoard.deriveSyntheticAgentStatusFromRuns (mirror image of the
-    // O2 demote-only reconcile). Name matching uses the same lowercased
-    // agentName seam as opsRunNodesByAgent.
+    // O2 demote-only reconcile). Matching uses the same name/subject-key map
+    // as roster live ops below.
     if (opsRunNodesByAgent.size === 0) return roster;
     const nowMs = Date.now();
     return roster.map((agent) => {
@@ -4142,6 +4281,12 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                 card above, before the agent roster). Hidden when empty. */}
             <OfficeBuildingNowCard board={opsBoard} />
             <OfficeTokensCard tracker={opsTokenTracker} />
+            <OfficeAgentPlanQueue
+              plans={visibleAgentPlans}
+              accentColor={accentColor}
+              maxItems={3}
+              onOpenChat={handleOpenAgentPlanChat}
+            />
 
             {/* Circle members' agents — shared office */}
             {mergedCircleAgents.length > 0 && (
@@ -4317,12 +4462,13 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
               filteredDisplayAgents.map((agent) => {
                 const statusColor = getOfficeStatusColor(agent.status);
                 const statusLabel = getOfficeStatusLabel(agent.status);
+                const opsNodes = getOpsRunNodesForAgent(agent, opsRunNodesByAgent);
                 // Shared run freshness for this agent's live/blocked run(s) —
                 // freshnessRank picks the most-alive one so the roster paints
                 // the same bucket/label Feed shows (reveals a wedged run a
                 // static agent status can't).
                 const runFreshness = pickFreshestRunFreshness(
-                  opsRunNodesByAgent.get(agent.name.trim().toLowerCase()),
+                  opsNodes,
                   opsRunFreshness,
                 );
                 const isSelected = selectedAgent?.id === agent.id;
@@ -4369,12 +4515,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                     </View>
                     <Text style={styles.mobileCardActivity} numberOfLines={1}>{agent.activity}</Text>
                     {/* Live ops: "Now: tool" + recent tools / uptime / subagents.
-                        Runs attach by case-insensitive name match — see the
-                        opsRunNodesByAgent limitation note. */}
+                        Runs attach by display name plus canonical subject ids. */}
                     <OfficeAgentLiveOpsLines
                       ops={buildAgentLiveOps(
                         agent,
-                        opsRunNodesByAgent.get(agent.name.trim().toLowerCase()) ?? [],
+                        opsNodes,
                         Date.now(),
                       )}
                       accentColor={agent.color || accentColor}
@@ -4382,7 +4527,7 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                     {/* O1/O2 (P38): last finished outcome + 24h counts/cost,
                         plus the fail-visible bridge status note when set. */}
                     <OfficeAgentAccountabilityLine
-                      entry={opsAccountability?.get(agent.name.trim().toLowerCase())}
+                      entry={getOpsAccountabilityForAgent(agent, opsAccountability)}
                       statusNote={agent.statusNote}
                     />
                   </Pressable>
@@ -4473,10 +4618,9 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
                       const pos = OFFICE_DESK_POSITIONS[i];
                       if (!pos) return null;
                       // Ops board: small "building" badge when this agent has a
-                      // matching building root or active subagents (name match —
-                      // see the opsRunNodesByAgent limitation note). Sprite and
+                      // matching building root or active subagents. Sprite and
                       // its own status indicator are untouched.
-                      const opsNodes = opsRunNodesByAgent.get(agent.name.trim().toLowerCase()) ?? [];
+                      const opsNodes = getOpsRunNodesForAgent(agent, opsRunNodesByAgent);
                       const opsBuilding =
                         opsNodes.some((n) => !n.isSubagent) ||
                         buildAgentLiveOps(agent, opsNodes, Date.now()).subagents.active > 0;
@@ -4587,10 +4731,17 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
 
               {/* Ops board row — live builds + token spend beneath the floor,
                   next to the whiteboard/server-rack column. Hidden when empty. */}
-              {(officeBoardHasContent(opsBoard) || officeTrackerHasContent(opsTokenTracker)) ? (
+              {(officeBoardHasContent(opsBoard) || officeTrackerHasContent(opsTokenTracker) || officeAgentPlanQueueHasContent(visibleAgentPlans)) ? (
                 <View style={styles.opsBoardRow}>
                   <OfficeBuildingNowCard board={opsBoard} style={{ flex: 1.4, minWidth: 260 }} />
                   <OfficeTokensCard tracker={opsTokenTracker} style={{ flex: 1, minWidth: 220 }} />
+                  <OfficeAgentPlanQueue
+                    plans={visibleAgentPlans}
+                    accentColor={accentColor}
+                    maxItems={3}
+                    onOpenChat={handleOpenAgentPlanChat}
+                    style={{ flex: 1.2, minWidth: 260 }}
+                  />
                 </View>
               ) : null}
             </ScrollView>
