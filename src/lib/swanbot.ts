@@ -4397,6 +4397,15 @@ export async function executeToolUseLoop(opts: {
       const truncatedToolIntent = toolUseBlocks.length > 0;
       const finalResponseText = extractAssistantText(content) || data.response
         || (truncatedToolIntent ? 'My reply was cut off mid-tool-call (output limit) before I could act. Tell me to continue and I\'ll pick up from here.' : '');
+      // Self-inflicted-defect check: even a non-truncated finish can present a broken
+      // draft — an empty/unclosed code fence, an "I'll do X" promise with no delivery,
+      // or a sentence that cuts off. scanResponseForDefects flags HIGH-severity cases as
+      // flag:'incomplete'; fold that into the existing `incomplete` signal so callers
+      // offer "continue" instead of presenting a self-broken answer as done. Additive:
+      // reuses the existing consumer and never suppresses or rewrites the text.
+      const { scanResponseForDefects } = await import('./responseSelfCheckCore');
+      const draftSelfCheck = scanResponseForDefects({ responseText: finalResponseText });
+      const markIncomplete = truncatedToolIntent || draftSelfCheck.flag === 'incomplete';
       return {
         // Fail-visible: a BlackSwan failover turn leads with what served it.
         response: blackSwanFailoverNotice
@@ -4404,7 +4413,7 @@ export async function executeToolUseLoop(opts: {
           : finalResponseText,
         toolEvents,
         routing: routingInfo,
-        ...(truncatedToolIntent ? { incomplete: true } : {}),
+        ...(markIncomplete ? { incomplete: true } : {}),
         observations: harvestToolLoopObservations(toolEvents, { isReadTool }),
       };
     }
