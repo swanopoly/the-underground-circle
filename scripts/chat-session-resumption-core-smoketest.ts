@@ -80,6 +80,20 @@ function noControlChars(s: string): boolean {
 function noFenceChars(s: string): boolean {
   return !s.includes('<') && !s.includes('>') && !s.includes('`');
 }
+/** No unpaired (lone) UTF-16 surrogate survives — a split astral char leaks one. */
+function noLoneSurrogate(s: string): boolean {
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const next = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+      if (next < 0xdc00 || next > 0xdfff) return false; // lone high surrogate
+      i += 1; // valid pair — skip the low surrogate
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return false; // lone low surrogate
+    }
+  }
+  return true;
+}
 
 /** A decision is well-formed: valid posture + bucket; elapsedMs null-or-finite;
  *  boolean flags; a bounded, control-free, fence-free directive; a bounded,
@@ -426,6 +440,28 @@ function main(): void {
   const emojiLabel = decideSessionResumption({ nowMs: NOW, lastActivityAtMs: NOW - 3_600_000, inFlightPlan: true, lastActivityLabel: 'ship it ' + '\u{1F680}'.repeat(3) });
   assert(wellFormed(emojiLabel), '(9) emoji label -> well-formed');
   assert(noControlChars(emojiLabel.directive), '(9) emoji label -> no stray control unit');
+
+  // ─── (10) REGRESSION — astral label must not bypass the UTF-16 directive cap ─
+  // Bug: clampCodePoints capped CODE POINTS, not UTF-16 .length, so an emoji-heavy
+  // label (1 code point / 2 units each) produced a directive up to ~2x MAX_DIRECTIVE_LEN.
+  // Exact failing input: a stale pending clarification (posture reconfirm-stale-pending)
+  // plus 161 code points / 321 UTF-16 units of rockets with ONE interior space (so it is
+  // not flagged as a spaceless secret blob). Build the astral char via String.fromCodePoint
+  // — never a raw char literal.
+  const ROCKET = String.fromCodePoint(0x1f680); // 1 code point, 2 UTF-16 units
+  const astralLabel = ROCKET.repeat(159) + ' ' + ROCKET; // 161 code points / 321 units
+  const astralReg = decideSessionResumption({
+    nowMs: NOW,
+    lastActivityAtMs: NOW - 2_000_000,
+    pendingClarificationAskedAtMs: NOW - 2_000_000,
+    lastActivityLabel: astralLabel,
+  });
+  assertEq(astralReg.posture, 'reconfirm-stale-pending', '(10) astral label: stale-pending posture unchanged');
+  // The specific invariant the bug violated: output .length must respect the UTF-16 cap.
+  assert(astralReg.directive.length <= MAX_DIRECTIVE_LEN, '(10) astral label: directive .length <= MAX_DIRECTIVE_LEN (UTF-16 cap not bypassed)', String(astralReg.directive.length));
+  // And clamping must never split a surrogate pair into a lone surrogate.
+  assert(noLoneSurrogate(astralReg.directive), '(10) astral label: no lone surrogate in directive');
+  assert(wellFormed(astralReg), '(10) astral label: well-formed decision');
 }
 
 main();

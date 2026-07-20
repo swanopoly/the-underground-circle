@@ -331,15 +331,22 @@ function looksLikeSecretValue(text: string): boolean {
   return false;
 }
 
-/** Code-point-aware truncation — never splits a surrogate pair. */
+/** Truncate to a UTF-16 `.length` budget — never splits a surrogate pair. Bounds
+ *  by EMITTED UTF-16 units (not code-point count): each astral char is 1 code
+ *  point but 2 UTF-16 units, so a code-point cap would let an emoji-heavy string
+ *  slip past a `.length` cap (up to ~2x). Accumulates whole code points only
+ *  while the running `.length` stays within budget. */
 function clampCodePoints(s: string, max: number): string {
   if (typeof s !== 'string') return '';
   if (max <= 0) return '';
-  if (s.length <= max) return s; // UTF-16 length <= max ⇒ code-point count <= max
+  if (s.length <= max) return s; // already within the UTF-16 budget
   try {
-    const cps = Array.from(s);
-    if (cps.length <= max) return s;
-    return cps.slice(0, max).join('');
+    let out = '';
+    for (const cp of s) { // for..of yields whole code points (full surrogate pairs)
+      if (out.length + cp.length > max) break; // stop before overflowing the UTF-16 budget
+      out += cp;
+    }
+    return out;
   } catch {
     return s.slice(0, max);
   }

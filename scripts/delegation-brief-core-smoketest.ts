@@ -568,6 +568,23 @@ function main(): void {
   const freshBrief = assembleDelegationBrief({ spec: { role: '__proto__', task: 'x' }, contextCandidates: [protoKeyCandidate] });
   assert(wellFormedBrief(freshBrief), '(9) __proto__ role + proto-key candidate → well-formed');
 
+  // ─── (10) REGRESSION: surrogate pair split at clipText's UTF-16 pre-slice ────
+  // clipText pre-slices raw by UTF-16 code UNITS before sanitizing. An odd-length
+  // run of single-unit chars (spaces) before an astral emoji lands that slice
+  // mid-surrogate-pair; the surviving lone HIGH surrogate must NOT leak into
+  // subtask/headline/text (regression: brief.subtask was === '\uD83D'). Astral
+  // input is built from its code point — never a raw astral char in source.
+  const regEmoji = String.fromCodePoint(0x1f600); // U+1F600, i.e. surrogate pair D83D DE00 (2 UTF-16 units)
+  const regBrief = assembleDelegationBrief({ spec: { role: 'coder', task: ' '.repeat(4863) + regEmoji } });
+  assert(
+    !hasLoneSurrogate(regBrief.subtask) && !hasLoneSurrogate(regBrief.headline) && !hasLoneSurrogate(regBrief.text),
+    '(10) pre-slice surrogate split leaks no lone surrogate into subtask/headline/text',
+  );
+  assert(wellFormedBrief(regBrief), '(10) split-boundary brief still well-formed');
+  // selectRelevantContext shares clipText — the 240-cap boundary must not leak either.
+  const regSlice = selectRelevantContext('', '', [' '.repeat(1023) + regEmoji]);
+  assert(!regSlice.some((l) => hasLoneSurrogate(l)), '(10) context-slice pre-slice boundary has no lone surrogate');
+
   if (failures > 0) {
     console.error('\n' + failures + ' failure(s), ' + passes + ' passed');
     process.exit(1);

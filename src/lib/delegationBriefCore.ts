@@ -255,6 +255,7 @@ function sanitizeLine(s: string): string {
     const c = ch.codePointAt(0) as number;
     if (c === 9 || c === 10 || c === 13 || c === 0x2028 || c === 0x2029) { arr.push(' '); continue; }
     if (c < 0x20 || c === 0x7f || (c >= 0x80 && c <= 0x9f)) continue;
+    if (ch.length === 1 && c >= 0xd800 && c <= 0xdfff) continue; // drop a lone surrogate (never valid standalone; e.g. a pair split by clipText's UTF-16 pre-slice)
     arr.push(ch);
   }
   return arr.join('').replace(/\s+/g, ' ').trim();
@@ -271,6 +272,7 @@ function sanitizeMultiline(s: string): string {
     if (c === 13) continue; // drop CR (avoid \r\n dupes)
     if (c === 9) { arr.push(' '); continue; }
     if (c < 0x20 || c === 0x7f || (c >= 0x80 && c <= 0x9f)) continue;
+    if (ch.length === 1 && c >= 0xd800 && c <= 0xdfff) continue; // drop a lone surrogate (never valid standalone; e.g. a pair split by clipText's UTF-16 pre-slice)
     arr.push(ch);
   }
   return arr.join('').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
