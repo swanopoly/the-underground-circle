@@ -2466,6 +2466,45 @@ function isBlackSwanTextModel(modelId: string | null | undefined): boolean {
   return /(?:^|\/)(?:blackswan|cswan801\/blackswan)/i.test((modelId || "").trim());
 }
 
+// 2026-07-20: chat/swanbot/openswan integration audit confirmed the two
+// isBlackSwanTextModel() branches below (huggingface_endpoint marketplace
+// routing, hosted huggingface routing) are single-shot text completions with
+// no tools array and no computer-task routing/contract context attached —
+// unlike ChatTab's main surface, which always sends BlackSwan turns through
+// runOpenSwanSessionTurn's typed tool loop (src/lib/openswanSessionRuntime.ts,
+// the "P8 BlackSwan collaboration split" that swaps execution to the real
+// tool-executor model while BlackSwan stays app-grounding context). This
+// getSwanBotResponse → swanbot-ai path is still reachable with BlackSwan
+// selected from RoomsTab, SwanBotScreen, FloatingChat, AgentTerminalPanels,
+// and kanban FocusChainPanel, none of which have that guard. Without this
+// check, a request like "open Photoshop and crop this image" would get a
+// plausible-sounding but entirely hallucinated "done!" reply, since nothing
+// on this path can actually act. Deliberately conservative (requires an
+// action verb AND an app/browser/file-surface noun) so it only fires on
+// genuine action requests, not ordinary conversation that happens to use a
+// word like "open" or "launch" figuratively (e.g. "should we launch this
+// feature this week?").
+/* UC_SMOKE_EXTRACT_START looksLikeUnsupportedActionRequestForBlackSwan */
+/* UC_SMOKE_EXTRACT_START buildBlackSwanActionGuardMessage */
+const BLACKSWAN_ACTION_REQUEST_RE =
+  /\b(?:open|launch|start|quit|close|click|double[- ]click|type|fill\s*(?:out|in)|navigate\s+to|go\s+to|visit|screenshot|take\s+a\s+screenshot|crop|resize|export|upload|download|drag|scroll|press|tap|switch\s+to|focus\s+on|log\s*in\s+to|sign\s+in\s+to)\b[\s\S]{0,40}\b(?:app|application|website|web\s*site|page|browser|tab|window|photoshop|illustrator|indesign|figma|chrome|safari|firefox|edge|finder|terminal|excel|word|powerpoint|wordpress|admin\s+panel|file|folder|button|form|field|link|url|dialog|screen)\b/i;
+const BLACKSWAN_ACTION_REQUEST_URL_RE = /\b(?:go\s+to|open|visit|navigate\s+to)\b[\s\S]{0,20}(?:https?:\/\/|www\.)/i;
+function looksLikeUnsupportedActionRequestForBlackSwan(message: string | null | undefined): boolean {
+  const text = (message || "").trim();
+  if (!text) return false;
+  return BLACKSWAN_ACTION_REQUEST_RE.test(text) || BLACKSWAN_ACTION_REQUEST_URL_RE.test(text);
+}
+/* UC_SMOKE_EXTRACT_END looksLikeUnsupportedActionRequestForBlackSwan */
+function buildBlackSwanActionGuardMessage(): string {
+  return (
+    "🦢 I can talk this through, but I can't actually open apps, click things, or browse the web from here — " +
+    "this chat surface doesn't have those tools attached to me. Send this in the main Chat tab instead " +
+    "(it runs through OpenSwan, which can execute real actions), or tell me what you'd like to know and " +
+    "I'll help with what I already have."
+  );
+}
+/* UC_SMOKE_EXTRACT_END buildBlackSwanActionGuardMessage */
+
 // 2026-07-16: live fleet testing found BlackSwan-v5 reliably breaks down on
 // production-shaped system prompts (long, multi-section, grounding/tool
 // blocks the model was never trained on) — 11/12 realistic test questions
@@ -5076,32 +5115,42 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
           ? openAiCompatibleCredential.apiKey
           : await loadMarketplaceProviderApiKey(supabase, circleId, userId, providerKey);
         if (providerApiKey) {
-          const provResult = await callMarketplaceProvider({
-            provider: providerKey,
-            modelId: tail,
-            systemPrompt: isBlackSwanTextModel(tail) ? blackSwanSystemPrompt : combinedSystemPrompt,
-            userMessage: message,
-            apiKey: providerApiKey,
-            maxTokens: maxTokens || 2048,
-            endpointOverride,
-          });
-          if (provResult.text) {
-            aiResponse = provResult.text;
-            tokenBreakdown = provResult.usage;
+          if (isBlackSwanTextModel(tail) && looksLikeUnsupportedActionRequestForBlackSwan(message)) {
+            // This path has no tools attached — see
+            // looksLikeUnsupportedActionRequestForBlackSwan above. Skip the
+            // model call entirely rather than let BlackSwan hallucinate
+            // having performed the action.
+            aiResponse = buildBlackSwanActionGuardMessage();
             nonRelayRouting.provider_routed = providerKey;
             nonRelayRouting.provider_model = tail;
-            logMarketplaceUsage(supabase, {
-              circleId: circleId ?? null,
-              userId: userId ?? null,
+          } else {
+            const provResult = await callMarketplaceProvider({
               provider: providerKey,
               modelId: tail,
-              inputTokens: provResult.usage?.input_tokens || 0,
-              outputTokens: provResult.usage?.output_tokens || 0,
-              metadata: { surface: "non_relay" },
+              systemPrompt: isBlackSwanTextModel(tail) ? blackSwanSystemPrompt : combinedSystemPrompt,
+              userMessage: message,
+              apiKey: providerApiKey,
+              maxTokens: maxTokens || 2048,
+              endpointOverride,
             });
-          } else if (provResult.error) {
-            nonRelayRouting.routing_fallback = { provider: providerKey, reason: provResult.error };
-            console.warn(`[swanbot-ai] marketplace ${providerKey} call failed:`, provResult.error);
+            if (provResult.text) {
+              aiResponse = provResult.text;
+              tokenBreakdown = provResult.usage;
+              nonRelayRouting.provider_routed = providerKey;
+              nonRelayRouting.provider_model = tail;
+              logMarketplaceUsage(supabase, {
+                circleId: circleId ?? null,
+                userId: userId ?? null,
+                provider: providerKey,
+                modelId: tail,
+                inputTokens: provResult.usage?.input_tokens || 0,
+                outputTokens: provResult.usage?.output_tokens || 0,
+                metadata: { surface: "non_relay" },
+              });
+            } else if (provResult.error) {
+              nonRelayRouting.routing_fallback = { provider: providerKey, reason: provResult.error };
+              console.warn(`[swanbot-ai] marketplace ${providerKey} call failed:`, provResult.error);
+            }
           }
         } else {
           nonRelayRouting.routing_fallback = { provider: providerKey, reason: "integration_not_connected" };
@@ -5125,26 +5174,39 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
 
     // Route to HuggingFace if user selected an open model
     if (!aiResponse && hfModelId && !isClaudeModel) {
-      const hfSystemPrompt = isBlackSwanTextModel(hfModelId) ? blackSwanSystemPrompt : combinedSystemPrompt;
-      const hfResult = await callHfProxy("chat", {
-        messages: [
-          { role: "system", content: hfSystemPrompt },
-          { role: "user", content: message },
-        ],
-      }, hfModelId, undefined, userId);
-
-      if (!hfResult.error && hfResult.result) {
-        const rawHfResponse = hfResult.result?.choices?.[0]?.message?.content || JSON.stringify(hfResult.result);
-        aiResponse = isBlackSwanTextModel(hfModelId) ? stripBlackSwanReasoningText(rawHfResponse) : rawHfResponse;
-        const est = Math.ceil((hfSystemPrompt.length + message.length + (aiResponse?.length || 0)) / 4);
+      if (isBlackSwanTextModel(hfModelId) && looksLikeUnsupportedActionRequestForBlackSwan(message)) {
+        // Same no-tools gap as the marketplace branch above — skip the call.
+        aiResponse = buildBlackSwanActionGuardMessage();
         tokenBreakdown = {
           model: hfModelId,
-          input_tokens: Math.ceil((hfSystemPrompt.length + message.length) / 4),
-          output_tokens: Math.ceil((aiResponse?.length || 0) / 4),
+          input_tokens: 0,
+          output_tokens: 0,
           cache_creation_tokens: 0,
           cache_read_tokens: 0,
-          total_tokens: est,
+          total_tokens: 0,
         };
+      } else {
+        const hfSystemPrompt = isBlackSwanTextModel(hfModelId) ? blackSwanSystemPrompt : combinedSystemPrompt;
+        const hfResult = await callHfProxy("chat", {
+          messages: [
+            { role: "system", content: hfSystemPrompt },
+            { role: "user", content: message },
+          ],
+        }, hfModelId, undefined, userId);
+
+        if (!hfResult.error && hfResult.result) {
+          const rawHfResponse = hfResult.result?.choices?.[0]?.message?.content || JSON.stringify(hfResult.result);
+          aiResponse = isBlackSwanTextModel(hfModelId) ? stripBlackSwanReasoningText(rawHfResponse) : rawHfResponse;
+          const est = Math.ceil((hfSystemPrompt.length + message.length + (aiResponse?.length || 0)) / 4);
+          tokenBreakdown = {
+            model: hfModelId,
+            input_tokens: Math.ceil((hfSystemPrompt.length + message.length) / 4),
+            output_tokens: Math.ceil((aiResponse?.length || 0) / 4),
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            total_tokens: est,
+          };
+        }
       }
     }
 
