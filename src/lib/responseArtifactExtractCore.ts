@@ -218,7 +218,10 @@ function cleanLabel(input: unknown, maxCp: number): string {
     i += wide ? 2 : 1;
   }
   out = out.replace(/\s+/g, ' ').trim();
-  if (codePointLen(out) > maxCp) out = clampCodePoints(out, maxCp - 1) + ELLIPSIS;
+  // clampCodePoints already appends exactly one ELLIPSIS on truncation, so
+  // asking it for (maxCp - 1) yields maxCp code points total. Do NOT append a
+  // second ELLIPSIS here — that overshoots the cap by 1 with a doubled ellipsis.
+  if (codePointLen(out) > maxCp) out = clampCodePoints(out, maxCp - 1);
   return out;
 }
 
@@ -261,7 +264,8 @@ function cleanCommand(input: string): string {
   }
   out = out.replace(/\s+/g, ' ').trim();
   if (codePointLen(out) > RESPONSE_ARTIFACT_COMMAND_MAX) {
-    out = clampCodePoints(out, RESPONSE_ARTIFACT_COMMAND_MAX - 1) + ELLIPSIS;
+    // clampCodePoints already appends one ELLIPSIS on truncation → maxCp total.
+    out = clampCodePoints(out, RESPONSE_ARTIFACT_COMMAND_MAX - 1);
   }
   return out;
 }
@@ -408,7 +412,25 @@ function redactQuery(query: string): string {
     .map((kv) => {
       const eq = kv.indexOf('=');
       if (eq <= 0) return kv;
-      const key = kv.slice(0, eq).toLowerCase().replace(/[_-]/g, '');
+      // Normalize the key so the sensitive-key lookup is IMMUNE to the exact
+      // chars cleanUrl later strips: drop control / format (zero-width, bidi,
+      // Unicode-Tag) / line-sep / lone-surrogate code points plus `_`/`-` BEFORE
+      // the Set test. Otherwise an invisible-char-split key (e.g. `to<ZWSP>ken`)
+      // dodges redaction here and cleanUrl reconstructs `token=<secret>` after —
+      // the classic redact-then-strip leak. The output key text stays verbatim;
+      // the later cleanUrl removes the invisible char, yielding `token=REDACTED`.
+      const rawKey = kv.slice(0, eq);
+      let key = '';
+      for (let i = 0; i < rawKey.length; ) {
+        const cp = rawKey.codePointAt(i) as number;
+        const wide = cp > 0xffff;
+        if (!isLoneSurrogate(cp) && !isControlChar(cp) && !isFormatChar(cp) &&
+            cp !== 0x5f /* _ */ && cp !== 0x2d /* - */) {
+          key += wide ? String.fromCodePoint(cp) : rawKey[i];
+        }
+        i += wide ? 2 : 1;
+      }
+      key = key.toLowerCase();
       return SENSITIVE_PARAM_KEYS.has(key) ? `${kv.slice(0, eq)}=REDACTED` : kv;
     })
     .join('&');
@@ -426,7 +448,8 @@ function cleanUrl(input: string): string {
     }
     i += wide ? 2 : 1;
   }
-  if (codePointLen(out) > MAX_URL_LEN) out = clampCodePoints(out, MAX_URL_LEN - 1) + ELLIPSIS;
+  // clampCodePoints already appends one ELLIPSIS on truncation → MAX_URL_LEN total.
+  if (codePointLen(out) > MAX_URL_LEN) out = clampCodePoints(out, MAX_URL_LEN - 1);
   return out;
 }
 

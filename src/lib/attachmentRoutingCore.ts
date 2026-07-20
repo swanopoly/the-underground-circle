@@ -365,6 +365,39 @@ function sanitizeLabel(input: string): string {
 }
 
 /**
+ * Strip the invisible/format/fence set that could hide a `data:` scheme from a
+ * naive test: everything sanitizeLabel() later removes (C0/DEL/C1, LS/PS, lone
+ * surrogates, the astral Tag block, prompt-fence chars) PLUS the zero-width and
+ * bidi format chars sanitizeLabel LEAVES behind (soft-hyphen, ZW*, LRM/RLM, bidi
+ * embeddings/overrides, word joiner, the Trojan-Source isolates U+2066-2069 and
+ * U+061C, BOM, interlinear marks). Code-point iteration so astral chars are handled
+ * whole. Only used to build a THROWAWAY data-uri detection probe, so over-stripping
+ * here can never corrupt a returned name.
+ */
+function stripInvisibleForProbe(input: string): string {
+  let out = '';
+  for (const ch of input) {
+    const cp = ch.codePointAt(0);
+    if (cp === undefined) continue;
+    if (cp < 0x20 || cp === 0x7f) continue; // C0 + DEL
+    if (cp >= 0x80 && cp <= 0x9f) continue; // C1
+    if (cp === 0xad || cp === 0x61c || cp === 0x180e) continue; // soft-hyphen, ALM, MVS
+    if (cp >= 0x200b && cp <= 0x200f) continue; // zero-width + LRM/RLM
+    if (cp === 0x2028 || cp === 0x2029) continue; // line/para separators
+    if (cp >= 0x202a && cp <= 0x202e) continue; // bidi embeddings/overrides
+    if (cp >= 0x2060 && cp <= 0x2064) continue; // word joiner + invisible ops
+    if (cp >= 0x2066 && cp <= 0x2069) continue; // Trojan-Source isolates
+    if (cp === 0xfeff) continue; // BOM / ZWNBSP
+    if (cp >= 0xfff9 && cp <= 0xfffb) continue; // interlinear annotation
+    if (cp >= 0xd800 && cp <= 0xdfff) continue; // lone surrogate
+    if (cp >= 0xe0000 && cp <= 0xe007f) continue; // astral Tag block
+    if (ch === '`' || ch === '<' || ch === '>') continue; // prompt-fence
+    out += ch;
+  }
+  return out;
+}
+
+/**
  * Bound a name to MAX_NAME_CHARS code points while preserving the extension so
  * a truncated `zzz…zzz.pdf` still reads with its kind. Code-point aware. `ext`
  * is passed in (computed on the fuller pre-bound string) so a name long enough
@@ -387,7 +420,19 @@ function boundNamePreservingExt(name: string, ext: string): string {
 function safeBasename(name: unknown): string {
   let s = safeStr(name).trim();
   if (!s) return '';
-  if (/^data:/i.test(s)) return ''; // never echo data-uri / base64 bytes
+  // Robust data-uri collapse (never echo base64 payload bytes). A naive `^data:`
+  // test on the raw string is bypassed two ways that both survive into the returned
+  // name: (1) an invisible/format/fence char SPLITS the scheme (e.g. `dat\0a:...`) —
+  // the later sanitizeLabel() pass strips that same char and RECONSTRUCTS a clean
+  // `data:...;base64,<payload>` (a redact-then-strip leak); the `data:image/png` form
+  // additionally has its scheme dropped by the path strip below, so a re-test there
+  // would miss it; (2) a zero-width / bidi char that sanitizeLabel does NOT strip
+  // leaves the payload echoed verbatim with the junk char sitting inside. So test a
+  // THROWAWAY probe of the ORIGINAL trimmed string (before any path/query strip) with
+  // that whole invisible set removed, making the redaction immune to exactly what a
+  // later pass could strip or leave behind.
+  const dataUriProbe = stripInvisibleForProbe(s);
+  if (/^\s*data:/i.test(dataUriProbe)) return ''; // never echo data-uri / base64 bytes
   const cut = s.search(/[?#]/);
   if (cut >= 0) s = s.slice(0, cut);
   // Drop the whole path — this removes any ../ traversal segments. (indexOf on a

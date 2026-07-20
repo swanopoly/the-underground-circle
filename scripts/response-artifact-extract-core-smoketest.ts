@@ -370,6 +370,18 @@ function main(): void {
     assertIncludes(links!.content, 'REDACTED', '(D) redaction marker present');
     assertIncludes(links!.content, 'secret.example.com', '(D) host preserved');
   }
+  // (D/bug1 regression) a sensitive query key split by an invisible char must
+  // STILL be redacted. The redact-then-strip leak: `to<ZWSP>ken` dodged the key
+  // Set test, then cleanUrl stripped the ZWSP and reconstructed `token=<secret>`.
+  {
+    const zwspToken = 'to' + ZWSP + 'ken'; // to<ZWSP>ken → normalizes to `token`
+    const text = 'Refs: https://a.example.com/1 https://b.example.com/2 '
+      + 'https://c.example.com/cb?' + zwspToken + '=SECRETVALUE';
+    const links = firstOfKind(extractResponseArtifacts(text), 'links');
+    assert(!!links, '(D/bug1) ≥3 urls → links artifact (zero-width key case)');
+    assertExcludes(links!.content, 'SECRETVALUE', '(D/bug1) zero-width-split sensitive key value NOT leaked');
+    assertIncludes(links!.content, 'token=REDACTED', '(D/bug1) reconstructed key is redacted');
+  }
 
   // ─── (E) csv-ish code stays kind 'code' ─────────────────────────────────────
   {
@@ -548,6 +560,17 @@ function main(): void {
     const code = firstOfKind(extractResponseArtifacts(hugeCode), 'code');
     assert(!!code, '(H) huge fence yields a code artifact');
     assertLE(cpLen(code!.content), RESPONSE_ARTIFACT_CONTENT_MAX + 1, '(H) huge body clamped to cap (+ellipsis)');
+  }
+  // (H/bug2 regression) an over-cap heading title clamps to TITLE_MAX with a
+  // SINGLE trailing ellipsis. clampCodePoints already appends one ellipsis, so
+  // the old `+ ELLIPSIS` overshot to maxCp+1 code points ending in a doubled '……'.
+  {
+    const ell = String.fromCharCode(0x2026); // '…'
+    const code = firstOfKind(extractResponseArtifacts('# ' + 'a'.repeat(130) + '\n```ts\ncode();\n```'), 'code');
+    assert(!!code, '(H/bug2) long-heading code artifact produced');
+    assertLE(cpLen(code!.title), RESPONSE_ARTIFACT_TITLE_MAX, '(H/bug2) over-cap title clamped to TITLE_MAX (no +1 overshoot)');
+    assertExcludes(code!.title, ell + ell, '(H/bug2) no doubled trailing ellipsis');
+    assertIncludes(code!.title, ell, '(H/bug2) truncated title ends with an ellipsis');
   }
   // many fences capped
   {

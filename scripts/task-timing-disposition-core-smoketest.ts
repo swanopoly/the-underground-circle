@@ -77,12 +77,24 @@ function assertNoThrow(fn: () => void, m: string): void {
 // ── code-point + control-char helpers ────────────────────────────────────────
 const cpLen = (s: string): number => Array.from(s).length;
 
-/** No control / DEL / C1 / line-separator chars (single-line strings). */
+/** No control / DEL / C1 / line-separator chars — and none of the zero-width /
+ *  bidi format controls sanitizeLabel strips, INCLUDING the Trojan-Source isolates
+ *  U+2066-U+2069 (LRI/RLI/FSI/PDI) and U+061C (ALM). (single-line strings). */
 function noControlChars(s: string): boolean {
   if (typeof s !== 'string') return false;
   for (const ch of s) {
     const c = ch.codePointAt(0) as number;
     if (c < 0x20 || c === 0x7f || (c >= 0x80 && c <= 0x9f) || c === 0x2028 || c === 0x2029) return false;
+    if (
+      c === 0x061c ||
+      (c >= 0x200b && c <= 0x200f) ||
+      (c >= 0x202a && c <= 0x202e) ||
+      c === 0x2060 ||
+      (c >= 0x2066 && c <= 0x2069) ||
+      c === 0xfeff
+    ) {
+      return false;
+    }
   }
   return true;
 }
@@ -113,6 +125,12 @@ const LONE_HI = String.fromCharCode(0xd800); // lone high surrogate
 const LONE_LO = String.fromCharCode(0xdc00); // lone low surrogate
 const EMOJI = String.fromCodePoint(0x1f600); // 😀 valid surrogate pair
 const COMBINING = String.fromCharCode(0x0301); // combining acute accent
+// Trojan-Source (CVE-2021-42574) invisible bidi directional-formatting controls.
+const LRI = String.fromCharCode(0x2066); // LEFT-TO-RIGHT ISOLATE
+const RLI = String.fromCharCode(0x2067); // RIGHT-TO-LEFT ISOLATE
+const FSI = String.fromCharCode(0x2068); // FIRST STRONG ISOLATE
+const PDI = String.fromCharCode(0x2069); // POP DIRECTIONAL ISOLATE
+const ALM = String.fromCharCode(0x061c); // ARABIC LETTER MARK
 const ctrlStr = 'a' + NUL + BEL + TAB + NL + CR + DEL + C1 + LS + PS + ZW + BOM + 'b';
 
 // A stable, injected "now" — deterministic; the core reads no clock.
@@ -472,6 +490,39 @@ function main(): void {
   // a lone-surrogate label defers cleanly with a bounded, surrogate-free blockedOn
   const loneDecision = decideTaskTiming({ nowMs: NOW, blockingResource: 'a' + LONE_HI + 'b' });
   assert(!hasLoneSurrogate(loneDecision.blockedOn || ''), '(G) lone surrogate dropped from blockedOn');
+
+  // ─── (H) REGRESSION: Trojan-Source bidi ISOLATE controls must be stripped ─────
+  // Bug: INVISIBLE_RE missed U+2066-U+2069 (LRI/RLI/FSI/PDI) + U+061C (ALM) — the
+  // exact invisible directional-formatting chars of CVE-2021-42574 — so an unbalanced
+  // isolate leaked through sanitizeLabel into blockedOn / recurrenceHint and the
+  // rendered one-liner, able to reorder adjacent UI/prompt text. They must be removed
+  // like U+202E, not survive into the echoed label.
+
+  // EXACT failing input from the bug report: 'delete' + U+2066 + ' keep'.
+  const lriDecision = decideTaskTiming({ nowMs: NOW, blockingResource: 'delete' + LRI + ' keep' });
+  assertEq(lriDecision.disposition, 'defer_until_unblocked', '(H) isolate-laden resource still defers');
+  assert(!(lriDecision.blockedOn || '').includes(LRI), '(H) U+2066 LRI stripped from blockedOn (not leaked)');
+  assertEq(lriDecision.blockedOn, 'delete keep', '(H) blockedOn is the cleaned label, isolate removed');
+  const lriDesc = describeTimingDecision(lriDecision);
+  assert(!lriDesc.includes(LRI), '(H) U+2066 LRI absent from the rendered one-liner');
+  assertIncludes(lriDesc, 'delete keep', '(H) rendered one-liner carries the cleaned label');
+  assert(noControlChars(lriDesc), '(H) rendered one-liner is control/bidi-clean');
+
+  // every isolate + ALM stripped from BOTH echoed sinks (blockedOn + recurrenceHint)
+  const isolates: Array<[string, string]> = [['LRI', LRI], ['RLI', RLI], ['FSI', FSI], ['PDI', PDI], ['ALM', ALM]];
+  const isoBlock = decideTaskTiming({ nowMs: NOW, blockingResource: 'x' + LRI + RLI + FSI + PDI + ALM + 'y' });
+  assertEq(isoBlock.blockedOn, 'xy', '(H) all isolate/mark controls removed from blockedOn');
+  const isoRec = decideTaskTiming({ nowMs: NOW, recurrenceHint: 'a' + LRI + RLI + FSI + PDI + ALM + 'b' });
+  assertEq(isoRec.disposition, 'recurring', '(H) isolate-laden hint still recurring');
+  assertEq(isoRec.recurrenceHint, 'ab', '(H) all isolate/mark controls removed from recurrenceHint');
+  for (const [name, ch] of isolates) {
+    assert(!(isoBlock.blockedOn || '').includes(ch), '(H) ' + name + ' stripped from blockedOn');
+    assert(!(isoRec.recurrenceHint || '').includes(ch), '(H) ' + name + ' stripped from recurrenceHint');
+  }
+
+  // a label made ONLY of isolate/mark controls reduces to absent (like all-control)
+  const isoOnly = decideTaskTiming({ nowMs: NOW, blockingResource: LRI + RLI + FSI + PDI + ALM });
+  assertEq(isoOnly.disposition, 'run_now', '(H) isolate-only resource treated as absent');
 
   if (failures > 0) {
     console.error('\n' + failures + ' failure(s), ' + passes + ' passed');

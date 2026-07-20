@@ -150,7 +150,7 @@ export const TIMING_SIGNAL_TOKENS: readonly string[] = Object.freeze([
 // Strip anything that could break a UI line, smuggle content past a section
 // fence, or hide bidi tricks in an echoed label. Escape sequences only — a raw
 // control / line-separator byte must NEVER appear in source.
-const INVISIBLE_RE = /[\u200b-\u200f\u202a-\u202e\u2060\ufeff]/g; // zero-width / bidi / BOM
+const INVISIBLE_RE = /[\u061c\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g; // zero-width / bidi (incl. Trojan-Source isolates U+2066-U+2069 + U+061C ALM) / BOM
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/g; // C0 + DEL + C1
 const LINE_SEP_RE = /[\u2028\u2029]/g; // LINE / PARAGRAPH separators
 const FENCE_RE = /[`<>]/g; // prompt-fence chars

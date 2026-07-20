@@ -538,6 +538,42 @@ function main(): void {
   const hInput = [{ name: 'a' + ctrl + '.png', mimeType: 'image/png' }, { name: '__proto__.exe' }];
   assertEq(JSON.stringify(planAttachmentRouting(hInput)), JSON.stringify(planAttachmentRouting(hInput)), '(9) hostile input deterministic');
 
+  // ─── (10) REGRESSION — invisible-char-split data-uri must NOT echo base64 payload ─
+  // A control/format char that splits or precedes the `data:` scheme dodges a naive
+  // `^data:` guard; a later sanitizeLabel() pass then strips it and would echo the
+  // base64 payload verbatim (the redact-then-strip leak class). safeBasename must
+  // collapse such a name to '' regardless of the splitter. All hostile chars are
+  // built via fromCharCode/fromCodePoint so no literal invisibles live in this file.
+  const NUL0 = String.fromCharCode(0);        // interior C0 splitter (exact bug input)
+  const ZWSP0 = String.fromCharCode(0x200b);  // zero-width space (survives sanitizeLabel)
+  const RLI0 = String.fromCharCode(0x2067);   // Trojan-Source isolate (U+2066-2069)
+  const TAG0 = String.fromCodePoint(0xe0041); // astral Tag block
+  const SECRET_B64 = 'U0VDUkVU';              // base64 for "SECRET" — must never be echoed
+  // exact failing input from the bug report: "dat\x00a:;base64,U0VDUkVU"
+  const splitUri = 'dat' + NUL0 + 'a:;base64,' + SECRET_B64;
+  const splitName = routeAttachment({ name: splitUri }).name;
+  assertEq(splitName, '', '(10) NUL-split data-uri collapses to "" (exact bug input)');
+  assert(!splitName.includes(SECRET_B64), '(10) split data-uri name does NOT echo base64 secret value');
+  assert(!splitName.toLowerCase().includes('data:') && !splitName.includes('base64'), '(10) split data-uri leaves no data:/base64 remnant');
+  // leading-NUL variant (bug: "reproduces with a leading NUL")
+  assertEq(routeAttachment({ name: NUL0 + 'data:;base64,' + SECRET_B64 }).name, '', '(10) leading-NUL data-uri collapses to ""');
+  // mediatype-slash variant: split defeats ^data: AND the path/slash strip would drop
+  // the scheme, leaking the `png;base64,<payload>` tail — must still collapse.
+  const slashName = routeAttachment({ name: 'dat' + NUL0 + 'a:image/png;base64,' + SECRET_B64 }).name;
+  assert(!slashName.includes(SECRET_B64), '(10) mediatype-slash split data-uri does NOT echo payload tail');
+  assertEq(slashName, '', '(10) mediatype-slash split data-uri collapses to ""');
+  // zero-width / isolate / astral-tag splitters (these survive sanitizeLabel, so the
+  // payload would otherwise be echoed with the junk char sitting inside it).
+  assert(!routeAttachment({ name: 'da' + ZWSP0 + 'ta:;base64,' + SECRET_B64 }).name.includes(SECRET_B64), '(10) zero-width-split data-uri does NOT echo payload');
+  assert(!routeAttachment({ name: 'da' + RLI0 + 'ta:;base64,' + SECRET_B64 }).name.includes(SECRET_B64), '(10) isolate-split data-uri does NOT echo payload');
+  assert(!routeAttachment({ name: 'da' + TAG0 + 'ta:;base64,' + SECRET_B64 }).name.includes(SECRET_B64), '(10) astral-tag-split data-uri does NOT echo payload');
+  // through the batch plan surface (the wiring target that reaches prompts/metadata)
+  const splitPlan = planAttachmentRouting([{ name: splitUri, mimeType: 'image/png' }]);
+  assert(!splitPlan.items[0].name.includes(SECRET_B64), '(10) plan surface: split data-uri name carries no secret payload');
+  assertEq(splitPlan.items[0].category, 'image', '(10) split data-uri still classified via mime → image');
+  // no false-collapse: an interior control char in an ORDINARY name still routes normally
+  assertEq(routeAttachment({ name: 're' + NUL0 + 'port.png', mimeType: 'image/png' }).name, 'report.png', '(10) control char in a normal name does NOT trigger data-uri collapse');
+
   if (failures > 0) {
     console.error('\n' + failures + ' failure(s), ' + passes + ' passed');
     process.exit(1);
