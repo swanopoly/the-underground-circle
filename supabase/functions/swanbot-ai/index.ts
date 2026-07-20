@@ -5363,6 +5363,13 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         ...(nonRelayRouting.provider_routed ? { provider_routed: nonRelayRouting.provider_routed, provider_model: nonRelayRouting.provider_model } : {}),
         ...(nonRelayRouting.routing_fallback ? { routing_fallback: nonRelayRouting.routing_fallback } : {}),
         ...(nonRelayRouting.blackswan_ghost_retry ? { blackswan_ghost_retry: true } : {}),
+        // True dead end: aiResponse is still the static honest-apology text
+        // — either the ghost retry above never ran (no key/budget) or it
+        // ran and failed. Distinct from blackswan_ghost_retry (which means
+        // the retry succeeded) so the client can render this small residual
+        // case differently from a normal reply, instead of showing an
+        // unexplained unhelpful answer with zero visual signal.
+        ...(aiResponse === BLACKSWAN_GARBLE_FALLBACK_MESSAGE ? { blackswan_honest_fallback: true } : {}),
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );

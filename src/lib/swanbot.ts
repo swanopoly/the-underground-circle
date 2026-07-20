@@ -463,6 +463,21 @@ export interface SwanBotStructuredResponse {
      * to the response text — this field is the machine-readable receipt.
      */
     blackswan_failover?: { failover_from: string; fallback_model: string; reason: string };
+    /**
+     * Set when BlackSwan's own reply was caught as garbled and this turn was
+     * silently re-answered by Claude (haiku) using BlackSwan's persona
+     * prompt instead — `response` is a real, working answer, just not from
+     * BlackSwan's own weights this turn.
+     */
+    blackswan_ghost_retry?: boolean;
+    /**
+     * The true residual case: BlackSwan's reply was garbled AND the ghost
+     * retry above could not run (no key/budget) or itself failed, so
+     * `response` is the static honest-apology fallback text, not a real
+     * answer. Distinct from blackswan_ghost_retry so the client can signal
+     * this small remaining case differently from an ordinary reply.
+     */
+    blackswan_honest_fallback?: boolean;
   };
 }
 
@@ -2351,6 +2366,8 @@ async function callSwanBotAIStructured(
       if (data.provider_routed) routing.provider_routed = data.provider_routed;
       if (data.provider_model) routing.provider_model = data.provider_model;
       if (data.routing_fallback) routing.routing_fallback = data.routing_fallback;
+      if (data.blackswan_ghost_retry) routing.blackswan_ghost_retry = true;
+      if (data.blackswan_honest_fallback) routing.blackswan_honest_fallback = true;
       return {
         response: data.response,
         usage: data.usage,
@@ -4119,11 +4136,13 @@ export async function executeToolUseLoop(opts: {
       return { response: data?.response || 'Tool-use call failed.', toolEvents, routing: routingInfo, incomplete: true };
     }
 
-    if (!routingInfo && (data.provider_routed || data.routing_fallback)) {
+    if (!routingInfo && (data.provider_routed || data.routing_fallback || data.blackswan_ghost_retry || data.blackswan_honest_fallback)) {
       routingInfo = {};
       if (data.provider_routed) routingInfo.provider_routed = data.provider_routed;
       if (data.provider_model) routingInfo.provider_model = data.provider_model;
       if (data.routing_fallback) routingInfo.routing_fallback = data.routing_fallback;
+      if (data.blackswan_ghost_retry) routingInfo.blackswan_ghost_retry = true;
+      if (data.blackswan_honest_fallback) routingInfo.blackswan_honest_fallback = true;
     }
 
     // FAIL-VISIBLE BlackSwan failover: the relay fail-closed shape is an

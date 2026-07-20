@@ -13819,7 +13819,7 @@ function MessageRow({
         <View
           style={[
             styles.enhancedMsgBubble,
-            item.isBot && {
+            item.isBot && !item.routing?.blackswan_honest_fallback && {
               borderColor: hovered ? accentColor : accentColor + 'aa',
               backgroundColor: accentColor + '12',
               ...(Platform.OS === 'web'
@@ -13838,7 +13838,12 @@ function MessageRow({
         >
           {renderContent(item)}
         </View>
-        
+        {item.isBot && item.routing?.blackswan_honest_fallback && (
+          <Text style={[styles.msgTime, { marginLeft: 0, marginTop: 2 }]}>
+            couldn't form a full answer this time — try rephrasing
+          </Text>
+        )}
+
         {hovered && (
           <View
             style={[styles.enhancedHoverActions, { backgroundColor: accentColor + '20' }]}
