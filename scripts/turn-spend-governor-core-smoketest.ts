@@ -256,6 +256,11 @@ function main(): void {
   // ─── (7) MIN / MAX clamps on the composed cap ─────────────────────────────
   const huge = resolveEffectiveTurnCap({ perTurnSoftCapUsd: 1000, taskValue: 1 });
   assertEq(huge.cap, MAX_TURN_CAP_USD, '(7) 1000 x1.4 clamps to MAX_TURN_CAP_USD (25)');
+  // regression: a near-MAX_VALUE soft cap with taskValue>0.5 overflows baseCap*mult
+  // to +Infinity; the overflowed-too-large product must clamp to the MAX ceiling
+  // (25), NOT collapse to MIN (0.02) via clampNumber's non-finite -> lo floor.
+  const overflowCap = resolveEffectiveTurnCap({ perTurnSoftCapUsd: 1.3e308, taskValue: 1 });
+  assertEq(overflowCap.cap, MAX_TURN_CAP_USD, '(7) overflow soft cap 1.3e308 x1.4 -> +Infinity clamps to MAX (25), not MIN');
   const tiny = resolveEffectiveTurnCap({ perTurnSoftCapUsd: 0.0001, taskValue: 0 });
   assertEq(tiny.cap, MIN_TURN_CAP_USD, '(7) 0.0001 x0.6 clamps up to MIN_TURN_CAP_USD (0.02)');
   assert(huge.cap <= ABSOLUTE_MAX_TURN_USD, '(7) real cap never exceeds the absolute backstop');

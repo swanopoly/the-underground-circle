@@ -157,6 +157,12 @@ const NUL = String.fromCharCode(0);
   ]) {
     assertEq(endsDangling(t), false, `dangling false: ${JSON.stringify(t.slice(-16))}`);
   }
+  // regression: a complete sentence whose true final word is a bare number must NOT
+  // read as dangling. The trailing-word check must derive the last word from the last
+  // token only; stripping across token boundaries would strip "8081" and expose the
+  // preceding "is" as a false dangling conjunction (would nag a finished answer).
+  assertEq(endsDangling('The port is 8081'), false, 'number-ending sentence not dangling (regression)');
+
   // dangling surfaces as a HIGH defect in a full scan
   const r = scan('I started the migration and');
   assert(hasKind(r, 'dangling_sentence'), 'dangling defect present');

@@ -619,10 +619,12 @@ export function endsDangling(text: unknown): boolean {
       return true; // bare separator / dash
     }
 
-    // TRUE: a trailing conjunction / preposition word.
-    const wordCore = trimmed.replace(/[^A-Za-z]+$/, '');
-    const wm = wordCore.match(/[A-Za-z]+$/);
-    if (wm && DANGLING_WORDS.has(wm[0].toLowerCase())) return true;
+    // TRUE: a trailing conjunction / preposition word. Derive the final word from the
+    // LAST whitespace-delimited token only (optionally wrapped in punctuation), so a
+    // bare number/version/port ("8081", "42", "v2", "2026") cannot expose the word
+    // BEFORE it (is/on/to/the) as a false dangling conjunction.
+    const wm = lastToken.match(/^[^A-Za-z]*([A-Za-z]+)[^A-Za-z]*$/);
+    if (wm && DANGLING_WORDS.has(wm[1].toLowerCase())) return true;
 
     // TRUE: an unmatched trailing quote (opened a quotation, said nothing).
     if (lastRaw === '"' || lastRaw === "'" || lastRaw === '`') {

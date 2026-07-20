@@ -267,7 +267,13 @@ export function resolveEffectiveTurnCap(input: {
     const v = vRaw === null ? DEFAULT_TASK_VALUE : clampNumber(vRaw, 0, 1);
     const mult = MIN_VALUE_MULT + v * (MAX_VALUE_MULT - MIN_VALUE_MULT);
     const ceiling = Math.min(MAX_TURN_CAP_USD, ABSOLUTE_MAX_TURN_USD);
-    const cap = clampNumber(baseCap * mult, MIN_TURN_CAP_USD, ceiling);
+    // baseCap >= 0 and mult ∈ [0.6, 1.4] > 0, so the only non-finite product is
+    // +Infinity (overflow of a near-MAX_VALUE soft cap), which must map to the
+    // ceiling — NOT clampNumber's conservative non-finite -> lo floor, which
+    // would wrongly collapse a too-large cap to MIN. Finite products (incl. the
+    // exhausted-budget product 0) pass through unchanged.
+    const product = baseCap * mult;
+    const cap = clampNumber(Number.isFinite(product) ? product : ceiling, MIN_TURN_CAP_USD, ceiling);
     return { cap, capped: true };
   } catch {
     // Last-resort totality net: treat as uncapped so the backstop guards.

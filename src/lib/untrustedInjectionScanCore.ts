@@ -280,8 +280,10 @@ const WHITESPACE_RUN = /\s+/g;
 /**
  * Strip control / line-separator / invisible-format chars and collapse
  * whitespace so a surfaced excerpt cannot smuggle instructions or forge fence
- * structure when re-embedded. Runs AFTER redaction so the `[REDACTED]` mask
- * (which contains only safe visible chars) is preserved intact.
+ * structure when re-embedded. Runs BETWEEN buildExcerpt's two redaction passes:
+ * removing the invisible chars here collapses an invisible-split secret back to
+ * its contiguous shape so the SECOND redact can mask it, while the first
+ * redact's `[REDACTED]` mask (only safe visible chars) passes through intact.
  */
 function normalizeExcerpt(input: string): string {
   let out = input;
@@ -304,9 +306,15 @@ function normalizeExcerpt(input: string): string {
 }
 
 /**
- * Build a secret-safe, bounded excerpt from a matched substring: redact first
- * (so a live secret is MASKED, never echoed), normalize control/whitespace,
- * then clamp to maxExcerpt. Never throws.
+ * Build a secret-safe, bounded excerpt from a matched substring. Redact FIRST
+ * (so an already-contiguous live secret is MASKED, never echoed), then normalize
+ * control/invisible/whitespace, then redact AGAIN, then clamp to maxExcerpt.
+ * The second redact is load-bearing: normalization strips zero-width/Tag chars
+ * an attacker may have inserted INSIDE a secret to dodge the first pass, which
+ * collapses that secret back to contiguous form — only a post-normalize redact
+ * can then mask it. The `[REDACTED]` mask (safe visible chars only) is produced
+ * last, so nothing reintroduces plaintext. Clamp stays last so a mask straddling
+ * the cap truncates to mask fragments, never to a secret fragment. Never throws.
  */
 function buildExcerpt(matched: string, maxExcerpt: number): string {
   let s = matched;
@@ -318,6 +326,16 @@ function buildExcerpt(matched: string, maxExcerpt: number): string {
   }
   if (typeof s !== 'string') s = '';
   s = normalizeExcerpt(s);
+  // De-smuggling pass: normalization above collapsed any invisible-split secret
+  // back to its contiguous shape, so re-run redaction to mask a secret that
+  // dodged the first pass. Guarded exactly like the first redact — never fatal.
+  try {
+    const red2 = redactSecrets(s);
+    if (red2 && typeof red2.text === 'string') s = red2.text;
+  } catch {
+    /* keep the normalized text; a failing redact must never break the scan */
+  }
+  if (typeof s !== 'string') s = '';
   if (s.length > maxExcerpt) s = s.slice(0, maxExcerpt);
   return s;
 }
