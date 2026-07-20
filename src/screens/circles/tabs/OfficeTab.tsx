@@ -10,6 +10,7 @@ import { OfficeIntelligenceSection, OfficeRuntimeSection, OfficeWorkspaceSection
 import { OFFICE_DESK_POSITIONS, OFFICE_FLOOR_HEIGHT, OFFICE_FLOOR_WIDTH } from './office/officeFloorLayout';
 import CustomizePanel, { TelegramConfig } from './office/CustomizePanel';
 import McpPanel from './office/McpPanel';
+import FileLeasePanel from './office/FileLeasePanel';
 import type { OfficeCommand } from './office/OfficeChat';
 import {
   OfficeAgent,
@@ -4008,6 +4009,10 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       {/* X7 tail (P53): per-lane chat quality — warn/danger-only, silent when
           healthy; self-polls the session lane-health registry (P48). */}
       <OfficeLaneHealthStrip />
+      {/* Visible multi-agent file-lease map — which files connected agents
+          currently have claimed, so nobody edits the same file twice.
+          Collapsed by default; silent-count badge only. */}
+      <FileLeasePanel userId={currentUserId} />
       <OfficeConnectBridgesSection circleId={circleId} />
 
       {/* Marquee ticker removed — too noisy for the Office view */}
