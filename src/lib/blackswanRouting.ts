@@ -324,15 +324,25 @@ export function shouldUseBlackSwanForAuto(
 export function shouldUseToolExecutorInsteadOfBlackSwan(
   modelId: string | null | undefined,
   runtimeToolNames?: string[] | null,
+  // 2026-07-20: chat/swanbot/openswan integration audit found this swap was
+  // previously blind to Stage-1's computer/app/browser task classification
+  // (src/lib/chatComputerRequestRouter.ts) — it only looked at whether THIS
+  // turn's tool-planner happened to recommend a non-empty tool list, so a
+  // message the router positively classified as a computer task could still
+  // reach BlackSwan directly if the planner's list came back empty for that
+  // turn. Passing true here closes that gap without changing behavior for
+  // any existing caller that omits it (defaults falsy).
+  isRoutedComputerTask?: boolean,
 ): boolean {
-  return isBlackSwanModel(modelId) && !!runtimeToolNames?.length;
+  return isBlackSwanModel(modelId) && (!!runtimeToolNames?.length || !!isRoutedComputerTask);
 }
 
 export function resolveOpenSwanToolLoopModel(
   modelId: string | null | undefined,
   runtimeToolNames?: string[] | null,
+  isRoutedComputerTask?: boolean,
 ): string {
-  if (shouldUseToolExecutorInsteadOfBlackSwan(modelId, runtimeToolNames)) {
+  if (shouldUseToolExecutorInsteadOfBlackSwan(modelId, runtimeToolNames, isRoutedComputerTask)) {
     return BLACKSWAN_TOOL_EXECUTOR_MODEL_ID;
   }
   return modelId || BLACKSWAN_TOOL_EXECUTOR_MODEL_ID;

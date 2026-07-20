@@ -65,7 +65,7 @@ import { OPENSWAN_RUNTIME_PLAN_VERSION } from './openswanRuntimePlan';
 import type { ConnectedProviderSet } from './serviceProfileSouls';
 import { buildUserTaskPipelinePromptBlock } from './userTaskPipelines';
 import { buildComputerAppTaskStrategyPromptBlock } from './computerAppTaskStrategy';
-import { buildChatComputerRequestRoutePromptBlock, resolveChatComputerConstraintInputs } from './chatComputerRequestRouter';
+import { buildChatComputerRequestRoute, buildChatComputerRequestRoutePromptBlock, resolveChatComputerConstraintInputs } from './chatComputerRequestRouter';
 import { buildComputerAppGroundingPromptBlock } from './computerAppGrounding';
 import { buildComputerAppExecutionReceiptPromptBlock } from './computerAppExecutionReceipts';
 import { buildDesignAppAutomationPromptBlock } from './designAppAutomation';
@@ -551,6 +551,16 @@ async function runTypedCoreToolLoop(args: {
   activeSoulKey?: string;
   activePluginIds?: string[];
   allowedToolNames: string[];
+  /**
+   * True when chatComputerRequestRouter positively classified this turn as
+   * a computer/app/browser task (see buildChatComputerRequestRoute's
+   * `.kind`), independent of whether `allowedToolNames` happens to be
+   * non-empty for this specific turn. Closes a gap where a routed computer
+   * task with an empty tool-planner recommendation still reached BlackSwan's
+   * raw text path instead of the tool executor — see
+   * resolveOpenSwanToolLoopModel's isRoutedComputerTask param.
+   */
+  isRoutedComputerTask?: boolean;
   surface: 'main_chat' | 'room_chat';
   mode?: string | null;
   maxToolRounds?: number;
@@ -581,7 +591,7 @@ async function runTypedCoreToolLoop(args: {
   // non-BlackSwan planner, so the BlackSwan swap never applies here).
   const loopModel = args.codingPlanSplit
     ? args.codingPlanSplit.executorModelId
-    : resolveOpenSwanToolLoopModel(args.model, args.allowedToolNames);
+    : resolveOpenSwanToolLoopModel(args.model, args.allowedToolNames, args.isRoutedComputerTask);
   const blackswanGroundingBlock = isBlackSwanModel(args.model)
     ? buildBlackSwanGroundingBlock({
         model: args.model,
@@ -1083,6 +1093,12 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   const standardsPrompt = buildRelevantAgentDevelopmentStandardsPromptBlock(cleanMessage, { mode: opts.mode || null });
   const pipelinePrompt = buildUserTaskPipelinePromptBlock(cleanMessage, { limit: 3 });
   const computerRequestRoutePrompt = buildChatComputerRequestRoutePromptBlock(cleanMessage);
+  // Cheap, pure re-classification (no I/O) just for the boolean signal —
+  // see isRoutedComputerTask below. buildChatComputerRequestRoutePromptBlock
+  // above computes the same route internally but only returns formatted
+  // text, so this is the smallest way to get `.kind` without touching that
+  // function's ~20 existing callers.
+  const isRoutedComputerTask = !!buildChatComputerRequestRoute(cleanMessage);
   const computerAppStrategyPrompt = buildComputerAppTaskStrategyPromptBlock(cleanMessage);
   const computerAppGroundingPrompt = buildComputerAppGroundingPromptBlock(cleanMessage);
   const computerAppReceiptPrompt = buildComputerAppExecutionReceiptPromptBlock(cleanMessage);
@@ -1724,6 +1740,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
             activeSoulKey,
             activePluginIds: opts.activePluginIds,
             allowedToolNames: runtimeToolNames,
+            isRoutedComputerTask,
             surface: surfaceForTools,
             mode: opts.mode || null,
             maxToolRounds: toolRoundBudget,

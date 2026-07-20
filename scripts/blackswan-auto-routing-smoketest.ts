@@ -24,6 +24,7 @@ import {
   resolveComputerTaskPlannerModel,
   resolveOpenSwanToolLoopModel,
   shouldEscalateBlackSwanToFrontier,
+  shouldUseToolExecutorInsteadOfBlackSwan,
 } from '../src/lib/blackswanRouting';
 import { getModelCapabilityFlags } from '../src/lib/modelCapabilities';
 
@@ -150,6 +151,30 @@ const WITHOUT_BLACKSWAN = new Set(['anthropic']);
   expect(
     resolveOpenSwanToolLoopModel('claude-sonnet-4-6', ['memory.search']) === 'claude-sonnet-4-6',
     'non-BlackSwan models pass through the swap untouched',
+  );
+  // 2026-07-20 fix: the swap used to depend ONLY on this turn's tool-planner
+  // recommendation list, so a message the router positively classified as a
+  // computer/app/browser task could still miss the swap if that list came
+  // back empty. isRoutedComputerTask closes that gap independent of tools.
+  expect(
+    resolveOpenSwanToolLoopModel(BLACKSWAN_ENDPOINT_MODEL_ID, [], true) === 'claude-haiku-4-5',
+    'a routed computer task swaps BlackSwan for the executor even with an empty tool list',
+  );
+  expect(
+    resolveOpenSwanToolLoopModel(BLACKSWAN_ENDPOINT_MODEL_ID, [], false) === BLACKSWAN_ENDPOINT_MODEL_ID,
+    'a non-routed turn with an empty tool list still leaves BlackSwan untouched (no regression)',
+  );
+  expect(
+    resolveOpenSwanToolLoopModel(BLACKSWAN_ENDPOINT_MODEL_ID) === BLACKSWAN_ENDPOINT_MODEL_ID,
+    'omitting isRoutedComputerTask entirely defaults falsy — fully backward compatible',
+  );
+  expect(
+    shouldUseToolExecutorInsteadOfBlackSwan(BLACKSWAN_ENDPOINT_MODEL_ID, null, true) === true,
+    'shouldUseToolExecutorInsteadOfBlackSwan itself also honors isRoutedComputerTask with a null tool list',
+  );
+  expect(
+    shouldUseToolExecutorInsteadOfBlackSwan('claude-sonnet-4-6', [], true) === false,
+    'isRoutedComputerTask never swaps a non-BlackSwan model (the swap is BlackSwan-only by design)',
   );
   // No memoryReferences (both real call sites — swanbot.ts and
   // openswanSessionRuntime.ts — invoke this without any): the bare
