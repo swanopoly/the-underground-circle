@@ -53,6 +53,9 @@ import {
 import { createRunAndFixGateState, foldRunAndFixRound, markNudgeSent, planVerificationNudge } from './runAndFixGateCore';
 import { buildUserActionReceipt } from './userActionReceiptCore';
 import { estimateRunCostUsd } from './runCostRollupCore';
+import { resolveCapabilityFallback } from './capabilityFallbackCore';
+import { getModelCapabilityFlags } from './modelCapabilities';
+import { getModelContextWindow } from './modelContextBudgetCore';
 import { appendOpenSwanTranscriptEvent, buildOpenSwanTranscriptKey, upsertOpenSwanTranscriptHeader, type OpenSwanSessionTranscript } from './openswanTranscripts';
 import { executeOpenSwanVerificationPlan, type OpenSwanVerificationResult } from './openswanVerificationRuntime';
 import { getSwanBotStructuredResponse, executeToolUseLoop, buildStreamableSystemPrompt, type SwanBotContext, type SwanBotStructuredArtifact, type SwanBotStructuredResponse } from './swanbot';
@@ -587,9 +590,22 @@ async function runTypedCoreToolLoop(args: {
   // P5: when a coding plan/execute split is active the loop runs on the
   // chosen fast executor (the split decider already required a strong,
   // non-BlackSwan planner, so the BlackSwan swap never applies here).
-  const loopModel = args.codingPlanSplit
+  const baseLoopModel = args.codingPlanSplit
     ? args.codingPlanSplit.executorModelId
     : resolveOpenSwanToolLoopModel(args.model, args.allowedToolNames);
+  // Capability fallback: if the resolved executor model lacks a needed capability
+  // (here: tool use — the headline hazard is a user picking a no-tool model while
+  // tools are enabled), swap to a tool-capable platform default. Fail-open: returns
+  // the same model unchanged when there's no gap — the same operation class as the
+  // BlackSwan grounding swap resolveOpenSwanToolLoopModel already performs.
+  const loopModel = resolveCapabilityFallback(
+    {
+      model: baseLoopModel,
+      flags: getModelCapabilityFlags(baseLoopModel),
+      contextWindow: getModelContextWindow(baseLoopModel),
+    },
+    { toolUse: true },
+  ).model;
   const blackswanGroundingBlock = isBlackSwanModel(args.model)
     ? buildBlackSwanGroundingBlock({
         model: args.model,
