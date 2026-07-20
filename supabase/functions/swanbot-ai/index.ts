@@ -2585,10 +2585,40 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   // its dominant symptom — sparser non-Latin characters within the same
   // response (only 3 stray CJK characters in ~1600 chars) were too sparse to
   // trip the density check above, so this catches that response via a much
-  // safer signal: genuine replies (even ones that legitimately bold a
-  // "**Done:**"/"**Next:**" label or two) essentially never use 8+ short
-  // bold spans in one message.
-  if ((text.match(/\*\*[^*]{1,60}\*\*/g) || []).length >= 8) return true;
+  // safer signal.
+  //
+  // Originally a bare count (>=8 short bold spans). An independent review
+  // fleet found and verified that a raw count false-positives hard on
+  // completely ordinary bolded lists this app produces routinely — an
+  // 8-person weekly streak digest ("**Chris**: 5-day streak", one bold name
+  // per line), an 8-step plan ("**Step 1:** ...", one bold label per step).
+  // Both are 8+ DISTINCT bold spans with no real repetition, nothing like
+  // the original evidence's spans, which shared content words across many
+  // of them ("specific task details" in 2 spans, "SIXTY" in 2 spans, etc.).
+  // Now requires that repetition: at least 3 distinct content words (3+
+  // chars, stopwords excluded) each appear inside 2+ different bold spans —
+  // verified this still catches the original evidence (content words like
+  // "task"/"specific"/"details"/"sixty" recur across spans) while a
+  // digest/step-list bolding 8+ genuinely distinct items does not.
+  const boldSpans = text.match(/\*\*[^*]{1,60}\*\*/g) || [];
+  if (boldSpans.length >= 8) {
+    const spanStopwords = new Set(["a", "an", "the", "and", "or", "but", "is", "was", "are", "were", "has", "have", "had", "not", "no", "it", "this", "that", "to", "of", "in", "on", "at", "for", "with", "as", "if", "they"]);
+    const wordSpanCounts = new Map<string, number>();
+    for (const span of boldSpans) {
+      const spanWords = (span.toLowerCase().match(/[a-z]+/g) || []).filter((w) => w.length >= 3 && !spanStopwords.has(w));
+      const seenInSpan = new Set<string>();
+      for (const w of spanWords) {
+        if (seenInSpan.has(w)) continue;
+        seenInSpan.add(w);
+        wordSpanCounts.set(w, (wordSpanCounts.get(w) || 0) + 1);
+      }
+    }
+    let wordsSharedAcrossSpans = 0;
+    for (const count of wordSpanCounts.values()) {
+      if (count >= 2) wordsSharedAcrossSpans++;
+    }
+    if (wordsSharedAcrossSpans >= 3) return true;
+  }
 
   // Repetition-loop detector: any 20+ char sliding window that recurs 3+
   // times verbatim is the hallmark of the non-terminating loop failure mode
@@ -2636,18 +2666,34 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   // lines), word-salad rather than exact repeated text, so neither the
   // 24-char verbatim window nor the 50-char sentence-repeat check fires.
   // Distinctive symptom here isn't repeated TEXT, it's the LINE STRUCTURE:
-  // mostly very short (<25 char), unpunctuated fragments — a genuine reply
-  // (even a numbered task list or a Done/Next update) is essentially always
-  // either a few substantive lines or short lines that still end in real
-  // punctuation. Requires at least 10 non-empty lines before checking the
-  // ratio, specifically to avoid flagging ordinary short multi-line replies
-  // (verified: a 7-line genuine task list and a 4-line Done/Next update
-  // both score well under the 0.6 threshold; this only fires on responses
-  // that are both long AND structurally degenerate throughout).
+  // mostly very short (<25 char), unpunctuated fragments.
+  //
+  // The line-shortness ratio alone isn't enough, though — an independent
+  // review fleet found and verified it false-positives on completely
+  // ordinary short-line answers this app produces routinely: a 12-item
+  // numbered task list, a 10-step walkthrough, a 10-person team roster.
+  // Those are ALSO >=10 lines that are mostly short and unpunctuated, but
+  // each line carries real, distinguishing content (a name, a number, a
+  // task title) — genuine garbling instead draws from a tiny, constantly-
+  // recombined vocabulary ("QA"/"blac"/"got"/"swan"/"car" account for most
+  // of the words in the live evidence). Requires BOTH the line-shortness
+  // ratio above 0.6 AND low lexical diversity among the words used across
+  // those short lines (unique-word-or-number ratio below 0.35) — verified
+  // this distinguishes all 4 genuine cases above (ratios 0.36-1.0) from the
+  // live garbled evidence (ratio 0.19).
   const nonEmptyLines = text.split("\n").map((l) => l.trim()).filter(Boolean);
   if (nonEmptyLines.length >= 10) {
     const degenerateLines = nonEmptyLines.filter((l) => l.length < 25 && !/[.!?:]$/.test(l));
-    if (degenerateLines.length / nonEmptyLines.length >= 0.6) return true;
+    if (degenerateLines.length / nonEmptyLines.length >= 0.6) {
+      const lineStopwords = new Set(["a", "an", "the", "and", "or", "but", "is", "was", "are", "were", "to", "of", "in", "on", "at", "for", "with", "as"]);
+      const tokens: string[] = [];
+      for (const line of degenerateLines) {
+        const lineTokens = (line.toLowerCase().match(/[a-z']+|\d+/g) || []).filter((t) => !lineStopwords.has(t));
+        tokens.push(...lineTokens);
+      }
+      const uniqueTokens = new Set(tokens);
+      if (tokens.length > 0 && uniqueTokens.size / tokens.length < 0.35) return true;
+    }
   }
 
   // 2026-07-17: a third distinct loop shape found live in the same testing
@@ -2658,16 +2704,28 @@ function looksLikeGarbledBlackSwanOutput(text: string): boolean {
   // neither the sentence-repeat check (the surrounding sentences differ) nor
   // the line-structure check above (these lines aren't short/unpunctuated)
   // fires. Flags any exact 4-word phrase (12+ chars, to skip trivial
-  // stopword n-grams) that recurs 4+ times anywhere in the response — a
-  // genuine answer essentially never repeats the same 4-word phrase that
-  // many times. Verified against 9 genuine longer/list-shaped/digest-style
-  // replies already covered by the tests above plus 4 more borderline
-  // stress cases (a 4-item numbered list, a task referenced 3x across one
-  // sentence, 4 short "today"-ending sentences, a facts block) — none trip
-  // this at the 4-occurrences threshold.
+  // stopword n-grams) that recurs 4+ times anywhere in the response.
+  //
+  // Deliberately skips windows starting within the first 2 words of their
+  // containing sentence — an independent review fleet found and verified
+  // that without this exclusion, a genuine templated/parallel answer (4
+  // reminders/FAQ entries that intentionally open the same way, e.g. "You
+  // should always check in ..." or "**Q: How do I ...**") false-positives:
+  // a real shared opener phrase produces not just itself but also several
+  // "shifted" overlapping windows starting 1 word later, which also recur
+  // 4 times as an artifact of the sliding scan, not because of any actual
+  // garbling. Genuine loop garbling (the live evidence) repeats its phrase
+  // in scattered, non-opener positions, so excluding true sentence-openers
+  // still catches it while sparing legitimate parallel-structure answers.
+  const sentenceSegments = text.split(/[.!?\n]+/).map((s) => s.trim().toLowerCase().replace(/\s+/g, " ")).filter(Boolean);
+  const wordPositionInSentence: number[] = [];
+  for (const segment of sentenceSegments) {
+    segment.split(" ").forEach((_, idx) => wordPositionInSentence.push(idx));
+  }
   const words = text.toLowerCase().replace(/\s+/g, " ").trim().split(" ");
   const phraseCounts = new Map<string, number>();
   for (let i = 0; i + 4 <= words.length; i++) {
+    if ((wordPositionInSentence[i] ?? 99) < 2) continue;
     const phrase = words.slice(i, i + 4).join(" ");
     if (phrase.length < 12) continue;
     const count = (phraseCounts.get(phrase) || 0) + 1;
@@ -2722,23 +2780,42 @@ function stripBlackSwanReasoningTextRaw(text: string | null): string | null {
   // for containing the tag. Extract the content after the closing tag
   // first, so a real answer underneath survives.
   //
-  // Deliberately matches on the CLOSING </think> tag alone, not requiring a
-  // literal opening <think> tag first — live direct-endpoint testing found
-  // the model's chat template evidently auto-opens the think block before
-  // generation starts, so the raw completion routinely begins mid-reasoning
-  // ("Thinking about the user's request...") and only the closing tag
-  // itself appears in the text. Requiring both tags (an earlier version of
-  // this fix did) missed that shape entirely, silently discarding a
-  // perfectly good, fact-correct answer written right after the lone
-  // closing tag. An opening tag with NO closing tag (generation cut off
-  // mid-reasoning) is still correctly left alone here — nothing to match on
-  // — so it still falls through to the garbling check below as a genuine
-  // leaked-reasoning failure; there's no reliable "end of reasoning"
-  // boundary to salvage an answer from in that case.
-  const closeThinkMatch = trimmed.match(/<\/think>\s*([\s\S]*)/i);
-  if (closeThinkMatch) {
-    const afterClose = closeThinkMatch[1].trim();
-    if (afterClose) trimmed = afterClose;
+  // Step 1: strip ALL well-formed <think>...</think> pairs (there may be
+  // more than one reasoning segment). An independent review fleet found
+  // and verified that an earlier version of this fix only matched the
+  // FIRST closing tag, so a second <think>...</think> pair left in the
+  // "salvaged" remainder would re-trip BLACKSWAN_GARBLE_THINK_TAG_RE and
+  // discard an otherwise-good final answer written after it.
+  const pairsStripped = trimmed.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  if (pairsStripped && pairsStripped !== trimmed) trimmed = pairsStripped;
+
+  // Step 2: a LONE closing tag with no matching opener (chat template
+  // evidently auto-opens the block before generation starts, so the raw
+  // completion routinely begins mid-reasoning — "Thinking about the
+  // user's request..." — and only the closing tag itself appears in the
+  // text) — take content after the LAST such occurrence.
+  //
+  // Guards against tripping on genuine prose that merely mentions/quotes
+  // the tag (e.g. "...a stray </think> tag before the real answer...") —
+  // also found and verified by the same review — by requiring the text
+  // right after the tag NOT read like a description of the tag itself;
+  // real model-emitted delimiters are never immediately followed by a word
+  // like "tag"/"marker" naming what they are. When that guard trips, the
+  // text is left untouched (still containing the tag), which correctly
+  // falls through to the garbling check below and degrades to the honest
+  // fallback message rather than showing truncated, confusing text — an
+  // acceptable outcome for what should be an exceedingly rare edge case
+  // for this app's actual question domain.
+  const closeTagRe = /<\/think>\s*/gi;
+  let lastCloseEnd = -1;
+  let closeMatch: RegExpExecArray | null;
+  while ((closeMatch = closeTagRe.exec(trimmed)) !== null) {
+    lastCloseEnd = closeMatch.index + closeMatch[0].length;
+  }
+  if (lastCloseEnd >= 0) {
+    const afterClose = trimmed.slice(lastCloseEnd).trim();
+    const looksLikeTagMention = /^[`'")\]]*\s*(?:tag|tags|marker|markers|block|blocks|token|delimiter)\b/i.test(afterClose);
+    if (afterClose && !looksLikeTagMention) trimmed = afterClose;
   }
 
   const reasoningPrefix = /^\s*(?:Thinking Process|Thought Process|Reasoning|Chain[- ]of[- ]Thought)\s*:\s*/i;

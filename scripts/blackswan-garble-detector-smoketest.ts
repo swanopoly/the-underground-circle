@@ -194,6 +194,24 @@ assert(
   'a genuine reply with 2 bold labels (e.g. Done/Next) is NOT flagged',
   looksLikeGarbledBlackSwanOutput("Update:\n**Done:** shipped the fix\n**Next:** writing tests\nAnything I'm missing?") === false,
 );
+// Fixed via independent review fleet (2026-07-17): a bare "8+ bold spans"
+// count false-positived on completely ordinary bolded lists this app
+// produces routinely — a weekly digest bolding each teammate's name once,
+// or a plan bolding each step label once. Both are 8+ DISTINCT spans with
+// no real repetition, unlike the garbled evidence above (whose spans share
+// content words: "specific task details" in 2 spans, "SIXTY" in 2 spans).
+assert(
+  'a genuine 8-person weekly digest (one bold name per line) is NOT flagged',
+  looksLikeGarbledBlackSwanOutput(
+    "🦋 Here's your weekly digest:\n**Chris**: 5-day streak, 3 tasks done\n**Sam**: 2-day streak, 1 task done\n**Jamie**: 7-day streak, 4 tasks done\n**Alex**: 1-day streak, 0 tasks done\n**Morgan**: 4-day streak, 2 tasks done\n**Taylor**: 6-day streak, 5 tasks done\n**Jordan**: 3-day streak, 2 tasks done\n**Casey**: 0-day streak, 0 tasks done\nKeep up the great work, team!",
+  ) === false,
+);
+assert(
+  'a genuine 8-step plan (one bold step label per line) is NOT flagged',
+  looksLikeGarbledBlackSwanOutput(
+    '**Step 1:** Review the PR\n**Step 2:** Merge if green\n**Step 3:** Deploy to staging\n**Step 4:** Smoke test\n**Step 5:** Deploy to prod\n**Step 6:** Announce in Circle\n**Step 7:** Close the task\n**Step 8:** Celebrate',
+  ) === false,
+);
 
 // Found live (round 5 QA fleet, 2026-07-17): a bare colon-terminated label
 // slipped past the <5-char near-empty check.
@@ -335,6 +353,30 @@ assert(
   'a genuine Done/Next update (short lines, but not degenerate-shaped) is NOT flagged',
   looksLikeGarbledBlackSwanOutput("Update:\n**Done:** shipped the fix\n**Next:** writing tests\nAnything I'm missing?") === false,
 );
+// Fixed via independent review fleet (2026-07-17): the line-shortness ratio
+// alone false-positived on genuine short-line answers this app produces
+// routinely — a 12-item numbered task list, a 10-step app walkthrough, a
+// 10-person team roster. These ARE >=10 lines that are mostly short and
+// unpunctuated, but each line carries real, distinguishing content (a
+// name, a number), unlike the garbled evidence above which draws from a
+// tiny, constantly-recombined vocabulary. Now also requires low lexical
+// diversity among the words/numbers used across those short lines.
+assert(
+  'a genuine 12-item numbered task list is NOT flagged',
+  looksLikeGarbledBlackSwanOutput('1. Task 1\n2. Task 2\n3. Task 3\n4. Task 4\n5. Task 5\n6. Task 6\n7. Task 7\n8. Task 8\n9. Task 9\n10. Task 10\n11. Task 11\n12. Task 12') === false,
+);
+assert(
+  'a genuine 10-step app walkthrough is NOT flagged',
+  looksLikeGarbledBlackSwanOutput(
+    '1. Open the app\n2. Tap Feed\n3. Tap the + button\n4. Enter a title\n5. Pick a due date\n6. Assign to yourself\n7. Add a description\n8. Tap Save\n9. Confirm it appears\n10. Done',
+  ) === false,
+);
+assert(
+  'a genuine 10-person team roster (name - streak per line) is NOT flagged',
+  looksLikeGarbledBlackSwanOutput(
+    'Team roster:\nChris - 5 day streak\nDana - 3 day streak\nMarco - 8 day streak\nAna - 1 day streak\nBen - 12 day streak\nSam - 0 day streak\nJo - 6 day streak\nLee - 9 day streak\nMax - 2 day streak\nKai - 4 day streak',
+  ) === false,
+);
 
 // Found via live direct-endpoint testing (2026-07-17, same session as the
 // line-structure check above): a repeated short phrase ("can't create
@@ -351,6 +393,12 @@ You watch Chris (can't create plan).
 You can't take (can't create plan).`;
 assert('a repeated short phrase embedded in otherwise-varying punctuated lines is flagged', looksLikeGarbledBlackSwanOutput(repeatedPhraseSalad) === true);
 assert(
+  'a mid-sentence phrase repeated only 3 times (below the 4-occurrence floor) is NOT flagged',
+  looksLikeGarbledBlackSwanOutput(
+    "It's not a real issue, don't worry about it. He said it's not a real issue too. She agreed it's not a real issue.",
+  ) === false,
+);
+assert(
   'a 4-item numbered list is NOT flagged',
   looksLikeGarbledBlackSwanOutput('1. Fix the login bug\n2. Fix the API docs typo\n3. Fix the deployment script\n4. Fix the test suite') === false,
 );
@@ -361,6 +409,25 @@ assert(
 assert(
   'a genuine reply with 4 short "today"-ending sentences is NOT flagged',
   looksLikeGarbledBlackSwanOutput("🦢 Nice work! You checked in today. You finished your task today. You're on track today.") === false,
+);
+// Fixed via independent review fleet (2026-07-17): flagging ANY 4-word
+// phrase repeating 4+ times (with no exclusion for sentence-openers)
+// false-positived on genuine templated/parallel answers — a reminders list
+// or an FAQ where every entry intentionally opens the same way produces a
+// real shared opener phrase PLUS several overlapping "shifted" windows
+// starting 1 word later, which also recur 4 times as a sliding-scan
+// artifact, not because of any actual garbling.
+assert(
+  'a genuine templated reminders list (4 entries sharing an opener) is NOT flagged',
+  looksLikeGarbledBlackSwanOutput(
+    'You should always check in with your team lead before deploying. You should always check in on the staging environment first. You should always check in with QA before merging. You should always check in on your calendar for conflicts.',
+  ) === false,
+);
+assert(
+  'a genuine FAQ-style answer (4 entries sharing a "**Q: How do I" opener) is NOT flagged',
+  looksLikeGarbledBlackSwanOutput(
+    '**Q: How do I check in?** Tap the check-in button on your home screen.\n\n**Q: How do I add a task?** Use the + button in the Feed tab.\n\n**Q: How do I invite teammates?** Go to Circle settings and share the invite link.\n\n**Q: How do I change my streak goal?** Open Settings > Streak Preferences.',
+  ) === false,
 );
 
 // ─── stripBlackSwanReasoningText ───────────────────────────────────────────
@@ -399,6 +466,45 @@ assert(
   'an unclosed <think> tag (leaked mid-generation, no closing tag at all) is still treated as garbled',
   stripBlackSwanReasoningText('<think>\nHer streak is 0, so I should') === null ||
     stripBlackSwanReasoningText('<think>\nHer streak is 0, so I should')?.startsWith("I couldn't form a clear answer"),
+);
+// Fixed via independent review fleet (2026-07-17): an earlier version only
+// matched the FIRST closing tag, so a SECOND <think>...</think> pair left
+// in the "salvaged" remainder would re-trip the raw tag check and discard
+// an otherwise-good final answer written after it.
+{
+  const multiBlock = stripBlackSwanReasoningText(
+    '<think>\nfirst reasoning\n</think>\nmid text\n<think>\nsecond reasoning\n</think>\n🦋 Final real answer here, all good.',
+  );
+  assert(
+    'a response with TWO well-formed <think> blocks is fully salvaged (no tags remain, final answer present)',
+    typeof multiBlock === 'string' && !multiBlock.includes('<think>') && !multiBlock.includes('</think>') && multiBlock.includes('Final real answer'),
+  );
+}
+// Fixed via independent review fleet (2026-07-17): the unanchored
+// closing-tag match used to also TRUNCATE genuine prose that merely
+// mentions the literal tag as a topic (e.g. explaining what leaked
+// reasoning markup looks like) — the real content before the mention was
+// silently and permanently lost, and the mangled remainder slipped past
+// the garbling check entirely (no more "</think>" left in it to catch).
+// Now the tag-mention guard leaves the text untouched instead of
+// truncating it — since it's still untouched, it still literally contains
+// "</think>" and correctly falls through to the garbling check, degrading
+// to the honest fallback message. That's the acceptable outcome here: for
+// what should be an exceedingly rare edge case (a user asking BlackSwan to
+// explain reasoning-tag internals) in this app's actual question domain,
+// showing the honest "couldn't form a clear answer" message is far better
+// than either truncated garbage or a heuristic guess at reconstruction.
+assert(
+  "genuine prose that mentions the </think> tag as a topic is NOT truncated into garbage (falls back to the honest message instead)",
+  stripBlackSwanReasoningText(
+    "Great question! In this app, a model's raw completion sometimes contains a stray </think> tag before the real answer — that's just leaked reasoning markup, not part of your task list.",
+  )?.startsWith("I couldn't form a clear answer") === true,
+);
+assert(
+  "a backtick-wrapped mention of the `</think>` marker is NOT truncated into garbage (falls back to the honest message instead)",
+  stripBlackSwanReasoningText('Some raw completions include a `</think>` marker before the real answer. length: 12 tasks left this week.')?.startsWith(
+    "I couldn't form a clear answer",
+  ) === true,
 );
 assert(
   'a closed <think> block with nothing written after it is still treated as garbled (no real answer to salvage)',
