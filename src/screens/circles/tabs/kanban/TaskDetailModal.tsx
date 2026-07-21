@@ -26,6 +26,7 @@ import TaskRunTimeline from './TaskRunTimeline';
 import TaskArtifactsPanel from './TaskArtifactsPanel';
 import TaskChecksPanel from './TaskChecksPanel';
 import TaskApprovalsPanel from './TaskApprovalsPanel';
+import TaskNextActionPanel from './TaskNextActionPanel';
 import { useProjectRooms } from '../../../../services/projectRooms';
 import { listCircleIntegrations } from '../../../../lib/circleIntegrations';
 import { getInstalledProviderSet, recommendMarketplaceItemsForWork } from '../../../../lib/marketplaceRecommendations';
@@ -1579,6 +1580,14 @@ export default function TaskDetailModal({ task: initialTask, kanban, agents, goa
                 <Pressable onPress={handleDelete} style={s.deleteBtn}>
                   <Text style={s.deleteBtnText}>Confirm delete</Text>
                 </Pressable>
+              </View>
+            )}
+
+            {/* Surface the agent-computed "next recommended action" persisted
+                per run — until now only read server-side into a prompt. */}
+            {taskRuns.length > 0 && (
+              <View style={{ marginBottom: 16 }}>
+                <TaskNextActionPanel runIds={taskRuns.map(r => r.id)} />
               </View>
             )}
 
