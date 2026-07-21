@@ -224,6 +224,7 @@ import {
 } from '../../../lib/chatAgentIdentity';
 import {
   deriveOutcomeVerdict,
+  browserPlanStatusOutcomeVerdict,
   mapReactionToSignal,
   type ChatOutcomeVerdict,
   type ChatUserSignal,
@@ -6556,6 +6557,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       },
       session.sourceRunId,
     );
+    // Reconcile the receipt verdict with the run's REAL terminal state. The
+    // launch-time stamp froze this message at 'completed'/'blocked'; on a real
+    // terminal status re-stamp so a FAILED run flips its receipt green→red and
+    // unlocks Retry (verdictNeedsRetry), plus records honest flywheel telemetry.
+    // Returns null on the non-terminal 'launched' call, so a live run is never
+    // overwritten. sourceMessageId is guaranteed non-null past the guard above.
+    const reconciledVerdict = browserPlanStatusOutcomeVerdict(status);
+    if (reconciledVerdict) {
+      stampOutcomeSignalRef.current(session.sourceMessageId, { verdict: reconciledVerdict });
+    }
     appendBrowserPlanEvent(session.sourceMessageId, {
       id: `${session.sourcePlanId}:${status}:${Date.now()}`,
       planId: session.sourcePlanId,

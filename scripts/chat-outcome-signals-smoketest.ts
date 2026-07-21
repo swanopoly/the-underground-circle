@@ -15,6 +15,7 @@
 import {
   CHAT_OUTCOME_VERDICTS,
   CHAT_USER_SIGNALS,
+  browserPlanStatusOutcomeVerdict,
   buildOutcomeSignalPayload,
   deriveOutcomeVerdict,
   mapReactionToSignal,
@@ -279,6 +280,30 @@ assert(readOutcomeSignalPayload({ verdict: 'failed' })?.verdict === 'failed', 'r
   });
   const sig = readPersistedOutcomeSignal(readPersistedChatBotMetadata(message) as any);
   assert(sig === null, 'empty outcome signal is not persisted');
+}
+
+// ─── 7. browserPlanStatusOutcomeVerdict (terminal-state re-stamp mapping) ────
+// A browser plan's launch-time verdict is frozen at 'completed'/'blocked'; when
+// the run terminates the caller re-stamps via this mapping so the receipt badge
+// + Retry reconcile with reality. Terminal-only: a non-terminal status returns
+// null so a live run's verdict is never overwritten mid-flight.
+assert(browserPlanStatusOutcomeVerdict('completed') === 'completed', "status 'completed' -> 'completed' re-stamp");
+assert(browserPlanStatusOutcomeVerdict('failed') === 'failed', "status 'failed' -> 'failed' re-stamp (flips green->red, unlocks Retry)");
+assert(browserPlanStatusOutcomeVerdict('launched') === null, "non-terminal 'launched' -> null (do NOT re-stamp a live run)");
+assert(browserPlanStatusOutcomeVerdict('planned') === null, "non-terminal 'planned' -> null");
+assert(browserPlanStatusOutcomeVerdict('approval_requested') === null, "non-terminal 'approval_requested' -> null");
+assert(browserPlanStatusOutcomeVerdict('executing') === null, "non-terminal 'executing' -> null");
+// degenerate / junk inputs never throw and never produce a spurious verdict
+assert(browserPlanStatusOutcomeVerdict('') === null, 'empty string -> null (no throw)');
+assert(browserPlanStatusOutcomeVerdict(undefined) === null, 'undefined -> null (no throw)');
+assert(browserPlanStatusOutcomeVerdict(null) === null, 'null -> null (no throw)');
+assert(browserPlanStatusOutcomeVerdict(42 as any) === null, 'non-string -> null (no throw)');
+assert(browserPlanStatusOutcomeVerdict({} as any) === null, 'object -> null (no throw)');
+assert(browserPlanStatusOutcomeVerdict('Completed' as any) === null, 'case-sensitive: capitalized status -> null (matches plan-card enum exactly)');
+// every non-null result is a valid outcome verdict the receipt/merge understand
+for (const s of ['completed', 'failed']) {
+  const v = browserPlanStatusOutcomeVerdict(s);
+  assert(v !== null && (CHAT_OUTCOME_VERDICTS as readonly string[]).includes(v), `terminal '${s}' maps to a valid ChatOutcomeVerdict`, String(v));
 }
 
 if (failures > 0) {
