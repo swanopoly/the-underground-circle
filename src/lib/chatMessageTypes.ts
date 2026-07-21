@@ -1,8 +1,8 @@
 // chatMessageTypes — shared chat message type declarations (decomposition U0).
 //
-// These types were previously declared inline in
-// `src/screens/circles/tabs/ChatTab.tsx` (ChatMessageSource ~820, ChatMessage
-// ~866, ChatBotMessageExtra ~935). They are the linchpin the decomposition plan
+// SINGLE SOURCE OF TRUTH: these types were previously declared inline in
+// `src/screens/circles/tabs/ChatTab.tsx`; that file now imports them from here
+// (no local mirror remains). They are the linchpin the decomposition plan
 // (docs/CHATTAB_OPENSWANCONSOLE_DECOMPOSITION_PLAN.md, unit U0) needs before the
 // message-coupled cores (U5, U12, and 3 U2 helpers) can be extracted.
 //
@@ -146,6 +146,14 @@ export type ChatBotMessageExtra = {
   quickReplies?: string[];
   localOnly?: boolean;
   runId?: string | null;
+  /**
+   * followup-chips: set true by error-path callers so the outcome verdict can
+   * reach 'failed' (deriveOutcomeVerdict) independently of recoveryOptions —
+   * without it the retry_run chip's emission condition (failed/partial +
+   * canRetry) was exactly its suppression condition (recoveryOptions present)
+   * and the chip was provably unreachable.
+   */
+  hadError?: boolean;
   agentPlan?: AgentPlanDraft | Record<string, unknown>;
   taskPlan?: OpenSwanTaskPlan;
   toolEvents?: OpenSwanToolEvent[];

@@ -11,7 +11,9 @@
  * circle-wide "Needs you" queue) render a single strip instead of each
  * caller inventing its own copy.
  *
- * Pure module: `import type` only, no Supabase/React Native, clock is
+ * Pure module: runtime imports only the dependency-free
+ * `approvalPreviewCore` (age classification), everything else `import type`;
+ * no Supabase/React Native, clock is
  * injectable — smoke-testable via tsx (`npm run smoke:chat-attention-queue`).
  * The module decides wording + ranking + urgency; the UI only renders the
  * typed action descriptors. Approval-floor semantics are untouched: this
@@ -20,6 +22,7 @@
 
 import type { ChatClarificationResumePending } from './runChatAutomationPlan';
 import type { PersistedChatRecoveryOption } from './persistedChatMetadata';
+import { classifyApprovalAge, APPROVAL_EXPIRED_MS } from './approvalPreviewCore';
 
 // ─── Inputs ─────────────────────────────────────────────────────────────────
 
@@ -213,8 +216,25 @@ function approvalItems(
   const items: ChatAttentionItem[] = [];
   for (const approval of approvals) {
     if (!approval || String(approval.status) !== 'pending') continue;
-    const expiresAt = resolveApprovalExpiresAt(approval.requested_at, approval.timeout_seconds);
+    let expiresAt = resolveApprovalExpiresAt(approval.requested_at, approval.timeout_seconds);
     const requestedAt = Date.parse(approval.requested_at);
+    // No-timeout rows (timeout_seconds <= 0 / NULL) have no explicit window,
+    // but the banners (HitlApprovalBanner via
+    // `approvalCardModelCore.isApprovalRowLive`) hide them past the 30-min
+    // `classifyApprovalAge` cap. Mirror that cap here — synthesize the same
+    // 30-min expiry so such rows route into the approval_expired branch
+    // below (Ask again / Dismiss, aging out via expiredVisibilityMs) instead
+    // of sitting as an invisible, unresolvable `approval_pending` forever.
+    // Only narrows: a row this old already shows no live Approve anywhere.
+    // (Not imported from approvalCardModelCore — that would be a cycle; its
+    // null-expiry arm IS classifyApprovalAge, so this is the same predicate.)
+    if (
+      expiresAt === null &&
+      Number.isFinite(requestedAt) &&
+      classifyApprovalAge(now - requestedAt) === 'expired'
+    ) {
+      expiresAt = requestedAt + APPROVAL_EXPIRED_MS;
+    }
     const waitingMs = Number.isFinite(requestedAt) ? Math.max(0, now - requestedAt) : null;
     const what = humanizeActionType(approval.action_type);
     const detail = clampText(approval.description, 160);

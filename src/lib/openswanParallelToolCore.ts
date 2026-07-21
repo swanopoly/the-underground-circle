@@ -174,7 +174,10 @@ export const DEFAULT_PARALLEL_SAFE_TOOLS: ReadonlySet<string> = new Set<string>(
   'desktop.shortcuts_list',
   'desktop.screen_size',
   'desktop.screenshot',
-  'desktop.wait_for_app',
+  // desktop.wait_for_app is deliberately EXCLUDED: it is a temporal
+  // synchronization primitive (blocks until the app is ready), so same-round
+  // neighbours must not dispatch beside it — getOpenSwanToolParallelPolicy
+  // special-cases it into a sequential barrier, and this fallback must agree.
   'desktop.read_a11y_tree',
   'desktop.indesign_document_status',
   'desktop.indesign_text_inventory',

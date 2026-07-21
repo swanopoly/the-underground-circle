@@ -2,6 +2,7 @@ import { supabase } from './supabase';
 import { loadMemories, type MemoryEntry } from './agentRunSystem';
 import { buildPromptMemoryBundle, loadStartupMemory, type PromptMemoryReference } from './memoryService';
 import { filterNovelAgainstAnchors } from './memoryNoveltyFilterCore';
+import { formatProvenanceSuffix } from './memoryProvenanceCore';
 import { loadUserMemory } from './userMemory';
 
 export type OpenSwanMemoryStores = {
@@ -62,9 +63,18 @@ function formatUserProfile(memories: MemoryEntry[], dedupAgainst?: string): stri
       })()
     : ranked;
   if (deduped.length === 0) return '';
+  // Provenance is suffix-only: the legacy line text stays byte-identical and
+  // we append ` [as of … · src:… · #…]` only when the row carries signal.
+  const now = Date.now();
   return `## User Profile\n${
     deduped
-      .map((memory) => `- [${memory.memory_kind}] ${memory.title}: ${memory.content.slice(0, 180)}`)
+      .map((memory) => {
+        const suffix = formatProvenanceSuffix(
+          { source: memory.source_surface, updatedAtMs: memory.updated_at || memory.created_at, id: memory.id },
+          now,
+        );
+        return `- [${memory.memory_kind}] ${memory.title}: ${memory.content.slice(0, 180)}${suffix ? ' ' + suffix : ''}`;
+      })
       .join('\n')
   }`;
 }
@@ -129,17 +139,27 @@ async function formatRuntimeMemory(args: {
     session: memories.filter((memory) => memory.scope === 'session').slice(0, 3),
   };
 
+  // Suffix-only provenance: legacy `- title: content.slice(0,180)` text stays
+  // byte-identical; ` [as of … · src:… · #…]` is appended only when present.
+  const provenance = (memory: MemoryEntry): string => {
+    const suffix = formatProvenanceSuffix(
+      { source: memory.source_surface, updatedAtMs: memory.updated_at || memory.created_at, id: memory.id },
+      now,
+    );
+    return suffix ? ' ' + suffix : '';
+  };
+
   if (grouped.circle.length > 0) {
-    sections.push(`## Circle Runtime Memory\n${grouped.circle.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}`).join('\n')}`);
+    sections.push(`## Circle Runtime Memory\n${grouped.circle.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}${provenance(memory)}`).join('\n')}`);
   }
   if (grouped.room.length > 0) {
-    sections.push(`## Room Runtime Memory\n${grouped.room.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}`).join('\n')}`);
+    sections.push(`## Room Runtime Memory\n${grouped.room.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}${provenance(memory)}`).join('\n')}`);
   }
   if (grouped.agent.length > 0) {
-    sections.push(`## Agent Runtime Memory\n${grouped.agent.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}`).join('\n')}`);
+    sections.push(`## Agent Runtime Memory\n${grouped.agent.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}${provenance(memory)}`).join('\n')}`);
   }
   if (grouped.session.length > 0) {
-    sections.push(`## Session Runtime Memory\n${grouped.session.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}`).join('\n')}`);
+    sections.push(`## Session Runtime Memory\n${grouped.session.map((memory) => `- ${memory.title}: ${memory.content.slice(0, 180)}${provenance(memory)}`).join('\n')}`);
   }
 
   const startup = await loadStartupMemory({

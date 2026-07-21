@@ -37,6 +37,7 @@ const files = {
   browserAiModalAdvisor: fs.readFileSync('src/lib/browserAIModalAdvisor.ts', 'utf8'),
   chatTab: fs.readFileSync('src/screens/circles/tabs/ChatTab.tsx', 'utf8'),
   chatUserFacingOutcomes: fs.readFileSync('src/lib/chatUserFacingOutcomes.ts', 'utf8'),
+  chatRecoveryDisplayCore: fs.readFileSync('src/lib/chatRecoveryDisplayCore.ts', 'utf8'),
   bridge: fs.readFileSync('scripts/claude-bridge.js', 'utf8'),
   pkg: JSON.parse(fs.readFileSync('package.json', 'utf8')),
 };
@@ -234,7 +235,9 @@ assert(files.chatTab.includes('bridge_probe_command_error') && files.chatTab.inc
 assert(files.chatFailureRecovery.includes('buildChatFailureRecoveryFingerprint') && files.chatFailureRecovery.includes('shouldSuppressDuplicateChatFailureHandoff') && files.chatFailureRecovery.includes('lastSuccessfulHandoffAt') && files.chatTab.includes('CHAT_FAILURE_RECOVERY_REPEAT_WINDOW_MS'), 'ChatTab: repeated chat failures are fingerprinted and duplicate handoffs are success-aware');
 assert(files.chatTab.includes('Resolved send model:') && files.chatTab.includes('Connected providers:') && files.chatTab.includes('Route intent:'), 'ChatTab: recovery prompt includes route, model, and provider context');
 assert(files.chatTab.includes('Recovery could not start automatically. Try again, or open the details for support.') && !files.chatTab.includes('Chat failure recovery: handoff failed: ${recoveryError'), 'ChatTab: recovery-handoff failures use customer-safe copy');
-assert(files.chatTab.includes('sanitizeVisibleComputerTaskMessage') && files.chatTab.includes('I could not finish that app or file action. Technical details were saved for recovery.'), 'ChatTab: computer-task output has a customer-safe raw-error sanitizer');
+// U2 decomposition: the sanitizer body (and its customer-safe literal) was
+// extracted verbatim to chatRecoveryDisplayCore; ChatTab imports and calls it.
+assert(files.chatTab.includes('sanitizeVisibleComputerTaskMessage') && files.chatRecoveryDisplayCore.includes('I could not finish that app or file action. Technical details were saved for recovery.'), 'ChatTab: computer-task output has a customer-safe raw-error sanitizer');
 assert(files.chatTab.includes('rawWarnings: rawOutcomeWarnings') && files.chatTab.includes('visibleWarnings: outcomeWarnings'), 'ChatTab: raw computer-task warnings are separated from visible warnings');
 assert(files.chatTab.includes('I could not finish the page build stream. Try again in a moment.') && !files.chatTab.includes('Build-page stream failed: ${msg}'), 'ChatTab: build-page stream failures hide raw stream errors');
 assert(files.chatTab.includes('I could not clear this thread. Try again in a moment.') && !files.chatTab.includes('Could not clear this thread: ${error.message}'), 'ChatTab: clear-thread failures hide raw Supabase errors');

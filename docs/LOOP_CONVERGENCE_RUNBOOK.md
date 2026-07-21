@@ -92,9 +92,12 @@ runtime obligations:
    runtime executes ALL tools client-side, so it is the MOST exposed path. Fix before flip:
    track `anyToolExecuted` (set on the `tool_call_start` event); in the `relayFailed` branch,
    if `anyToolExecuted` return `{ text: resolveChatStopMessage('continuation_failed').message }`
-   instead of null. First-round failures (no tools yet) keep the harmless v1 fallback. (NOT yet
-   applied — the runtime file was being edited by another session; documented to avoid a merge
-   conflict.)
+   instead of null. First-round failures (no tools yet) keep the harmless v1 fallback.
+   (**APPLIED 2026-07-20** — `anyToolExecuted` set on `tool_call_start` in `onEvent`; guard
+   applied in BOTH the `relayFailed` branch and the outer catch, mirroring
+   `attemptedClientTools` in `callSwanBotV2`'s catch. The honest `buildV2BatchErrorRow`
+   telemetry write is kept in both branches. Note: returning stop text makes the breaker
+   classify the turn 'success' — intended sibling parity.)
 
 The adapter's INPUT directions (`toAgentCoreMessages` / `toAgentCoreToolDefs`) were
 reviewed as **correct** — the runtime can build on them as-is.
@@ -381,6 +384,38 @@ Dogfa behind the flag, then diff the cohorts:
   `:304`-`320`).
 
 Only when this holds do you flip the default (Phase 4).
+
+### Telemetry-parity probe — temporal-cohorting plan (SPEC ONLY; actioned in Phase 3 dogfood)
+
+Both cohorts share `metadata->>version='swanbot-v2-ai'` + `surface='main_chat'` by
+design (that IS the parity contract), so the Phase 3 diff separates them **temporally**,
+not by tag:
+
+1. **Temporal cohorting via the readiness loader's window params.** The readiness
+   loader already windows on `started_at` (`since`/`until`); run it twice — an
+   edge-baseline window ending at the per-device flag-ON timestamp, and a client-loop
+   window starting there (both cohorts padded to comparable turn counts). Record the
+   flag-ON timestamp when dogfooding starts so the boundary is exact. DE-RISK #1
+   (`started_at` stamped at run creation) is what makes the client window visible at all.
+2. **Vocabulary check:** the client window's `v2StopReasons` keys must be
+   ⊆ `{end_turn, max_tokens, error}` — no raw `tool_use`/`stop_sequence` leakage
+   (would indicate the explicit normalized terminal write was bypassed).
+3. **No `ignoredRows` growth:** the client window must not add readiness-ignored rows
+   (a growth means rows are dropping out of the cohort — missing `metadata.version`
+   or surface drift).
+4. **Completion rate:** client-window `end_turn` rate ≥ the edge-baseline window's,
+   over a soak of comparable size (ADR §4 step 6).
+5. **Completeness:** token fields non-null and non-zero, `tool_calls` present,
+   `iteration_count` a positive int — same accumulators as §3 above.
+6. **Optional sharper discriminator (benign):** the runtime MAY additionally tag
+   `metadata.loop = 'client'` at run creation. The readiness cohort filter reads only
+   `metadata->>version` + `surface`, so an extra key cannot change cohort membership —
+   it only lets the Phase 3 diff split cohorts by tag instead of by time window. If
+   adopted, verify `ignoredRows` stays flat before trusting it, and drop or keep it
+   deliberately at Phase 4 (do not let half-tagged history confuse later audits).
+
+This subsection is the Phase 3 execution spec; nothing here runs at Phase 2
+(flag-dark) time.
 
 ---
 

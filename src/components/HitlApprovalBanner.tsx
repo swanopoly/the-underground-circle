@@ -13,8 +13,11 @@ import {
 import {
   buildApprovalIntentPreview,
   type ApprovalIntentPreview,
-  type ApprovalRiskChipTone,
 } from '../lib/approvalIntentPreview';
+import {
+  shouldOfferRememberAutoApprove,
+  RISK_TIER_CHIP_COLORS,
+} from '../lib/approvalCardModelCore';
 
 interface Props {
   approvals: AgentApproval[];
@@ -44,14 +47,6 @@ function actionColor(type: string): string {
   if (type === 'external_message') return '#3b82f6';
   return '#9e9e9e';
 }
-
-/** Risk-chip tone → {fg, bg, border} for the dark theme. */
-const RISK_CHIP_COLORS: Record<ApprovalRiskChipTone, { fg: string; bg: string; border: string }> = {
-  green: { fg: '#22c55e', bg: '#22c55e18', border: '#22c55e55' },
-  blue: { fg: '#60a5fa', bg: '#60a5fa18', border: '#60a5fa55' },
-  amber: { fg: '#f59e0b', bg: '#f59e0b18', border: '#f59e0b55' },
-  red: { fg: '#ef4444', bg: '#ef444418', border: '#ef444455' },
-};
 
 /**
  * Build the Intent Preview for an approval row from the fields the approval
@@ -191,7 +186,12 @@ export default function HitlApprovalBanner({ approvals, circleId, onEditAndResen
       if (status === 'approved' && rememberPerApproval[approvalId]) {
         const ap = approvals.find((x) => x.id === approvalId);
         const cat = ap ? deriveCategory(ap) : null;
-        if (cat) await writeUserAutoApprove(userId, cat, 'auto').catch(() => {});
+        // Floor suppression (approvalCardModelCore) — defense-in-depth mirror
+        // of the checkbox render guard: never persist a standing auto-approve
+        // for pay/delete/login/grant or credential entry.
+        if (cat && ap && shouldOfferRememberAutoApprove(cat, ap.action_type)) {
+          await writeUserAutoApprove(userId, cat, 'auto').catch(() => {});
+        }
       }
       setRememberPerApproval((prev) => {
         const next = { ...prev };
@@ -281,7 +281,7 @@ export default function HitlApprovalBanner({ approvals, circleId, onEditAndResen
             // rendering below (no regression).
             const preview = deriveIntentPreview(ap);
             const usePreview = hasIntentPreviewSignal(ap, preview);
-            const chip = RISK_CHIP_COLORS[preview.riskChip.tone];
+            const chip = RISK_TIER_CHIP_COLORS[preview.riskChip.tone];
             const editable = canEdit(ap);
             const busy = !!editBusy[ap.id];
             return (
@@ -348,6 +348,10 @@ export default function HitlApprovalBanner({ approvals, circleId, onEditAndResen
               {(() => {
                 const cat = deriveCategory(ap);
                 if (!cat) return null;
+                // Floor suppression (approvalCardModelCore): pay/delete/login/
+                // grant and credential entry never offer a standing
+                // auto-approve — the request-side gate would refuse it anyway.
+                if (!shouldOfferRememberAutoApprove(cat, ap.action_type)) return null;
                 const checked = !!rememberPerApproval[ap.id];
                 return (
                   <Pressable

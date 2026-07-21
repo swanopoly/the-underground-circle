@@ -260,29 +260,28 @@ export function formatAsOf(updatedAtMs: unknown, nowMs: unknown): string {
 }
 
 /**
- * Render ONE memory line with a compact, bounded, secret-safe provenance suffix:
+ * Render ONLY the compact, bounded, secret-safe provenance suffix for a memory
+ * line, e.g. `[conf:high · as of 2d ago · src:chat · #a1b2c3]` — no leading
+ * space, no text. This is the SUFFIX-ONLY wiring seam for callers (e.g.
+ * openswanMemoryStores.ts) that must keep their existing line text
+ * byte-identical and merely append provenance when it exists.
  *
- *   `<text> [conf:high · as of 2d ago · src:chat · #a1b2c3]`
- *
- * Each suffix token is included only when it carries signal:
+ * Each token is included only when it carries signal:
  *   • conf:<band>  — omitted when the score is unknown (no weighting signal).
  *   • as of <age>  — omitted when there is no usable date or `nowMs`.
  *   • src:<token>  — omitted when there is no source; only a short basename token.
  *   • #<token>     — omitted when there is no id; only a ≤6-char citation token.
  *
- * When there is no usable text at all → '' (nothing to render). When every suffix
- * token is empty → just the bounded text. Total: any hostile/cyclic/huge input
- * degrades safely and never throws.
+ * When every token is empty → '' (the caller appends nothing, so its line is
+ * byte-for-byte the legacy line). Total: any hostile/cyclic/huge input degrades
+ * safely and never throws.
  */
-export function formatMemoryProvenance(
-  item: { text?: unknown; score?: unknown; source?: unknown; updatedAtMs?: unknown; id?: unknown },
+export function formatProvenanceSuffix(
+  item: { score?: unknown; source?: unknown; updatedAtMs?: unknown; id?: unknown },
   nowMs: unknown,
 ): string {
   const it: MemoryProvenanceItem =
     item && typeof item === 'object' ? (item as MemoryProvenanceItem) : {};
-
-  const text = sanitizeLineText(it.text, MAX_PROVENANCE_TEXT_LEN);
-  if (!text) return '';
 
   const tokens: string[] = [];
 
@@ -298,8 +297,32 @@ export function formatMemoryProvenance(
   const id = shortIdToken(it.id);
   if (id) tokens.push(id);
 
-  if (tokens.length === 0) return text;
-  return `${text} [${tokens.join(' · ')}]`;
+  if (tokens.length === 0) return '';
+  return `[${tokens.join(' · ')}]`;
+}
+
+/**
+ * Render ONE memory line with a compact, bounded, secret-safe provenance suffix:
+ *
+ *   `<text> [conf:high · as of 2d ago · src:chat · #a1b2c3]`
+ *
+ * Token-omission rules live in `formatProvenanceSuffix` (this composes
+ * `text + ' ' + suffix`). When there is no usable text at all → '' (nothing to
+ * render). When every suffix token is empty → just the bounded text. Total: any
+ * hostile/cyclic/huge input degrades safely and never throws.
+ */
+export function formatMemoryProvenance(
+  item: { text?: unknown; score?: unknown; source?: unknown; updatedAtMs?: unknown; id?: unknown },
+  nowMs: unknown,
+): string {
+  const it: MemoryProvenanceItem =
+    item && typeof item === 'object' ? (item as MemoryProvenanceItem) : {};
+
+  const text = sanitizeLineText(it.text, MAX_PROVENANCE_TEXT_LEN);
+  if (!text) return '';
+
+  const suffix = formatProvenanceSuffix(it, nowMs);
+  return suffix ? `${text} ${suffix}` : text;
 }
 
 /**

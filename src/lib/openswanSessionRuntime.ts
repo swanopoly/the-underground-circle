@@ -1,6 +1,7 @@
 import { buildAgenticCodingPrompt, detectAgenticCodingProfile, type AgenticCodingProfile, type AgenticCodingSurface } from './agenticCodingProfile';
 import { getChatPromptLaneSpec } from './chatPromptAssembly';
-import { addArtifact, addStep, completeRunUnlessCancelled, createRun, mergeRunMetadata, type ArtifactKind, type RunSurface, updateRunStatus } from './agentRunSystem';
+import { addArtifact, addStep, completeRunUnlessCancelled, createRun, mergeRunMetadata, type ArtifactKind, type RunSurface, updateRunProgressUnlessCancelled, updateRunStatus } from './agentRunSystem';
+import { planTelemetrySchedule } from './openswanTelemetryDeferCore';
 import { startRunHeartbeat } from './agentRunPersistence';
 import { buildOpenSwanExecutionStream, type OpenSwanExecutionContract } from './openswanExecution';
 import { buildOpenSwanMemoryRecommendations, captureOpenSwanOutcomeMemory, recordArchiveDerivedMemorySuccess, recordArchiveDerivedMemoryWeakSignal, type OpenSwanMemoryRecommendation, type PromptMemoryReference } from './memoryService';
@@ -972,12 +973,16 @@ async function runTypedCoreToolLoop(args: {
     // incomplete, not cap-exhausted). Composed locally so the DB-side console
     // cancel (onRoundComplete poll above) can abort the same loop.
     signal: localAbort.signal,
-    // The legacy loop only parallelized all-read-only, ungated rounds;
-    // dispatch stays sequential (safe superset of legacy ordering, incl.
-    // approval prompts) — the T8 policy provider below is supplied for
-    // replay-safety classification only, and concurrency 1 keeps its
-    // partitioned groups executing one call at a time, in order.
-    parallelToolConcurrency: 1,
+    // R1 flip: partitioned groups from partitionParallelSafeBatch may now
+    // dispatch up to 4 calls concurrently WITHIN a group; groups still run
+    // sequentially in emitted order, and approval-gated/interactive/unknown
+    // tools remain sequential barriers (their groups are size 1). Ordering
+    // to the model is preserved by index reassembly — agentExecutionCore
+    // reassembles results by original tool_use index and runWithConcurrency
+    // is an index-stable pool. Interactive rounds (loop-level approval gate
+    // present) force concurrency 1 in the core, so gated lanes like RoomsTab
+    // stay fully sequential.
+    parallelToolConcurrency: 4,
     toolApprovalGate: args.toolApprovalGate
       ? createLegacyApprovalGateAdapter(args.toolApprovalGate, (toolUseId) => rejectedToolUseIds.add(toolUseId))
       : undefined,
@@ -1079,12 +1084,13 @@ async function runTypedCoreToolLoop(args: {
     // runAgent merges them additively each turn; when OFF it is `undefined`
     // (set above) and runAgent skips it entirely — exact legacy behavior.
     resolveAdditionalTools,
-    // T8 policy provider — flipped on for CLASSIFICATION, not parallelism:
-    // `parallelToolConcurrency` stays 1 above (and partitioned groups stay
-    // contiguous/in-order), so dispatch order is unchanged. Supplying the
-    // provider feeds each tool's catalog side-effect policy into the core's
-    // replay-safety gate, so an outcome-unknown failure of a mutating tool
-    // gets "verify first / do not replay" instead of "a single retry is OK".
+    // T8 policy provider — serves BOTH duties since the R1 flip above:
+    // (1) replay safety — each tool's catalog side-effect policy feeds the
+    // core's replay-safety gate, so an outcome-unknown failure of a mutating
+    // tool gets "verify first / do not replay" instead of "a single retry is
+    // OK"; and (2) parallel partitioning — partitionParallelSafeBatch uses
+    // the same policies to group only auto-approved, no-external-side-effect,
+    // read-only-or-disjoint-domain calls for concurrent dispatch (up to 4).
     toolParallelPolicyProvider: createOpenSwanToolParallelPolicyProvider({ activePluginIds: args.activePluginIds }),
   }).finally(() => { stopLoopHeartbeat?.(); });
 
@@ -1403,6 +1409,73 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       })
     : null;
 
+  // ── Telemetry defer (hot-path R2): take the ~7 serial pre-loop Supabase
+  // telemetry writes off time-to-first-token. planTelemetrySchedule (pure
+  // core, openswanTelemetryDeferCore) decides per write: blocking
+  // (fail-closed), ordered chain, or loose fire-and-forget. The static
+  // descriptor list below yields two ordered chains — status step0→step2
+  // (whole-column status writes on the same row must not reorder) and
+  // metadata transcript_ptr→posture (mergeRunMetadata is a non-atomic
+  // read-merge-write; concurrent merges drop keys) — plus 3 independent
+  // addStep inserts that fire loose.
+  //
+  // Deferral = NOT AWAITED, not delayed: each write STARTS immediately at its
+  // original call site (keeping today's cancel-race window identical), and
+  // the join barrier right after the tool loop awaits them all BEFORE any
+  // finalization write, so no deferred 'running' status or metadata merge can
+  // land after/concurrent with the terminal writes.
+  const telemetrySchedule = planTelemetrySchedule([
+    { id: 'status_step0', kind: 'update_status' },
+    { id: 'merge_transcript_ptr', kind: 'merge_metadata' },
+    { id: 'step_plan', kind: 'add_step' },
+    { id: 'step_context', kind: 'add_step' },
+    { id: 'step_thinking', kind: 'add_step' },
+    { id: 'status_step2', kind: 'update_status', dependsOn: ['status_step0'] },
+    { id: 'merge_posture', kind: 'merge_metadata', dependsOn: ['merge_transcript_ptr'] },
+  ]);
+  const telemetryBlockingIds = new Set(telemetrySchedule.blocking);
+  const telemetryLooseIds = new Set(telemetrySchedule.fireAndForget);
+  const telemetryChainByWriteId = new Map<string, number>();
+  telemetrySchedule.deferredOrdered.forEach((chain, chainIndex) => {
+    for (const writeId of chain) telemetryChainByWriteId.set(writeId, chainIndex);
+  });
+  const telemetryChainTails = new Map<number, Promise<unknown>>();
+  const pendingTelemetry: Array<Promise<unknown>> = [];
+  /**
+   * Start a telemetry write per the schedule. Returns a promise the call site
+   * awaits: for deferred writes it resolves immediately (write started, not
+   * awaited); for anything the core classified as blocking — or any id the
+   * schedule does not know — it returns the write itself (fail-closed).
+   */
+  const deferTelemetry = (writeId: string, write: () => Promise<unknown>): Promise<unknown> => {
+    const chainIndex = telemetryChainByWriteId.get(writeId);
+    if (telemetryBlockingIds.has(writeId) || (chainIndex === undefined && !telemetryLooseIds.has(writeId))) {
+      return write();
+    }
+    let started: Promise<unknown>;
+    if (chainIndex !== undefined) {
+      const tail = telemetryChainTails.get(chainIndex) || Promise.resolve();
+      started = tail.then(() => write()).catch(() => undefined);
+      telemetryChainTails.set(chainIndex, started);
+    } else {
+      started = write().catch(() => undefined);
+    }
+    pendingTelemetry.push(started);
+    return Promise.resolve();
+  };
+  /**
+   * Settle a deferred chain up to (and including) the named write before an
+   * awaited same-row write runs, so a still-in-flight chained write cannot
+   * land after — and clobber — the awaited one (step-index regression /
+   * dropped mergeRunMetadata keys). Chain promises already swallow errors via
+   * .catch, so this never throws.
+   */
+  const awaitTelemetryChain = (writeId: string): Promise<unknown> => {
+    const chainIndex = telemetryChainByWriteId.get(writeId);
+    if (chainIndex === undefined) return Promise.resolve();
+    return telemetryChainTails.get(chainIndex) ?? Promise.resolve();
+  };
+
   if (run && opts.context.circleId) {
     void persistAgentRunLedgerPreview({
       preview: taskPlan.ledgerPreview,
@@ -1464,15 +1537,21 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   })) || transcript;
 
   if (run && opts.context.circleId) {
-    await updateRunStatus(run.id, 'running', { current_step_index: 0, total_steps: totalSteps });
-    await mergeRunMetadata(run.id, {
+    const runId = run.id;
+    await deferTelemetry('status_step0', () =>
+      updateRunProgressUnlessCancelled(runId, { current_step_index: 0, total_steps: totalSteps }));
+    // Snapshot the payload NOW — the deferred closure must not read transcript
+    // state mutated by later appends.
+    const transcriptPtr = {
       openswanTranscriptKey: transcriptKey,
       openswanTranscriptEventCount: transcript.events.length,
       openswanTranscriptUpdatedAt: transcript.updatedAt,
-    });
-    await addStep({
-      runId: run.id,
-      circleId: opts.context.circleId,
+    };
+    await deferTelemetry('merge_transcript_ptr', () => mergeRunMetadata(runId, transcriptPtr));
+    const stepPlanCircleId = opts.context.circleId;
+    await deferTelemetry('step_plan', () => addStep({
+      runId,
+      circleId: stepPlanCircleId,
       stepIndex: 0,
       stepKind: 'plan',
       title: 'OpenSwan session turn',
@@ -1495,7 +1574,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         '',
         toolBrief,
       ].join('\n').slice(0, 5000),
-    });
+    }));
   }
 
   emitStage(opts, 'loading_context', 'Loading context');
@@ -1516,17 +1595,20 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     },
   })) || transcript;
   if (run && opts.context.circleId) {
-    await addStep({
-      runId: run.id,
-      circleId: opts.context.circleId,
+    const runId = run.id;
+    const circleId = opts.context.circleId;
+    const contextBody = (opts.context.chatHistory || '').slice(0, 5000);
+    await deferTelemetry('step_context', () => addStep({
+      runId,
+      circleId,
       stepIndex: 1,
       stepKind: 'context_edit',
       title: 'Context assembled',
-      body: (opts.context.chatHistory || '').slice(0, 5000),
-    });
-    await addStep({
-      runId: run.id,
-      circleId: opts.context.circleId,
+      body: contextBody,
+    }));
+    await deferTelemetry('step_thinking', () => addStep({
+      runId,
+      circleId,
       stepIndex: 2,
       stepKind: 'thinking',
       title: 'Task and verification plan',
@@ -1544,8 +1626,9 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         'Recommended tools:',
         ...taskPlan.recommendedTools.map((tool) => `- ${tool.tool} [${tool.priority}]: ${tool.reason}`),
       ].join('\n').slice(0, 5000),
-    });
-    await updateRunStatus(run.id, 'running', { current_step_index: 2, total_steps: totalSteps });
+    }));
+    await deferTelemetry('status_step2', () =>
+      updateRunProgressUnlessCancelled(runId, { current_step_index: 2, total_steps: totalSteps }));
   }
 
   let delegationSummary = '';
@@ -1575,7 +1658,11 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         title: 'Sub-agent delegation plan',
         body: delegationSpecs.map((spec) => `- ${spec.subagent.displayName}: ${spec.reason}`).join('\n').slice(0, 5000),
       });
-      await updateRunStatus(run.id, 'running', { current_step_index: 3, total_steps: totalSteps });
+      // Settle the deferred status chain (step0→step2) first so a
+      // still-in-flight chained write cannot land after this awaited write
+      // and regress current_step_index from 3 back to 2 (or 0).
+      await awaitTelemetryChain('status_step2');
+      await updateRunProgressUnlessCancelled(run.id, { current_step_index: 3, total_steps: totalSteps });
     }
 
     const delegated = await delegateToSubagents({
@@ -1680,6 +1767,11 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
           });
         }
       }
+      // Settle the deferred metadata chain (transcript_ptr) first —
+      // mergeRunMetadata is a non-atomic read-merge-write, so an in-flight
+      // deferred merge interleaving with this awaited one would silently drop
+      // keys from one side (delegation results or the transcript pointer).
+      await awaitTelemetryChain('merge_transcript_ptr');
       await mergeRunMetadata(run.id, {
         delegatedSubagentResults: delegated.results.map((result) => ({
           role: result.subagent.role,
@@ -1700,7 +1792,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         })),
         delegatedArtifactSummary: delegatedArtifacts,
       });
-      await updateRunStatus(run.id, 'running', { current_step_index: 4 + delegated.results.length, total_steps: totalSteps });
+      await updateRunProgressUnlessCancelled(run.id, { current_step_index: 4 + delegated.results.length, total_steps: totalSteps });
     }
   }
 
@@ -1740,7 +1832,8 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       : 'main_chat';
     const exposedTools = previewOpenSwanToolsForSurface(postureSurface, opts.mode || null);
     const hiddenTools = listToolsHiddenByMode(postureSurface, opts.mode || null);
-    await mergeRunMetadata(run.id, {
+    const postureRunId = run.id;
+    await deferTelemetry('merge_posture', () => mergeRunMetadata(postureRunId, {
       runtimePlanVersion: OPENSWAN_RUNTIME_PLAN_VERSION,
       memoryReferences: summarizeMemoryReferences(memoryBundle.references),
       memoriesUsed: memoryBundle.references.map((ref) => ref.title),
@@ -1757,7 +1850,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         runtimeToolNames,
         toolRoundBudget,
       },
-    });
+    }));
   }
   const assistantResponseStepIndex = delegationSpecs.length > 0 ? 4 + delegationSpecs.length : 3;
 
@@ -2078,6 +2171,13 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       summary: `Tool loop failed; answered without tools. Reason: ${toolErr instanceof Error ? toolErr.message : String(toolErr)}`,
     })) || transcript;
   }
+
+  // ── Telemetry join barrier ── every deferred pre-loop write must settle
+  // BEFORE any finalization write: a late deferred 'running' status or
+  // metadata merge landing after/concurrent with the terminal writes would
+  // resurrect a finished/cancelled row (mergeRunMetadata is a non-atomic
+  // read-merge-write). allSettled — deferred failures were already swallowed.
+  await Promise.allSettled(pendingTelemetry);
 
   const toolStepIndex = assistantResponseStepIndex;
   const actualAssistantResponseStepIndex = assistantResponseStepIndex + (runtimeToolActions.length > 0 ? 1 : 0);

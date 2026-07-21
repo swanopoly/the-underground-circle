@@ -59,16 +59,24 @@ Key confirmations from the read:
 
 ### R1 — Parallelize independent read-only tool calls (High value / Low effort)
 
+> **STATUS: SHIPPED (Primary route, 2026-07-20).** The T8 policy provider was
+> already wired (`openswanSessionRuntime.ts:~1088`) and
+> `parallelToolConcurrency` is now raised `1 → 4`
+> (`openswanSessionRuntime.ts:~980`). Groups still run sequentially in emitted
+> order; concurrency applies only within a parallel-safe group.
+> `delegationGate.ts` and `swanbotV2BatchRuntime.ts` intentionally remain
+> pinned at 1. Rollback: one-line revert of the concurrency value.
+
 **Problem.** When a model round emits a burst of pure reads with no ordering
 dependency (`context.search` + `codebase.search` + `tasks.list` +
 `desktop.read_a11y_tree`), each waits on the previous one's network round-trip.
 `runTypedCoreToolLoop` pins concurrency to 1.
 
 **Evidence.**
-- Pin: `openswanSessionRuntime.ts:896` (`parallelToolConcurrency: 1`), with the
-  intent comment at `:893-895` ("until the T8 policy provider is flipped on").
-- Disabled seam: `openswanSessionRuntime.ts:998-999` (`toolParallelPolicyProvider`
-  commented out).
+- Pin (now flipped): `openswanSessionRuntime.ts:~980` (`parallelToolConcurrency`,
+  formerly `1`, now `4`).
+- Seam (now wired): `openswanSessionRuntime.ts:~1088`
+  (`toolParallelPolicyProvider: createOpenSwanToolParallelPolicyProvider(...)`).
 - The executor honors concurrency only when > 1: `runWithConcurrency`
   short-circuits to a serial loop at `agentExecutionCore.ts:563` (`if (concurrency <= 1)`).
 - The safe partition dispatch path is **already implemented** in
@@ -288,9 +296,9 @@ a profile flags it.
 
 ## 4. Suggested sequencing
 
-1. **R1 (T8 flip) + R2 (telemetry off critical path)** — biggest latency wins,
-   both Low effort, both use already-built machinery. Ship together behind revert
-   discipline.
+1. **R1 (T8 flip) — SHIPPED 2026-07-20** + R2 (telemetry off critical path) —
+   biggest latency wins, both Low effort, both use already-built machinery. Ship
+   behind revert discipline.
 2. **R3 Option A** — cap runaway context cost fast with the existing seam.
 3. **R4 + R5** — cheap CPU/alloc cleanup, bundle in one PR.
 4. **R3 Option B** — migrate compaction onto `openswanContextCompactionCore` to

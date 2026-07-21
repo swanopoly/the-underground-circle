@@ -31,7 +31,16 @@
  *     start at 25; edge-function consumers can lower to 8 for Haiku).
  */
 
-import { compressContextIfOversized, PRUNED_IMAGE_PLACEHOLDER_TEXT } from './agentContextCompression';
+import { compressContextIfOversized, estimateMessagesTokens, PRUNED_IMAGE_PLACEHOLDER_TEXT } from './agentContextCompression';
+import {
+  planCompactionTier,
+  DEFAULT_KEEP_RECENT_COUNT,
+  KEEP_RECENT_MIN,
+  KEEP_RECENT_MAX,
+} from './contextCompactionTierCore';
+import type { CompactionTier, CompactionTierPlan } from './contextCompactionTierCore';
+import { projectMessagesForCompaction } from './openswanContextCompactionCore';
+import { truncateToTokenBudget } from './promptTokenEstimateCore';
 import { partitionParallelSafeBatch } from './toolBatchParallelism';
 import type { ToolParallelPolicy } from './toolBatchParallelism';
 import { buildToolFailureFeedback } from './toolFailureFeedback';
@@ -235,7 +244,17 @@ export type AgentEvent =
    */
   | { kind: 'iteration_complete'; iteration: number; messages: AgentMessage[] }
   /** Mid-run steering (P7b): a drained note was injected as a user message at this iteration boundary (`note` truncated to 200 chars). */
-  | { kind: 'steering_applied'; iteration: number; note: string };
+  | { kind: 'steering_applied'; iteration: number; note: string }
+  /**
+   * Tiered pre-turn context compaction (contextCompactionTierCore) executed a
+   * non-'none' tier before this provider turn. `reason` is the selector's
+   * bounded, secret-safe explanation (counts/token numbers only, ≤240 chars);
+   * `freedTokensApprox` is the estimate delta the tier's actions achieved.
+   * Never fired with tier 'none' (small contexts stay byte-identical); if the
+   * post-compaction safety net has to shave on a 'none' plan, the event is
+   * reported as tier 'hard_truncate' with a "safety net" reason.
+   */
+  | { kind: 'context_compaction_tier'; iteration: number; tier: CompactionTier; reason: string; estimatedTokens: number; freedTokensApprox: number };
 
 export type AgentRunOptions = {
   initialMessages: AgentMessage[];
@@ -323,6 +342,28 @@ export type AgentRunOptions = {
     maxContextTokens?: number;
     /** Tail messages preserved verbatim. Default 20. */
     preserveLast?: number;
+  };
+  /**
+   * Tiered pre-turn context compaction (contextCompactionTierCore) — the
+   * escalation ladder that keeps a LONG tool loop under the model's context
+   * window: drop stale tool_result noise (free, local) → summarize oldest
+   * history (only when `compaction.summariser` is injected; otherwise degrades
+   * to drop-only) → hard-truncate protected message TEXT (emergency, so the
+   * provider never 400s "prompt too long" on a single giant recent result).
+   * Default ON with a 200k-window / 8k-reserved-output / keep-6-recent
+   * posture — the selector is identity below 0.75× the window (unless the
+   * ≥40-turn proactive gate trips), so normal runs stay byte-identical.
+   * Pass `false` to opt out, mirroring `toolResultSummarization`. When the
+   * `compaction` seam is also configured, `contextWindowTokens` /
+   * `keepRecentCount` default to its `maxContextTokens` / `preserveLast`.
+   */
+  tieredCompaction?: false | {
+    /** Target model's context window (tokens). Default `compaction.maxContextTokens` ?? 200_000. */
+    contextWindowTokens?: number;
+    /** Headroom reserved for the model's OUTPUT; hardLimit = window − this. Default 8_000. */
+    reservedOutputTokens?: number;
+    /** Most-recent messages protected verbatim. Default `compaction.preserveLast` ?? 6. */
+    keepRecentCount?: number;
   };
   /**
    * Deterministic per-tool-result summarization (coding-agent P6). A tool
@@ -532,6 +573,229 @@ export function pruneStaleToolResultImages(messages: AgentMessage[], maxLiveImag
   return pruned;
 }
 
+// ─── Tiered compaction executors (contextCompactionTierCore wiring) ─────────
+
+/** Marker prefix for a dropped stale tool_result (tier 'drop_tool_noise').
+ *  Also the idempotency guard: an already-stubbed result is never re-stubbed. */
+export const DROPPED_TOOL_RESULT_MARKER_PREFIX = '[tool result dropped to save context:';
+
+function droppedToolResultMarker(charsOmitted: number): string {
+  return `${DROPPED_TOOL_RESULT_MARKER_PREFIX} ${charsOmitted} chars omitted — re-run the tool if needed]`;
+}
+
+/** Marker appended when a protected message's text is hard-truncated to fit
+ *  the hard context limit (tier 'hard_truncate'). */
+export const HARD_TRUNCATE_MARKER_TEXT = '[truncated to fit context window]';
+
+/**
+ * Tier 'drop_tool_noise' executor. Replaces the CONTENT of every stale
+ * tool_result — non-system messages BEFORE the protected recent suffix —
+ * with a short "dropped to save context" marker, freeing the bulky bytes
+ * while keeping every message and block in place.
+ *
+ * Lockstep contract with `contextCompactionTierCore.planCompactionTier`:
+ * `keepRecentCount` is normalised with the SAME clamps (default 6, [2, 200])
+ * and `recentStart` uses the SAME pair-guard walk-back (never let the kept
+ * suffix START with a tool_result), so the set of stubbed messages matches
+ * exactly the set the selector counted as `freeableByDropTokens`
+ * (`referencedLater` is false everywhere for projections built without ids).
+ *
+ * Structural guarantees:
+ *   - NEVER removes a message or a block — tool_use/tool_result pairing is
+ *     preserved by construction (only a tool_result's content is swapped).
+ *   - NEVER mutates in place: touched messages are REPLACED with fresh
+ *     objects (same checkpoint-aliasing contract as
+ *     `pruneStaleToolResultImages` — R12 `iteration_complete` snapshots that
+ *     share message objects keep their original contents).
+ *   - Image parts inside content-array tool_results are left untouched
+ *     (their budget is owned by `pruneStaleToolResultImages`); text parts
+ *     are stubbed. Stubs that would GROW the message (content shorter than
+ *     the marker) are skipped.
+ *
+ * Returns the replaced message indices (ascending) plus the chars freed.
+ */
+export function stubStaleToolResultContents(
+  messages: AgentMessage[],
+  keepRecentCount?: number,
+): { stubbedIndices: number[]; freedChars: number } {
+  const n = messages.length;
+  const rawKeep = typeof keepRecentCount === 'number' && Number.isFinite(keepRecentCount)
+    ? Math.floor(keepRecentCount)
+    : DEFAULT_KEEP_RECENT_COUNT;
+  const keepRecent = Math.min(KEEP_RECENT_MAX, Math.max(KEEP_RECENT_MIN, rawKeep));
+  const hasToolResult = (m: AgentMessage): boolean =>
+    Array.isArray(m.content) && m.content.some((b) => !!b && b.type === 'tool_result');
+  // Pair-guard walk-back (mirrors the tier core's protection rule).
+  let recentStart = Math.max(0, n - keepRecent);
+  while (recentStart > 0 && hasToolResult(messages[recentStart])) recentStart -= 1;
+
+  const stubbedIndices: number[] = [];
+  let freedChars = 0;
+  for (let mi = 0; mi < recentStart; mi++) {
+    const original = messages[mi];
+    if (original.role === 'system') continue;
+    if (typeof original.content === 'string') continue; // no tool_result blocks
+    let changed = false;
+    let freedForMsg = 0;
+    const nextBlocks = original.content.map((block): AgentMessageContentBlock => {
+      if (block.type !== 'tool_result') return block;
+      if (typeof block.content === 'string') {
+        if (block.content.startsWith(DROPPED_TOOL_RESULT_MARKER_PREFIX)) return block;
+        const marker = droppedToolResultMarker(block.content.length);
+        if (block.content.length <= marker.length) return block; // net-negative stub
+        changed = true;
+        freedForMsg += block.content.length - marker.length;
+        return { ...block, content: marker };
+      }
+      // Content-array tool_result: stub text parts, keep image parts' shape.
+      let partChanged = false;
+      const nextParts = block.content.map((part) => {
+        if (part.type !== 'text') return part;
+        if (part.text.startsWith(DROPPED_TOOL_RESULT_MARKER_PREFIX)) return part;
+        const marker = droppedToolResultMarker(part.text.length);
+        if (part.text.length <= marker.length) return part;
+        partChanged = true;
+        freedForMsg += part.text.length - marker.length;
+        return { type: 'text' as const, text: marker };
+      });
+      if (!partChanged) return block;
+      changed = true;
+      return { ...block, content: nextParts };
+    });
+    if (changed) {
+      messages[mi] = { role: original.role, content: nextBlocks };
+      stubbedIndices.push(mi);
+      freedChars += freedForMsg;
+    }
+  }
+  return { stubbedIndices, freedChars };
+}
+
+/**
+ * Tier 'hard_truncate' per-message shave: returns a COPY of `message` whose
+ * TEXT content (string content, text blocks, tool_result string content and
+ * text parts) is truncated so it fits ~`budgetTokens`, with a truncation
+ * marker appended wherever text was cut. Blocks and image/tool_use parts keep
+ * their exact shape — only text is shaved, so tool pairing and block
+ * structure survive. Never mutates the input.
+ */
+function truncateMessageTextToTokenBudget(message: AgentMessage, budgetTokens: number): AgentMessage {
+  let remaining = Math.max(0, Math.floor(budgetTokens));
+  const cut = (text: string): string => {
+    const r = truncateToTokenBudget(text, remaining);
+    remaining = Math.max(0, remaining - r.estimate);
+    if (!r.truncated) return text;
+    return r.text ? `${r.text}\n${HARD_TRUNCATE_MARKER_TEXT}` : HARD_TRUNCATE_MARKER_TEXT;
+  };
+  if (typeof message.content === 'string') {
+    return { role: message.role, content: cut(message.content) };
+  }
+  const nextBlocks = message.content.map((block): AgentMessageContentBlock => {
+    if (block.type === 'text') return { ...block, text: cut(block.text) };
+    if (block.type === 'tool_result') {
+      if (typeof block.content === 'string') return { ...block, content: cut(block.content) };
+      const nextParts = block.content.map((part) =>
+        part.type === 'text' ? { ...part, text: cut(part.text) } : part,
+      );
+      return { ...block, content: nextParts };
+    }
+    return block; // tool_use input is structural, never shaved
+  });
+  return { role: message.role, content: nextBlocks };
+}
+
+/** Chars of TEXT that `truncateMessageTextToTokenBudget` can actually shave:
+ *  string content, text blocks, tool_result string content and text parts.
+ *  Excludes tool_use input JSON, image blocks, and per-block overheads. */
+function messageShaveableTextChars(message: AgentMessage): number {
+  if (typeof message.content === 'string') return message.content.length;
+  let chars = 0;
+  for (const block of message.content) {
+    if (block.type === 'text') chars += block.text.length;
+    else if (block.type === 'tool_result') {
+      if (typeof block.content === 'string') chars += block.content.length;
+      else for (const part of block.content) { if (part.type === 'text') chars += part.text.length; }
+    }
+  }
+  return chars;
+}
+
+/** Minimal text core kept on the FINAL message even in an emergency shave, so
+ *  the turn's driving instruction never disappears entirely. */
+const FINAL_MESSAGE_MIN_KEEP_TEXT_TOKENS = 64;
+
+/**
+ * Post-compaction SAFETY NET: shaves message TEXT largest-first across the
+ * WHOLE live history until the estimate fits `hardLimitTokens`. Runs
+ * unconditionally after the planned tier executes because the plan's tier
+ * choice projects summariser savings that don't materialise when no
+ * summariser is injected (all current callers), and its
+ * `hardTruncateCandidates` are only populated on the 'hard_truncate' tier —
+ * so e.g. a prose-dominated over-hardLimit history planned as
+ * 'summarize_oldest' would otherwise be forwarded verbatim and 400.
+ *
+ * Shave order: older non-system messages first (before the keep-recent
+ * suffix), then the protected/recent/system remainder — each group by
+ * current estimate descending (index asc tiebreak) — and the FINAL message
+ * last, keeping its minimal text core. Text-only shaving never removes a
+ * message or block, so tool_use/tool_result pairing and block shape are
+ * preserved; touched messages are REPLACED, never mutated (R12 checkpoint
+ * snapshots keep their originals).
+ *
+ * Each candidate's text budget subtracts its UNshaveable tokens (image
+ * blocks at IMAGE_BLOCK_TOKEN_ESTIMATE each, tool_use input JSON, per-block
+ * overheads) computed in `estimateMessagesTokens`'s own chars/4 units, so an
+ * image- or tool_use-heavy message gets a real text cut instead of an
+ * over-allocated budget that frees nothing. The 64-token margin absorbs
+ * marker text + estimator drift.
+ *
+ * Returns the final live estimate so callers can detect "still over".
+ */
+export function shaveMessagesTextToHardLimit(
+  messages: AgentMessage[],
+  hardLimitTokens: number,
+  keepRecentCount?: number,
+): number {
+  let est = estimateMessagesTokens(messages);
+  if (!(hardLimitTokens > 0) || est <= hardLimitTokens || messages.length === 0) return est;
+
+  const n = messages.length;
+  const rawKeep = typeof keepRecentCount === 'number' && Number.isFinite(keepRecentCount)
+    ? Math.floor(keepRecentCount)
+    : DEFAULT_KEEP_RECENT_COUNT;
+  const keepRecent = Math.min(KEEP_RECENT_MAX, Math.max(KEEP_RECENT_MIN, rawKeep));
+  const recentStart = Math.max(0, n - keepRecent);
+  const lastIndex = n - 1;
+
+  const order = messages
+    .map((m, index) => ({
+      index,
+      size: estimateMessagesTokens([m]),
+      group: index === lastIndex ? 2 : (m.role !== 'system' && index < recentStart ? 0 : 1),
+    }))
+    .sort((a, b) => (a.group - b.group) || (b.size - a.size) || (a.index - b.index));
+
+  for (const cand of order) {
+    if (est <= hardLimitTokens) break;
+    const single = estimateMessagesTokens([messages[cand.index]]);
+    // Unshaveable tokens in the SAME units as `single` (its 4-chars/token
+    // heuristic + fixed image estimates), so the text budget below is the
+    // true shaveable complement rather than the whole-message remainder.
+    const nonTextTokens = Math.max(
+      0,
+      single - Math.ceil(messageShaveableTextChars(messages[cand.index]) / 4),
+    );
+    const needed = est - hardLimitTokens;
+    const minKeep = cand.index === lastIndex ? FINAL_MESSAGE_MIN_KEEP_TEXT_TOKENS : 0;
+    // 64-token safety margin absorbs marker text + estimator drift so the
+    // shaved payload actually lands under the limit.
+    const keepTextTokens = Math.max(minKeep, single - needed - 64 - nonTextTokens);
+    messages[cand.index] = truncateMessageTextToTokenBudget(messages[cand.index], keepTextTokens);
+    est = estimateMessagesTokens(messages);
+  }
+  return est;
+}
+
 // ─── Internals ──────────────────────────────────────────────────────────────
 
 function ensureBlocks(content: AgentMessage['content']): AgentMessageContentBlock[] {
@@ -602,6 +866,7 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     onRoundComplete,
     steering,
     toolResultSummarization,
+    tieredCompaction,
   } = opts;
 
   const emit = (e: AgentEvent) => { try { onEvent?.(e); } catch {} };
@@ -703,6 +968,100 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
     // so R12 checkpoint snapshots keep their originals — see the fn's
     // mutation contract).
     pruneStaleToolResultImages(messages, MAX_LIVE_IMAGES);
+
+    // Tiered pre-turn context compaction (default ON; `tieredCompaction: false`
+    // opts out). `planCompactionTier` picks the CHEAPEST sufficient tier from
+    // token pressure: 'none' → identity (below 0.75× the window, unless the
+    // ≥40-turn proactive gate trips — small contexts stay byte-identical);
+    // 'drop_tool_noise' → free local stub of stale tool_result bytes;
+    // 'summarize_oldest' → drop + the injected `compaction.summariser` (no
+    // summariser → degrades to drop-only); 'hard_truncate' → emergency shave
+    // of message TEXT. After the planned tier runs, an UNCONDITIONAL safety
+    // net (`shaveMessagesTextToHardLimit`) re-checks the live estimate and
+    // shaves regardless of the planned tier, so the provider never receives
+    // an over-hardLimit prompt and 400s. Errors are swallowed — compaction
+    // must never break the loop.
+    if (tieredCompaction !== false) {
+      try {
+        const tierKeepRecent = tieredCompaction?.keepRecentCount ?? compaction?.preserveLast;
+        const tierWindow = tieredCompaction?.contextWindowTokens ?? compaction?.maxContextTokens;
+        const tierPlan: CompactionTierPlan = planCompactionTier({
+          estimatedTokens: estimateMessagesTokens(messages),
+          contextWindowTokens: tierWindow,
+          reservedOutputTokens: tieredCompaction?.reservedOutputTokens,
+          messages: projectMessagesForCompaction(messages),
+          keepRecentCount: tierKeepRecent,
+          turnCount: iteration,
+        });
+        if (tierPlan.tier !== 'none') {
+          // Every tier starts with the free local drop. Messages are REPLACED,
+          // never mutated — earlier R12 checkpoint snapshots keep originals.
+          stubStaleToolResultContents(messages, tierKeepRecent);
+          // Escalation: summarize the oldest history with the injected
+          // summariser (same seam + event as the `compaction` block above).
+          // All current callers inject none, so this degrades to drop-only.
+          if (tierPlan.tier !== 'drop_tool_noise' && compaction?.summariser) {
+            const compressed = await compressContextIfOversized(messages, {
+              summariser: compaction.summariser,
+              thresholdRatio: compaction.thresholdRatio,
+              maxContextTokens: compaction.maxContextTokens,
+              preserveLast: compaction.preserveLast,
+            });
+            if (compressed.compressed) {
+              messages.length = 0;
+              messages.push(...compressed.messages);
+              emit({
+                kind: 'context_compressed',
+                iteration,
+                droppedCount: compressed.droppedCount,
+                tokensBefore: compressed.tokensBefore,
+                tokensAfter: compressed.tokensAfter,
+              });
+            }
+          }
+        }
+        // UNCONDITIONAL post-compaction safety net (subsumes the old
+        // tier==='hard_truncate' shave): whatever tier ran — including
+        // 'none' — never forward an over-hardLimit payload. The plan's
+        // tier choice projects summariser savings that don't materialise
+        // when no summariser is injected (all current callers), so e.g. a
+        // prose-dominated history planned as 'summarize_oldest' can still
+        // be far over the hard limit here; re-check the LIVE estimate and
+        // shave text largest-first across the whole history until it fits.
+        const preNetTokens = estimateMessagesTokens(messages);
+        const liveTokens = preNetTokens > tierPlan.hardLimitTokens
+          ? shaveMessagesTextToHardLimit(messages, tierPlan.hardLimitTokens, tierKeepRecent)
+          : preNetTokens;
+        const stillOver = liveTokens > tierPlan.hardLimitTokens;
+        if (tierPlan.tier !== 'none') {
+          emit({
+            kind: 'context_compaction_tier',
+            iteration,
+            tier: tierPlan.tier,
+            reason: (stillOver
+              ? `${tierPlan.reason}; shave exhausted, still over hard ${tierPlan.hardLimitTokens}t`
+              : tierPlan.reason).slice(0, 240),
+            estimatedTokens: tierPlan.estimatedTokens,
+            freedTokensApprox: Math.max(0, tierPlan.estimatedTokens - liveTokens),
+          });
+        } else if (preNetTokens > tierPlan.hardLimitTokens) {
+          // The plan said 'none' but the live estimate was over the hard
+          // limit (e.g. large reserved output under the soft trigger, or
+          // nothing the plan believed compactable). The safety net still
+          // ran — report it as a hard_truncate tier event so the emergency
+          // stays observable.
+          emit({
+            kind: 'context_compaction_tier',
+            iteration,
+            tier: 'hard_truncate',
+            reason: (`tier hard_truncate: safety net, plan none but est ${preNetTokens}t over hard `
+              + `${tierPlan.hardLimitTokens}t${stillOver ? '; shave exhausted, still over' : ''}`).slice(0, 240),
+            estimatedTokens: preNetTokens,
+            freedTokensApprox: Math.max(0, preNetTokens - liveTokens),
+          });
+        }
+      } catch { /* tiered compaction must never break the loop */ }
+    }
 
     const turn = await provider.turn({
       messages,

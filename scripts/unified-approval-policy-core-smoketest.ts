@@ -11,6 +11,7 @@
 
 import {
   resolveApprovalDecision,
+  matchesAlwaysAskFloor,
   ALWAYS_ASK_FLOOR_MARKERS,
   type ApprovalPolicyInput,
 } from '../src/lib/unifiedApprovalPolicyCore';
@@ -382,6 +383,21 @@ function main() {
   assertEq(kind({ tool: 'files.delete_all', toolApprovalMode: 'auto' }), 'require_approval', '9.5 floor tool beats tool-auto mode');
   assertEq(kind({ category: 'memory_read', tool: 'memory.read', toolApprovalMode: 'auto' }), 'auto_approve', '9.6 non-floor auto tool unaffected (no false floor)');
   assertEq(kind({ tool: 42 as unknown }), 'require_approval', '9.7 hostile non-string tool → no throw, safe default');
+
+  // ── Group 10: matchesAlwaysAskFloor (exported floor probe) ────────────────
+  assertEq(matchesAlwaysAskFloor('delete'), true, '10.1 exact marker delete → floor');
+  assertEq(matchesAlwaysAskFloor('desktop.delete'), true, '10.2 tool containing delete → floor');
+  assertEq(matchesAlwaysAskFloor('LOGIN_FLOW'), true, '10.3 case-insensitive login variant → floor');
+  assertEq(matchesAlwaysAskFloor('  paywall  '), true, '10.4 trimmed paywall (contains pay) → floor');
+  assertEq(matchesAlwaysAskFloor('grant_access'), true, '10.5 grant variant → floor');
+  assertEq(matchesAlwaysAskFloor('memory_read'), false, '10.6 non-floor category → false');
+  assertEq(matchesAlwaysAskFloor(''), false, '10.7 empty string → false');
+  assertEq(matchesAlwaysAskFloor(null), false, '10.8 null → false, no throw');
+  assertEq(matchesAlwaysAskFloor(undefined), false, '10.9 undefined → false, no throw');
+  assertEq(matchesAlwaysAskFloor(42), false, '10.10 number → false, no throw');
+  assertEq(matchesAlwaysAskFloor({ toString() { throw new Error('hostile'); } }), false, '10.11 hostile object → false, no throw');
+  assertEq(matchesAlwaysAskFloor('x'.repeat(100_000) + 'delete'), false, '10.12 marker past the 200-char bound is ignored (bounded scan)');
+  assertEq(matchesAlwaysAskFloor('delete' + 'x'.repeat(100_000)), true, '10.13 marker inside the bound still matches');
 
   if (failures > 0) {
     console.error('\n' + failures + ' fail');

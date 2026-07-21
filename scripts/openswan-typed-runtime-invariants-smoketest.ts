@@ -5,13 +5,15 @@
  *   OST-G1 — the legacy dual tool path `runOpenSwanRuntimeToolLoop` has zero
  *            callers (only the pure `extractBrowserPlansFromToolActions` helper
  *            is imported from `openswanRuntimeToolLoop`).
- *   OST-G2 — the session runtime keeps the wired/dark seam split of 2026-07-01
- *            (f9c9a0b): the T2 progressive-disclosure seam is LIVE
- *            (getProgressiveOpenSwanTools called, resolveAdditionalTools passed
- *            into the typed-core run) while T8 PARALLELISM stays dark
- *            (parallelToolConcurrency pinned to 1). Since 2026-07-20 the
- *            toolParallelPolicyProvider itself is LIVE — supplied for
- *            replay-safety side-effect classification only, not concurrency.
+ *   OST-G2 — the session runtime keeps its typed-core seams LIVE: the T2
+ *            progressive-disclosure seam (getProgressiveOpenSwanTools called,
+ *            resolveAdditionalTools passed into the typed-core run) and, since
+ *            2026-07-20, the T8 toolParallelPolicyProvider. As of the R1 flip
+ *            (2026-07-20) T8 PARALLELISM is also LIVE in this one runtime:
+ *            parallelToolConcurrency is pinned to 4 (partitioned groups may
+ *            dispatch up to 4 concurrently; groups stay sequential/in-order,
+ *            approval/interactive/unknown tools stay sequential barriers).
+ *            The delegationGate and swanbotV2BatchRuntime pins stay at 1.
  *   OST-G3 — agentExecutionCore.runAgent advertises an additive-only tool set:
  *            without resolveAdditionalTools the set is identical turn-over-turn;
  *            with one it only GROWS (never shrinks).
@@ -111,11 +113,17 @@ assert(
   importerFiles.join(' | '),
 );
 
-// ── OST-G2: T2 seam is LIVE (2026-07-01), T8 parallelism stays dark ─────────
+// ── OST-G2: T2 seam is LIVE (2026-07-01), T8 parallelism LIVE (R1, 2026-07-20) ─
 const sessionSrc = readFileSync(join(repoRoot, 'src/lib/openswanSessionRuntime.ts'), 'utf8');
 const persistenceSrc = readFileSync(join(repoRoot, 'src/lib/agentRunPersistence.ts'), 'utf8');
 const subagentSrc = readFileSync(join(repoRoot, 'src/lib/subagentRegistry.ts'), 'utf8');
-assert(/parallelToolConcurrency:\s*1\b/.test(sessionSrc), 'session runtime pins parallelToolConcurrency: 1');
+assert(/parallelToolConcurrency:\s*4\b/.test(sessionSrc), 'session runtime pins parallelToolConcurrency: 4 (R1 flip, 2026-07-20)');
+// The other two typed-core call sites stay fully sequential — the R1 flip is
+// scoped to the OpenSwan session runtime only.
+const delegationSrc = readFileSync(join(repoRoot, 'src/lib/delegationGate.ts'), 'utf8');
+const v2BatchSrc = readFileSync(join(repoRoot, 'src/lib/swanbotV2BatchRuntime.ts'), 'utf8');
+assert(/parallelToolConcurrency:\s*1\b/.test(delegationSrc), 'delegationGate keeps parallelToolConcurrency pinned to 1');
+assert(/parallelToolConcurrency:\s*1\b/.test(v2BatchSrc), 'swanbotV2BatchRuntime keeps parallelToolConcurrency pinned to 1');
 
 function allMentionsAreComments(src: string, token: string): boolean {
   const lines = src.split('\n').filter((l) => l.includes(token));
@@ -136,13 +144,14 @@ assert(
   sessionSrc.split('\n').some((l) => l.trim() === 'resolveAdditionalTools,'),
   'resolveAdditionalTools is passed LIVE into the typed-core run (wired 2026-07-01)',
 );
-// Replay-safety wire (2026-07-20): the T8 policy provider is now passed LIVE —
-// for side-effect CLASSIFICATION (toolReplaySafetyCore's verify-first gate on
-// failed mutating tools), not parallelism: parallelToolConcurrency stays
-// pinned to 1 (asserted above) so dispatch order is unchanged.
+// T8 policy provider (2026-07-20): passed LIVE and, since the R1 flip, serves
+// BOTH duties — side-effect CLASSIFICATION (toolReplaySafetyCore's verify-first
+// gate on failed mutating tools) AND parallel partitioning
+// (partitionParallelSafeBatch groups only auto/no-external-side-effect/
+// read-only-or-disjoint-domain calls for the concurrency-4 dispatch above).
 assert(
   hasLiveMention(sessionSrc, 'toolParallelPolicyProvider: createOpenSwanToolParallelPolicyProvider('),
-  'toolParallelPolicyProvider is passed LIVE into the typed-core run (replay-safety classification, 2026-07-20)',
+  'toolParallelPolicyProvider is passed LIVE into the typed-core run (replay safety + partitioning, 2026-07-20)',
 );
 
 // ── OST-G4: typed run-ledger token rollups stay complete ───────────────────

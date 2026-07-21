@@ -56,15 +56,23 @@ export async function resolveApproval(
   status: 'approved' | 'rejected',
   userId: string,
 ): Promise<void> {
-  const { error } = await supabase
+  // Pending-only transition (mirrors runApprovalsService.resolveRunApproval):
+  // a late click after another approver — or after expiry — must not flip an
+  // already-resolved row. 0 rows matched → silent no-op (the realtime refresh
+  // clears the card); real errors still throw. Downstream apply is safe either
+  // way: agentApprovalsWorker re-checks status + applied_at itself.
+  const { data, error } = await supabase
     .from('agent_approvals')
     .update({
       status,
       resolved_at: new Date().toISOString(),
       resolved_by: userId,
     })
-    .eq('id', approvalId);
+    .eq('id', approvalId)
+    .eq('status', 'pending')
+    .select('id');
   if (error) throw error;
+  if (!Array.isArray(data) || data.length === 0) return; // already resolved/expired
 }
 
 export async function getPendingApprovals(circleId: string): Promise<AgentApproval[]> {

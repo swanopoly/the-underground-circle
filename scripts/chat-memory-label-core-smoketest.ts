@@ -3,7 +3,8 @@
  * formatters extracted from ChatTab (src/lib/chatMemoryLabelCore.ts, unit U1).
  *
  * Goldens are pinned to the VERBATIM ChatTab.tsx behavior (lines 626–689, also
- * byte-identical in chat/ChatTranscript.tsx + components/chat/RunHistoryDrawer.tsx):
+ * byte-identical in components/chat/RunHistoryDrawer.tsx; ChatTab.tsx owns the
+ * live chat render path — chat/ChatTranscript.tsx was dead code, now deleted):
  * recency buckets (fresh/d/w/mo, Date.now()-relative), strength/trust/state/
  * archive/source thresholds + precedence, guidance-vs-pattern family mapping,
  * empty/edge defaults, and a hostile no-throw contract over every export.

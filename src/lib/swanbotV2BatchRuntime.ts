@@ -32,6 +32,7 @@
 
 import { supabase } from './supabase';
 import { getFreshAccessToken } from './authSession';
+import { resolveChatStopMessage } from './chatStopMessageCore';
 import {
   runAgent,
   type AgentEvent,
@@ -205,8 +206,18 @@ export async function runSwanbotV2Batch(
   // events. We also stream every event into the persistence handle (durable
   // agent_run_events parity) and, optionally, into the live-narration sink.
   const turnEndEvents: AgentEvent[] = [];
+  // ── DE-RISK #5 (HIGH — relay-failure double-execution, runbook §0.5.5). ──
+  // Once ANY tool has started this run, a later relay/loop failure must NOT
+  // return `{ text: null }`: the orchestrator would classify it as a transport
+  // failure and re-run the WHOLE prompt via v1, re-executing already-committed
+  // side effects (duplicate email/commit). Mirrors the sibling suppression in
+  // `callSwanBotV2` (swanbot.ts `attemptedClientTools`): return the friendly
+  // 'continuation_failed' stop copy (a completed answer) instead of null. The
+  // breaker then classifies the turn 'success' — intended sibling parity.
+  let anyToolExecuted = false;
   const onEvent = (event: AgentEvent) => {
     if (event.kind === 'turn_end') turnEndEvents.push(event);
+    if (event.kind === 'tool_call_start') anyToolExecuted = true;
     // Durable trajectory rows (turn_start/turn_end/tool_call_*/final_response),
     // fire-and-forget inside the handle — matches the edge's event writes.
     if (handle) {
@@ -348,7 +359,13 @@ export async function runSwanbotV2Batch(
           console.warn('[swanbotV2BatchRuntime] relay-failure error row write failed:', e);
         }
       }
-      return { text: null };
+      // DE-RISK #5: keep the honest error row above, but if a tool already ran
+      // suppress the null (which would trigger the caller's v1 re-run) and
+      // return the stop copy instead. First-round failures (no tools yet) keep
+      // the harmless v1 fallback.
+      return anyToolExecuted
+        ? { text: resolveChatStopMessage('continuation_failed').message }
+        : { text: null };
     }
 
     // 2.7 result — adapter maps AgentRunResult → the v2 response contract.
@@ -386,6 +403,22 @@ export async function runSwanbotV2Batch(
       }
     }
 
+    // DE-RISK #5: the normal terminal can ALSO end with empty final text after
+    // tools executed — e.g. a tool-heavy run that burns every round on tool_use
+    // (max-iterations exit returns '' text) or a user STOP mid-loop. Returning
+    // null there would make the caller classify a completed-with-side-effects
+    // run as a transport failure and re-run the WHOLE prompt via v1, duplicating
+    // the committed side effects. Mirror the edge sibling's continuation_cap
+    // stop copy (swanbot.ts) instead. Zero-tool empty-text runs keep the
+    // harmless null → v1 fallback, matching the relayFailed/catch posture.
+    if (!v2.text && anyToolExecuted) {
+      return {
+        text: resolveChatStopMessage(
+          runResult.hitMaxIterations ? 'continuation_cap' : 'continuation_failed',
+        ).message,
+      };
+    }
+
     // §2.7: return text only — the caller resolves friendly stop copy via
     // resolveChatStopMessage, exactly as it did for the edge terminal body.
     return { text: v2.text || null };
@@ -413,27 +446,52 @@ export async function runSwanbotV2Batch(
       '[swanbotV2BatchRuntime] run failed:',
       err instanceof Error ? err.message : String(err),
     );
-    // Fail closed to the same terminal `null` a transport failure yields — the
-    // caller's v1 safety net + breaker handle it (runbook §4).
+    // DE-RISK #5: identical double-execution hazard as the relayFailed branch —
+    // if a tool already ran, a v1 re-run would duplicate its side effects, so
+    // return the stop copy (mirrors `attemptedClientTools` in swanbot.ts's
+    // catch). Otherwise fail closed to the same terminal `null` a transport
+    // failure yields — the caller's v1 safety net + breaker handle it (§4).
+    if (anyToolExecuted) {
+      return { text: resolveChatStopMessage('continuation_failed').message };
+    }
     return { text: null };
+  } finally {
+    // Heartbeat teardown: this runtime deliberately bypasses handle.finalize
+    // (explicit terminal-row writes above), so the wall-clock heartbeat started
+    // by createPersistedRun would otherwise beat forever — forging liveness on
+    // finished runs and leaking one 60s interval per turn. Stop it on EVERY
+    // terminal path (relayFailed early return, success, catch). Idempotent.
+    try {
+      handle?.stopHeartbeat();
+    } catch {
+      /* teardown must never mask the real result/error */
+    }
   }
 }
 
 /*
- * ── Phase-2 flip (NOT in this workflow — a separate coordinated swanbot.ts
- *    commit, ADR R6). Inside `callSwanBotV2`, right AFTER the existing
+ * ── Phase-2 flip (LANDED — the coordinated swanbot.ts guard, ADR R6). Inside
+ *    `callSwanBotV2`, right AFTER the existing
  *    `if (shouldBlockExternalAiProvider('anthropic')) return { text: null };`
- *    guard (so the killswitch still covers both paths), add one line:
+ *    guard (so the killswitch covers both paths), the flag-dark block calls
+ *    this runtime with the REAL 11-param signature:
  *
- *      if (isSwanbotV2ClientLoopEnabled())
+ *      if (isSwanbotV2ClientLoopEnabled()) {
+ *        // heavy deps dynamically imported inside the guard; prompt-build
+ *        // failure falls open to the edge path below.
  *        return runSwanbotV2Batch(
  *          message, circleId, userId, _discordContext, model, _wikiContext,
  *          conversationMessages, thinkingLevel, _maxTokens, systemDirective,
- *          { systemPrompt, snapshotContextMessage },
+ *          { systemPrompt, snapshotContextMessage, mode,
+ *            targetAgentName: agentSubject?.agentDisplayName,
+ *            targetAgentSubject: agentSubject ?? null },
  *        );
+ *      }
  *
- *    where `systemPrompt` is built from swanbot.ts's own buildSystemPromptAsync(...)
- *    (+ the mirrored MODE_CONTRACT line) and `snapshotContextMessage` from the
- *    already-imported buildCircleSnapshotContextMessage(...) / BlackSwan grounding.
+ *    `systemPrompt` is built from swanbot.ts's own buildSystemPromptAsync(...)
+ *    (omitCircleContextSnapshot: true) + appendV2ModeContract (the mirrored
+ *    MODE_CONTRACT line), and `snapshotContextMessage` from
+ *    buildCircleSnapshotContextMessage(...). `agentSubject` rides in the extra
+ *    bag — NEVER as an 11th positional (that slot IS the extra bag).
  *    Flag DEFAULT OFF ⇒ no behavior change on merge.
  */

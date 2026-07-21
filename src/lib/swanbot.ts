@@ -77,6 +77,10 @@ import { buildFailureRecovery } from './failureRecoveryCopyCore';
 import { resolveConversationComplexityFloor } from './conversationComplexityFloorCore';
 import { resolveModelContextBudget, getModelContextWindow } from './modelContextBudgetCore';
 import { SWANBOT_CONTINUATION_BASE_MAX } from './swanbotContinuationBudgetCore';
+// Loop convergence (ADR-0002 Phase 2): per-device opt-in flag for the client-
+// side batch loop. Static import is the zero-dep flag ONLY — the runtime and
+// everything heavy stay dynamically imported inside the flag guard.
+import { isSwanbotV2ClientLoopEnabled } from './swanbotV2ClientLoopFlag';
 import { buildBlackSwanGroundingBlock, isBlackSwanModel, isLocalOllamaBlackSwan, planBlackSwanEndpointFailover } from './blackswanRouting';
 // Pure csv/table helpers (no react-native) — see the LOCKSTEP note on
 // SwanBotStructuredArtifact below.
@@ -1248,6 +1252,60 @@ async function callSwanBotV2(
   agentSubject?: AgentRuntimeSubjectMetadata | null,
 ): Promise<V2CallResult> {
   if (shouldBlockExternalAiProvider('anthropic')) return { text: null };
+  // ── Loop convergence flip site (ADR-0002 Phase 2, runbook §4) — FLAG-DARK. ──
+  // Default OFF (opt-in per device via `uc_swanbot_v2_client_loop`); when ON,
+  // the batch turn runs the client-side `runAgent` loop (swanbotV2BatchRuntime)
+  // instead of the swanbot-v2-ai edge round-trip. Placed AFTER the strict-local
+  // killswitch above so it covers both paths. Everything heavy is dynamically
+  // imported INSIDE the guard, so flag-OFF turns pay nothing. Fail-open: any
+  // prompt-build failure falls through to today's edge path below.
+  if (isSwanbotV2ClientLoopEnabled()) {
+    try {
+      const mode = thinkingLevel === 'fast' ? 'talk' : 'build';
+      // Frozen system prompt via the existing chat assembly. The Circle
+      // Context Snapshot is suppressed here and delivered instead as a
+      // user-role context message (R15/O7 cache discipline — the same
+      // suppression contract the typed-core session runtime uses).
+      const promptContext: SwanBotContext = {
+        userId,
+        circleId,
+        model,
+        conversationMessages: conversationMessages as SwanBotContext['conversationMessages'],
+        thinkingLevel,
+        agentSubjectMetadata: agentSubject || undefined,
+        agentName: agentSubject?.agentDisplayName,
+        agentSubjectKey: agentSubject?.agentSubjectKey,
+        omitCircleContextSnapshot: true,
+      };
+      const circleData = await getCircleContextData(promptContext);
+      const basePrompt = await buildSystemPromptAsync(promptContext, circleData, message);
+      // LOCKSTEP mirror of the edge MODE_CONTRACT (swanbot-v2-ai index.ts).
+      // NOTE: systemDirective is NOT appended here — the runtime folds the
+      // positional param into the prompt itself.
+      const { appendV2ModeContract } = await import('./swanbotV2ModeContractCore');
+      const systemPrompt = appendV2ModeContract(basePrompt, mode);
+      const snapshotContextMessage = await import('./circleSnapshotContextInjection')
+        .then(({ buildCircleSnapshotContextMessage }) => buildCircleSnapshotContextMessage(circleId))
+        .catch(() => null);
+      const { runSwanbotV2Batch } = await import('./swanbotV2BatchRuntime');
+      // agentSubject rides in the extra bag — NEVER as an 11th positional
+      // (that slot IS the extra bag). SwanbotV2BatchResult is structurally
+      // identical to V2CallResult, so no cast.
+      return runSwanbotV2Batch(
+        message, circleId, userId, _discordContext, model, _wikiContext,
+        conversationMessages, thinkingLevel, _maxTokens, systemDirective,
+        {
+          systemPrompt,
+          snapshotContextMessage,
+          mode,
+          targetAgentName: agentSubject?.agentDisplayName,
+          targetAgentSubject: agentSubject ?? null,
+        },
+      );
+    } catch (err) {
+      console.warn('[SwanBot/v2] client-loop prompt build failed — falling back to the edge path:', err);
+    }
+  }
   // Shared source of truth with the edge (swanbotContinuationBudgetCore) so the
   // client cap and the edge cap can never drift into an off-by-one again.
   const MAX_CONTINUATIONS = SWANBOT_CONTINUATION_BASE_MAX;

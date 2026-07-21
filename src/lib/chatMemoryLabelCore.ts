@@ -7,8 +7,9 @@
  * to the inline copies for every real `PromptMemoryReference`; the follow-up
  * hot-file edit deletes the inline definitions and imports them from here.
  * (The same 8 formatters are byte-identical duplicates in
- * `chat/ChatTranscript.tsx` and `components/chat/RunHistoryDrawer.tsx`, which may
- * later re-import this core too — out of scope for U1.)
+ * `components/chat/RunHistoryDrawer.tsx`, which may later re-import this core
+ * too — out of scope for U1. `chat/ChatTranscript.tsx` was dead code and has
+ * been deleted; the live render path is inline in `ChatTab.tsx`.)
  *
  * PURITY: `import type` only — the `PromptMemoryReference` type is fully erased
  * at compile time, so this module pulls in ZERO runtime deps (no supabase, no

@@ -18,15 +18,12 @@ import { renderApprovalAction } from '../lib/approvalPayloadRenderer';
 import { classifyApprovalAge, type ApprovalStaleness } from '../lib/approvalPreviewCore';
 import { toolAutoApproveCategory } from '../lib/openswanToolRuntime';
 import { AUTO_APPROVE_CATEGORY_LABELS, writeUserAutoApprove } from '../lib/chatAutoApproveSettings';
-
-// Risk badge (from the approval payload's approvalPreview.risk, set by
-// openswanToolRuntime) so a user sees WHAT they're approving at a glance —
-// a read is safe, a destructive action deserves a second look.
-const RISK_BADGES: Record<'read' | 'write' | 'destructive', { fg: string; bg: string; border: string; label: string }> = {
-  read:        { fg: '#34d399', bg: '#022c22', border: '#065f46', label: 'READ' },
-  write:       { fg: '#fbbf24', bg: '#422006', border: '#92400e', label: 'WRITE' },
-  destructive: { fg: '#f87171', bg: '#450a0a', border: '#991b1b', label: 'DESTRUCTIVE' },
-};
+import {
+  mapPreviewRiskToTier,
+  shouldOfferRememberAutoApprove,
+  RISK_TIER_CHIP_COLORS,
+} from '../lib/approvalCardModelCore';
+import { describeApprovalRiskChip } from '../lib/approvalIntentPreview';
 
 const KIND_ACCENTS: Record<ApprovalKind, { fg: string; bg: string; border: string; label: string }> = {
   publish:             { fg: '#fbbf24', bg: '#422006', border: '#92400e', label: 'PUBLISH' },
@@ -72,7 +69,12 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
   // tool) → no checkbox; those always ask.
   const rememberCategory = useMemo(() => {
     const tool = (item.payload as any)?.tool;
-    return typeof tool === 'string' ? toolAutoApproveCategory(tool) : null;
+    const cat = typeof tool === 'string' ? toolAutoApproveCategory(tool) : null;
+    // Floor suppression (approvalCardModelCore): never offer a standing
+    // auto-approve for pay/delete/login/grant or credential entry — the
+    // request-side gate would refuse to honor it anyway. Narrows-only:
+    // the user can still approve this one action.
+    return cat && shouldOfferRememberAutoApprove(cat, tool) ? cat : null;
   }, [item.payload]);
 
   const handle = useCallback(async (status: 'approved' | 'rejected') => {
@@ -107,11 +109,16 @@ function ApprovalCard({ item, userId, onResolve }: { item: AgentRunApproval; use
   );
 
   // Risk pill from the approval preview payload (secret-safe; set upstream).
+  // Shared vocab (approvalCardModelCore): fold the preview's read/write/
+  // destructive triple into the same tier chips HitlApprovalBanner uses, so
+  // destructive shows the red IRREVERSIBLE chip in both banners. Legacy rows
+  // without an approvalPreview.risk render NO chip (never a default badge).
   const risk = useMemo(() => {
     const r = (item.payload as any)?.approvalPreview?.risk;
-    return r === 'read' || r === 'write' || r === 'destructive'
-      ? RISK_BADGES[r as 'read' | 'write' | 'destructive']
-      : null;
+    if (r !== 'read' && r !== 'write' && r !== 'destructive') return null;
+    const chip = describeApprovalRiskChip(mapPreviewRiskToTier(r));
+    const colors = RISK_TIER_CHIP_COLORS[chip.tone];
+    return { ...colors, label: chip.label };
   }, [item.payload]);
 
   // UC-1b: when the approval payload includes semantic info (tool +

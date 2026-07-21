@@ -24,6 +24,14 @@ export type PersistedRunHandle = {
   onEvent: (event: AgentEvent) => void;
   /** Call once the core finishes. Writes totals + final status. */
   finalize: (result: AgentRunResult, err?: unknown) => Promise<void>;
+  /**
+   * Stop the wall-clock heartbeat without finalize's raw terminal write.
+   * For runtimes that own their terminal row (e.g. swanbotV2BatchRuntime):
+   * MUST be called on every terminal path so the interval never keeps
+   * forging liveness on a finished run. Idempotent (clearInterval), and
+   * finalize already calls it — double-stop is harmless.
+   */
+  stopHeartbeat: () => void;
 };
 
 export type CreatePersistedRunOptions = {
@@ -343,5 +351,5 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
     }
   };
 
-  return { run, onEvent, finalize };
+  return { run, onEvent, finalize, stopHeartbeat };
 }

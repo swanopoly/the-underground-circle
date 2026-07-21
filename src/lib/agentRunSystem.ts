@@ -281,6 +281,29 @@ export async function completeRunUnlessCancelled(
   return true;
 }
 
+// Cancel-guarded 'running' progress write: same shape as
+// updateRunStatus(runId, 'running', extra) but with the
+// `.neq('status','cancelled')` predicate (mirroring completeRunUnlessCancelled)
+// so a DEFERRED pre-loop progress write can never flip a console-cancelled row
+// back to 'running'. Used by openswanSessionRuntime's telemetry-defer path,
+// where step-progress writes are started immediately but not awaited.
+export async function updateRunProgressUnlessCancelled(
+  runId: string,
+  extra?: Partial<{ current_step_index: number; total_steps: number; started_at: string }>,
+): Promise<boolean> {
+  const updates: Record<string, unknown> = { status: 'running', updated_at: new Date().toISOString() };
+  if (!extra?.started_at) updates.started_at = new Date().toISOString();
+  if (extra) Object.assign(updates, extra);
+
+  const { error } = await supabase
+    .from('agent_runs')
+    .update(updates)
+    .eq('id', runId)
+    .neq('status', 'cancelled');
+  if (error) { console.error('[AgentRunSystem] updateRunProgressUnlessCancelled error:', error); return false; }
+  return true;
+}
+
 export async function mergeRunMetadata(runId: string, patch: Record<string, unknown>): Promise<boolean> {
   try {
     const { data, error } = await supabase

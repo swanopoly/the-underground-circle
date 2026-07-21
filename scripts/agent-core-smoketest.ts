@@ -26,6 +26,9 @@
 
 import {
   runAgent,
+  stubStaleToolResultContents,
+  DROPPED_TOOL_RESULT_MARKER_PREFIX,
+  HARD_TRUNCATE_MARKER_TEXT,
   type AgentEvent,
   type AgentMessage,
   type AgentMessageContentBlock,
@@ -33,6 +36,9 @@ import {
   type AgentToolDefinition,
   type ProviderTurnResult,
 } from '../src/lib/agentExecutionCore';
+import { estimateMessagesTokens } from '../src/lib/agentContextCompression';
+import { planCompactionTier } from '../src/lib/contextCompactionTierCore';
+import { projectMessagesForCompaction } from '../src/lib/openswanContextCompactionCore';
 
 let failures = 0;
 
@@ -706,6 +712,239 @@ async function case12_abortedNotCapExhausted() {
     'case12c: real cap still emits the cap-exhausted event');
 }
 
+// ─── Case 13 — tiered pre-turn compaction (contextCompactionTierCore wiring) ─
+
+async function case13_tieredCompaction() {
+  const readTool = (name: string, payload: () => string): AgentToolDefinition => ({
+    name,
+    description: 'returns a payload',
+    input_schema: { type: 'object', properties: {} },
+    async handler() { return { ok: true, data: { body: payload() } }; },
+  });
+  const toolTurn = (id: string, name: string): ProviderTurnResult =>
+    ({ stop_reason: 'tool_use', content: [{ type: 'tool_use', id, name, input: {} }] });
+  const endTurn: ProviderTurnResult =
+    { stop_reason: 'end_turn', content: [{ type: 'text', text: 'fin' }] };
+  const pairingIntact = (msgs: AgentMessage[]): boolean => {
+    const uses = new Set<string>();
+    const results = new Set<string>();
+    for (const m of msgs) {
+      if (typeof m.content === 'string') continue;
+      for (const b of m.content) {
+        if (b.type === 'tool_use') uses.add(b.id);
+        else if (b.type === 'tool_result') results.add(b.tool_use_id);
+      }
+    }
+    for (const id of uses) if (!results.has(id)) return false;
+    return true;
+  };
+
+  // (a) Small-context identity: a sub-trigger run with default-ON tiered
+  //     compaction is DEEP-EQUAL to the same run with tieredCompaction:false,
+  //     and never emits the tier event.
+  const smallRun = async (tiered: false | undefined) => {
+    const events: AgentEvent[] = [];
+    const result = await runAgent({
+      initialMessages: [{ role: 'user', content: 'go' }],
+      tools: [readTool('smallread', () => 's'.repeat(400))],
+      provider: scriptedProvider([
+        toolTurn('tu_t1', 'smallread'),
+        toolTurn('tu_t2', 'smallread'),
+        toolTurn('tu_t3', 'smallread'),
+        endTurn,
+      ]),
+      maxIterations: 10,
+      onEvent: (e) => events.push(e),
+      ...(tiered === false ? { tieredCompaction: false as const } : {}),
+    });
+    return { result, events };
+  };
+  const defaultOn = await smallRun(undefined);
+  const optedOut = await smallRun(false);
+  assertEqual(
+    JSON.stringify(defaultOn.result.messages),
+    JSON.stringify(optedOut.result.messages),
+    'case13a: sub-trigger transcript byte-identical to tieredCompaction:false',
+  );
+  assert(!defaultOn.events.some((e) => e.kind === 'context_compaction_tier'),
+    'case13a: no tier event below the trigger');
+
+  // (b) Long-run drop: 30 tool rounds of 12k-char stale results against a 20k
+  //     window. The provider must NEVER receive an over-hardLimit payload,
+  //     pairing stays intact, stale results carry the drop marker, and earlier
+  //     iteration_complete snapshots retain the ORIGINAL contents (replace,
+  //     never mutate).
+  const bigBody = 'b'.repeat(12_000);
+  const turnsB: ProviderTurnResult[] = [];
+  for (let i = 0; i < 30; i++) turnsB.push(toolTurn(`tu_big_${i}`, 'bigread'));
+  turnsB.push(endTurn);
+  const hardLimitB = 20_000 - 2_000;
+  const payloadEstimates: number[] = [];
+  const scriptedB = scriptedProvider(turnsB);
+  const watchingProvider: AgentProvider = {
+    async turn(args) {
+      payloadEstimates.push(estimateMessagesTokens(args.messages));
+      return scriptedB.turn(args);
+    },
+  };
+  const eventsB: AgentEvent[] = [];
+  let snapshotAtIter2: AgentMessage[] | null = null;
+  const resultB = await runAgent({
+    initialMessages: [{ role: 'user', content: 'go' }],
+    tools: [readTool('bigread', () => bigBody)],
+    provider: watchingProvider,
+    maxIterations: 35,
+    tieredCompaction: { contextWindowTokens: 20_000, reservedOutputTokens: 2_000 },
+    onEvent: (e) => {
+      eventsB.push(e);
+      if (e.kind === 'iteration_complete' && e.iteration === 2) snapshotAtIter2 = e.messages;
+    },
+  });
+  assertEqual(resultB.text, 'fin', 'case13b: run completed');
+  assert(payloadEstimates.every((t) => t <= hardLimitB),
+    `case13b: provider never receives an over-hardLimit payload (max ${Math.max(...payloadEstimates)}t vs ${hardLimitB}t)`);
+  assert(pairingIntact(resultB.messages), 'case13b: every tool_use id still has a matching tool_result');
+  const stubbedCount = resultB.messages.filter((m) =>
+    Array.isArray(m.content) && m.content.some((b) =>
+      b.type === 'tool_result' && typeof b.content === 'string'
+      && b.content.startsWith(DROPPED_TOOL_RESULT_MARKER_PREFIX)),
+  ).length;
+  assert(stubbedCount > 0, 'case13b: stale tool_results carry the drop marker');
+  assert(eventsB.some((e) => e.kind === 'context_compaction_tier'
+      && (e.tier === 'drop_tool_noise' || e.tier === 'summarize_oldest')),
+    'case13b: tier event emitted with a drop-family tier');
+  const tierEvent = eventsB.find((e) => e.kind === 'context_compaction_tier');
+  if (tierEvent && tierEvent.kind === 'context_compaction_tier') {
+    assert(tierEvent.freedTokensApprox > 0, 'case13b: freedTokensApprox positive');
+    assert(tierEvent.reason.length > 0 && tierEvent.reason.length <= 240
+      && !tierEvent.reason.includes(bigBody.slice(0, 32)),
+      'case13b: reason bounded and content-free');
+  }
+  // Replace-not-mutate: the round-2 snapshot (taken before the first trip)
+  // shares message OBJECTS with the live array; later stubbing must have
+  // replaced, not mutated, so the snapshot still holds the original bytes.
+  assert(!!snapshotAtIter2, 'case13b: captured the iteration-2 snapshot');
+  if (snapshotAtIter2) {
+    const snapshotHasOriginal = (snapshotAtIter2 as AgentMessage[]).some((m) =>
+      Array.isArray(m.content) && m.content.some((b) =>
+        b.type === 'tool_result' && typeof b.content === 'string' && b.content.includes(bigBody)));
+    const snapshotHasMarker = (snapshotAtIter2 as AgentMessage[]).some((m) =>
+      Array.isArray(m.content) && m.content.some((b) =>
+        b.type === 'tool_result' && typeof b.content === 'string'
+        && b.content.startsWith(DROPPED_TOOL_RESULT_MARKER_PREFIX)));
+    assert(snapshotHasOriginal && !snapshotHasMarker,
+      'case13b: earlier iteration_complete snapshot retains original contents');
+  }
+
+  // (c) Giant PROTECTED recent tool_result → hard_truncate lands the payload
+  //     under the hard limit while keeping block shape + pairing.
+  //     toolResultSummarization:false so the 160k-char envelope reaches the
+  //     history intact (isolates the tier path from the P6 clamp).
+  const giantBody = 'g'.repeat(160_000);
+  const payloadsC: number[] = [];
+  const scriptedC = scriptedProvider([toolTurn('tu_giant', 'giantread'), endTurn]);
+  const watchingC: AgentProvider = {
+    async turn(args) {
+      payloadsC.push(estimateMessagesTokens(args.messages));
+      return scriptedC.turn(args);
+    },
+  };
+  const eventsC: AgentEvent[] = [];
+  const resultC = await runAgent({
+    initialMessages: [{ role: 'user', content: 'go' }],
+    tools: [readTool('giantread', () => giantBody)],
+    provider: watchingC,
+    maxIterations: 5,
+    toolResultSummarization: false,
+    tieredCompaction: { contextWindowTokens: 20_000, reservedOutputTokens: 2_000 },
+    onEvent: (e) => eventsC.push(e),
+  });
+  assertEqual(resultC.text, 'fin', 'case13c: run completed');
+  const hardLimitC = 18_000;
+  assert(payloadsC[1] !== undefined && payloadsC[1] <= hardLimitC,
+    `case13c: hard_truncate landed the payload under hardLimit (${payloadsC[1]}t vs ${hardLimitC}t)`);
+  assert(eventsC.some((e) => e.kind === 'context_compaction_tier' && e.tier === 'hard_truncate'),
+    'case13c: hard_truncate tier event emitted');
+  assert(pairingIntact(resultC.messages), 'case13c: pairing intact after hard truncate');
+  const truncated = resultC.messages.find((m) =>
+    Array.isArray(m.content) && m.content.some((b) =>
+      b.type === 'tool_result' && typeof b.content === 'string'
+      && b.content.includes(HARD_TRUNCATE_MARKER_TEXT)));
+  assert(!!truncated, 'case13c: truncation marker present on the shaved tool_result');
+
+  // (d) tieredCompaction:false on the SAME over-trigger workload → legacy
+  //     byte behavior: no tier event, no markers, full stale bytes forwarded.
+  const turnsD: ProviderTurnResult[] = [];
+  for (let i = 0; i < 8; i++) turnsD.push(toolTurn(`tu_off_${i}`, 'bigread'));
+  turnsD.push(endTurn);
+  const eventsD: AgentEvent[] = [];
+  const resultD = await runAgent({
+    initialMessages: [{ role: 'user', content: 'go' }],
+    tools: [readTool('bigread', () => bigBody)],
+    provider: scriptedProvider(turnsD),
+    maxIterations: 12,
+    tieredCompaction: false,
+    onEvent: (e) => eventsD.push(e),
+  });
+  assert(!eventsD.some((e) => e.kind === 'context_compaction_tier'),
+    'case13d: opted-out run never emits the tier event');
+  const anyMarkerD = resultD.messages.some((m) =>
+    Array.isArray(m.content) && m.content.some((b) =>
+      b.type === 'tool_result' && typeof b.content === 'string'
+      && (b.content.startsWith(DROPPED_TOOL_RESULT_MARKER_PREFIX) || b.content.includes(HARD_TRUNCATE_MARKER_TEXT))));
+  assert(!anyMarkerD, 'case13d: opted-out run keeps every stale byte (no markers)');
+  const fullResultsD = resultD.messages.filter((m) =>
+    Array.isArray(m.content) && m.content.some((b) =>
+      b.type === 'tool_result' && typeof b.content === 'string' && b.content.includes(bigBody)));
+  assertEqual(fullResultsD.length, 8, 'case13d: all 8 oversized tool_results forwarded verbatim');
+
+  // (e) Lockstep: the executor's recentStart walk-back + droppable set match
+  //     the tier core's protection rule exactly (same clamps, same pair guard).
+  const bigResultMsg = (id: string): AgentMessage => ({
+    role: 'user',
+    content: [{ type: 'tool_result', tool_use_id: id, content: 'r'.repeat(5_000) }],
+  });
+  const toolUseMsg = (id: string): AgentMessage => ({
+    role: 'assistant',
+    content: [{ type: 'tool_use', id, name: 'x', input: {} }],
+  });
+  const history: AgentMessage[] = [
+    { role: 'user', content: 'start' },
+    toolUseMsg('l1'), bigResultMsg('l1'),
+    toolUseMsg('l2'), bigResultMsg('l2'),
+    toolUseMsg('l3'), bigResultMsg('l3'),
+    toolUseMsg('l4'), bigResultMsg('l4'),
+    toolUseMsg('l5'), bigResultMsg('l5'),
+  ];
+  const keepRecentE = 5; // n=11 → recentStart 6 lands ON a tool_result → walk back to 5
+  const views = projectMessagesForCompaction(history);
+  // Replicate the tier core's rule from its own projections.
+  let expectedStart = Math.max(0, views.length - keepRecentE);
+  while (expectedStart > 0 && views[expectedStart].isToolResult) expectedStart -= 1;
+  const expectedIndices: number[] = [];
+  for (let i = 0; i < expectedStart; i++) {
+    if (views[i].isToolResult && views[i].role !== 'system') expectedIndices.push(i);
+  }
+  const workingCopy = history.map((m) => m); // executor replaces slots; originals shared
+  const { stubbedIndices } = stubStaleToolResultContents(workingCopy, keepRecentE);
+  assertEqual(stubbedIndices, expectedIndices,
+    'case13e: executor stubs exactly the tier core\'s droppable set (pair-guard walk-back matches)');
+  // And the selector's freeable-by-drop accounting agrees with that same set.
+  const planE = planCompactionTier({ messages: views, keepRecentCount: keepRecentE });
+  const expectedFreeable = Math.floor(
+    expectedIndices.reduce((sum, i) => sum + (views[i].contentLen ?? 0), 0) / 4,
+  );
+  assertEqual(planE.freeableByDropTokens, expectedFreeable,
+    'case13e: planCompactionTier freeableByDropTokens matches the executor\'s set');
+  // Replace-not-mutate: original history objects untouched.
+  const originalUntouched = expectedIndices.every((i) => {
+    const blocks = history[i].content as AgentMessageContentBlock[];
+    const b = blocks[0];
+    return b.type === 'tool_result' && typeof b.content === 'string' && b.content === 'r'.repeat(5_000);
+  });
+  assert(originalUntouched, 'case13e: executor replaced message objects without mutating originals');
+}
+
 // ─── Run all ────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -722,6 +961,7 @@ async function main() {
     ['case10_dependencyAwareParallelism', case10_dependencyAwareParallelism],
     ['case11_onRoundCompleteHook',  case11_onRoundCompleteHook],
     ['case12_abortedNotCapExhausted', case12_abortedNotCapExhausted],
+    ['case13_tieredCompaction',      case13_tieredCompaction],
   ];
   for (const [name, fn] of cases) {
     const before = failures;

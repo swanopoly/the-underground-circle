@@ -212,6 +212,48 @@ async function checkRealCatalogPolicies() {
     'real-catalog round partitions: disjoint writers group, conflicting write + dependent read barrier',
   );
 
+  // verification.* run real shell commands via bridge /exec — external side
+  // effect (auto-approved, non-mutating), so each call is a sequential
+  // singleton barrier: three npm processes must never contend in one
+  // working tree inside a single parallel group.
+  for (const name of ['verification.typecheck', 'verification.tests', 'verification.lint']) {
+    const p = runtime.getOpenSwanToolParallelPolicy(name);
+    assert.equal(p.approvalMode, 'auto', `${name} stays auto-approved (no new HITL prompt)`);
+    assert.equal(p.mutatesState, false, `${name} is non-mutating`);
+    assert.equal(p.externalSideEffect, true, `${name} spawns a bridge /exec process (external side effect)`);
+    assert.equal(isParallelEligibleToolPolicy(p), false, `${name} is never parallel-eligible`);
+  }
+  assert.deepEqual(
+    partitionParallelSafeBatch([
+      runtime.getOpenSwanToolParallelPolicy('verification.typecheck'),
+      runtime.getOpenSwanToolParallelPolicy('verification.tests'),
+      runtime.getOpenSwanToolParallelPolicy('verification.lint'),
+    ]),
+    [[0], [1], [2]],
+    'a verification round runs strictly serially (no concurrent npm processes)',
+  );
+
+  // desktop.wait_for_app is a temporal synchronization primitive: base policy
+  // stays read-only/auto (no HITL change), but the parallel policy marks it
+  // mutating with NO declared targets so it is a singleton barrier — a
+  // same-round observation must not fire while the app is still launching.
+  const waitForApp = runtime.getOpenSwanToolParallelPolicy('desktop.wait_for_app');
+  assert.equal(waitForApp.approvalMode, 'auto', 'desktop.wait_for_app stays auto-approved');
+  assert.equal(waitForApp.mutatesState, true, 'desktop.wait_for_app parallel policy is mutating (barrier)');
+  assert.equal(waitForApp.mutationTargets, undefined, 'desktop.wait_for_app declares no mutationTargets');
+  assert.equal(isParallelEligibleToolPolicy(waitForApp), false, 'desktop.wait_for_app is never parallel-eligible');
+  const basePolicy = runtime.getOpenSwanToolPolicy('desktop.wait_for_app');
+  assert.equal(basePolicy.approvalMode, 'auto', 'base policy approval unchanged (auto)');
+  assert.equal(basePolicy.mutatesState, false, 'base policy stays read-only (no HITL/banner change)');
+  assert.deepEqual(
+    partitionParallelSafeBatch([
+      waitForApp,
+      runtime.getOpenSwanToolParallelPolicy('desktop.photoshop_document_status'),
+    ]),
+    [[0], [1]],
+    'wait_for_app then photoshop_document_status partitions into two groups (wait completes first)',
+  );
+
   // Bridge provider — ready for runAgent({ toolParallelPolicyProvider }).
   const provider = bridge.createOpenSwanToolParallelPolicyProvider();
   assert.deepEqual(provider('tasks.create')?.mutationTargets, ['circle_tasks'], 'bridge provider mirrors the catalog policy');

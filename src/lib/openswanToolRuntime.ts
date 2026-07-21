@@ -3920,7 +3920,16 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
       family: 'verification',
       approvalMode: 'auto',
       mutatesState: false,
-      externalSideEffect: false,
+      // externalSideEffect: true — these handlers spawn real shell commands
+      // (npm run typecheck / test / lint) through the bridge /exec, the same
+      // external surface local.run_shell/git.run use (see the
+      // TOOL_DEPENDENCY_DOMAINS exec note). Marking the side effect keeps
+      // each verification.* call a sequential singleton barrier in
+      // partitionParallelSafeBatch — concurrent npm processes in one working
+      // tree contend on CPU/caches and blow past the bridge's 30s exec
+      // timeout. Approval stays 'auto': maybeRequestToolApproval only gates
+      // 'ask' tools, so no new HITL prompt is introduced.
+      externalSideEffect: true,
       summary: 'Runs or plans local verification checks for correctness.',
     };
   }
@@ -4168,8 +4177,11 @@ function getBaseOpenSwanToolPolicy(tool: OpenSwanRuntimeToolName): OpenSwanToolP
   }
 
   if (tool.startsWith('desktop.')) {
-    // Read-only tools (list apps, screen size, screenshot, wait_for_app)
-    // auto-approve — they observe state, they don't change it. Every
+    // Read-only tools (list apps, screen size, screenshot) auto-approve —
+    // they observe state, they don't change it. desktop.wait_for_app stays
+    // auto/read-only HERE (no HITL change), but it is a temporal
+    // synchronization primitive, so getOpenSwanToolParallelPolicy
+    // special-cases it into a sequential barrier for parallel dispatch. Every
     // write path (launch/focus/type/keys/click/open_url/open_path) is
     // 'ask' and routes through maybeRequestToolApproval, where
     // toolAutoApproveCategory maps desktop.* to the `desktop_action`
@@ -4673,6 +4685,17 @@ export function getOpenSwanToolParallelPolicy(
   toolName: string,
   activePluginIds?: string[],
 ): ToolParallelPolicy {
+  // desktop.wait_for_app is a temporal synchronization primitive, not an
+  // order-free read: same-round calls the model emits AFTER it depend on the
+  // wait having completed (e.g. wait_for_app(Photoshop) then
+  // photoshop_document_status). Its BASE policy stays read-only/auto — no
+  // HITL/banner change for any base-policy consumer — but for parallel
+  // dispatch it must be a singleton barrier: mutating with NO declared
+  // mutationTargets is exactly what isParallelEligibleToolPolicy rejects,
+  // so partitionParallelSafeBatch never groups it with round-neighbours.
+  if (toolName === 'desktop.wait_for_app') {
+    return { approvalMode: 'auto', mutatesState: true, externalSideEffect: false };
+  }
   const base = getOpenSwanToolPolicy(toolName as OpenSwanRuntimeToolName, activePluginIds);
   const domains = TOOL_DEPENDENCY_DOMAINS[toolName as OpenSwanRuntimeToolName];
   return {

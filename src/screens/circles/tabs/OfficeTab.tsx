@@ -115,10 +115,10 @@ import OfficeAgentPlanQueue, { officeAgentPlanQueueHasContent } from '../../../c
 import RunHistoryDrawer from '../../../components/chat/RunHistoryDrawer';
 import {
   buildChatAttentionState,
-  resolveApprovalExpiresAt,
   type ChatAttentionAction,
   type ChatAttentionItem,
 } from '../../../lib/chatAttentionQueue';
+import { isApprovalRowLive } from '../../../lib/approvalCardModelCore';
 import { showAlert } from '../../../lib/alert';
 import type { ComputerTaskChecklistCard } from '../../../lib/computerTaskState';
 import { useAgentApprovals, useAgentControl } from '../../../services/hitlService';
@@ -4133,10 +4133,11 @@ export default function OfficeTab({ circleId, accentColor, onAgentStats, onReady
       {/* HITL Approval Banner — expired rows are excluded (the strip above
           declares them expired; live APPROVE on a dead window is a trap). */}
       <HitlApprovalBanner
-        approvals={pendingApprovals.filter((approval) => {
-          const expiresAt = resolveApprovalExpiresAt(approval.requested_at, approval.timeout_seconds);
-          return expiresAt === null || expiresAt > Date.now();
-        })}
+        approvals={pendingApprovals.filter((approval) =>
+          // Shared liveness predicate (approvalCardModelCore); no-timeout rows
+          // age out at the 30-min staleness cap too — narrows-only.
+          isApprovalRowLive(approval.requested_at, approval.timeout_seconds, Date.now()),
+        )}
         circleId={circleId}
       />
 

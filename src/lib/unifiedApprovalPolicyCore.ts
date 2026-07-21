@@ -91,6 +91,22 @@ function matchesFloorMarker(s: string): boolean {
   return false;
 }
 
+/**
+ * Public floor probe: true iff the (normalized) input contains an always-ask
+ * floor marker as a substring. Total and fail-safe in the over-ask direction:
+ * non-string / hostile input reads as NOT floor (returns false) — callers use
+ * a `true` result only to ADD an approval or SUPPRESS an auto-approve
+ * affordance, never to skip one. Shared with `approvalCardModelCore` so the
+ * banner checkboxes and the request-side gate agree on the floor vocabulary.
+ */
+export function matchesAlwaysAskFloor(s: unknown): boolean {
+  try {
+    return matchesFloorMarker(norm(s));
+  } catch {
+    return false;
+  }
+}
+
 // Bounds so pathological inputs can never blow up time/space.
 const MAX_STR = 200;
 const MAX_LIST = 200;

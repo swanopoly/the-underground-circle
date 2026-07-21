@@ -168,10 +168,10 @@ import {
 } from '../../../lib/blackswanRouting';
 import {
   buildChatAttentionState,
-  resolveApprovalExpiresAt,
   type ChatAttentionAction,
   type ChatAttentionItem,
 } from '../../../lib/chatAttentionQueue';
+import { isApprovalRowLive } from '../../../lib/approvalCardModelCore';
 import {
   formatChatUserFacingOutcome,
   providerBlockerFromFailure,
@@ -292,6 +292,7 @@ import { chooseChatTerminalTransport, looksLikeTerminalActionRequest as looksLik
 import { decideChatOrchestration } from '../../../lib/aiFirstChatPolicy';
 import { attachPlanDecisionToRun } from '../../../lib/runChatAutomationPlanObserver';
 import { deriveChatActivityFlags, shapePersistedChatMessage } from '../../../lib/chatMessageShape';
+import type { ChatMessage, ChatMessageSource, ChatBotMessageExtra } from '../../../lib/chatMessageTypes';
 import {
   applyOpenSwanMemoryRecommendation,
   getLatestSpiritMemoryReferences,
@@ -393,6 +394,24 @@ import {
   stripChatFailureRecoveryOptionsText,
   type ChatFailureRecoveryOption,
 } from '../../../lib/chatFailureRecovery';
+import {
+  appendCustomerSafeRecoveryMessage,
+  isSupportOnlyComputerTaskWarning,
+  sanitizeVisibleComputerTaskMessage,
+  getRecoveryOptionActorLabel,
+  getRecoveryOptionAccent,
+  formatRecoverySurfaceKind,
+  formatRecoveryFailureArea,
+  formatRecoveryEvidenceLabel,
+  formatHandoffSurfaceRouteLabel,
+  buildComputerTaskSummaryLine,
+  getRecoveryReliabilityStatus,
+  buildRecoveryReliabilityCard,
+  buildChatAppChoiceCard,
+  stripChatAppChoiceLine,
+  getRecoveryOptionPolicyBadges,
+  getRecoveryReliabilityFromArchive,
+} from '../../../lib/chatRecoveryDisplayCore';
 import {
   buildChatRecoveryActionIntent,
   formatChatRecoveryActionDisplayText,
@@ -556,24 +575,9 @@ function toAssignableSessionAgent(agent: OfficeAgent, circleId: string): Assigna
 // deriveSessionTitleFromMessage) extracted verbatim to the pure, smoke-tested
 // src/lib/chatSessionTitleCore.ts (decomposition unit U6) and imported above.
 
-function appendCustomerSafeRecoveryMessage(message: string, recoveryMessage?: string | null): string {
-  const base = message.trim().replace(/\s+$/g, '');
-  const recovery = String(recoveryMessage || '').trim();
-  return recovery ? `${base}\n\n${recovery}` : base;
-}
-
-function isSupportOnlyComputerTaskWarning(warning: string): boolean {
-  return /\b(?:desktop\.[a-z_]+|\/desktop\/|stale_bridge|errorCode|MCP|endpoint|fetch failed|TypeError|ECONN|ETIMEDOUT|EADDR|unknown error|Desktop bridge .*failed)\b/i.test(String(warning || ''));
-}
-
-function sanitizeVisibleComputerTaskMessage(message: string, status: string): string {
-  const text = String(message || '').trim();
-  if (!text || status === 'completed') return text;
-  if (!/\b(?:desktop\.[a-z_]+|\/desktop\/|Desktop bridge|local bridge|unknown bridge error|errorCode|MCP|endpoint|fetch failed|TypeError|ECONN|ETIMEDOUT|EADDR|EACCES|EPERM|ENOENT|File or folder does not exist|Transport .*threw|Transport threw)\b/i.test(text)) {
-    return text;
-  }
-  return 'I could not finish that app or file action. Technical details were saved for recovery.';
-}
+// appendCustomerSafeRecoveryMessage, isSupportOnlyComputerTaskWarning, and
+// sanitizeVisibleComputerTaskMessage extracted verbatim to the pure, smoke-tested
+// src/lib/chatRecoveryDisplayCore.ts (decomposition unit U2) and imported above.
 
 // isAutoNamedSession + normalizeThreadModelPreference extracted verbatim to
 // src/lib/chatSessionTitleCore.ts (decomposition unit U6) and imported above.
@@ -832,15 +836,6 @@ async function mapLoadedThreadMessages(
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type ChatMessageSource = {
-  actor?: string;
-  surface?: string;
-  selectedModel?: string | null;
-  effectiveModel?: string | null;
-  provider?: string | null;
-  showRouteChips?: boolean;
-};
-
 type ChatFailureRecoveryLedgerEntry = {
   firstAt: number;
   lastAt: number;
@@ -877,130 +872,6 @@ type ChatFailureRecoveryPayload = {
 const CHAT_FAILURE_RECOVERY_REPEAT_WINDOW_MS = 10 * 60 * 1000;
 const CHAT_FAILURE_RECOVERY_LEDGER_RETENTION_MS = 60 * 60 * 1000;
 const CHAT_FAILURE_RECOVERY_LEDGER_MAX = 64;
-
-type ChatMessage = {
-  id: string;
-  content: string;
-  isBot: boolean;
-  isUser: boolean;
-  userName?: string;
-  timestamp: Date;
-  reactions: Record<string, string[]>;
-  replyTo?: { name: string; content: string } | null;
-  dbId?: string;
-  isCheckIn?: boolean;
-  isAchievement?: boolean;
-  artifacts?: SwanBotStructuredArtifact[];
-  wikiRefs?: WikiArticleReference[];
-  researchRefs?: ResearchDocumentReference[];
-  // Memory indicators
-  memoriesSaved?: string[];   // titles of memories extracted from this exchange
-  memoriesUsed?: string[];    // titles of memories that informed this response
-  memoryRefs?: PromptMemoryReference[];
-  memoryRecommendations?: OpenSwanMemoryRecommendation[];
-  source?: ChatMessageSource;
-  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
-  usage?: SwanBotStructuredResponse['usage'];
-  executionStream?: OpenSwanExecutionContract[];
-  agentPlan?: AgentPlanDraft | Record<string, unknown>;
-  browserPlans?: BrowserPlanCardData[];
-  browserPlanEvents?: BrowserPlanEvent[];
-  browserSessions?: BrowserSessionRecord[];
-  recoveryOptions?: ChatFailureRecoveryOption[];
-  recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
-  computerHandoff?: ChatComputerHandoffMetadata;
-  chatAutomationPlanPreview?: ChatAutomationPlanPreview | null;
-  computerPreflightBlockers?: { task: string; items: PreflightBlockerItem[] };
-  /** Structured browser-run findings (bounded) persisted on the completion
-   *  message so "book option N" follow-ups can resolve durably after reload. */
-  computerFindings?: PersistedComputerFindings | null;
-  /** Best-of-N race results (bounded) — interactive adopt/race-again card. */
-  bestOfN?: PersistedBestOfNRace | null;
-  /** Flywheel telemetry (Cursor-Tab precedent): machine-derived outcome
-   *  verdict + the user's accept/reject/edit-resend/steer signal, persisted as
-   *  tiny enums so it becomes BlackSwan training data. See chatOutcomeSignals. */
-  outcomeSignal?: { verdict: ChatOutcomeVerdict; signal?: ChatUserSignal; lane?: string; model?: string } | null;
-  quickReplies?: string[];    // tappable suggested replies (e.g. clarification answers)
-  /** Cross-surface follow-up chips (create Feed task / open run / approve /
-   *  retry) derived at finalize time by crossSurfaceFollowupCore. NOT
-   *  persisted — cheap to re-derive and keeps message rows bounded.
-   *  LOCKSTEP: mirrored in src/lib/chatMessageTypes.ts (decomposition U0). */
-  crossSurfaceFollowups?: CrossSurfaceFollowup[];
-  delegatedTo?: string;       // subagent that handled this message
-  delegatedSubagents?: string[];
-  runId?: string | null;
-  taskPlan?: OpenSwanTaskPlan;
-  toolEvents?: OpenSwanToolEvent[];
-  verificationResults?: OpenSwanVerificationResult[];
-  routing?: SwanBotStructuredResponse['routing'];
-  /** Automation proposal parsed from a natural-language request like
-   *  "every Friday at 5pm post a weekly summary". When present, the
-   *  message renders an AutomationProposalCard with a CREATE button. */
-  automationProposal?: AutomationProposal;
-  /** Agent subject snapshot used when the proposal is accepted later. */
-  automationAgentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
-  /** Search results from `/search <query>`. Renders as a clickable
-   *  list with JUMP buttons per row. */
-  searchResults?: { query: string; rows: SearchResultRow[] };
-  /** When true, render the structured `/help` panel under this
-   *  message — interactive, filterable, click-to-insert. */
-  commandsHelp?: boolean;
-  /** Live agents to render under a /assign picker. */
-  assignPickerAgents?: AssignPickerAgent[];
-  /** Bridge probe results to render under a /diag card. */
-  bridgeDiagResults?: BridgeProbeResult[];
-  /** When true and runId is set, render a live RunTraceCard under
-   *  this message that subscribes to agent_run_steps in real time. */
-  showRunTrace?: boolean;
-  isPending?: boolean;
-};
-
-type ChatBotMessageExtra = {
-  delegatedTo?: string;
-  delegatedSubagents?: string[];
-  memoriesUsed?: string[];
-  memoryRefs?: PromptMemoryReference[];
-  memoryRecommendations?: OpenSwanMemoryRecommendation[];
-  executionStream?: OpenSwanExecutionContract[];
-  browserPlans?: BrowserPlanCardData[];
-  browserPlanEvents?: BrowserPlanEvent[];
-  browserSessions?: BrowserSessionRecord[];
-  recoveryOptions?: ChatFailureRecoveryOption[];
-  recoveryReliability?: PersistedChatRecoveryReliabilitySummary | null;
-  computerHandoff?: ChatComputerHandoffMetadata;
-  chatAutomationPlanPreview?: ChatAutomationPlanPreview | null;
-  computerPreflightBlockers?: { task: string; items: PreflightBlockerItem[] };
-  computerFindings?: PersistedComputerFindings | null;
-  bestOfN?: PersistedBestOfNRace | null;
-  quickReplies?: string[];
-  localOnly?: boolean;
-  runId?: string | null;
-  /**
-   * followup-chips: set true by error-path callers so the outcome verdict can
-   * reach 'failed' (deriveOutcomeVerdict) independently of recoveryOptions —
-   * without it the retry_run chip's emission condition (failed/partial +
-   * canRetry) was exactly its suppression condition (recoveryOptions present)
-   * and the chip was provably unreachable.
-   */
-  hadError?: boolean;
-  agentPlan?: AgentPlanDraft | Record<string, unknown>;
-  taskPlan?: OpenSwanTaskPlan;
-  toolEvents?: OpenSwanToolEvent[];
-  verificationResults?: OpenSwanVerificationResult[];
-  wikiRefs?: WikiArticleReference[];
-  researchRefs?: ResearchDocumentReference[];
-  automationProposal?: AutomationProposal;
-  automationAgentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
-  searchResults?: { query: string; rows: SearchResultRow[] };
-  commandsHelp?: boolean;
-  assignPickerAgents?: AssignPickerAgent[];
-  bridgeDiagResults?: BridgeProbeResult[];
-  showRunTrace?: boolean;
-  routing?: SwanBotStructuredResponse['routing'];
-  source?: ChatMessageSource;
-  agentSubjectMetadata?: AgentRuntimeSubjectMetadata | null;
-  usage?: SwanBotStructuredResponse['usage'] | null;
-};
 
 function isLastTaskModelQuestion(message: string): boolean {
   const normalized = message.trim().toLowerCase().replace(/\s+/g, ' ');
@@ -1145,216 +1016,10 @@ function describeLastTaskModel(messages: ChatMessage[]): string {
   return `I do not have model metadata for the last assistant message. Surface: \`${surface}\`.`;
 }
 
-function getRecoveryOptionActorLabel(actor: ChatFailureRecoveryOption['actor']): string {
-  switch (actor) {
-    case 'openswan':
-      return 'OpenSwan';
-    case 'connected_agent':
-      return 'Connected agent';
-    case 'llm':
-      return 'LLM';
-    case 'user':
-      return 'User';
-    default:
-      return 'Stop';
-  }
-}
-
-function getRecoveryOptionAccent(option: ChatFailureRecoveryOption): string {
-  if (option.actor === 'connected_agent') return '#22c55e';
-  if (option.actor === 'openswan') return '#38bdf8';
-  if (option.actor === 'user') return '#f59e0b';
-  if (option.actor === 'llm') return '#a78bfa';
-  return '#ef4444';
-}
-
-function formatRecoverySurfaceKind(kind?: string | null): string {
-  switch (kind) {
-    case 'desktop_app':
-      return 'Desktop app';
-    case 'local_file':
-      return 'Local files';
-    case 'browser':
-      return 'Browser';
-    case 'hybrid':
-      return 'Multi-surface';
-    case 'agent_buildout':
-      return 'Capability buildout';
-    default:
-      return 'Task';
-  }
-}
-
-function formatRecoveryFailureArea(area?: string | null): string {
-  return String(area || 'recovery')
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function formatRecoveryEvidenceLabel(value: string): string {
-  return value
-    .replace(/^desktop\./, '')
-    .replace(/^browser\./, '')
-    .replace(/^agent\./, '')
-    .replace(/[_:]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-// P22: display-only route/surface label for computer/desktop/app-task
-// messages. The plan preview's `routeLabel` is hardcoded 'browser' for the
-// forced computer-task path (and the preview smoke locks that value), so we
-// derive a surface-accurate label from the handoff metadata for DISPLAY only —
-// executor selection still keys off the unchanged routeId.
-function formatHandoffSurfaceRouteLabel(
-  handoff?: ChatComputerHandoffMetadata | null,
-): string | null {
-  switch (handoff?.surface) {
-    case 'desktop':
-      return 'Desktop app';
-    case 'local_files':
-      return 'Local files';
-    case 'browser':
-      return 'Browser';
-    case 'computer':
-      return 'Computer';
-    default:
-      return null;
-  }
-}
-
-// P22: the one always-visible compact summary line for a computer/desktop/
-// app-task message. Prefers the concise user-facing notice summary the route
-// already produced, then the app-choice ("Using <app> · <surface>"), then the
-// first sentence of the body. Bounded so the collapsed row stays one glance.
-function buildComputerTaskSummaryLine(args: {
-  handoff?: ChatComputerHandoffMetadata | null;
-  appChoiceCard: { selectedAppName: string; surfaceLabel: string } | null;
-  body: string;
-}): string {
-  const notice = args.handoff?.requestNotice;
-  const noticeSummary = String(notice?.summary || '').replace(/\s+/g, ' ').trim();
-  const appLine = args.appChoiceCard
-    ? `Using ${args.appChoiceCard.selectedAppName} · ${args.appChoiceCard.surfaceLabel}`
-    : '';
-  const firstSentence = String(args.body || '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .split(/(?<=[.!?])\s/)[0] || '';
-  const base = noticeSummary || appLine || firstSentence || 'Computer task';
-  return base.length > 140 ? `${base.slice(0, 139)}…` : base;
-}
-
-function getRecoveryReliabilityStatus(summary?: PersistedChatRecoveryReliabilitySummary | null): {
-  label: string;
-  color: string;
-  detail: string;
-} | null {
-  if (!summary) return null;
-  if (summary.userActionRequired) {
-    return { label: 'User step', color: '#f59e0b', detail: 'Waiting for a permission, login, approval, bridge, or app blocker to be resolved.' };
-  }
-  if (summary.connectedAgentAllowed) {
-    return { label: 'Agent repair', color: '#22c55e', detail: 'A connected agent can repair the missing adapter or runtime capability before retrying.' };
-  }
-  if (summary.retryAllowed) {
-    if (summary.readinessStatus === 'ready') {
-      return { label: 'Ready', color: '#22c55e', detail: 'Required evidence is fresh enough for one bounded retry.' };
-    }
-    return { label: 'Needs evidence', color: '#38bdf8', detail: 'Fresh evidence is required before retrying the failed step.' };
-  }
-  return { label: 'Stopped', color: '#ef4444', detail: 'The recovery path is blocked until the cause is reviewed.' };
-}
-
-function buildRecoveryReliabilityCard(summary?: PersistedChatRecoveryReliabilitySummary | null): {
-  title: string;
-  subtitle: string;
-  statusLabel: string;
-  color: string;
-  detail: string;
-  chips: string[];
-} | null {
-  const status = getRecoveryReliabilityStatus(summary);
-  if (!summary || !status) return null;
-  const surface = formatRecoverySurfaceKind(summary.surfaceKind);
-  const area = formatRecoveryFailureArea(summary.failureArea);
-  const needed = (summary.requiredFreshEvidence || [])[0]
-    || (summary.nextEvidenceTools || [])[0]
-    || (summary.requiredEvidenceTools || [])[0]
-    || status.detail;
-  const chips = [
-    summary.readinessStatus ? `Evidence ${summary.readinessStatus}` : null,
-    ...(summary.nextEvidenceTools || summary.requiredEvidenceTools || [])
-      .slice(0, 2)
-      .map(formatRecoveryEvidenceLabel),
-    summary.verificationCommands?.length ? `${summary.verificationCommands.length} checks` : null,
-  ].filter(Boolean) as string[];
-  return {
-    title: `${surface} recovery`,
-    subtitle: summary.targetName
-      ? `${summary.targetName} · ${area}`
-      : area,
-    statusLabel: status.label,
-    color: status.color,
-    detail: typeof needed === 'string' ? needed : status.detail,
-    chips,
-  };
-}
-
-function buildChatAppChoiceCard(handoff?: ChatComputerHandoffMetadata | null): {
-  selectedAppName: string;
-  surfaceLabel: string;
-  availabilityLabel: string;
-  reason: string;
-  switchHint: string | null;
-  alternatives: string[];
-  openStep: string | null;
-} | null {
-  const notice = handoff?.requestNotice;
-  const choice = notice?.appChoice;
-  if (choice && choice.visibility === 'user') {
-    const surfaceLabel = choice.selectedSurface === 'desktop' ? 'Desktop app' : 'Web app';
-    const availabilityLabel = choice.availability === 'installed'
-      ? 'Installed'
-      : choice.availability === 'maybe'
-        ? 'Bridge check'
-        : choice.availability === 'web'
-          ? 'Web ready'
-          : surfaceLabel;
-    return {
-      selectedAppName: choice.selectedAppName,
-      surfaceLabel,
-      availabilityLabel,
-      reason: choice.reason || 'best available app for this task',
-      switchHint: choice.switchHint,
-      alternatives: (choice.alternatives || []).slice(0, 3),
-      openStep: choice.openStepLines?.[0] || null,
-    };
-  }
-  const fallbackLine = notice?.appChoiceLine;
-  if (!fallbackLine) return null;
-  const selectedMatch = fallbackLine.match(/^Using\s+(.+?)(?:\s+\(|\.|$)/);
-  return {
-    selectedAppName: selectedMatch?.[1]?.trim() || 'Selected app',
-    surfaceLabel: handoff?.surface === 'desktop' ? 'Desktop app' : handoff?.surface === 'browser' ? 'Web app' : 'App task',
-    availabilityLabel: 'Selected',
-    reason: fallbackLine.replace(/^Using\s+.+?\s+\((.+?)\).*$/i, '$1'),
-    switchHint: /say\s+"use\s+(.+?)"/i.test(fallbackLine) ? fallbackLine.replace(/^.*?(say\s+"use\s+.+?").*$/i, '$1') : null,
-    alternatives: [],
-    openStep: null,
-  };
-}
-
-function stripChatAppChoiceLine(content: string, appChoiceLine?: string | null): string {
-  const target = String(appChoiceLine || '').trim();
-  if (!target) return content;
-  return String(content || '')
-    .split('\n')
-    .filter((line) => line.trim() !== target)
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
+// getRecoveryOptionActorLabel through stripChatAppChoiceLine (recovery/handoff
+// display formatters, including the two P22 comment blocks) extracted verbatim
+// to the pure, smoke-tested src/lib/chatRecoveryDisplayCore.ts (decomposition
+// unit U2) and imported above.
 
 function buildRecoveryOptionComposerPrompt(option: ChatFailureRecoveryOption, message?: ChatMessage): string {
   return formatChatFailureRecoveryOptionSelection(option, message ? {
@@ -1392,28 +1057,9 @@ function findPriorUserPromptForMessage(messages: ChatMessage[], botMessageId: st
   return null;
 }
 
-function getRecoveryOptionPolicyBadges(option: ChatFailureRecoveryOption): string[] {
-  const plan = buildChatFailureRecoveryExecutionPlan(option);
-  const policy = plan.policy;
-  const badges: string[] = [];
-  if (policy.requiresApproval) badges.push('APPROVAL');
-  if (policy.requiresFreshEvidence) badges.push('FRESH EVIDENCE');
-  if (policy.userActionRequired) badges.push('USER STEP');
-  if (policy.allowConnectedAgent) badges.push('CONNECTED AGENT');
-  if (policy.allowRuntimePatch) badges.push('PATCH');
-  if (policy.maxAttempts > 0) badges.push(`${policy.maxAttempts} TRY`);
-  if (policy.safetyMode === 'stop') badges.push('NO RETRY');
-  return badges.slice(0, 4);
-}
-
-function getRecoveryReliabilityFromArchive(
-  metadata?: Record<string, unknown> | null,
-): PersistedChatRecoveryReliabilitySummary | null {
-  const summary = metadata?.recoveryReliability;
-  return summary && typeof summary === 'object'
-    ? summary as PersistedChatRecoveryReliabilitySummary
-    : null;
-}
+// getRecoveryOptionPolicyBadges and getRecoveryReliabilityFromArchive extracted
+// verbatim to src/lib/chatRecoveryDisplayCore.ts (decomposition unit U2) and
+// imported above.
 
 function buildPendingBotMessageRecord(message: ChatMessage): PendingBotMessageRecord {
   const record: PendingBotMessageRecordWithAgentSubject = {
@@ -14047,9 +13693,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           // P12 fix: rows past their timeout (nothing sweeps DB status)
           // must not show live APPROVE buttons here while the attention
           // strip above declares them expired — the strip's "Ask again"
-          // is the only affordance for those.
-          const expiresAt = resolveApprovalExpiresAt(approval.requested_at, approval.timeout_seconds);
-          return expiresAt === null || expiresAt > Date.now();
+          // is the only affordance for those. Shared liveness predicate
+          // (approvalCardModelCore); no-timeout rows now age out at the
+          // 30-min staleness cap too — narrows-only.
+          return isApprovalRowLive(approval.requested_at, approval.timeout_seconds, Date.now());
         })}
         circleId={circleId}
         onEditAndResend={(_approval, commandText) => {

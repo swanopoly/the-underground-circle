@@ -11,8 +11,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { resolveApprovalExpiresAt } from '../lib/chatAttentionQueue';
-import { classifyApprovalAge } from '../lib/approvalPreviewCore';
+import { isApprovalRowLive } from '../lib/approvalCardModelCore';
 
 export type ApprovalKind =
   | 'tool_use'
@@ -63,16 +62,15 @@ export async function getPendingRunApprovals(circleId: string): Promise<AgentRun
   // HitlApprovalBanner — instead of letting a stale pending approval pin
   // ChatTab's "Needs your approval" pill (and the banner) indefinitely. Doing
   // it at this single read point keeps the banner list, its pending count,
-  // and the run pill in agreement. Rows with no timeout (timeout <= 0 →
-  // resolveApprovalExpiresAt null) fall back to classifyApprovalAge's 30-min
-  // 'expired' tier as a staleness cap. Hiding a timed-out row only narrows
+  // and the run pill in agreement. Liveness semantics live in the shared
+  // `approvalCardModelCore.isApprovalRowLive` (this filter was its reference
+  // implementation): explicit timeout window when set, else the 30-min
+  // classifyApprovalAge staleness cap. Hiding a timed-out row only narrows
   // what can be approved — never widens what executes.
   const now = Date.now();
-  return ((data || []) as AgentRunApproval[]).filter((row) => {
-    const expiresAt = resolveApprovalExpiresAt(row.requested_at, row.timeout_seconds);
-    if (expiresAt !== null) return expiresAt > now;
-    return classifyApprovalAge(now - Date.parse(row.requested_at)) !== 'expired';
-  });
+  return ((data || []) as AgentRunApproval[]).filter((row) =>
+    isApprovalRowLive(row.requested_at, row.timeout_seconds, now),
+  );
 }
 
 // ─── Writes ────────────────────────────────────────────────────────

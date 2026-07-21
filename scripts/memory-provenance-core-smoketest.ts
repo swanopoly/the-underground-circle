@@ -24,6 +24,7 @@ import {
   memoryConfidenceBand,
   formatAsOf,
   formatMemoryProvenance,
+  formatProvenanceSuffix,
   formatMemoryReferenceLine,
   CONFIDENCE_HIGH_MIN,
   CONFIDENCE_MEDIUM_MIN,
@@ -288,7 +289,72 @@ assertEqual(formatMemoryProvenance(sym as never, NOW), '', 'symbol item → ""')
 assertEqual(formatMemoryProvenance({ text: sym, score: 0.9 } as never, NOW), '', 'symbol text field → "" (no throw)');
 assertEqual(memoryConfidenceBand(1n), 'unknown', 'bigint score → unknown');
 
-// ── 11. Determinism + band type soundness ─────────────────────────────────────
+// ── 11. formatProvenanceSuffix: suffix-only seam (openswanMemoryStores wiring) ─
+// Full suffix, no leading space, no text.
+assertEqual(
+  formatProvenanceSuffix({ score: 0.9, source: 'chat', updatedAtMs: NOW - 2 * DAY, id: '550e8400-e29b-41d4-a716-446655440000' }, NOW),
+  `[conf:high${SEP}as of 2d ago${SEP}src:chat${SEP}#550e84]`,
+  'suffix-only: full token set renders bracketed suffix (no text, no leading space)',
+);
+// MemoryEntry-shaped call (no score field) → no conf token.
+{
+  const s = formatProvenanceSuffix({ source: 'office', updatedAtMs: NOW - 3 * DAY, id: 'm1' }, NOW);
+  assertEqual(s, `[as of 3d ago${SEP}src:office${SEP}#m1]`, 'MemoryEntry-shaped input (no score) → as-of + src + id only');
+  assert(!s.includes('conf:'), 'suffix without score has NO conf token');
+}
+// Empty-token omission → '' so the wiring appends NOTHING.
+assertEqual(formatProvenanceSuffix({}, NOW), '', 'all tokens empty → "" (not "[]")');
+assertEqual(formatProvenanceSuffix({ source: '', updatedAtMs: undefined, id: null }, NOW), '', 'empty/null fields → ""');
+assertEqual(formatProvenanceSuffix(null as never, NOW), '', 'null item → ""');
+assertEqual(formatProvenanceSuffix({ updatedAtMs: 'not a date' }, NOW), '', 'unparseable date only → ""');
+// BYTE-IDENTITY invariant: the store's `line + (suffix ? ' ' + suffix : '')`
+// wiring must equal the legacy line exactly when there is no provenance.
+{
+  const legacyLine = `- [preference] Editor: uses vim keybindings`;
+  const suffix = formatProvenanceSuffix({ source: undefined, updatedAtMs: undefined, id: undefined }, NOW);
+  const appended = `${legacyLine}${suffix ? ' ' + suffix : ''}`;
+  assertEqual(appended, legacyLine, 'byte-identity: no provenance fields → appended line === legacy line exactly');
+}
+{
+  const legacyLine = `- Note: stuff here`;
+  const suffix = formatProvenanceSuffix({ source: 'office', updatedAtMs: NOW - 3 * DAY, id: 'm1' }, NOW);
+  const appended = `${legacyLine}${suffix ? ' ' + suffix : ''}`;
+  assert(appended.startsWith(legacyLine + ' ['), 'byte-identity: with provenance, prefix is the legacy line byte-for-byte');
+  assertEqual(appended, `${legacyLine} [as of 3d ago${SEP}src:office${SEP}#m1]`, 'appended line = legacy + space + suffix');
+}
+// Composition: formatMemoryProvenance === sanitized text + ' ' + suffix.
+{
+  const item = { text: 'compose me', score: 0.9, source: 'chat', updatedAtMs: NOW - 2 * DAY, id: 'abc' };
+  assertEqual(
+    formatMemoryProvenance(item, NOW),
+    `compose me ${formatProvenanceSuffix(item, NOW)}`,
+    'formatMemoryProvenance composes text + " " + formatProvenanceSuffix',
+  );
+}
+// Hostile source_surface: path + control chars + fence markers → only a short sanitized token.
+{
+  const hostileSrc = '/etc/\x00secrets/```fence\nsrc```<inject>';
+  const s = formatProvenanceSuffix({ source: hostileSrc }, NOW);
+  assert(!s.includes('/etc'), 'hostile source: path segments not leaked');
+  assert(!s.includes('```'), 'hostile source: fence markers stripped');
+  assert(!s.includes('\x00') && !s.includes('\n'), 'hostile source: control chars stripped');
+  assert(!s.includes('<') && !s.includes('>'), 'hostile source: angle brackets stripped');
+  assert(/^\[src:[a-zA-Z0-9._-]{1,24}\]$/.test(s), 'hostile source yields only a short sanitized src token', s);
+}
+// Never throws on hostile input.
+for (const h of hostiles) {
+  noThrow(`formatProvenanceSuffix(hostile-item)`, () => formatProvenanceSuffix(h as never, NOW));
+  noThrow(`formatProvenanceSuffix(item, hostile-now)`, () => formatProvenanceSuffix({ updatedAtMs: NOW - DAY }, h));
+}
+assertString(formatProvenanceSuffix(cyclic as never, NOW), 'formatProvenanceSuffix(cyclic)');
+// Full id is never leaked through the suffix-only path either.
+{
+  const s = formatProvenanceSuffix({ id: FULL_ID }, NOW);
+  assert(!s.includes(FULL_ID), 'suffix-only path never leaks the full id');
+  assertEqual(s, '[#111122]', 'suffix-only id token is the ≤6-char citation');
+}
+
+// ── 12. Determinism + band type soundness ─────────────────────────────────────
 const detItem = { text: 'determinism', score: 0.9, source: 'chat', updatedAtMs: NOW - 2 * DAY, id: 'det-1234' };
 assertEqual(formatMemoryProvenance(detItem, NOW), formatMemoryProvenance(detItem, NOW), 'formatMemoryProvenance is deterministic');
 assertEqual(formatAsOf(NOW - 2 * DAY, NOW), formatAsOf(NOW - 2 * DAY, NOW), 'formatAsOf is deterministic');
