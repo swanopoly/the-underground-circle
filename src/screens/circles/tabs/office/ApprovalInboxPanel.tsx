@@ -1,6 +1,6 @@
 /**
  * ApprovalInboxPanel — a persistent, collapsed-by-default Office panel that
- * unifies the two HITL approval queues that already have real list + resolve
+ * unifies the three HITL approval queues that have real list + resolve
  * functions into one "what's waiting on a human" view:
  *
  *   - `agent_approvals`     (skill/memory/tool_call/spending/external_message
@@ -16,26 +16,32 @@
  *                            deliverable_review/tool_use gates) via
  *                            `src/services/runApprovalsService.ts`
  *                            (`useAgentRunApprovals`, `resolveRunApproval`).
+ *   - `task_run_approvals`  (kanban task-run gates — room_patch_apply/
+ *                            repo_write/external_publish/destructive_edit/
+ *                            high_cost_generation) via
+ *                            `src/services/taskRunApprovalsService.ts`
+ *                            (`useTaskRunApprovals`, `resolveTaskRunApproval`).
  *
- * Both hooks already carry their own realtime `postgres_changes`
- * subscription plus a safety-net poll, so this panel does no polling of its
- * own — it just renders their combined pending rows and wires Approve/Reject
- * to the real resolve calls those services already expose.
+ * All three hooks carry their own realtime `postgres_changes` subscription
+ * (the run/task hooks also add a safety-net poll; `useAgentApprovals` is
+ * realtime-only), so this panel does no polling of its own — it just
+ * renders their combined pending rows and wires Approve/Reject to the real
+ * resolve calls those services expose.
  *
- * Deliberately left out: `task_run_approvals` (kanban task-run gates —
- * human_review/deploy/merge/budget/access/release/security). That table is
- * read-only today: `TaskApprovalsPanel.tsx` queries it directly and its own
- * header comment says "PR1: read-only display only (no approve/reject
- * buttons — those come in PR2)". No `resolveTaskRunApproval`-shaped function
- * exists anywhere in the codebase, so there is nothing real to wire an
- * Approve/Reject action to here. Rather than show a queue whose buttons
- * would silently do nothing (or invent a write path this task didn't ask
- * for), this panel only surfaces the two queues it can actually act on.
- * `task_run_approvals` already has its own surface (the task detail modal)
- * and isn't duplicated here.
+ * `task_run_approvals` (previously left out because no resolve function
+ * existed) works differently from the other two queues: resolution is
+ * consumed on re-check, not live. `canTaskRunMarkComplete`
+ * (`src/lib/taskExecutionRuntime.ts`) reads the run's rows on the next
+ * `runAgentOnTask` attempt — pending OR rejected rows force the task back to
+ * `in_progress` and withhold completion XP; approving here opens that gate.
+ * The resolve is the same fail-closed pending-only flip the other queues
+ * use, and the same write `TaskApprovalsPanel` (task detail modal) performs
+ * — the two surfaces intentionally share it. Caveat: nothing calls
+ * `createTaskRunApproval` yet, so this queue stays empty until the kanban
+ * executor grows a producer; the wiring is real for any row that exists.
  *
  * Collapsed by default with a silent header count badge (FileLeasePanel
- * pattern) — the badge is the combined pending count across both real
+ * pattern) — the badge is the combined pending count across the three real
  * queues, zero when there's nothing waiting, so the panel stays quiet in the
  * common case without disappearing entirely (unlike the transient top
  * overlay banners `HitlApprovalBanner`/`RunApprovalBanner`, which unmount
@@ -50,6 +56,12 @@ import {
   type AgentRunApproval,
   type ApprovalKind,
 } from '../../../../services/runApprovalsService';
+import {
+  useTaskRunApprovals,
+  resolveTaskRunApproval,
+  type TaskRunApproval,
+  type TaskRunApprovalKind,
+} from '../../../../services/taskRunApprovalsService';
 import { applyApprovedAction } from '../../../../lib/agentApprovalsWorker';
 import { renderApprovalAction } from '../../../../lib/approvalPayloadRenderer';
 import { MONO } from './AgentPanelShared';
@@ -79,6 +91,14 @@ type InboxItem = {
   detail: string | null;
   requestedBy: string;
   requestedAt: string;
+} | {
+  source: 'task';
+  id: string;
+  kindKey: TaskRunApprovalKind;
+  title: string;
+  detail: string | null;
+  requestedBy: string;
+  requestedAt: string;
 };
 
 const RUN_KIND_LABELS: Record<ApprovalKind, string> = {
@@ -91,6 +111,14 @@ const RUN_KIND_LABELS: Record<ApprovalKind, string> = {
   privileged_action: 'Privileged action',
   plan_approval: 'Plan approval',
   deliverable_review: 'Deliverable review',
+};
+
+const TASK_KIND_LABELS: Record<TaskRunApprovalKind, string> = {
+  room_patch_apply: 'Room patch',
+  repo_write: 'Repo write',
+  external_publish: 'External publish',
+  destructive_edit: 'Destructive edit',
+  high_cost_generation: 'High-cost generation',
 };
 
 const HITL_KIND_LABELS: Record<string, string> = {
@@ -122,6 +150,16 @@ function kindAccent(item: InboxItem): string {
       case 'plan_approval': return '#34d399';
       case 'deliverable_review': return '#38bdf8';
       case 'tool_use': return '#c4b5fd';
+      default: return '#9e9e9e';
+    }
+  }
+  if (item.source === 'task') {
+    switch (item.kindKey) {
+      case 'room_patch_apply': return '#818cf8';
+      case 'repo_write': return '#60a5fa';
+      case 'external_publish': return '#f472b6';
+      case 'destructive_edit': return '#f87171';
+      case 'high_cost_generation': return '#fbbf24';
       default: return '#9e9e9e';
     }
   }
@@ -162,6 +200,19 @@ function fromHitl(a: AgentApproval): InboxItem {
   };
 }
 
+function fromTask(a: TaskRunApproval): InboxItem {
+  return {
+    source: 'task',
+    id: a.id,
+    kindKey: a.approval_kind,
+    title: a.title,
+    detail: a.summary && a.summary !== a.title ? a.summary : null,
+    requestedBy: a.requested_by || 'agent',
+    // Schema note: task_run_approvals has `created_at`, not `requested_at`.
+    requestedAt: a.created_at,
+  };
+}
+
 function fromRun(a: AgentRunApproval): InboxItem {
   // UC-1b payload renderer — same humanized headline RunApprovalBanner
   // shows in chat, so the two surfaces read consistently.
@@ -184,15 +235,17 @@ export default function ApprovalInboxPanel({ circleId, userId }: Props) {
 
   const hitlApprovals = useAgentApprovals(circleId);
   const { approvals: runApprovals, refresh: refreshRunApprovals } = useAgentRunApprovals(circleId);
+  const { approvals: taskApprovals, refresh: refreshTaskApprovals } = useTaskRunApprovals(circleId);
 
   const items = useMemo<InboxItem[]>(() => {
     const combined = [
       ...hitlApprovals.map(fromHitl),
       ...runApprovals.map(fromRun),
+      ...taskApprovals.map(fromTask),
     ];
     combined.sort((a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime());
     return combined;
-  }, [hitlApprovals, runApprovals]);
+  }, [hitlApprovals, runApprovals, taskApprovals]);
 
   const count = items.length;
 
@@ -214,6 +267,15 @@ export default function ApprovalInboxPanel({ circleId, userId }: Props) {
             notify('Approved, but the action failed to apply', applied.error);
           }
         }
+      } else if (item.source === 'task') {
+        // Fail-closed pending-only flip; consumed by canTaskRunMarkComplete
+        // on the next run attempt (approve unblocks completion + XP, reject
+        // keeps that run's completion gate closed).
+        const r = await resolveTaskRunApproval(item.id, status, userId);
+        if (!r.ok) {
+          notify('Could not resolve', r.error || 'This approval could not be resolved.');
+        }
+        await refreshTaskApprovals();
       } else {
         const r = await resolveRunApproval(item.id, status, userId);
         if (!r.ok) {
@@ -230,7 +292,7 @@ export default function ApprovalInboxPanel({ circleId, userId }: Props) {
         return next;
       });
     }
-  }, [userId, refreshRunApprovals]);
+  }, [userId, refreshRunApprovals, refreshTaskApprovals]);
 
   return (
     <View style={styles.wrap} nativeID="section-office-approval-inbox">
@@ -257,7 +319,7 @@ export default function ApprovalInboxPanel({ circleId, userId }: Props) {
       {expanded ? (
         <View style={styles.body}>
           <Text style={styles.subtitle}>
-            Actions pending a human decision, across skill/memory/review gates and per-run approval gates.
+            Actions pending a human decision, across skill/memory/review gates, per-run approval gates, and kanban task-run gates.
           </Text>
           {count === 0 ? (
             <View style={styles.empty}>
@@ -269,7 +331,11 @@ export default function ApprovalInboxPanel({ circleId, userId }: Props) {
           ) : (
             items.map((item) => {
               const accent = kindAccent(item);
-              const kindLabel = item.source === 'run' ? RUN_KIND_LABELS[item.kindKey] : humanizeHitlKind(item.kindKey);
+              const kindLabel = item.source === 'run'
+                ? RUN_KIND_LABELS[item.kindKey]
+                : item.source === 'task'
+                  ? TASK_KIND_LABELS[item.kindKey]
+                  : humanizeHitlKind(item.kindKey);
               const state = busy[item.id];
               return (
                 <View key={`${item.source}:${item.id}`} style={styles.row}>

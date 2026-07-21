@@ -1,13 +1,28 @@
 /**
- * TaskApprovalsPanel -- Renders approval gates for a task run
- * PR1: read-only display only (no approve/reject buttons — those come in PR2).
+ * TaskApprovalsPanel -- Renders approval gates for a task run.
+ *
+ * PR2 (shipped): pending cards carry Approve/Reject buttons wired to
+ * `resolveTaskRunApproval` (`src/services/taskRunApprovalsService.ts`) — a
+ * fail-closed, pending-only status flip that stamps resolver + timestamp.
+ * Resolution is genuinely consumed: `canTaskRunMarkComplete`
+ * (`src/lib/taskExecutionRuntime.ts`) re-checks this table on the next
+ * `runAgentOnTask` attempt — pending OR rejected rows keep the task out of
+ * `done` and withhold completion XP; approving here opens that gate.
+ *
+ * PR2 also fixed the PR1 query: this table has `created_at`, not
+ * `requested_at` (selecting the latter errored at runtime and the panel
+ * always rendered empty), and the kind icon/color maps now match the DB
+ * CHECK kinds (room_patch_apply / repo_write / external_publish /
+ * destructive_edit / high_cost_generation).
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, Platform,
+  View, Text, ScrollView, StyleSheet, Platform, Pressable, ActivityIndicator,
 } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
+import { safeGetUserId } from '../../../../lib/authSession';
+import { resolveTaskRunApproval } from '../../../../services/taskRunApprovalsService';
 
 interface Props {
   runId: string;
@@ -21,7 +36,7 @@ interface Approval {
   title: string;
   summary: string | null;
   status: string;
-  requested_at: string;
+  created_at: string;
   resolved_at: string | null;
   resolved_by: string | null;
 }
@@ -40,24 +55,21 @@ const STATUS_LABELS: Record<string, string> = {
   expired: 'EXPIRED',
 };
 
+// Keys match the DB CHECK constraint on task_run_approvals.approval_kind.
 const KIND_ICONS: Record<string, string> = {
-  human_review: 'HR',
-  deploy: 'Dp',
-  merge: 'Mg',
-  budget: '$',
-  access: 'Ac',
-  release: 'Rl',
-  security: 'Sc',
+  room_patch_apply: 'Rm',
+  repo_write: 'Rw',
+  external_publish: 'Pb',
+  destructive_edit: 'Dx',
+  high_cost_generation: '$',
 };
 
 const KIND_COLORS: Record<string, string> = {
-  human_review: '#6366f1',
-  deploy: '#22c55e',
-  merge: '#3b82f6',
-  budget: '#f59e0b',
-  access: '#ec4899',
-  release: '#8b5cf6',
-  security: '#ef4444',
+  room_patch_apply: '#6366f1',
+  repo_write: '#3b82f6',
+  external_publish: '#ec4899',
+  destructive_edit: '#ef4444',
+  high_cost_generation: '#f59e0b',
 };
 
 function timeAgo(dateStr: string): string {
@@ -74,14 +86,16 @@ function timeAgo(dateStr: string): string {
 export default function TaskApprovalsPanel({ runId, circleId }: Props) {
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<Record<string, 'approving' | 'rejecting' | undefined>>({});
+  const [actionErrors, setActionErrors] = useState<Record<string, string | undefined>>({});
 
   const fetchApprovals = useCallback(async () => {
     try {
       const { data, error } = await supabase
         .from('task_run_approvals')
-        .select('id, run_id, approval_kind, title, summary, status, requested_at, resolved_at, resolved_by')
+        .select('id, run_id, approval_kind, title, summary, status, created_at, resolved_at, resolved_by')
         .eq('run_id', runId)
-        .order('requested_at', { ascending: true });
+        .order('created_at', { ascending: true });
 
       if (error) {
         console.warn('[TaskApprovalsPanel] fetch error:', error.message);
@@ -112,6 +126,37 @@ export default function TaskApprovalsPanel({ runId, circleId }: Props) {
       supabase.removeChannel(channel);
     };
   }, [runId, fetchApprovals]);
+
+  const handleResolve = useCallback(async (approvalId: string, status: 'approved' | 'rejected') => {
+    setBusy((prev) => ({ ...prev, [approvalId]: status === 'approved' ? 'approving' : 'rejecting' }));
+    setActionErrors((prev) => ({ ...prev, [approvalId]: undefined }));
+    try {
+      const userId = await safeGetUserId();
+      if (!userId) {
+        setActionErrors((prev) => ({ ...prev, [approvalId]: 'Sign-in required — no signed-in user found to record the decision.' }));
+        return;
+      }
+      // Fail-closed: only flips a still-pending row; a late click after
+      // another approver reports ok:false instead of silently overwriting.
+      const result = await resolveTaskRunApproval(approvalId, status, userId);
+      if (!result.ok) {
+        setActionErrors((prev) => ({ ...prev, [approvalId]: result.error || 'Could not resolve this approval.' }));
+      }
+      // Realtime also fires, but refetch now so the card updates immediately.
+      await fetchApprovals();
+    } catch (err) {
+      setActionErrors((prev) => ({
+        ...prev,
+        [approvalId]: err instanceof Error ? err.message : 'Could not resolve this approval.',
+      }));
+    } finally {
+      setBusy((prev) => {
+        const next = { ...prev };
+        delete next[approvalId];
+        return next;
+      });
+    }
+  }, [fetchApprovals]);
 
   const getKindIcon = (kind: string): string => KIND_ICONS[kind] || '!!';
   const getKindColor = (kind: string): string => KIND_COLORS[kind] || '#6366f1';
@@ -191,7 +236,7 @@ export default function TaskApprovalsPanel({ runId, circleId }: Props) {
               {/* Timestamps */}
               <View style={s.timestampRow}>
                 <Text style={s.timestampLabel}>Requested</Text>
-                <Text style={s.timestampValue}>{timeAgo(approval.requested_at)}</Text>
+                <Text style={s.timestampValue}>{timeAgo(approval.created_at)}</Text>
                 {approval.resolved_at ? (
                   <>
                     <View style={s.timestampDivider} />
@@ -200,6 +245,44 @@ export default function TaskApprovalsPanel({ runId, circleId }: Props) {
                   </>
                 ) : null}
               </View>
+
+              {/* Approve / Reject — pending rows only. Resolution feeds the
+                  canTaskRunMarkComplete gate on the next run attempt. */}
+              {approval.status === 'pending' ? (
+                <>
+                  <View style={s.actionRow}>
+                    <Pressable
+                      style={[s.actionBtn, s.rejectBtn]}
+                      onPress={() => handleResolve(approval.id, 'rejected')}
+                      disabled={!!busy[approval.id]}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Reject approval: ${approval.title}`}
+                    >
+                      {busy[approval.id] === 'rejecting' ? (
+                        <ActivityIndicator size="small" color="#ef4444" />
+                      ) : (
+                        <Text style={[s.actionBtnText, s.rejectBtnText]}>REJECT</Text>
+                      )}
+                    </Pressable>
+                    <Pressable
+                      style={[s.actionBtn, s.approveBtn]}
+                      onPress={() => handleResolve(approval.id, 'approved')}
+                      disabled={!!busy[approval.id]}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Approve approval: ${approval.title}`}
+                    >
+                      {busy[approval.id] === 'approving' ? (
+                        <ActivityIndicator size="small" color="#22c55e" />
+                      ) : (
+                        <Text style={[s.actionBtnText, s.approveBtnText]}>APPROVE</Text>
+                      )}
+                    </Pressable>
+                  </View>
+                  {actionErrors[approval.id] ? (
+                    <Text style={s.actionError}>{actionErrors[approval.id]}</Text>
+                  ) : null}
+                </>
+              ) : null}
             </View>
           );
         })}
@@ -344,6 +427,46 @@ const s = StyleSheet.create({
     width: 1,
     height: 10,
     backgroundColor: '#1a1a28',
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 4,
+  },
+  actionBtn: {
+    flex: 1,
+    borderWidth: 2,
+    borderRadius: 2,
+    paddingVertical: 7,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 32,
+  },
+  actionBtnText: {
+    fontSize: 10,
+    fontWeight: '700',
+    fontFamily: 'monospace',
+    letterSpacing: 0.5,
+  },
+  rejectBtn: {
+    borderColor: '#ef444440',
+    backgroundColor: '#ef444410',
+  },
+  rejectBtnText: {
+    color: '#ef4444',
+  },
+  approveBtn: {
+    borderColor: '#22c55e40',
+    backgroundColor: '#22c55e10',
+  },
+  approveBtnText: {
+    color: '#22c55e',
+  },
+  actionError: {
+    color: '#ef4444',
+    fontSize: 10,
+    fontFamily: 'monospace',
+    lineHeight: 14,
   },
   empty: {
     alignItems: 'center',

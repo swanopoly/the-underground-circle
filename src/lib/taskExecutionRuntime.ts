@@ -1044,7 +1044,8 @@ export async function canTaskRunMarkComplete(
       }
     }
 
-    // Load approvals for this run — any pending approval blocks completion
+    // Load approvals for this run — pending OR rejected approvals block
+    // completion
     const { data: approvals, error: approvalsErr } = await supabase
       .from('task_run_approvals')
       .select('status')
@@ -1056,7 +1057,13 @@ export async function canTaskRunMarkComplete(
     }
 
     for (const approval of approvals ?? []) {
-      if (approval.status === 'pending') {
+      // 'pending' blocks (no human decision yet) and 'rejected' blocks (a
+      // human explicitly denied the gated action — denial must not unblock
+      // completion the way approval does). Only 'approved' — or 'expired',
+      // which nothing writes today — lets the run finish. The query is
+      // scoped to this run_id, so a rejected gate only pins this run; a
+      // later fresh run starts with a clean slate of approvals.
+      if (approval.status === 'pending' || approval.status === 'rejected') {
         return false;
       }
     }
