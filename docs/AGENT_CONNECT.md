@@ -95,7 +95,7 @@ etc.) on your machine. For Claude Code specifically, `POST /launch` and
 (`EXPO_PUBLIC_ALLOW_CLAUDE_CODE_BILLING=true` or
 `EXPO_PUBLIC_ALLOW_CLAUDE_BRIDGE_BILLING=true`) — without it the bridge
 returns a "disabled to prevent Anthropic charges" error instead of running
-anything (`src/lib/bridgeTaskDispatcher.ts:26-38`,
+anything (`src/lib/bridgeTaskDispatcher.ts:31-44`,
 `scripts/claude-bridge.js:922-926`).
 
 `src/lib/bridgeEnvironment.ts` governs whether the app even tries to reach
@@ -156,7 +156,7 @@ below.
 
 ## 3. The MCP server(s) that exist today
 
-### `scripts/mcp-agent-connect.js` — stdio MCP server, presence + 7 tools
+### `scripts/mcp-agent-connect.js` — stdio MCP server, presence + 9 tools
 
 This is a real, working, zero-dependency **stdio** MCP server
 (`initialize` / `tools/list` / `tools/call` JSON-RPC over stdin/stdout,
@@ -178,8 +178,8 @@ It does two things:
    silently dropped (`scripts/mcp-agent-connect.js:90`) — but the same POST
    endpoint now also answers `event: "read_op"` reads (next subsection), so
    it is no longer write-only.
-2. Exposes **7 tools** to the connected MCP client (`TOOLS` array,
-   `scripts/mcp-agent-connect.js:225-290`; handlers `:342-463`).
+2. Exposes **9 tools** to the connected MCP client (`TOOLS` array,
+   `scripts/mcp-agent-connect.js:236-323`; handlers `:379-527`).
 
    The 3 original self-reporting tools:
    - `uc_report_progress(task, status?)` — reports current work via the same
@@ -192,8 +192,8 @@ It does two things:
    - `uc_post_update(message, type?)` — posts a short message, also via the
      heartbeat POST with a truncated task string (`:382-400`).
 
-   The 4 read tools added 2026-07-20/21 (uncommitted worktree state at the
-   time of writing):
+   The 4 read tools added 2026-07-20/21 (committed on this branch — re-derive
+   line numbers against your checkout):
    - `uc_list_file_leases()` — **local-disk read, no server call**: walks up
      from `cwd` (max 12 levels) to find `.uc/agent-locks.json`
      (`:183-195`), the same advisory lease registry
@@ -217,23 +217,42 @@ It does two things:
      agent presence rows only — no member list, no message contents, no
      tokens.
 
-   The 3 server-backed reads share one transport: `postReadOp`
-   (`scripts/mcp-agent-connect.js:114-154`) POSTs `{ event: "read_op", op }`
-   to the same `agent-connect` edge function, with the same
-   `Authorization: Bearer <UC_CONNECT_TOKEN>` header (`:130`) and a 10s
-   timeout (`:150`), and — unlike heartbeats — actually reads the response
-   body back. `uc_list_file_leases` is the exception: it never touches the
-   network.
+   The 2 slice-2 tools added 2026-07-21 (committed on this branch — re-derive
+   line numbers against your checkout):
+   - `uc_list_tasks()` — server read: **open** tasks on the circle's kanban
+     board (`tasks`, "open" = status not in `done`/`approved`), returning id,
+     title, status, priority, due date, position, `assigned_agent_id`, and
+     assignee/creator **display names** (`:489-504`; server side in the next
+     subsection). It never returns the task `description`, `focus_chain`,
+     `peer_approvals`, plan ids, `image_url`, or the raw `created_by`/
+     `assigned_to` UUIDs (owner columns are mapped to a name string).
+   - `uc_report_receipt(title, pow_type?, detail?, mission_id?)` — the first
+     **write** tool: records ONE append-only `proof_of_work` row via a new
+     `event: "write_op"` branch (`:505-522`; server side below). It is
+     INSERT-only — it cannot update or delete anything, and cannot write
+     memory, skills, or approvals. The client forwards only `title`, `pow_type`,
+     `detail`, and `mission_id`; it deliberately never sends `circle_id` or
+     `user_id`, which the server forces from the connect token. A missing/empty
+     `title` is rejected client-side before any request is sent.
 
-There are still no read tools for tasks, memory/context packs, connected
-apps, or agent sessions in this server, and no write/claim tools beyond
-self-reporting — see "What's coming" below.
+   The 4 server-backed reads plus the write share one transport: `postServerOp`
+   (`scripts/mcp-agent-connect.js:118-157`), which POSTs `{ event, op, ... }`
+   to the same `agent-connect` edge function with the same
+   `Authorization: Bearer <UC_CONNECT_TOKEN>` header and a 10s timeout, and —
+   unlike heartbeats — actually reads the response body back. `postReadOp`
+   (`:159`) and `postWriteOp` (`:163`) are the thin wrappers that set the
+   event. `uc_list_file_leases` is the exception: it never touches the network.
 
-**Staleness**: this file's last *committed* change is 2026-03-23
-(`git log -1 -- scripts/mcp-agent-connect.js`), but it is under active
-development again — the 4 read tools above were added in this worktree on
-2026-07-20/21 and are uncommitted as of this writing (`git status` shows the
-file modified). Re-derive line numbers against your checkout.
+There are still no read tools for memory/context packs, connected apps, or
+agent sessions in this server, and the only write/report tool beyond
+self-reporting is the append-only `uc_report_receipt` — no task-claim,
+file-claim, or artifact-publish tools yet. See "What's coming" below.
+
+**Staleness**: before this branch, this file's last change was 2026-03-23,
+but it is under active development again — the 4 read tools were added on
+2026-07-20/21 and the 2 slice-2 tools (`uc_list_tasks`, `uc_report_receipt`)
+on 2026-07-21, all committed on this branch (see `git log -- scripts/mcp-agent-connect.js`).
+Re-derive line numbers against your checkout.
 
 ### `supabase/functions/agent-connect/index.ts` — heartbeat receiver + read ops
 
@@ -246,20 +265,39 @@ It supports Claude Code, Codex, Gemini CLI, Cursor, OpenCode, Windsurf,
 Copilot, Aider, Cline, Continue, and Amp as named `agent_type` values with
 per-provider display metadata (`supabase/functions/agent-connect/index.ts:25-37`).
 
-Since 2026-07-20/21 (uncommitted in this worktree) it also serves **read
+Since 2026-07-20/21 (committed on this branch) it also serves **read
 ops**: a POST with `event: "read_op"` and an `op` field is routed to
-`handleReadOp` (`supabase/functions/agent-connect/index.ts:339-341`, handler
-at `:72-196`) — reached **only after** the same token-validation
-(`:212-228`) and circle-membership (`:324-335`) gates the presence path
-uses, and reads early-return so they never upsert presence (`:337-341`).
-Three ops exist — `list_pending_approvals`, `list_skills`,
-`circle_live_info` (allowlist at `:63`); unknown ops get a `400` (`:195`).
-Every query is manually scoped to the resolved circle id (the service-role
-client bypasses RLS, per the comment at `:52-61`), output is bounded (max 20
-rows via `MAX_READ_ROWS` at `:64`, long strings truncated via `truncField`
-at `:66-69`), and columns are allowlisted: approval reads never select the
-action `payload` or `session_key` (`:74-96`), skill reads never select the
-skill `content` body (`:124-132`), and no op returns tokens or credentials.
+`handleReadOp` (`supabase/functions/agent-connect/index.ts:506-508`, handler
+at `:92-261`) — reached **only after** the same token-validation
+(`:385-396`) and circle-membership (`:493-503`) gates the presence path
+uses, and reads early-return so they never upsert presence (`:506-508`).
+Four read ops exist — `list_pending_approvals`, `list_skills`,
+`circle_live_info`, and `list_tasks` (allowlist at `:63`); unknown ops get a
+`400` (`:261`). Every query is manually scoped to the resolved circle id (the
+service-role client bypasses RLS, per the comment at `:52-61`), output is
+bounded (max 20 rows via `MAX_READ_ROWS` at `:64`, long strings truncated via
+`truncField` at `:86-89`), and columns are allowlisted: approval reads never
+select the action `payload` or `session_key` (`:98`), skill reads never select
+the skill `content` body (`:149`), `list_tasks` never selects the task
+`description`/`focus_chain`/`peer_approvals`/plan ids/`image_url` and maps the
+`created_by`/`assigned_to` UUIDs to display names (`:215-259`), and no op
+returns tokens or credentials.
+
+Since 2026-07-21 (committed on this branch) it also serves one **write
+op**: a POST with `event: "write_op"` and `op: "report_receipt"` is routed to
+`handleWriteOp` (`:516-518`, handler at `:265-364`) — reached from the **same
+early-return point, immediately after the `read_op` branch and therefore after
+the identical token-validation (`:385-396`) and circle-membership 403 gate
+(`:493-503`)**. It is append-only: a single `proof_of_work` INSERT (`:333-344`)
+— never UPDATE/DELETE, and never memory/skills/approvals. `circle_id` and
+`user_id` are **server-forced** from the validated token/membership, never read
+from the client body; `pow_type` is validated against the table's CHECK set
+(`:79`, reject-400 otherwise), `title` is capped at 300 chars and `detail`
+(jsonb) at 4 KB, a supplied `mission_id` is dropped unless it belongs to the
+caller's circle, and writes are rate-limited to 12/min per user+circle so a
+leaked token cannot spam rows. Unknown write ops get a `400` (`:364`). This
+preserves the edge-security-audit posture: the write path adds no new trust and
+sits behind the exact same gates as every other authenticated op.
 
 **Operational caveat**: these read ops exist in this repo's source but are
 **not live until the edge function is redeployed** (`npx supabase functions
@@ -275,10 +313,10 @@ not an error.
 
 It remains a **single POST endpoint** — no `GET /health` (any non-POST gets
 a `405`, `supabase/functions/agent-connect/index.ts:203-205`), no capability
-listing, no task push. Its last committed change is the `2026-06-02`
+listing, no task push. Before this branch its last change was the `2026-06-02`
 working-tree snapshot commit shared with `chatAgentTargets.ts` and
-`customAgentBridgeDispatcher.ts`; the `read_op` branch above is uncommitted
-worktree state on top of that.
+`customAgentBridgeDispatcher.ts`; the `read_op` and `write_op` branches above
+were added on top of that, committed on this branch.
 
 ### `claude-bridge.js`'s own `/mcp` endpoint — a different, narrower MCP server
 
@@ -323,10 +361,12 @@ not circle task orchestration.
 - **The MCP heartbeat channel is fire-and-forget, and its reads are
   partial.** `uc_get_circle_info` returns locally cached state, not a live
   server read (`uc_get_circle_live_info` is the live counterpart); there's
-  still no server-side task list or memory search exposed over MCP today
-  (skills, pending approvals, live circle info, and local file leases now
-  are — section 3), and the server-backed reads silently return empty
-  results until the edge function is redeployed.
+  still no memory search or context-pack read exposed over MCP today (skills,
+  pending approvals, live circle info, open tasks, and local file leases now
+  are, and `uc_report_receipt` can now write an append-only proof-of-work row
+  — section 3), and the server-backed reads and the write silently no-op
+  (reads return empty, the write is treated as a presence beat) until the edge
+  function is redeployed.
 - **Two unrelated things are both called "the generic agent contract"** in
   this codebase right now: the chat-dispatch 5-path POST fallback described
   above, and the separate Office `GET /health` + optional `POST
@@ -346,15 +386,19 @@ it in the source.
   only the 5-path POST fallback above exists, with no health/status/cancel/
   receipt calls.
 - The rest of the "MCP v2" tool set for `mcp-agent-connect.js` (or a
-  successor): read tools like `uc_get_context_pack`, `uc_list_tasks`,
-  `uc_get_task`, `uc_search_memory`, `uc_list_connected_apps`, and
-  write/report tools like `uc_claim_task`, `uc_report_receipt`,
-  `uc_report_blocker`, `uc_claim_file`, `uc_publish_artifact`. The first
-  four read tools from this plan (`uc_list_file_leases`,
+  successor): read tools like `uc_get_context_pack`, `uc_get_task`,
+  `uc_search_memory`, `uc_list_connected_apps`, and write/report tools like
+  `uc_claim_task`, `uc_report_blocker`, `uc_claim_file`, `uc_publish_artifact`.
+  The first four read tools from this plan (`uc_list_file_leases`,
   `uc_list_pending_approvals`, `uc_list_skills`, `uc_get_circle_live_info`)
-  landed in-repo on 2026-07-20/21 — see section 3. Today the server exposes
-  exactly the 7 tools listed there; every write/claim tool is still unbuilt,
-  and the server-backed reads need an edge redeploy to work live.
+  landed in-repo on 2026-07-20/21, and slice 2 (`uc_list_tasks` read +
+  `uc_report_receipt`, the first append-only write) landed on 2026-07-21 —
+  see section 3. Today the server exposes exactly the 9 tools listed there.
+  `uc_report_receipt` is the only write tool so far — task-claim, file-claim
+  (deferred: it would need to reimplement the on-disk lease format that
+  `agentFileLeaseCore.ts` owns), and artifact-publish tools are still unbuilt;
+  and the server-backed reads plus the write need an edge redeploy to work
+  live.
 - Machine-readable discovery docs at the repo/site root (`/llms.txt`,
   `/llms-full.txt`, `/agents.md`, `/mcp`, `/mcp/manifest`,
   `/skills/index.json`) and companion docs

@@ -105,19 +105,22 @@ function stopHeartbeat() {
   sendHeartbeat('session_end');
 }
 
-// ── Server read ops (MCP v2 read tools) ─────────────────────────────────────
-// Unlike heartbeats (fire-and-forget), read tools need the response body.
-// POSTs { event: "read_op", op } to the same agent-connect edge function with
-// the same Bearer token; the server validates token + circle membership before
-// answering, and returns only bounded, allowlisted fields.
+// ── Server read/write ops (MCP v2 tools) ────────────────────────────────────
+// Unlike heartbeats (fire-and-forget), these tools need the response body.
+// POSTs { event, op, ... } to the same agent-connect edge function with the
+// same Bearer token; the server validates token + circle membership before
+// answering, returns only bounded/allowlisted fields for reads, and for writes
+// performs a single append-only INSERT scoped to the caller's circle.
+//
+// `postServerOp` is the shared transport; `postReadOp`/`postWriteOp` are thin
+// wrappers that set the event. Read behavior is unchanged from before.
 
-function postReadOp(op) {
+function postServerOp(bodyFields) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify({
-      event: 'read_op',
-      op,
       agent_type: AGENT_TYPE,
       cwd: process.cwd(),
+      ...bodyFields,
     });
 
     const url = new URL(AGENT_CONNECT_URL);
@@ -151,6 +154,14 @@ function postReadOp(op) {
     req.write(payload);
     req.end();
   });
+}
+
+function postReadOp(op) {
+  return postServerOp({ event: 'read_op', op });
+}
+
+function postWriteOp(op, fields) {
+  return postServerOp({ event: 'write_op', op, ...(fields || {}) });
 }
 
 function truncateText(value, max) {
@@ -285,6 +296,28 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {},
+    },
+  },
+  {
+    name: 'uc_list_tasks',
+    description: 'List OPEN tasks on your circle\'s kanban board (everything not done/approved). Returns id, title, status, priority, due date, assignee, and assigned agent — use it to see what to work on. Read-only; never returns task descriptions or raw owner ids.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'uc_report_receipt',
+    description: 'Record an append-only proof-of-work receipt to your circle (e.g. "Opened PR #42", "Deployed staging"). Writes ONE immutable proof_of_work row — it cannot edit or delete anything, and cannot touch memory, skills, or approvals. Provide a short title; optionally a pow_type, a small JSON detail object, and a mission id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short receipt title — what you did (e.g. "Opened PR #42")' },
+        pow_type: { type: 'string', enum: ['commit', 'pr', 'deploy', 'agent_run', 'checkin', 'manual'], description: 'Kind of proof (default: agent_run)' },
+        detail: { type: 'object', description: 'Optional small JSON object with extra context (links, ids). Capped at ~4KB.' },
+        mission_id: { type: 'string', description: 'Optional mission id to attach the receipt to (ignored unless it belongs to your circle).' },
+      },
+      required: ['title'],
     },
   },
 ];
@@ -451,6 +484,40 @@ function handleToolCall(id, params) {
         }
         return toolTextResult(id, lines.join('\n'));
       }).catch((err) => toolTextResult(id, `Could not fetch circle info: ${err.message}`, true));
+    }
+
+    case 'uc_list_tasks': {
+      return postReadOp('list_tasks').then((data) => {
+        const rows = Array.isArray(data.tasks) ? data.tasks.slice(0, 20) : [];
+        if (rows.length === 0) return toolTextResult(id, 'No open tasks in your circle right now.');
+        const lines = rows.map((t) => {
+          const meta = [];
+          if (t.priority) meta.push(`priority ${truncateText(t.priority, 20)}`);
+          if (t.assignee) meta.push(`assignee ${truncateText(t.assignee, 80)}`);
+          if (t.due_date) meta.push(`due ${truncateText(t.due_date, 40)}`);
+          const suffix = meta.length ? ` — ${meta.join(', ')}` : '';
+          return `- [${truncateText(t.status, 40) || 'status'}] ${truncateText(t.title, 300) || '(untitled)'}${suffix} (id: ${t.id})`;
+        });
+        return toolTextResult(id, `${rows.length} open task(s) in your circle:\n${lines.join('\n')}`);
+      }).catch((err) => toolTextResult(id, `Could not fetch tasks: ${err.message}`, true));
+    }
+
+    case 'uc_report_receipt': {
+      const title = typeof args?.title === 'string' ? args.title.trim() : '';
+      if (!title) {
+        return toolTextResult(id, 'uc_report_receipt requires a non-empty "title".', true);
+      }
+      // Forward only allowlisted fields. circle_id/user_id are intentionally
+      // NOT sent — the server forces those from the connect token.
+      const fields = { title };
+      if (typeof args?.pow_type === 'string' && args.pow_type) fields.pow_type = args.pow_type;
+      if (args?.detail != null && typeof args.detail === 'object' && !Array.isArray(args.detail)) fields.detail = args.detail;
+      if (typeof args?.mission_id === 'string' && args.mission_id) fields.mission_id = args.mission_id;
+      return postWriteOp('report_receipt', fields).then((data) => {
+        const r = data.receipt || {};
+        const mission = r.mission_id ? ` (mission ${r.mission_id})` : '';
+        return toolTextResult(id, `Recorded proof-of-work receipt: "${truncateText(r.title || title, 300)}" [${truncateText(r.pow_type, 40) || 'agent_run'}]${mission} (id: ${r.id || 'unknown'}).`);
+      }).catch((err) => toolTextResult(id, `Could not record receipt: ${err.message}`, true));
     }
 
     default:

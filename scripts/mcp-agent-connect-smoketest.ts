@@ -12,10 +12,15 @@
  *
  * Verifies: the 3 legacy tools still work unchanged, the heartbeat protocol
  * still fires (session_start observed by the mock with the same token), the 4
- * new read tools return bounded text, expired leases are filtered, sensitive
- * fields (payload/content/contentHash/ownerId) never appear in tool output,
- * unknown tools/methods still error, and network/auth failures degrade to
- * isError results without crashing the process.
+ * read tools + the 2 slice-2 tools (uc_list_tasks read, uc_report_receipt
+ * append-only write) return bounded text over the wire, expired leases are
+ * filtered, sensitive fields (payload/content/contentHash/ownerId, and now
+ * task description/created_by UUID) never appear in tool output, the write op
+ * carries the same Bearer token to the same endpoint and never sends
+ * client-supplied circle_id/user_id (server-forced), a missing receipt title
+ * is rejected client-side with no write leaving the process, unknown
+ * tools/methods still error, and network/auth failures degrade to isError
+ * results without crashing the process.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -96,6 +101,29 @@ function cannedReadOpResponse(op: string): { status: number; json: unknown } {
       },
     };
   }
+  if (op === 'list_tasks') {
+    return {
+      status: 200,
+      json: {
+        ok: true, op, circle_id: CIRCLE_ID, count: 2,
+        tasks: [
+          {
+            id: 'task-1', title: 'Ship MCP v2 slice 2', status: 'in_progress',
+            priority: 'high', due_date: '2026-07-25', position: 1,
+            assigned_agent_id: 'agent-xyz', assignee: 'Chris', creator: 'Chris',
+            // Decoys: a compliant server never selects these; prove the client
+            // would not echo a description body or raw owner UUID if one leaked.
+            description: 'SECRET-TASK-DESCRIPTION', created_by: 'creator-uuid-9999',
+          },
+          {
+            id: 'task-2', title: 'Review write-op gate', status: 'todo',
+            priority: 'normal', due_date: null, position: 2,
+            assigned_agent_id: null, assignee: null, creator: 'Sam',
+          },
+        ],
+      },
+    };
+  }
   return { status: 400, json: { error: 'Unknown read op', code: 'unknown_read_op' } };
 }
 
@@ -122,6 +150,28 @@ function startMockServer(): Promise<{ server: http.Server; port: number }> {
         if (body.event === 'read_op') {
           const { status, json } = cannedReadOpResponse(String(body.op || ''));
           respond(status, json);
+          return;
+        }
+        if (body.event === 'write_op') {
+          // Faithful to the edge write path: report_receipt echoes back an
+          // append-only receipt; any other write op is a 400. The real server
+          // forces circle_id/user_id from the token — the client never sends
+          // them, which section (12) asserts against the recorded body.
+          const wop = String(body.op || '');
+          if (wop === 'report_receipt') {
+            respond(200, {
+              ok: true, op: wop, circle_id: CIRCLE_ID,
+              receipt: {
+                id: 'pow-1',
+                pow_type: body.pow_type || 'agent_run',
+                title: String(body.title || ''),
+                mission_id: body.mission_id || null,
+                created_at: new Date().toISOString(),
+              },
+            });
+            return;
+          }
+          respond(400, { error: 'Unknown write op', code: 'unknown_write_op' });
           return;
         }
         // Presence path (session_start / heartbeat / tool_use / session_end)
@@ -274,16 +324,20 @@ async function main(): Promise<void> {
     assertEq(hb.body.agent_type, 'claude-code', '(1) heartbeat agent_type unchanged');
     assert(typeof hb.body.cwd === 'string' && hb.body.cwd.length > 0, '(1) heartbeat carries cwd');
 
-    // ─── (2) tools/list: 3 legacy + 4 new ───────────────────────────────────
+    // ─── (2) tools/list: 3 legacy + 4 read + 2 slice-2 (list_tasks, receipt) ─
     const list = await a.request('tools/list');
     const names = (list?.result?.tools || []).map((t: any) => t.name);
-    assertEq(names.length, 7, '(2) exactly 7 tools listed');
+    assertEq(names.length, 9, '(2) exactly 9 tools listed');
     for (const expected of [
       'uc_report_progress', 'uc_get_circle_info', 'uc_post_update',
       'uc_list_file_leases', 'uc_list_pending_approvals', 'uc_list_skills', 'uc_get_circle_live_info',
+      'uc_list_tasks', 'uc_report_receipt',
     ]) {
       assert(names.includes(expected), `(2) tools/list includes ${expected}`);
     }
+    // uc_report_receipt must advertise `title` as required.
+    const receiptTool = (list?.result?.tools || []).find((t: any) => t.name === 'uc_report_receipt');
+    assert(Array.isArray(receiptTool?.inputSchema?.required) && receiptTool.inputSchema.required.includes('title'), '(2) uc_report_receipt requires title');
     assert((list?.result?.tools || []).every((t: any) => t?.inputSchema?.type === 'object'), '(2) every tool has an object inputSchema');
 
     // ─── (3) Legacy tools still work unchanged ──────────────────────────────
@@ -373,6 +427,59 @@ async function main(): Promise<void> {
     assert(toolText(noReg).includes('No file-lease registry found'), '(10) missing registry handled', toolText(noReg));
     const pingB = await b.request('ping');
     assert(pingB && !pingB.error, '(10) process alive after network failure');
+
+    // ─── (11) uc_list_tasks: open tasks, allowlisted fields, no secrets ──────
+    const tasks = await a.callTool('uc_list_tasks');
+    const tasksText = toolText(tasks);
+    assert(!tasks?.result?.isError, '(11) tasks call succeeds', tasksText);
+    assert(tasksText.includes('Ship MCP v2 slice 2'), '(11) task title shown', tasksText);
+    assert(tasksText.includes('in_progress'), '(11) task status shown');
+    assert(tasksText.includes('high'), '(11) task priority shown');
+    assert(tasksText.includes('task-1'), '(11) task id shown');
+    assert(tasksText.includes('Chris'), '(11) assignee display name shown');
+    assert(tasksText.includes('Review write-op gate'), '(11) second task shown');
+    assert(!tasksText.includes('SECRET-TASK-DESCRIPTION'), '(11) task description never echoed');
+    assert(!tasksText.includes('creator-uuid-9999'), '(11) raw created_by UUID never echoed');
+    const taskReadReq = seen.find((r) => r.body?.event === 'read_op' && r.body?.op === 'list_tasks')!;
+    assert(!!taskReadReq, '(11) list_tasks read_op reached the server');
+    assertEq(taskReadReq.auth, `Bearer ${TOKEN}`, '(11) list_tasks carries the same Bearer token');
+    assertEq(taskReadReq.url, '/functions/v1/agent-connect', '(11) list_tasks hits the same endpoint');
+
+    // ─── (12) uc_report_receipt: append-only write_op, server-forced scope ───
+    const receiptsBefore = seen.filter((r) => r.body?.event === 'write_op' && r.body?.op === 'report_receipt').length;
+    const receipt = await a.callTool('uc_report_receipt', {
+      title: 'Opened PR #42', pow_type: 'pr',
+      detail: { url: 'https://example.com/pr/42' }, mission_id: 'm-1',
+    });
+    const receiptText = toolText(receipt);
+    assert(!receipt?.result?.isError, '(12) receipt call succeeds', receiptText);
+    assert(receiptText.includes('Opened PR #42'), '(12) receipt title echoed', receiptText);
+    assert(receiptText.includes('pr'), '(12) receipt pow_type shown');
+    assert(receiptText.includes('pow-1'), '(12) receipt id shown');
+
+    const writeReq = seen.find((r) => r.body?.event === 'write_op' && r.body?.op === 'report_receipt' && r.body?.title === 'Opened PR #42')!;
+    assert(!!writeReq, '(12) write_op request reached the server');
+    assertEq(writeReq.auth, `Bearer ${TOKEN}`, '(12) write_op carries the same Bearer token');
+    assertEq(writeReq.url, '/functions/v1/agent-connect', '(12) write_op hits the same endpoint');
+    assertEq(writeReq.body.event, 'write_op', '(12) write_op event set');
+    assertEq(writeReq.body.pow_type, 'pr', '(12) write_op forwards pow_type');
+    assertEq(writeReq.body.mission_id, 'm-1', '(12) write_op forwards mission_id');
+    // The client must NOT send circle_id/user_id — the server forces both from
+    // the connect token, so a client cannot write into another circle/identity.
+    assert(writeReq.body.circle_id === undefined, '(12) client does not send circle_id (server-forced)');
+    assert(writeReq.body.user_id === undefined, '(12) client does not send user_id (server-forced)');
+
+    // Missing-title guard: client-side reject, and NO write_op leaves the process.
+    const badReceipt = await a.callTool('uc_report_receipt', {});
+    assert(badReceipt?.result?.isError === true, '(12) missing title → isError');
+    assert(toolText(badReceipt).toLowerCase().includes('title'), '(12) missing-title message mentions title');
+    const receiptsAfter = seen.filter((r) => r.body?.event === 'write_op' && r.body?.op === 'report_receipt').length;
+    assertEq(receiptsAfter, receiptsBefore + 1, '(12) exactly one write_op sent (bad call sent none)');
+
+    // Auth failure on write: wrong-token client → server 401 surfaced as isError.
+    const deniedWrite = await c.callTool('uc_report_receipt', { title: 'nope' });
+    assert(deniedWrite?.result?.isError === true, '(12) write with bad token → isError');
+    assert(toolText(deniedWrite).includes('Invalid connect token'), '(12) write auth error surfaced', toolText(deniedWrite));
   } catch (err) {
     failures += 1;
     console.error(`FAIL: smoke threw: ${(err as Error)?.message}`);
