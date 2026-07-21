@@ -49,6 +49,152 @@ const HOOK_EVENT_MAP: Record<string, string> = {
   "UserPromptSubmit": "heartbeat",
 };
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Read ops (MCP v2 read tools — event: "read_op")
+//
+//  Served ONLY after the same token-validation + circle-membership gates as the
+//  presence path (the caller in Deno.serve returns 401/403 before reaching
+//  here). Every query is manually scoped to the resolved circle id because the
+//  service-role client bypasses RLS. Output is bounded (≤20 rows, long strings
+//  truncated) and allowlisted — never approval `payload`, skill `content`,
+//  `session_key`, tokens, or credentials.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const READ_OPS = ["list_pending_approvals", "list_skills", "circle_live_info"];
+const MAX_READ_ROWS = 20;
+
+function truncField(value: unknown, max: number): string {
+  const s = value == null ? "" : String(value);
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+// deno-lint-ignore no-explicit-any
+async function handleReadOp(sb: any, circleId: string, op: string): Promise<Response> {
+  if (op === "list_pending_approvals") {
+    // Legacy kill-switch approvals (`agent_approvals`) + run-loop HITL gates
+    // (`agent_run_approvals`). NEVER return `payload` or `session_key`.
+    const { data: legacyRows, error: legacyErr } = await sb
+      .from("agent_approvals")
+      .select("id, agent_name, action_type, description, requested_at, timeout_seconds")
+      .eq("circle_id", circleId)
+      .eq("status", "pending")
+      .order("requested_at", { ascending: false })
+      .limit(MAX_READ_ROWS);
+
+    if (legacyErr) {
+      return errResponse(500, "read_failed", truncField(legacyErr.message, 300));
+    }
+
+    // Table may not exist on older projects — fail open to empty, matching
+    // src/services/runApprovalsService.ts.
+    const { data: runRows } = await sb
+      .from("agent_run_approvals")
+      .select("id, approval_kind, title, requested_by, requested_at, timeout_seconds")
+      .eq("circle_id", circleId)
+      .eq("status", "pending")
+      .order("requested_at", { ascending: false })
+      .limit(MAX_READ_ROWS);
+
+    const approvals = [
+      ...(legacyRows || []).map((r: any) => ({
+        id: r.id,
+        source: "agent_approvals",
+        kind: truncField(r.action_type, 40),
+        title: truncField(r.description, 300),
+        requester: truncField(r.agent_name, 80),
+        requested_at: r.requested_at,
+        timeout_seconds: r.timeout_seconds,
+      })),
+      ...(runRows || []).map((r: any) => ({
+        id: r.id,
+        source: "agent_run_approvals",
+        kind: truncField(r.approval_kind, 40),
+        title: truncField(r.title, 300),
+        requester: truncField(r.requested_by, 80) || null,
+        requested_at: r.requested_at,
+        timeout_seconds: r.timeout_seconds,
+      })),
+    ]
+      .sort((a, b) => String(b.requested_at || "").localeCompare(String(a.requested_at || "")))
+      .slice(0, MAX_READ_ROWS);
+
+    return jsonResponse({ ok: true, op, circle_id: circleId, count: approvals.length, approvals });
+  }
+
+  if (op === "list_skills") {
+    // Metadata only — the `content` column (skill body) is intentionally never
+    // selected, matching src/lib/skillLibrary.ts listLibrarySkills.
+    const { data, error } = await sb
+      .from("circle_skills")
+      .select("id, name, description, version, tags, usage_count, success_count, updated_at")
+      .eq("circle_id", circleId)
+      .order("name", { ascending: true })
+      .limit(MAX_READ_ROWS);
+
+    if (error) {
+      // PGRST205 = relation missing (skill-library migration not applied) —
+      // fail open to an empty library, matching skillLibrary.ts.
+      if ((error as any).code === "PGRST205") {
+        return jsonResponse({ ok: true, op, circle_id: circleId, count: 0, skills: [] });
+      }
+      return errResponse(500, "read_failed", truncField(error.message, 300));
+    }
+
+    const skills = (data || []).map((r: any) => ({
+      id: r.id,
+      name: truncField(r.name, 120),
+      description: truncField(r.description, 300),
+      version: truncField(r.version, 20),
+      tags: Array.isArray(r.tags) ? r.tags.slice(0, 10).map((t: unknown) => truncField(t, 40)) : [],
+      usage_count: r.usage_count ?? 0,
+      success_count: r.success_count ?? 0,
+      updated_at: r.updated_at,
+    }));
+
+    return jsonResponse({ ok: true, op, circle_id: circleId, count: skills.length, skills });
+  }
+
+  if (op === "circle_live_info") {
+    const today = new Date().toISOString().split("T")[0];
+
+    const [circleRes, membersRes, checkInsRes, messagesRes, agentsRes] = await Promise.all([
+      sb.from("circles").select("id, name").eq("id", circleId).maybeSingle(),
+      sb.from("circle_members").select("*", { count: "exact", head: true }).eq("circle_id", circleId),
+      sb.from("check_ins").select("*", { count: "exact", head: true }).eq("circle_id", circleId).gte("created_at", today),
+      sb.from("messages").select("*", { count: "exact", head: true }).eq("circle_id", circleId).gte("created_at", today),
+      sb.from("circle_office_agents")
+        .select("name, provider, status, current_task, last_active_at")
+        .eq("circle_id", circleId)
+        .order("last_active_at", { ascending: false })
+        .limit(10),
+    ]);
+
+    const agents = (agentsRes.data || []).map((a: any) => ({
+      name: truncField(a.name, 80),
+      provider: truncField(a.provider, 40),
+      status: truncField(a.status, 20),
+      current_task: truncField(a.current_task, 160),
+      last_active_at: a.last_active_at,
+    }));
+
+    return jsonResponse({
+      ok: true,
+      op,
+      circle_id: circleId,
+      circle: {
+        id: circleId,
+        name: truncField((circleRes.data as any)?.name, 120) || null,
+      },
+      total_members: membersRes.count ?? 0,
+      today_check_ins: checkInsRes.count ?? 0,
+      today_messages: messagesRes.count ?? 0,
+      agents,
+    });
+  }
+
+  return errResponse(400, "unknown_read_op", `Unknown read op. Supported: ${READ_OPS.join(", ")}`);
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -186,6 +332,12 @@ Deno.serve(async (req: Request) => {
 
     if (!memberCheck) {
       return errResponse(403, "forbidden", "Not a member of this circle");
+    }
+
+    // ── Read ops (MCP v2 read tools) — token + membership verified above.
+    //    Early return: reads never upsert presence. ────────────────────────────
+    if (event === "read_op") {
+      return await handleReadOp(sb, circleId, typeof body.op === "string" ? body.op : "");
     }
 
     // ── Get user profile ─────────────────────────────────────────────────────
