@@ -1857,6 +1857,17 @@ function routeNeedsDataTransferPrecisionRules(kind: ChatComputerRequestRouteKind
 export function buildChatComputerRequestRoutePromptBlock(message: string): string | null {
   const route = buildChatComputerRequestRoute(message);
   if (!route) return null;
+  return formatChatComputerRequestRoutePromptBlock(route);
+}
+
+/**
+ * Format an already-computed route into its prompt block. Split out from
+ * buildChatComputerRequestRoutePromptBlock so a caller that already holds the
+ * route (e.g. openswanSessionRuntime, which also needs the boolean `!!route`
+ * to decide the BlackSwan tool-executor swap) can format it without
+ * classifying the message a second time on a hot per-turn path.
+ */
+export function formatChatComputerRequestRoutePromptBlock(route: ChatComputerRequestRoute): string {
   return [
     '## Chat Computer Request Route',
     `Best path: ${route.bestPath}`,

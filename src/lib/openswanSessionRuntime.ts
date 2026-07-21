@@ -65,7 +65,7 @@ import { OPENSWAN_RUNTIME_PLAN_VERSION } from './openswanRuntimePlan';
 import type { ConnectedProviderSet } from './serviceProfileSouls';
 import { buildUserTaskPipelinePromptBlock } from './userTaskPipelines';
 import { buildComputerAppTaskStrategyPromptBlock } from './computerAppTaskStrategy';
-import { buildChatComputerRequestRoute, buildChatComputerRequestRoutePromptBlock, resolveChatComputerConstraintInputs } from './chatComputerRequestRouter';
+import { buildChatComputerRequestRoute, formatChatComputerRequestRoutePromptBlock, resolveChatComputerConstraintInputs } from './chatComputerRequestRouter';
 import { buildComputerAppGroundingPromptBlock } from './computerAppGrounding';
 import { buildComputerAppExecutionReceiptPromptBlock } from './computerAppExecutionReceipts';
 import { buildDesignAppAutomationPromptBlock } from './designAppAutomation';
@@ -1092,13 +1092,15 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   const agentDevelopmentStandards = summarizeRelevantAgentDevelopmentStandards(cleanMessage, { mode: opts.mode || null });
   const standardsPrompt = buildRelevantAgentDevelopmentStandardsPromptBlock(cleanMessage, { mode: opts.mode || null });
   const pipelinePrompt = buildUserTaskPipelinePromptBlock(cleanMessage, { limit: 3 });
-  const computerRequestRoutePrompt = buildChatComputerRequestRoutePromptBlock(cleanMessage);
-  // Cheap, pure re-classification (no I/O) just for the boolean signal —
-  // see isRoutedComputerTask below. buildChatComputerRequestRoutePromptBlock
-  // above computes the same route internally but only returns formatted
-  // text, so this is the smallest way to get `.kind` without touching that
-  // function's ~20 existing callers.
-  const isRoutedComputerTask = !!buildChatComputerRequestRoute(cleanMessage);
+  // Classify once, use twice: the formatted prompt block AND the boolean that
+  // decides the BlackSwan tool-executor swap (isRoutedComputerTask). Previously
+  // this called buildChatComputerRequestRoutePromptBlock + buildChatComputerRequestRoute
+  // separately, running the (non-trivial) router classification twice per turn.
+  const computerRequestRoute = buildChatComputerRequestRoute(cleanMessage);
+  const computerRequestRoutePrompt = computerRequestRoute
+    ? formatChatComputerRequestRoutePromptBlock(computerRequestRoute)
+    : null;
+  const isRoutedComputerTask = !!computerRequestRoute;
   const computerAppStrategyPrompt = buildComputerAppTaskStrategyPromptBlock(cleanMessage);
   const computerAppGroundingPrompt = buildComputerAppGroundingPromptBlock(cleanMessage);
   const computerAppReceiptPrompt = buildComputerAppExecutionReceiptPromptBlock(cleanMessage);
