@@ -9392,6 +9392,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const webDecision = decideWebSearchForTurn(content, webSearchEnabled);
     if (webDecision.attach) {
       setBotTyping(true);
+      // Thread the prior bot message's blocked/completed computer-task context
+      // into the web-search lane too. This lane returns early (below) and never
+      // reaches the conversational path's blocker/completed-task threading, yet
+      // with the web-search toggle on it fires for EVERY turn — so a follow-up
+      // ("what did you find?", "the blocked one — why?") would otherwise see
+      // only raw m.content history. Reuses the shared launch-context wrapper
+      // (same as the two computer-task launch sites); '' (no-op) when the last
+      // message isn't a bot task, so plain web-search Q&A is unchanged.
+      const taskCtx = buildTaskLaunchContextSuffix(messages);
       try {
         const { webSearchViaOpenRouter } = await import('../../../lib/llmProviders');
         const recent = messages.slice(-6).map(m => ({
@@ -9402,7 +9411,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           query: content,
           circleId,
           conversation: recent,
-          systemPrompt: 'You are a helpful assistant in a chat. Use the web_search tool when the question needs current information. Cite sources inline as markdown links when you do.',
+          systemPrompt: 'You are a helpful assistant in a chat. Use the web_search tool when the question needs current information. Cite sources inline as markdown links when you do.'
+            + (taskCtx ? `\n\n${taskCtx}` : ''),
         });
         setBotTyping(false);
         // Auto-detection footer — only surfaced when the heuristic
@@ -9432,7 +9442,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           const fallback = await invokeAnyChat({
             modelId: resolveSendModel(content) || 'claude-haiku-4-5',
             messages: [
-              { role: 'system', content: 'Web search is unavailable for this turn. Answer from training knowledge and clearly note when information may be out of date.' },
+              { role: 'system', content: 'Web search is unavailable for this turn. Answer from training knowledge and clearly note when information may be out of date.'
+                + (taskCtx ? `\n\n${taskCtx}` : '') },
               ...recent,
               { role: 'user', content },
             ],
