@@ -1,9 +1,10 @@
 /**
  * agent-file-lease-core-smoketest — the PURE multi-agent coordination brain
  * (src/lib/agentFileLeaseCore.ts). Load-bearing: lease state machine
- * (grant/renew/held_by_other/reclaim-stale), content-hash CAS (clean/conflict/
- * unknown), deterministic change-detecting hash, TTL expiry + prune, path-free
- * awareness, corrupt-registry defense, never-throws.
+ * (grant/renew/held_by_other/reclaim-stale; release outcomes released/
+ * released_expired/not_holder/gone with holder+reason on refusal), content-hash
+ * CAS (clean/conflict/unknown), deterministic change-detecting hash, TTL expiry
+ * + prune, path-free awareness, corrupt-registry defense, never-throws.
  *
  * Pure — loads under tsx (agentFileLeaseCore has zero imports).
  */
@@ -76,13 +77,22 @@ function main(): void {
   assert(renewLease({ version: 1, leases: {} }, { path: 'nope.ts', ownerId: 'A' }, T0).outcome === 'gone', '(5) renew of missing lease → gone');
 
   // ─── (6) release: owner / non-owner-active / stale-by-anyone / gone ───────
-  assert(releaseLease(a1.registry, { path: 'src/x.ts', ownerId: 'A' }, T0 + 1000).outcome === 'released', '(6) owner releases');
+  const relOwn = releaseLease(a1.registry, { path: 'src/x.ts', ownerId: 'A' }, T0 + 1000);
+  assert(relOwn.ok && relOwn.outcome === 'released', '(6) owner releases');
   const relByOther = releaseLease(a1.registry, { path: 'src/x.ts', ownerId: 'B' }, T0 + 1000);
-  assert(relByOther.outcome === 'not_holder', '(6) non-owner cannot release an ACTIVE lease');
+  assert(!relByOther.ok && relByOther.outcome === 'not_holder', '(6) non-owner cannot release an ACTIVE lease');
+  assert(relByOther.holder?.ownerId === 'A', '(6) release refusal carries the REAL holder');
+  assert(/held by claude for \d+s more/.test(relByOther.reason), '(6) refusal reason names holder + remaining time', relByOther.reason);
+  assert('src/x.ts' in relByOther.registry.leases, '(6) refused release does not mutate the registry');
   const relStale = releaseLease(a1.registry, { path: 'src/x.ts', ownerId: 'B' }, expiredAt);
-  assert(relStale.outcome === 'released', '(6) anyone may release a STALE lease (reclaim)');
+  assert(relStale.ok && relStale.outcome === 'released_expired', '(6) anyone may release a STALE lease → released_expired');
+  assert(!('src/x.ts' in relStale.registry.leases), '(6) stale release removes the lease from the registry');
+  const relOwnExpired = releaseLease(a1.registry, { path: 'src/x.ts', ownerId: 'A' }, expiredAt);
+  assert(relOwnExpired.ok && relOwnExpired.outcome === 'released', "(6) owner releasing own EXPIRED lease is still plain 'released'");
   assert(!('src/x.ts' in releaseLease(a1.registry, { path: 'src/x.ts', ownerId: 'A' }, T0 + 1000).registry.leases), '(6) released lease removed from registry');
-  assert(releaseLease({ version: 1, leases: {} }, { path: 'x', ownerId: 'A' }, T0).outcome === 'gone', '(6) release of missing → gone (idempotent)');
+  const relGone = releaseLease({ version: 1, leases: {} }, { path: 'x', ownerId: 'A' }, T0);
+  assert(relGone.ok && relGone.outcome === 'gone', '(6) release of missing → gone (idempotent)');
+  assert([relOwn, relByOther, relStale, relGone].every((r) => typeof r.reason === 'string' && r.reason.length > 0), '(6) every release result carries a reason');
 
   // ─── (7) CONTENT-HASH CAS — the universal guarantee ───────────────────────
   const h = hashContent('same content');

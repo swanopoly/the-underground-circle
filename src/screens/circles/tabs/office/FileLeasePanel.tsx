@@ -23,9 +23,13 @@
  * "Release" calls the real releaseFile() — it only succeeds for the panel's
  * own session (leases created by tool calls in this same app instance) or
  * for leases that have genuinely expired; an attempt on another agent's
- * still-active lease is safely refused and reported back with the actual
- * holder and remaining time, matching the underlying advisory-lease
- * guarantee (it never force-overrides another agent's active claim).
+ * still-active lease is safely refused, and the notice shown comes from the
+ * structured ReleaseResult itself (outcome + the actual holder and remaining
+ * time from the fresh registry read — not re-derived from this panel's
+ * possibly-stale row), matching the underlying advisory-lease guarantee (it
+ * never force-overrides another agent's active claim). A release that was
+ * allowed but could not be persisted (bridge offline) is reported as exactly
+ * that, instead of being misreported as "still claimed".
  *
  * There is intentionally no "message owner" action: `ownerLabel` is a short
  * free-text label (e.g. "openswan:ab12cd34"), not a routable identity, so
@@ -168,14 +172,24 @@ export default function FileLeasePanel({ userId }: Props) {
     setReleasing((prev) => ({ ...prev, [lease.path]: true }));
     try {
       const coord = await import('../../../../lib/agentFileCoordination');
-      const released = await coord.releaseFile(lease.path, { repoRoot: repoRootRef.current });
-      if (released) {
+      const res = await coord.releaseFile(lease.path, { repoRoot: repoRootRef.current });
+      if (res.ok) {
         await load();
-      } else {
-        const remaining = Math.max(0, Math.round((lease.expiresAt - Date.now()) / 1000));
+      } else if (res.outcome === 'not_holder') {
+        // Refused: show the REAL holder + remaining time from the fresh
+        // registry read the release just did, not this panel's stale row.
+        const holder = res.holder ?? lease;
+        const remaining = Math.max(0, Math.round((holder.expiresAt - Date.now()) / 1000));
         notify(
           'Still claimed',
-          `${lease.path} is still held by ${lease.ownerLabel} for about ${remaining}s. It will free itself automatically once that agent finishes or its lease expires.`,
+          `${lease.path} is still held by ${holder.ownerLabel} for about ${remaining}s. It will free itself automatically once that agent finishes or its lease expires.`,
+        );
+      } else {
+        // no_registry: the release was allowed but could not be persisted
+        // (bridge offline / registry write failed) — say that honestly.
+        notify(
+          'Release not saved',
+          `${lease.path}: ${res.reason}`,
         );
       }
     } finally {

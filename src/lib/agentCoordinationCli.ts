@@ -136,7 +136,7 @@ export function runCoordinationCommand(argv: string[], deps: CoordinationDeps, e
     case 'release': {
       if (!p.path) return usage(['release requires a <path>', '', USAGE]);
       const res = releaseLease(registry, { path: p.path, ownerId }, now);
-      if (!res.ok) return denied([`NOT RELEASED: ${normalizeLeasePath(p.path)} — ${res.outcome} (you are not the holder of an active lease).`], { outcome: res.outcome });
+      if (!res.ok) return denied([`NOT RELEASED: ${normalizeLeasePath(p.path)} — ${res.reason} (you are not the holder).`], { outcome: res.outcome, holder: res.holder });
       const wrote = deps.writeRegistry(res.registry);
       return ok([`RELEASED: ${normalizeLeasePath(p.path)} (${res.outcome}).`], { outcome: res.outcome, persisted: wrote });
     }
