@@ -50,6 +50,7 @@ import {
 import { appendAppActionVerificationGate } from './appActionVerificationGate';
 import { appendStuckBreaker } from './toolLoopStuckBreaker';
 import { toolBudgetReminder } from './toolLoopBudget';
+import { evaluateStepBudget } from './openswanStepBudgetCore';
 import { planDeterministicReobserve, summarizeObservationForRetry } from './deterministicReobserve';
 import { assessProofCoverage, proofCoverageNudge } from './proofCoverage';
 import {
@@ -167,19 +168,49 @@ export function createLegacyApprovalGateAdapter(
 /** Subset of OpenSwanRunStage the in-loop mapper can emit. */
 export type OpenSwanLoopStage = 'reasoning' | 'using_tools' | 'finalizing';
 
+/**
+ * Maps a core loop event to the OpenSwan stage + user-visible label.
+ *
+ * Honest step denominator: when the caller shares the turn's round cap
+ * (`opts.maxRounds` — openswanSessionRuntime's resolved `maxRounds`), labels
+ * from round 2 on read "step i of N" instead of an open-ended counter, and the
+ * pure step-budget guard (`evaluateStepBudget`) decides when the label should
+ * admit the cap is imminent/reached (checkpoint/stop ⇒ ' — wrapping up').
+ * Round-1 labels and every no-opts call stay byte-identical to the legacy
+ * mapper; a degenerate cap (non-finite / <= 0) is treated as absent.
+ */
 export function mapAgentEventToOpenSwanStage(
   event: AgentEvent,
+  opts?: { maxRounds?: number },
 ): { stage: OpenSwanLoopStage; label: string } | null {
+  const maxRounds =
+    typeof opts?.maxRounds === 'number' && Number.isFinite(opts.maxRounds) && opts.maxRounds > 0
+      ? Math.floor(opts.maxRounds)
+      : null;
   switch (event.kind) {
-    case 'turn_start':
+    case 'turn_start': {
+      if (event.iteration <= 1) {
+        return { stage: 'reasoning', label: 'Reasoning with tools' };
+      }
+      if (maxRounds === null) {
+        return { stage: 'reasoning', label: `Reasoning over tool results (step ${event.iteration})` };
+      }
+      const wrappingUp =
+        evaluateStepBudget({ stepsUsed: event.iteration, maxSteps: maxRounds }).action !== 'continue'
+          ? ' — wrapping up'
+          : '';
       return {
         stage: 'reasoning',
-        label: event.iteration <= 1
-          ? 'Reasoning with tools'
-          : `Reasoning over tool results (step ${event.iteration})`,
+        label: `Reasoning over tool results (step ${event.iteration} of ${maxRounds})${wrappingUp}`,
       };
+    }
     case 'tool_call_start':
-      return { stage: 'using_tools', label: `Using ${event.toolName}` };
+      return {
+        stage: 'using_tools',
+        label: maxRounds === null
+          ? `Using ${event.toolName}`
+          : `Using ${event.toolName} · step ${event.iteration}/${maxRounds}`,
+      };
     case 'final_response':
       return { stage: 'finalizing', label: 'Finalizing response' };
     case 'turn_end':

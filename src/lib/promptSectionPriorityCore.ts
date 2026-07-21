@@ -93,6 +93,7 @@ export const DEFAULT_SECTION_PRIORITY: Record<ChatPromptSectionKey, number> = {
   memory_user_profile: 76,
   user_chat_profile: 74,
   connected_resources: 73,
+  proactive_surfacing: 72,
   memory_working: 71,
   memory_runtime: 70,
 
@@ -161,6 +162,7 @@ export const SECTION_EMIT_ORDER: ReadonlyArray<ChatPromptSectionKey> = [
   'agent_identity',
   'missions',
   'circle_snapshot',
+  'proactive_surfacing',
   'last_session',
 ];
 

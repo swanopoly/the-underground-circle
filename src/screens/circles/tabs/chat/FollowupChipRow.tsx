@@ -1,25 +1,27 @@
 /**
- * FollowupChipRow — renders a finalized bot turn's cross-surface follow-up
- * actions (derived by crossSurfaceFollowupCore) as tappable chips: create a
- * Feed task for untracked work, open/retry the run in Office, or resolve a
- * pending approval. Visual clone of QuickReplyChips so the two chip rows read
- * as one system; the parent owns what each chip actually does (tab switch,
- * task-create event, input seed).
+ * FollowupChipRow — renders cross-surface chips: a finalized bot turn's
+ * follow-up actions (crossSurfaceFollowupCore) or a user message's resolved
+ * reference jump-tos (crossSurfaceReferenceResolverCore, mapped by the
+ * parent). Visual clone of QuickReplyChips so the chip rows read as one
+ * system; the parent owns what each chip actually does (tab switch,
+ * task-create event, input seed). Props are structurally generic — the
+ * component reads only `kind` / `label` / `hint`.
  */
 import React from 'react';
 import { Pressable, StyleSheet, Text, View, Platform } from 'react-native';
-import type { CrossSurfaceFollowup } from '../../../../lib/crossSurfaceFollowupCore';
 
 const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
 
-interface Props {
-  followups: CrossSurfaceFollowup[];
-  onPress: (followup: CrossSurfaceFollowup) => void;
+interface Props<T extends { kind: string; label: string; hint?: string }> {
+  followups: T[];
+  onPress: (followup: T) => void;
   accentColor?: string;
   label?: string;
 }
 
-export default function FollowupChipRow({ followups, onPress, accentColor = '#6366f1', label = 'Follow up' }: Props) {
+export default function FollowupChipRow<T extends { kind: string; label: string; hint?: string }>(
+  { followups, onPress, accentColor = '#6366f1', label = 'Follow up' }: Props<T>,
+) {
   const items = (followups || [])
     .filter((f) => f && typeof f.label === 'string' && f.label.trim().length > 0)
     .slice(0, 4);

@@ -2595,6 +2595,46 @@
     "passed": true
   },
   {
+    "caseId": "skill-gate-none-appends-nothing-byte-identical",
+    "suite": "library-skill-gate",
+    "passed": true
+  },
+  {
+    "caseId": "skill-gate-weak-suggest-appends-nothing-byte-identical",
+    "suite": "library-skill-gate",
+    "passed": true
+  },
+  {
+    "caseId": "skill-gate-strong-match-appends-one-best-match-line",
+    "suite": "library-skill-gate",
+    "passed": true
+  },
+  {
+    "caseId": "skill-gate-near-tie-appends-ask-line",
+    "suite": "library-skill-gate",
+    "passed": true
+  },
+  {
+    "caseId": "skill-gate-success-boost-never-clears-floor",
+    "suite": "library-skill-gate",
+    "passed": true
+  },
+  {
+    "caseId": "skill-gate-fence-chars-stripped-from-gate-ids",
+    "suite": "library-skill-gate",
+    "passed": true
+  },
+  {
+    "caseId": "skill-gate-legacy-vs-gate-divergence-gate-names-own-pick",
+    "suite": "library-skill-gate",
+    "passed": true
+  },
+  {
+    "caseId": "skill-gate-persona-hoist-order-and-block-unchanged",
+    "suite": "skill-resolution-hoist",
+    "passed": true
+  },
+  {
     "caseId": "v2-loop-toolsel-plain-chat-selects-no-groups",
     "suite": "v2-tool-selection",
     "passed": true

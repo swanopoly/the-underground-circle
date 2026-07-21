@@ -30,6 +30,10 @@
  * R17/E6 convention (`<untrusted_quoted>` body, structural headers outside).
  */
 
+// Type-only (erased at compile time, no cycle: the resolver core imports
+// nothing from this module) — keeps the pure half tsx-loadable.
+import type { CrossSurfaceEntity } from './crossSurfaceReferenceResolverCore';
+
 // ─── Pure model ──────────────────────────────────────────────────────────────
 
 export type CircleContextSection =
@@ -498,6 +502,39 @@ export function searchCircleContextSnapshot(
   }
   hits.sort((a, b) => b.score - a.score || a.line.localeCompare(b.line));
   return hits.slice(0, limit);
+}
+
+/**
+ * PURE adapter: the snapshot's NAVIGABLE sections as the compact
+ * `CrossSurfaceEntity` list `resolveCrossSurfaceReferences` scores —
+ * tasks→'task', missions→'mission', rooms→'room' (title = room name),
+ * recentRuns→'run'; status carried where the section has one. Rows with an
+ * empty id are skipped (nothing to navigate to). Goals/members/integrations/
+ * skills are deliberately EXCLUDED: the entityHandleCore `EntityKind` union has
+ * no 'goal'/'member' kind (do not extend that QA-hardened union here), and
+ * integrations/skills have no per-row deep-link surface.
+ */
+export function snapshotReferenceEntities(snapshot: CircleContextSnapshot): CrossSurfaceEntity[] {
+  const out: CrossSurfaceEntity[] = [];
+  const sections = snapshot?.sections;
+  if (!sections) return out;
+  for (const t of sections.tasks || []) {
+    if (!t || !String(t.id || '').trim()) continue;
+    out.push({ kind: 'task', id: t.id, title: t.title, ...(t.status ? { status: t.status } : {}) });
+  }
+  for (const m of sections.missions || []) {
+    if (!m || !String(m.id || '').trim()) continue;
+    out.push({ kind: 'mission', id: m.id, title: m.title, ...(m.status ? { status: m.status } : {}) });
+  }
+  for (const r of sections.rooms || []) {
+    if (!r || !String(r.id || '').trim()) continue;
+    out.push({ kind: 'room', id: r.id, title: r.name });
+  }
+  for (const r of sections.recentRuns || []) {
+    if (!r || !String(r.id || '').trim()) continue;
+    out.push({ kind: 'run', id: r.id, title: r.title, ...(r.status ? { status: r.status } : {}) });
+  }
+  return out;
 }
 
 // ─── Impure builder (deps seam + lazy imports only) ─────────────────────────

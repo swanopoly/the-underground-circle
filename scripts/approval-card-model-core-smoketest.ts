@@ -9,7 +9,12 @@
  *     not, unparsable requested_at is dead (fail-closed);
  *   - remember-checkbox floor suppression: pay/delete/login/grant substrings
  *     and credential entry never offer a standing auto-approve;
- *   - RISK_TIER_CHIP_COLORS covers every chip tone.
+ *   - RISK_TIER_CHIP_COLORS covers every chip tone;
+ *   - batch-card plan: planRunApprovalBatchCards folds same-tool same-risk
+ *     runtime-stamped rows into one "Approve all N" entry, and every
+ *     narrowing rule (missing toolApprovalKey, non-batchable kind, external
+ *     side effect, floor/credential tool, destructive/missing preview,
+ *     cross-tool, hostile payloads) fails toward solo cards.
  *
  * Run: npx tsx scripts/approval-card-model-core-smoketest.ts
  */
@@ -18,7 +23,9 @@ import {
   mapPreviewRiskToTier,
   isApprovalRowLive,
   shouldOfferRememberAutoApprove,
+  planRunApprovalBatchCards,
   RISK_TIER_CHIP_COLORS,
+  type RunApprovalCardPlanEntry,
 } from '../src/lib/approvalCardModelCore';
 import { describeApprovalRiskChip } from '../src/lib/approvalIntentPreview';
 import { APPROVAL_EXPIRED_MS } from '../src/lib/approvalPreviewCore';
@@ -138,6 +145,209 @@ function main() {
     const chip = describeApprovalRiskChip(tier);
     assert(!!RISK_TIER_CHIP_COLORS[chip.tone], `4.chip ${tier} → tone ${chip.tone} has colors`);
   }
+
+  // ── Group 5: planRunApprovalBatchCards ─────────────────────────────────────
+  // Row builder shaped like a runtime-stamped agent_run_approvals row.
+  const mkRow = (opts: {
+    kind?: string;
+    tool?: string;
+    noTool?: boolean;
+    key?: string;
+    noKey?: boolean;
+    risk?: string;
+    noPreview?: boolean;
+    externalSideEffect?: boolean;
+  } = {}): Record<string, unknown> => {
+    const payload: Record<string, unknown> = {};
+    if (!opts.noTool) payload.tool = opts.tool ?? 'desktop.write_file';
+    if (!opts.noKey) payload.toolApprovalKey = opts.key ?? 'key-1';
+    if (!opts.noPreview) payload.approvalPreview = { risk: opts.risk ?? 'write' };
+    if (opts.externalSideEffect) payload.externalSideEffect = true;
+    return { approval_kind: opts.kind ?? 'tool_use', title: 't', payload };
+  };
+  // Coverage helper: every index in [0, n) appears in exactly one entry.
+  const coveredIndices = (plan: RunApprovalCardPlanEntry[]): number[] =>
+    plan
+      .flatMap((e) => (e.kind === 'single' ? [e.index] : e.indices))
+      .slice()
+      .sort((a, b) => a - b);
+  const allSingles = (plan: RunApprovalCardPlanEntry[]): boolean =>
+    plan.every((e) => e.kind === 'single');
+
+  // 5.1 three same-tool writes → ONE batch(3), medium/reversible.
+  const p1 = planRunApprovalBatchCards([mkRow(), mkRow(), mkRow()]);
+  assertEq(p1.length, 1, '5.1a 3× same-tool write → one entry');
+  assert(p1[0].kind === 'batch', '5.1b entry is a batch');
+  if (p1[0].kind === 'batch') {
+    assertEq(JSON.stringify(p1[0].indices), '[0,1,2]', '5.1c batch covers all three rows');
+    assertEq(p1[0].tool, 'desktop.write_file', '5.1d batch carries the shared tool');
+    assertEq(p1[0].combinedRisk, 'medium', '5.1e write tier → medium bucket');
+    assertEq(p1[0].tier, 'reversible', '5.1f write batch chip tier reversible');
+  }
+
+  // 5.2 read and write NEVER co-mingle, even for the same tool.
+  const p2 = planRunApprovalBatchCards([
+    mkRow({ tool: 'gdrive.list', risk: 'read' }),
+    mkRow({ tool: 'gdrive.list', risk: 'read' }),
+    mkRow({ tool: 'gdrive.list', risk: 'write' }),
+    mkRow({ tool: 'gdrive.list', risk: 'write' }),
+  ]);
+  assertEq(p2.length, 2, '5.2a read+write same tool → two entries');
+  assert(p2.every((e) => e.kind === 'batch'), '5.2b both entries are batches');
+  if (p2[0].kind === 'batch' && p2[1].kind === 'batch') {
+    assertEq(JSON.stringify(p2[0].indices), '[0,1]', '5.2c read batch covers reads only');
+    assertEq(p2[0].combinedRisk, 'low', '5.2d read batch is low bucket');
+    assertEq(p2[0].tier, 'read', '5.2e read batch chip tier read');
+    assertEq(JSON.stringify(p2[1].indices), '[2,3]', '5.2f write batch covers writes only');
+    assertEq(p2[1].combinedRisk, 'medium', '5.2g write batch is medium bucket');
+  }
+
+  // 5.3 destructive preview → always solo (critical never batches).
+  const p3 = planRunApprovalBatchCards([
+    mkRow({ risk: 'destructive' }),
+    mkRow({ risk: 'destructive' }),
+  ]);
+  assertEq(p3.length, 2, '5.3a 2× destructive → two entries');
+  assert(allSingles(p3), '5.3b destructive rows stay solo');
+
+  // 5.4 missing/empty toolApprovalKey → solo (only the runtime gate stamps it).
+  assert(
+    allSingles(planRunApprovalBatchCards([mkRow({ noKey: true }), mkRow({ noKey: true })])),
+    '5.4a missing key → solo',
+  );
+  assert(
+    allSingles(planRunApprovalBatchCards([mkRow({ key: '' }), mkRow({ key: '' })])),
+    '5.4b empty-string key → solo',
+  );
+  const p4c = planRunApprovalBatchCards([mkRow(), mkRow({ noKey: true }), mkRow()]);
+  assertEq(
+    JSON.stringify(p4c.map((e) => e.kind)),
+    '["batch","single"]',
+    '5.4c keyless row solo while keyed rows still batch',
+  );
+
+  // 5.5 payload.externalSideEffect === true → solo.
+  assert(
+    allSingles(planRunApprovalBatchCards([
+      mkRow({ externalSideEffect: true }),
+      mkRow({ externalSideEffect: true }),
+    ])),
+    '5.5 externalSideEffect rows stay solo',
+  );
+
+  // 5.6 non-batchable kinds → solo even ×2 same tool.
+  for (const kind of ['publish', 'external_send', 'cost_threshold', 'plan_approval', 'deliverable_review', 'made_up_kind']) {
+    assert(
+      allSingles(planRunApprovalBatchCards([mkRow({ kind }), mkRow({ kind })])),
+      `5.6 kind ${kind} → solo`,
+    );
+  }
+
+  // 5.7 floor/credential tools → solo (fill_credential_field has no literal
+  // floor marker — the credential check is load-bearing).
+  assert(
+    allSingles(planRunApprovalBatchCards([
+      mkRow({ tool: 'browser.fill_credential_field' }),
+      mkRow({ tool: 'browser.fill_credential_field' }),
+    ])),
+    '5.7a credential tool → solo',
+  );
+  assert(
+    allSingles(planRunApprovalBatchCards([
+      mkRow({ tool: 'desktop.delete_file', risk: 'write' }),
+      mkRow({ tool: 'desktop.delete_file', risk: 'write' }),
+    ])),
+    '5.7b floor-marker tool (delete) → solo',
+  );
+
+  // 5.8 no cross-tool merge: different tools never share a batch.
+  const p8 = planRunApprovalBatchCards([
+    mkRow({ tool: 'tool.a' }),
+    mkRow({ tool: 'tool.b' }),
+  ]);
+  assertEq(p8.length, 2, '5.8a two tools → two entries');
+  assert(allSingles(p8), '5.8b singles, never a cross-tool batch');
+  const p8b = planRunApprovalBatchCards([
+    mkRow({ tool: 'tool.a' }),
+    mkRow({ tool: 'tool.a' }),
+    mkRow({ tool: 'tool.b' }),
+  ]);
+  assertEq(
+    JSON.stringify(p8b.map((e) => e.kind)),
+    '["batch","single"]',
+    '5.8c same-tool pair batches, odd tool stays single',
+  );
+
+  // 5.9 hostile rows → solo; healthy neighbors still batch.
+  const hostile: Record<string, unknown> = {};
+  Object.defineProperty(hostile, 'payload', {
+    get() { throw new Error('boom'); },
+    enumerable: true,
+  });
+  const p9 = planRunApprovalBatchCards([mkRow(), hostile, mkRow()]);
+  assertEq(
+    JSON.stringify(p9.map((e) => e.kind)),
+    '["batch","single"]',
+    '5.9a throwing-getter row solo, good rows batch',
+  );
+  assertEq(JSON.stringify(coveredIndices(p9)), '[0,1,2]', '5.9b hostile plan still covers every row');
+  assert(allSingles(planRunApprovalBatchCards([null, undefined, 42, 'x'])), '5.9c non-object rows → solo');
+  assertEq(planRunApprovalBatchCards(null as unknown).length, 0, '5.9d non-array input → empty plan');
+  assertEq(planRunApprovalBatchCards({ length: 3 } as unknown).length, 0, '5.9e array-like object → empty plan');
+
+  // 5.10 a single eligible row is a single card, never a 1-batch.
+  const p10 = planRunApprovalBatchCards([mkRow()]);
+  assertEq(JSON.stringify(p10), '[{"kind":"single","index":0}]', '5.10 one row → one single');
+
+  // 5.11 missing preview → solo (risk unknown never batches).
+  assert(
+    allSingles(planRunApprovalBatchCards([mkRow({ noPreview: true }), mkRow({ noPreview: true })])),
+    '5.11a previewless rows → solo',
+  );
+  assert(
+    allSingles(planRunApprovalBatchCards([
+      mkRow({ risk: 'reversible' }),
+      mkRow({ risk: 'reversible' }),
+    ])),
+    '5.11b preview risk outside read/write/destructive → solo (no tier laundering)',
+  );
+
+  // 5.12 toolless rows → solo even with keys.
+  assert(
+    allSingles(planRunApprovalBatchCards([mkRow({ noTool: true }), mkRow({ noTool: true })])),
+    '5.12 rows without payload.tool → solo',
+  );
+
+  // 5.13 ordering + full coverage on an interleaved queue.
+  const p13 = planRunApprovalBatchCards([
+    mkRow({ tool: 'tool.a' }),                 // 0 ┐ batch (medium, tool.a)
+    mkRow({ risk: 'destructive' }),            // 1   solo
+    mkRow({ tool: 'tool.a' }),                 // 2 ┘
+    mkRow({ tool: 'gdrive.list', risk: 'read' }), // 3   single (lone read)
+  ]);
+  assertEq(
+    JSON.stringify(p13.map((e) => (e.kind === 'single' ? `s${e.index}` : `b${e.indices.join('+')}`))),
+    '["b0+2","s1","s3"]',
+    '5.13a entries ordered by first covered index',
+  );
+  assertEq(JSON.stringify(coveredIndices(p13)), '[0,1,2,3]', '5.13b every row covered exactly once');
+
+  // 5.14 determinism: same input → identical plan.
+  const detRows = [mkRow(), mkRow({ risk: 'read', tool: 'gdrive.list' }), mkRow(), hostile];
+  assertEq(
+    JSON.stringify(planRunApprovalBatchCards(detRows)),
+    JSON.stringify(planRunApprovalBatchCards(detRows)),
+    '5.14 deterministic plan',
+  );
+
+  // 5.15 same tool across two batchable kinds still batches (partition key is
+  // the tool, per spec — the kind pill just shows the first row's kind).
+  const p15 = planRunApprovalBatchCards([
+    mkRow({ kind: 'tool_use' }),
+    mkRow({ kind: 'file_write' }),
+  ]);
+  assertEq(p15.length, 1, '5.15a same-tool cross-kind pair → one entry');
+  assert(p15[0].kind === 'batch', '5.15b entry is a batch');
 
   if (failures > 0) {
     console.error('\n' + failures + ' fail');

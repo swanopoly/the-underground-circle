@@ -145,6 +145,7 @@ export type ChatPromptSectionKey =
   | 'agent_identity'
   | 'missions'
   | 'circle_snapshot'
+  | 'proactive_surfacing'
   | 'last_session';
 
 export const CHAT_PROMPT_SECTION_ORDER: ReadonlyArray<ChatPromptSectionKey> = [
@@ -191,6 +192,9 @@ export const CHAT_PROMPT_SECTION_ORDER: ReadonlyArray<ChatPromptSectionKey> = [
   'agent_identity',
   'missions',
   'circle_snapshot',
+  // Proactive heads-up (failed runs / stalled missions / blocked approvals)
+  // sits after the snapshot it derives from, ahead of session continuity.
+  'proactive_surfacing',
   'last_session',
 ];
 
@@ -241,6 +245,7 @@ export const CHAT_PROMPT_SECTION_STABILITY: Readonly<
   agent_identity: 'turn',
   missions: 'turn',
   circle_snapshot: 'turn',
+  proactive_surfacing: 'turn',
   last_session: 'turn',
 };
 

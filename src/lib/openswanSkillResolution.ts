@@ -7,6 +7,10 @@ export type OpenSwanResolvedSkill = Skill & {
   source: 'enabled' | 'recommended' | 'inferred';
   rationale: string;
   playbook: OpenSwanSkillPlaybook | null;
+  /** Hoisted hint bonus (matched-query-hint +5 / task-hint +3 / mode-hint +2).
+   *  PRIMARY sort key for the resolved order; carried on the skill so
+   *  downstream content-aware rankers can respect hint precedence. */
+  hintScore?: number;
 };
 
 export type OpenSwanSkillResolution = {
@@ -192,16 +196,24 @@ export function resolveOpenSwanSkillsFromCatalog(args: OpenSwanSkillResolutionIn
     });
   }
 
+  // Hoisted hint score (matched-query-hint +5 / task-hint +3 / mode-hint +2):
+  // precomputed once per skill name so the comparator is pure map lookups and
+  // the score can ride along on each resolved skill as `hintScore` for
+  // downstream content-aware ranking. Ordering is byte-identical to the
+  // previous inline comparator (hint desc → sourceRank → costTier → displayName).
+  const hintScoreByName = new Map<string, number>();
+  for (const skill of resolved.values()) {
+    if (hintScoreByName.has(skill.name)) continue;
+    let score = 0;
+    if (matchedQueryHintNames.has(skill.name)) score += 5;
+    if (taskHintNames.has(skill.name)) score += 3;
+    if (modeHintNames.has(skill.name)) score += 2;
+    hintScoreByName.set(skill.name, score);
+  }
+
   const ordered = Array.from(resolved.values()).sort((a, b) => {
-    const relevanceScore = (skill: OpenSwanResolvedSkill) => {
-      let score = 0;
-      if (matchedQueryHintNames.has(skill.name)) score += 5;
-      if (taskHintNames.has(skill.name)) score += 3;
-      if (modeHintNames.has(skill.name)) score += 2;
-      return score;
-    };
-    const aScore = relevanceScore(a);
-    const bScore = relevanceScore(b);
+    const aScore = hintScoreByName.get(a.name) || 0;
+    const bScore = hintScoreByName.get(b.name) || 0;
     if (aScore !== bScore) return bScore - aScore;
     const sourceRank = { enabled: 0, recommended: 1, inferred: 2 } as const;
     if (sourceRank[a.source] !== sourceRank[b.source]) {
@@ -211,7 +223,9 @@ export function resolveOpenSwanSkillsFromCatalog(args: OpenSwanSkillResolutionIn
       return String(a.costTier || '').localeCompare(String(b.costTier || ''));
     }
     return a.displayName.localeCompare(b.displayName);
-  }).slice(0, maxSkills);
+  })
+    .slice(0, maxSkills)
+    .map((skill) => ({ ...skill, hintScore: hintScoreByName.get(skill.name) || 0 }));
 
   return {
     skills: ordered,

@@ -8,6 +8,7 @@
 import { supabase } from './supabase';
 import { getFreshAccessToken, safeGetUser } from './authSession';
 import { wrapUntrusted } from './untrustedContent';
+import { annotateUntrustedHeading } from './untrustedScanAnnotate';
 import { runWithTransientRetry, isRetryableInvokeError, type RetryAttemptResult } from './swanbotV2Retry';
 import { findAliasKey } from './crossProviderRouter';
 import type { PromptMemoryReference } from './memoryService';
@@ -23,6 +24,7 @@ import type { OpenSwanChatMode } from './openswanModePolicy';
 import type { OpenSwanResolvedSkill } from './openswanSkillResolution';
 import type { AgentRuntimeSubjectMetadata } from './agentRuntimeSubject';
 import type { ConnectedProviderSet } from './serviceProfileSouls';
+import type { SurfacingSignal } from './proactiveSurfacingCore';
 import { detectAutomationVerificationGate } from './desktopAutomationSafety';
 import { buildUserTaskPipelinePromptBlock } from './userTaskPipelines';
 import { buildComputerAppTaskStrategyPromptBlock } from './computerAppTaskStrategy';
@@ -219,6 +221,14 @@ export type SwanBotContext = {
    * undefined (no forced grounding) until a caller sets it.
    */
   appTrainedModelAvailable?: boolean;
+  /**
+   * Live "waiting on the user" signals (blocked approvals from ChatTab's
+   * attention strip, via `attentionItemsToSurfacingSignals`) merged into the
+   * proactive_surfacing section alongside snapshot-derived failed-run /
+   * stalled-mission signals. Optional — lanes without a live strip still get
+   * the snapshot-derived heads-up.
+   */
+  attentionSignals?: SurfacingSignal[];
 };
 
 function getContextAgentSubjectKey(context: SwanBotContext): string | undefined {
@@ -606,12 +616,6 @@ const HISTORY_STORAGE_PREFIX = 'uc_agent_history_';
 let _activeBondId: string | null = null;
 let _activeBondCircleId: string | null = null;
 
-/** Set the active bond for conversation persistence */
-export function setActiveBond(bondId: string | null, circleId: string | null) {
-  _activeBondId = bondId;
-  _activeBondCircleId = circleId;
-}
-
 function getHistory(circleId: string): ConversationMessage[] {
   // Restore from localStorage on first access
   if (!conversationHistory.has(circleId)) {
@@ -655,25 +659,6 @@ function addToHistory(circleId: string, role: 'user' | 'model', text: string): b
     }).catch(() => {});
   }
   return true;
-}
-
-/** Load conversation history from bond (for session restoration) */
-export async function restoreHistoryFromBond(bondId: string, circleId: string): Promise<void> {
-  try {
-    const { loadConversationHistory } = await import('./agentBonding');
-    const history = await loadConversationHistory(bondId, MAX_HISTORY);
-    if (history.length > 0) {
-      const messages: ConversationMessage[] = history.map(h => ({
-        role: h.role === 'user' ? 'user' : 'model',
-        text: h.content,
-      }));
-      conversationHistory.set(circleId, messages);
-      _activeBondId = bondId;
-      _activeBondCircleId = circleId;
-    }
-  } catch {
-    // Bond history unavailable — use in-memory only
-  }
 }
 
 // ─── Session Persistence ────────────────────────────────────────────────────
@@ -842,7 +827,7 @@ export async function saveSessionToMemory(circleId: string, userId: string): Pro
  * Build a "last session" context string for the agent's system prompt.
  * Loads the most recent session memory + any persistent findings/decisions.
  */
-export async function getLastSessionContext(
+async function getLastSessionContext(
   circleId: string,
   userId?: string,
   opts?: { depth?: ChatContextDepth },
@@ -964,21 +949,6 @@ export async function resetAgentMind(circleId: string): Promise<{ cleared: numbe
   } catch {}
 
   return { cleared };
-}
-
-/**
- * Get current conversation history length for a circle (for UI display).
- */
-export function getHistoryLength(circleId: string): number {
-  return getHistory(circleId).length;
-}
-
-/**
- * Clear ONLY the conversation history (not memories) — lighter reset.
- */
-export function clearConversationHistory(circleId: string): void {
-  conversationHistory.delete(circleId);
-  try { localStorage.removeItem(`${HISTORY_STORAGE_PREFIX}${circleId}`); } catch {}
 }
 
 // ─── Custom-model proxy routing (GLM-5, MiniMax, etc.) ──────────────────────
@@ -3088,11 +3058,27 @@ async function buildSystemPromptAsync(
         // Recalled content is untrusted (rule 5) — a circle member, a prior
         // session, or a connected agent may have written into user notes,
         // runtime memory, or the working-memory bundle. Fence each so the model
-        // treats them as data, not instructions.
-        if (stores?.userNotes) sections.push({ key: 'memory_user_notes', body: wrapUntrusted(stores.userNotes) });
-        if (stores?.userProfile) sections.push({ key: 'memory_user_profile', body: wrapUntrusted(stores.userProfile) });
-        if (stores?.runtimeMemory) sections.push({ key: 'memory_runtime', body: wrapUntrusted(stores.runtimeMemory) });
-        if (stores?.workingMemory) sections.push({ key: 'memory_working', body: wrapUntrusted(stores.workingMemory, { heading: '## Working Memory' }) });
+        // treats them as data, not instructions. The advisory injection scan
+        // (untrustedScanAnnotate) escalates a store's fence heading when it
+        // carries hijack-style wording; unflagged stores stay byte-identical
+        // (heading: undefined ≡ headingless). Compact summary only — never
+        // body text — reaches the activity ticker or logs.
+        const flaggedStores: Array<{ seam: string; level: string; kinds: string[] }> = [];
+        const shieldHeading = (seam: string, storeBody: string, base?: string): string | undefined => {
+          const ann = annotateUntrustedHeading(storeBody, base);
+          if (ann.flagged) flaggedStores.push({ seam, level: ann.scan.level, kinds: ann.scan.kinds });
+          return ann.heading;
+        };
+        if (stores?.userNotes) sections.push({ key: 'memory_user_notes', body: wrapUntrusted(stores.userNotes, { heading: shieldHeading('memory_user_notes', stores.userNotes) }) });
+        if (stores?.userProfile) sections.push({ key: 'memory_user_profile', body: wrapUntrusted(stores.userProfile, { heading: shieldHeading('memory_user_profile', stores.userProfile) }) });
+        if (stores?.runtimeMemory) sections.push({ key: 'memory_runtime', body: wrapUntrusted(stores.runtimeMemory, { heading: shieldHeading('memory_runtime', stores.runtimeMemory) }) });
+        if (stores?.workingMemory) sections.push({ key: 'memory_working', body: wrapUntrusted(stores.workingMemory, { heading: shieldHeading('memory_working', stores.workingMemory, '## Working Memory') }) });
+        if (flaggedStores.length > 0) {
+          // ONE user-visible shield notice per turn (fail-soft sink) + one
+          // bounded warn ({seam,level,kinds} — ≤4 entries, no content).
+          emitSwanBotActivity('Shielded suspicious recalled content');
+          console.warn('[SwanBot] Injection-style wording in recalled memory stores:', flaggedStores);
+        }
       }
     } catch (e) { console.warn('[SwanBot] Memory context failed:', e); }
   });
@@ -3322,6 +3308,34 @@ async function buildSystemPromptAsync(
       })));
       if (resourcesBlock) sections.push({ key: 'connected_resources', body: resourcesBlock });
     } catch (e) { console.warn('[SwanBot] Connected resources context failed:', e); }
+  });
+
+  // Proactive heads-up: unprompted alerts on failed runs, stalled missions,
+  // and blocked approvals. The anti-nag decision brain (proactiveSurfacingCore
+  // via proactiveSurfacingRuntime) owns cooldown → decay → retirement, so
+  // trouble gets flagged once or twice, then goes quiet; a same-turn prompt
+  // rebuild (stream → tool-loop escalation) hits the runtime's 30s memo and
+  // never double-counts a showing. Fails soft to no section.
+  if (loadMissions && context.circleId) addContextTask(async () => {
+    try {
+      // Commit-on-delivery: the builder is COMPUTE-ONLY and hands back a
+      // commit() that advances the per-circle turn counter + bumps the surfaced
+      // signals' showings. withTimeout is a Promise.race that does NOT cancel
+      // the builder, so a cold build overrunning 3s resolves null here and its
+      // section is dropped from the prompt — we must NOT commit that discarded
+      // showing (it would mute the heads-up through the cooldown window).
+      // Commit iff withTimeout returned a live result (surfaced OR silent-but-
+      // delivered); skip only on the timeout/discard (null).
+      const surfacing = await withTimeout(import('./proactiveSurfacingRuntime').then(({ buildProactiveSurfacingSection }) => buildProactiveSurfacingSection({
+        circleId: context.circleId,
+        message: currentMessage || '',
+        attentionSignals: context.attentionSignals,
+      })));
+      if (surfacing) {
+        surfacing.commit();
+        if (surfacing.section) sections.push({ key: 'proactive_surfacing', body: surfacing.section });
+      }
+    } catch (e) { console.warn('[SwanBot] Proactive surfacing context failed:', e); }
   });
 
   // Load last session context so agent can continue where it left off
@@ -4488,7 +4502,7 @@ function isObservationToolEvent(
  * `diagnoseComputerTaskEvidenceFailure` via `chatFailureRecovery` so
  * `evidenceReadiness.ready` reflects real ground truth.
  */
-export function harvestToolLoopObservations(
+function harvestToolLoopObservations(
   toolEvents: ReadonlyArray<Pick<ToolLoopEvent, 'tool' | 'status' | 'metadata'>>,
   opts: { isReadTool?: (name: string) => boolean; nowMs?: number; max?: number } = {},
 ): ComputerTaskEvidenceRecoveryObservation[] {
@@ -5431,6 +5445,8 @@ export async function buildStreamableSystemPrompt(opts: {
   omitSections?: ChatPromptSectionKey[];
   /** See SwanBotContext.promptComplexityFloor (X1/P44 lane floor). */
   complexityFloor?: ChatPromptComplexity;
+  /** See SwanBotContext.attentionSignals (proactive_surfacing inputs). */
+  attentionSignals?: SurfacingSignal[];
 }): Promise<string> {
   const context: SwanBotContext = {
     userId: opts.userId,
@@ -5455,6 +5471,7 @@ export async function buildStreamableSystemPrompt(opts: {
     memoryStores: opts.memoryStores,
     omitPromptSections: opts.omitSections,
     promptComplexityFloor: opts.complexityFloor,
+    attentionSignals: opts.attentionSignals,
   };
   const circleData = opts.circleId
     ? await getCircleContextData(context)

@@ -5,7 +5,9 @@
  * `agentExecutionCore.runAgent`.
  *
  * Covers:
- *   1. R13 stage mapping per event kind.
+ *   1. R13 stage mapping per event kind, incl. the honest step-of-N
+ *      denominator + ' — wrapping up' step-budget label boundaries
+ *      (opts.maxRounds; legacy labels byte-identical when opts absent).
  *   2. Legacy dispatch-status derivation + handler-result shaping
  *      (metadata side channel, model-visible text-only payload, nudges).
  *   3. R14 metadata → legacy toolEvents incl. design-app capture key,
@@ -138,6 +140,70 @@ async function main() {
     null,
     'model_delta emits no stage',
   );
+
+  // ── 1b. Honest step denominator (opts.maxRounds → "step i of N") ──────────
+  // Legacy no-opts label stays byte-identical (open-ended counter).
+  assert(
+    mapAgentEventToOpenSwanStage({ kind: 'turn_start', iteration: 2 })?.label
+      === 'Reasoning over tool results (step 2)',
+    'no opts: legacy open-ended step label unchanged',
+  );
+  assert(
+    mapAgentEventToOpenSwanStage({ kind: 'turn_start', iteration: 1 }, { maxRounds: 5 })?.label
+      === 'Reasoning with tools',
+    'round-1 label byte-identical even with maxRounds provided',
+  );
+  // Denominator from round 2 on; ' — wrapping up' follows evaluateStepBudget
+  // (STEP_BUDGET_CHECKPOINT_MARGIN=1 / RATIO=0.8; turn_start iteration is
+  // 1-based — agentExecutionCore increments BEFORE emitting turn_start).
+  assert(
+    mapAgentEventToOpenSwanStage({ kind: 'turn_start', iteration: 2 }, { maxRounds: 5 })?.label
+      === 'Reasoning over tool results (step 2 of 5)',
+    'denominator present at iteration 2 (5-round cap, still continue)',
+  );
+  assert(
+    mapAgentEventToOpenSwanStage({ kind: 'turn_start', iteration: 3 }, { maxRounds: 5 })?.label
+      === 'Reasoning over tool results (step 3 of 5)',
+    'step 3 of 5 (remaining 2, ratio 0.6) still continue — no wrap-up suffix',
+  );
+  assert(
+    mapAgentEventToOpenSwanStage({ kind: 'turn_start', iteration: 4 }, { maxRounds: 5 })?.label
+      === 'Reasoning over tool results (step 4 of 5) — wrapping up',
+    'step 4 of 5 hits the checkpoint margin (1 left) — wrapping up',
+  );
+  assert(
+    mapAgentEventToOpenSwanStage({ kind: 'turn_start', iteration: 5 }, { maxRounds: 5 })?.label
+      === 'Reasoning over tool results (step 5 of 5) — wrapping up',
+    'step 5 of 5 (budget exhausted → stop) never reads as plain continue',
+  );
+  // RATIO boundary distinct from the margin: 19/25 = 0.76 continue, 20/25 = 0.8 checkpoint.
+  assert(
+    mapAgentEventToOpenSwanStage({ kind: 'turn_start', iteration: 19 }, { maxRounds: 25 })?.label
+      === 'Reasoning over tool results (step 19 of 25)',
+    'ratio boundary: 19/25 (0.76) still continue',
+  );
+  assert(
+    mapAgentEventToOpenSwanStage({ kind: 'turn_start', iteration: 20 }, { maxRounds: 25 })?.label
+      === 'Reasoning over tool results (step 20 of 25) — wrapping up',
+    'ratio boundary: 20/25 (0.8) checkpoints — wrapping up',
+  );
+  // tool_call_start carries the compact step suffix only when the cap is known.
+  assertEqual(
+    mapAgentEventToOpenSwanStage(
+      { kind: 'tool_call_start', iteration: 2, toolName: 'tasks.list', toolUseId: 't1', input: {} },
+      { maxRounds: 5 },
+    ),
+    { stage: 'using_tools', label: 'Using tasks.list · step 2/5' },
+    'tool_call_start suffixes " · step i/N" when maxRounds is known',
+  );
+  // Degenerate caps are treated as absent (legacy labels, no denominator).
+  for (const bad of [0, -3, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert(
+      mapAgentEventToOpenSwanStage({ kind: 'turn_start', iteration: 2 }, { maxRounds: bad })?.label
+        === 'Reasoning over tool results (step 2)',
+      `degenerate maxRounds ${bad} falls back to the legacy label`,
+    );
+  }
 
   // ── 2. Status derivation + handler shaping ───────────────────────────────
   assertEqual(deriveLegacyDispatchStatus('tasks.create', { ok: true }, null), 'passed', 'ok result → passed');

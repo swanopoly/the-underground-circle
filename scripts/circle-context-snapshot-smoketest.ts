@@ -33,10 +33,12 @@ import {
   invalidateCircleContextSnapshot,
   renderCircleContextSnapshot,
   searchCircleContextSnapshot,
+  snapshotReferenceEntities,
   CIRCLE_CONTEXT_SECTION_LIMITS,
   normalizeCircleContextSection,
   type CircleContextSnapshotDeps,
 } from '../src/lib/circleContextSnapshot';
+import { resolveCrossSurfaceReferences } from '../src/lib/crossSurfaceReferenceResolverCore';
 
 let failures = 0;
 function fail(message: string) { failures += 1; console.error('FAIL:', message); }
@@ -144,6 +146,56 @@ assert(idHit[0]?.section === 'missions' && idHit[0]?.id === 'mission-1', 'case4:
 
 assert(searchCircleContextSnapshot(snapshot, '').length === 0, 'case4: empty query returns nothing');
 assert(normalizeCircleContextSection('recent_runs') === 'recentRuns' && normalizeCircleContextSection('bogus') === null, 'case4: section normalization accepts aliases, rejects unknowns');
+
+// ── Case 4b — snapshotReferenceEntities: snapshot → CrossSurfaceEntity[] ─────
+// (reference-nav-chips adapter: navigable sections only, empty ids skipped)
+
+const refSnapshot = assembleCircleContextSnapshot({
+  circleId: 'circle-ref',
+  members: [{ id: 'user-alice', name: 'Alice Example', role: 'creator' }],
+  tasks: [
+    { id: 'task-1', title: 'Ship parser', status: 'in_progress' },
+    { id: '', title: 'Ghost task with no id', status: 'todo' },
+  ],
+  goals: [{ id: 'goal-1', title: 'Ship Q2', status: 'active' }],
+  missions: [{ id: 'mission-1', title: 'Launch v2', status: 'active', taskCount: 3 }],
+  rooms: [{ id: 'room-1', name: 'Core Room', openTaskCount: 2 }],
+  integrations: [{ provider: 'github', status: 'connected' }],
+  recentRuns: [{ id: 'run-1', title: 'Fix CI', status: 'completed', surface: 'main_chat', atIso: '2026-06-11T08:00:00.000Z' }],
+  skills: [{ name: 'deploy-checklist', version: '3' }],
+});
+const refEntities = snapshotReferenceEntities(refSnapshot);
+assert(refEntities.length === 4, 'case4b: one entity per non-empty task/mission/room/run row', `got ${refEntities.length}`);
+const refTask = refEntities.find((e) => e.kind === 'task');
+assert(refTask?.id === 'task-1' && refTask?.title === 'Ship parser' && refTask?.status === 'in_progress', 'case4b: tasks map to kind task with title + status');
+const refMission = refEntities.find((e) => e.kind === 'mission');
+assert(refMission?.id === 'mission-1' && refMission?.title === 'Launch v2' && refMission?.status === 'active', 'case4b: missions map to kind mission with status');
+const refRoom = refEntities.find((e) => e.kind === 'room');
+assert(refRoom?.id === 'room-1' && refRoom?.title === 'Core Room', 'case4b: rooms map to kind room with title = room name');
+const refRun = refEntities.find((e) => e.kind === 'run');
+assert(refRun?.id === 'run-1' && refRun?.title === 'Fix CI' && refRun?.status === 'completed', 'case4b: recent runs map to kind run with status');
+assert(refEntities.every((e) => e.id.trim().length > 0), 'case4b: empty-id rows are skipped');
+assert(
+  !refEntities.some((e) => e.id === 'goal-1' || e.id === 'user-alice' || e.title === 'deploy-checklist' || e.title === 'github'),
+  'case4b: goals/members/integrations/skills are excluded (EntityKind has no goal/member)',
+);
+assert(
+  snapshotReferenceEntities(assembleCircleContextSnapshot({ circleId: 'circle-ref-empty' })).length === 0,
+  'case4b: empty snapshot yields no entities',
+);
+// End-to-end shape compatibility: the adapter output resolves in the resolver
+// core (the exact call ChatTab's reference-nav-chips path makes).
+const refResolved = resolveCrossSurfaceReferences('how is the Launch v2 mission going?', refEntities, {
+  maxMatches: 3,
+  minConfidence: 'medium',
+  surfaceHint: 'chat',
+});
+assert(
+  refResolved.matches[0]?.handle.kind === 'mission'
+    && refResolved.matches[0]?.handle.id === 'mission-1'
+    && refResolved.matches[0]?.handle.surface === 'feed',
+  'case4b: adapter output resolves through resolveCrossSurfaceReferences (mission → feed handle)',
+);
 
 // ── Case 5 — builder: section degradation + entity linking via deps seam ─────
 

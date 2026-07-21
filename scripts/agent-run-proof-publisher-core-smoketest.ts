@@ -21,13 +21,35 @@
  *   INJECTED nowMs → ISO `at`; missing/invalid nowMs → ''.
  *   BOUNDED + every export TOTAL (hostile / cyclic input never throws) + DETERMINISTIC.
  *
+ * OpenSwan chat/room turn bridge (groups 13-15):
+ *   MAP: mapRuntimeToolActionsToProofEvents adapts the runtime
+ *     {tool_name,status,title,output_preview} shape to {tool,status,summary,result}
+ *     so tool names count and git commit/push output + PR URLs in output_preview
+ *     become canonical git_references.
+ *   GATE: decideOpenSwanTurnProofPublication — cancelled / feed_task / read-only
+ *     → no publish; editedFiles / committed / git refs / artifacts / successful
+ *     FILE-mutating tool (fs./file./edit tools) → publish; a bare read-only
+ *     git.run success is NOT evidence (git. is not a mutation prefix) — a real
+ *     commit publishes only via committed / gitRefCount; incomplete → stopReason
+ *     'max_iterations' (failure family, never a false completion); receipt
+ *     verdict 'failed' → suppress the 'task_completed' activity; hostile input
+ *     fails closed and never throws.
+ *   PROSE-PROOF (group 16): the gate's gitRefCount must be derived from REAL
+ *     tool output only, so a turn that merely NAMES a PR or quotes a github URL
+ *     in the model deliverable never publishes; a genuine tool-output commit does.
+ *
  * Pure — loads under tsx (the publisher core imports only the two zero-import cores).
  */
 
 import {
   buildRunProofPublication,
+  decideOpenSwanTurnProofPublication,
+  mapRuntimeToolActionsToProofEvents,
   type RunProofPublication,
 } from '../src/lib/agentRunProofPublisherCore';
+// The runtime feeds the gate's gitRefCount from a TOOL-ONLY extraction; group
+// (16) mirrors that wiring, so it imports the same extractor the runtime uses.
+import { extractGitReferences } from '../src/lib/taskPRLinkageCore';
 
 let passes = 0;
 let failures = 0;
@@ -426,12 +448,252 @@ function main(): void {
     assertEq(pub.proofRow.pow_type, 'agent_run', '(12) pow_type stable');
   }
 
+  // ─── (13) MAP: runtime tool_name shape → proof events (+ git URL in result) ─
+  {
+    const runtimeActions = [
+      { kind: 'tool', tool_name: 'desktop.edit_file', title: 'desktop > edit file', status: 'completed', input_preview: '{"path":"src/lib/a.ts"}', output_preview: 'Edited src/lib/a.ts', metadata: {} },
+      { kind: 'tool', tool_name: 'git.run', title: 'git > run', status: 'completed', input_preview: '{"verb":"commit"}', output_preview: `To github.com:${REPO}.git\n[main 7d3a1f2] feat: x`, metadata: {} },
+      { kind: 'tool', tool_name: 'browser.navigate', title: 'browser > navigate', status: 'completed', input_preview: '{}', output_preview: `Opened ${PR_URL}`, metadata: {} },
+      { kind: 'tool', tool_name: 'web.search', title: 'web > search', status: 'failed', input_preview: 'q', output_preview: 'timeout', metadata: {} },
+    ];
+    const events = mapRuntimeToolActionsToProofEvents(runtimeActions);
+    assertEq(events.length, 4, '(13) all runtime actions mapped');
+    assertEq(events[0].tool, 'desktop.edit_file', '(13) tool_name → tool');
+    assertEq(events[0].status, 'completed', '(13) status passes raw');
+    assertEq(events[0].summary, 'desktop > edit file', '(13) title → summary');
+    assertEq(events[0].result, 'Edited src/lib/a.ts', '(13) output_preview → result');
+    assertEq(events[3].status, 'failed', '(13) failed status passes raw');
+    assert(events[1].result.includes('github.com'), '(13) git output preserved in result');
+    // Mapped events feed BOTH sub-cores: tool names count, git text links refs.
+    const pub = buildRunProofPublication({
+      runId: 'run-map-1',
+      toolsUsed: events,
+      toolEvents: events,
+      verification: [vTypePass],
+      stopReason: 'end_turn',
+      durationMs: 9_000,
+      nowMs: 1_700_000_000_000,
+    });
+    assertShape(pub, '(13)');
+    assert(pub.gitReferences.some((r) => r.type === 'commit' && r.sha === '7d3a1f2'), '(13) commit ref from output_preview→result');
+    assert(pub.gitReferences.some((r) => r.type === 'pull_request' && r.prNumber === 123), '(13) PR ref from URL in output_preview');
+    assert(bulletsJoin(pub).includes('4 tool call'), '(13) tool_name shape counted by proof card', bulletsJoin(pub));
+    // Idempotent: an already-mapped {tool,...} event maps through unchanged.
+    const remapped = mapRuntimeToolActionsToProofEvents(events);
+    assertEq(remapped.length, 4, '(13) already-mapped events accepted');
+    assertEq(remapped[1].tool, 'git.run', '(13) tool key accepted on re-map');
+    // Malformed elements skipped; non-array → [].
+    const messy = mapRuntimeToolActionsToProofEvents([
+      null, undefined, 42, 'str', [], {}, { tool_name: 7 }, { title: 'no tool' },
+      { tool_name: '  ', status: 'completed' },
+      { tool_name: 'ok.tool', status: 9, title: null, output_preview: {} },
+    ] as unknown[]);
+    assertEq(messy.length, 1, '(13) malformed elements skipped');
+    assertEq(messy[0].tool, 'ok.tool', '(13) surviving tool kept');
+    assertEq(messy[0].status, '', '(13) non-string status → ""');
+    assertEq(messy[0].summary, '', '(13) non-string title → ""');
+    assertEq(messy[0].result, '', '(13) non-string output_preview → ""');
+    assertEq(mapRuntimeToolActionsToProofEvents(null).length, 0, '(13) null → []');
+    assertEq(mapRuntimeToolActionsToProofEvents({ tool_name: 'x' }).length, 0, '(13) record → []');
+    // Bounds: ≤200 events, per-field clips.
+    const many = mapRuntimeToolActionsToProofEvents(
+      Array.from({ length: 250 }, (_, i) => ({ tool_name: `t.${i}`, status: 'completed', title: 'x'.repeat(5000), output_preview: 'y'.repeat(50_000) })),
+    );
+    assertEq(many.length, 200, '(13) events bounded ≤200');
+    assert(many.every((e) => e.tool.length <= 120 && e.status.length <= 120 && e.summary.length <= 300 && e.result.length <= 1600), '(13) per-field clips hold');
+  }
+
+  // ─── (14) GATE: decideOpenSwanTurnProofPublication branches ────────────────
+  {
+    const receiptEdits = { editedFiles: ['a.ts', 'b.ts'], checks: [], committed: false, verdict: 'verified', summary: 'ok' };
+    const receiptCommit = { editedFiles: [], checks: [], committed: true, verdict: 'unverified', summary: '' };
+    const receiptFailed = { editedFiles: ['a.ts'], checks: [], committed: false, verdict: 'failed', summary: 'checks failed' };
+    const readonlyEvents = [
+      { tool: 'web.search', status: 'completed', summary: '', result: '' },
+      { tool: 'circle.snapshot', status: 'completed', summary: '', result: '' },
+    ];
+    // A bare git.run success with NO commit/push output — read-only shaped
+    // (git status/log/diff). Per the openswan-chat-proof fix, `git.` is no
+    // longer a mutation prefix, so this is NOT proof-of-work on its own.
+    const readonlyGitEvents = [{ tool: 'git.run', status: 'completed', summary: '', result: '' }];
+    const base = { runSurface: 'main_chat', cancelled: false, incomplete: false, receipt: null, toolEvents: readonlyEvents, artifactCount: 0, gitRefCount: 0 };
+
+    // cancelled → never publish, even with maximal evidence.
+    const dCancel = decideOpenSwanTurnProofPublication({ ...base, cancelled: true, receipt: receiptEdits, toolEvents: readonlyGitEvents, artifactCount: 3, gitRefCount: 2 });
+    assertEq(dCancel.publish, false, '(14) cancelled → no publish');
+    assertEq(dCancel.stopReason, 'cancelled', '(14) cancelled → stopReason cancelled');
+    assertEq(dCancel.reason, 'cancelled', '(14) cancelled reason');
+    // feed_task surface → never publish (Kanban owns the richer publication).
+    const dFeed = decideOpenSwanTurnProofPublication({ ...base, runSurface: 'feed_task', receipt: receiptEdits, gitRefCount: 2, artifactCount: 1 });
+    assertEq(dFeed.publish, false, '(14) feed_task → no publish (double-post guard)');
+    assertEq(dFeed.reason, 'feed-task-surface', '(14) feed_task reason');
+    // read-only turn → no publish, clean end_turn.
+    const dRead = decideOpenSwanTurnProofPublication({ ...base });
+    assertEq(dRead.publish, false, '(14) read-only → no publish');
+    assertEq(dRead.stopReason, 'end_turn', '(14) clean turn → end_turn');
+    assertEq(dRead.suppressCompletedActivity, false, '(14) no receipt → no suppression');
+    assertEq(dRead.reason, 'no-mutation-evidence', '(14) read-only reason');
+    // evidence branches → publish.
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, receipt: receiptEdits }).publish, true, '(14) editedFiles → publish');
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, receipt: receiptEdits }).reason, 'edited-files', '(14) editedFiles reason');
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, receipt: receiptCommit }).publish, true, '(14) committed → publish');
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, gitRefCount: 1 }).publish, true, '(14) gitRefCount → publish');
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, artifactCount: 2 }).publish, true, '(14) artifactCount → publish');
+    // legacy fallback (no receipt): successful FILE-mutating tool → publish.
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, toolEvents: [{ tool: 'fs.write_file', status: 'completed' }] }).publish, true, '(14) fs.* prefix → publish');
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, toolEvents: [{ tool: 'fs.write_file', status: 'completed' }] }).reason, 'mutating-tool', '(14) fs.* → mutating-tool reason');
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, toolEvents: [{ tool: 'desktop.edit_file', status: 'completed' }] }).publish, true, '(14) catalog edit tool → publish');
+    // REGRESSION (openswan-chat-proof): a read-only git.run (git status/log/diff)
+    // is dual-use — its bare success is NOT mutation evidence, since 'git.' is no
+    // longer a mutation prefix. It must NOT publish via the legacy fallback.
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, toolEvents: readonlyGitEvents }).publish, false, '(14) read-only git.run success → NO publish');
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, toolEvents: readonlyGitEvents }).reason, 'no-mutation-evidence', '(14) read-only git.run → no-mutation-evidence');
+    // A GENUINE commit/push STILL publishes: its [branch sha]/pushed-ref output
+    // becomes a git reference upstream (extractGitReferences on the tool output),
+    // so the caller passes gitRefCount>0 and the git-references branch fires.
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, toolEvents: readonlyGitEvents, gitRefCount: 1 }).publish, true, '(14) real commit (gitRefCount>0) → publish');
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, toolEvents: readonlyGitEvents, gitRefCount: 1 }).reason, 'git-references', '(14) real commit → git-references reason');
+    // fail-closed: failed/blocked mutating tools are NOT evidence.
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, toolEvents: [{ tool: 'fs.write_file', status: 'failed' }] }).publish, false, '(14) failed fs.write_file → no publish');
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, toolEvents: [{ tool: 'desktop.edit_file', status: 'blocked' }] }).publish, false, '(14) blocked edit → no publish');
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, toolEvents: [{ tool: 'fs.write_file' }] }).publish, false, '(14) missing status → no publish');
+    // incomplete → max_iterations; publish still allowed with evidence.
+    const dIncomplete = decideOpenSwanTurnProofPublication({ ...base, incomplete: true, receipt: receiptEdits });
+    assertEq(dIncomplete.stopReason, 'max_iterations', '(14) incomplete → max_iterations');
+    assertEq(dIncomplete.publish, true, '(14) incomplete w/ evidence still publishes');
+    // cancelled wins over incomplete.
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, cancelled: true, incomplete: true }).stopReason, 'cancelled', '(14) cancelled beats incomplete');
+    // verdict failed → suppress task_completed; proof row may still publish.
+    const dFail = decideOpenSwanTurnProofPublication({ ...base, receipt: receiptFailed });
+    assertEq(dFail.suppressCompletedActivity, true, '(14) verdict failed → suppress');
+    assertEq(dFail.publish, true, '(14) failed receipt w/ edits still publishes proof');
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, receipt: receiptEdits }).suppressCompletedActivity, false, '(14) verdict verified → no suppress');
+    // pre-pass contract: stopReason independent of gitRefCount.
+    const preA = decideOpenSwanTurnProofPublication({ ...base, incomplete: true, gitRefCount: 0 });
+    const preB = decideOpenSwanTurnProofPublication({ ...base, incomplete: true, gitRefCount: 5 });
+    assertEq(preA.stopReason, preB.stopReason, '(14) stopReason invariant across gitRefCount');
+    // hostile counts coerce to 0 (fail-closed).
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, gitRefCount: NaN, artifactCount: -3 }).publish, false, '(14) NaN/negative counts → no publish');
+    assertEq(decideOpenSwanTurnProofPublication({ ...base, gitRefCount: '5' }).publish, false, '(14) string count → no publish');
+    // failure stopReasons feed the publisher → honest 'task_failed', never a
+    // false completion (STOP_FAIL family in openswanRunProofCore).
+    const pubMax = buildRunProofPublication({ runId: 'run-cap-1', toolsUsed: [editA], stopReason: 'max_iterations', nowMs: 1_700_000_000_000 });
+    assertEq(pubMax.activityRow.activity_type, 'task_failed', '(14) max_iterations → task_failed activity');
+    assertEq(pubMax.proofRow.verified, false, '(14) max_iterations → verified false');
+    const pubCancelled = buildRunProofPublication({ runId: 'run-stop-2', toolsUsed: [editA], stopReason: 'cancelled', nowMs: 1_700_000_000_000 });
+    assertEq(pubCancelled.activityRow.activity_type, 'task_failed', '(14) cancelled stopReason → task_failed activity');
+  }
+
+  // ─── (15) bridge exports TOTAL under hostile / null input ──────────────────
+  {
+    const cyc: AnyRec = {};
+    cyc.self = cyc;
+    const cycArr: unknown[] = [];
+    cycArr.push({ tool_name: 'git.run', output_preview: 'x', self: cycArr });
+    const hostiles: unknown[] = [
+      null, undefined, 42, 'a string', true, [], {}, () => 'fn', Symbol('s'), cyc, cycArr,
+      { runSurface: 7, cancelled: 'yes', incomplete: 1, receipt: 'nope', toolEvents: cyc, artifactCount: 'many', gitRefCount: {} },
+      { receipt: { editedFiles: 'a.ts', committed: 'true', verdict: 42 } },
+      { receipt: { editedFiles: cycArr, verdict: 'failed' } },
+      { toolEvents: [null, 7, 'x', { tool: 9 }, { tool: 'git.run', status: cyc }] },
+      { runSurface: 'feed_task', cancelled: true },
+    ];
+    let idx = 0;
+    for (const h of hostiles) {
+      idx++;
+      let threw = false;
+      let mapped: unknown = null;
+      let decided: ReturnType<typeof decideOpenSwanTurnProofPublication> | null = null;
+      try {
+        mapped = mapRuntimeToolActionsToProofEvents(h);
+        decided = decideOpenSwanTurnProofPublication(h as never);
+      } catch {
+        threw = true;
+      }
+      assert(!threw, `(15.${idx}) hostile bridge input did not throw`);
+      assert(Array.isArray(mapped), `(15.${idx}) map always returns an array`);
+      if (decided) {
+        assert(typeof decided.publish === 'boolean', `(15.${idx}) decision.publish boolean`);
+        assert(typeof decided.suppressCompletedActivity === 'boolean', `(15.${idx}) decision.suppress boolean`);
+        assert(decided.stopReason === 'cancelled' || decided.stopReason === 'max_iterations' || decided.stopReason === 'end_turn', `(15.${idx}) decision.stopReason valid`);
+        assert(typeof decided.reason === 'string' && decided.reason.length <= 60, `(15.${idx}) decision.reason bounded string`);
+        let jsonOk = true;
+        try { JSON.stringify(decided); } catch { jsonOk = false; }
+        assert(jsonOk, `(15.${idx}) decision JSON-serializable`);
+      }
+    }
+    // Fail-closed: pure garbage never publishes.
+    assertEq(decideOpenSwanTurnProofPublication(null as never).publish, false, '(15) null input → publish false');
+    assertEq(decideOpenSwanTurnProofPublication({} as never).publish, false, '(15) {} → publish false');
+  }
+
+  // ─── (16) REGRESSION (openswan-chat-proof): the publish gate must count git
+  //     refs from REAL TOOL OUTPUT only — never from the untrusted model
+  //     deliverable prose. This mirrors the openswanSessionRuntime wiring, where
+  //     the gate's gitRefCount is `extractGitReferences({ toolEvents:
+  //     proofEvents }).length`, NOT `pub.gitReferences.length` (which ALSO scans
+  //     the deliverable). Pins: prose-only PR mention → NO publish; full PR URL
+  //     quoted in prose → NO publish; genuine commit in tool output → publish.
+  {
+    const gateBase = { runSurface: 'main_chat', cancelled: false, incomplete: false, receipt: null, artifactCount: 0 };
+
+    // (a) A read-only Q&A turn: the model ANSWERS about a PR and the only tool
+    //     run was a read (web.search) whose output carries no git commit text.
+    const qaEvents = mapRuntimeToolActionsToProofEvents([
+      { kind: 'tool', tool_name: 'web.search', title: 'web > search', status: 'completed', input_preview: 'q', output_preview: 'PR #128 refactored the auth module', metadata: {} },
+    ]);
+    // The COMBINED scan (deliverable + tools) DOES pick up the prose "PR #128" —
+    // this is the over-count that used to trip a false completion.
+    const combined = buildRunProofPublication({
+      runId: 'run-prose-1',
+      toolsUsed: qaEvents,
+      toolEvents: qaEvents,
+      deliverable: 'PR #128 refactored the auth module.',
+      stopReason: 'end_turn',
+      durationMs: 1_000,
+      outputSummary: 'PR #128 refactored the auth module.',
+      nowMs: 1_700_000_000_000,
+    });
+    assert(combined.gitReferences.length >= 1, '(16) combined scan sees the prose PR (the hazard)', 'len ' + combined.gitReferences.length);
+    // The gate must instead be fed the TOOL-ONLY count, which is 0 here.
+    const qaToolRefs = extractGitReferences({ toolEvents: qaEvents });
+    assertEq(qaToolRefs.length, 0, '(16) tool-only git refs = 0 for a prose-only PR mention');
+    const proseDecision = decideOpenSwanTurnProofPublication({ ...gateBase, toolEvents: qaEvents, gitRefCount: qaToolRefs.length });
+    assertEq(proseDecision.publish, false, '(16) prose-only PR mention → NO publish');
+    assertEq(proseDecision.reason, 'no-mutation-evidence', '(16) prose-only PR → no-mutation-evidence');
+
+    // (b) Even a FULL github.com /pull/N URL quoted in the DELIVERABLE prose (not
+    //     tool output) must NOT publish — the fixNote's "strip url-less prose
+    //     refs" alternative was incomplete; the tool-only derivation closes it.
+    const urlProseEvents = mapRuntimeToolActionsToProofEvents([
+      { kind: 'tool', tool_name: 'web.search', title: 'web > search', status: 'completed', output_preview: 'no git in this tool output', metadata: {} },
+    ]);
+    const urlProseToolRefs = extractGitReferences({ toolEvents: urlProseEvents });
+    assertEq(urlProseToolRefs.length, 0, '(16) full PR URL in deliverable prose → 0 tool refs');
+    assertEq(
+      decideOpenSwanTurnProofPublication({ ...gateBase, toolEvents: urlProseEvents, gitRefCount: urlProseToolRefs.length }).publish,
+      false,
+      '(16) full PR URL quoted in prose → NO publish',
+    );
+
+    // (c) A GENUINE commit: the git.run tool output carries the [branch sha]
+    //     line, so the tool-only scan yields a ref → gitRefCount>0 → publish.
+    const commitEvents = mapRuntimeToolActionsToProofEvents([
+      { kind: 'tool', tool_name: 'git.run', title: 'git > run', status: 'completed', input_preview: '{"verb":"commit"}', output_preview: `To github.com:${REPO}.git\n[main 7d3a1f2] feat: x`, metadata: {} },
+    ]);
+    const commitToolRefs = extractGitReferences({ toolEvents: commitEvents });
+    assert(commitToolRefs.length >= 1, '(16) tool-only scan sees a real commit', 'len ' + commitToolRefs.length);
+    const commitDecision = decideOpenSwanTurnProofPublication({ ...gateBase, toolEvents: commitEvents, gitRefCount: commitToolRefs.length });
+    assertEq(commitDecision.publish, true, '(16) real commit in tool output → publish');
+    assertEq(commitDecision.reason, 'git-references', '(16) real commit → git-references reason');
+  }
+
   // ─── Summary ───────────────────────────────────────────────────────────────
   if (failures > 0) {
     console.error(`\n✗ agentRunProofPublisherCore smoke FAILED: ${failures} failed, ${passes} passed`);
     process.exit(1);
   }
-  console.log(`✓ agentRunProofPublisherCore smoke PASSED: ${passes} assertions across 12 groups`);
+  console.log(`✓ agentRunProofPublisherCore smoke PASSED: ${passes} assertions across 16 groups`);
 }
 
 main();

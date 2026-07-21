@@ -87,7 +87,7 @@ function main() {
       'case2: runtime_bundle is FIRST (the legacy unshift)');
     assert(CHAT_PROMPT_SECTION_ORDER[CHAT_PROMPT_SECTION_ORDER.length - 1] === 'last_session',
       'case2: last_session is LAST');
-    assert(CHAT_PROMPT_SECTION_ORDER.length === 35, 'case2: 35 canonical sections (34 + connected_resources cross-dashboard block)',
+    assert(CHAT_PROMPT_SECTION_ORDER.length === 36, 'case2: 36 canonical sections (35 + proactive_surfacing heads-up block)',
       `got ${CHAT_PROMPT_SECTION_ORDER.length}`);
     assert(new Set(CHAT_PROMPT_SECTION_ORDER).size === CHAT_PROMPT_SECTION_ORDER.length,
       'case2: no duplicate keys in canonical order');

@@ -28,6 +28,7 @@ import { CASES as optimization2 } from './optimization2';
 import { CASES as optimization3 } from './optimization3';
 import { CASES as optimization4 } from './optimization4';
 import { CASES as routingResilience } from './routing-resilience';
+import { CASES as skillGate } from './skill-gate';
 import { CASES as v2Loop } from './v2-loop';
 import { CASES as verifyA11yCodebase } from './verify-a11y-codebase';
 
@@ -50,6 +51,7 @@ export const EXTENDED_CASES: CoreGoldenCase[] = [
   ...optimization3,
   ...optimization4,
   ...routingResilience,
+  ...skillGate,
   ...v2Loop,
   ...verifyA11yCodebase,
 ];

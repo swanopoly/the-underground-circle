@@ -13,17 +13,18 @@
  * (swanbot.ts:3794-3811 prepends a user notice); general marketplace /
  * cross-provider failover has no equivalent surface. This core is that surface.
  *
- * Two pure formatters (the compose is SAFE; the ChatTab render point and the
- * `persistedChatMetadata` merge are the caller's job):
+ * One pure formatter (the compose is SAFE; the ChatTab render point is the
+ * caller's job — `failoverBadgeForMessage` in ChatTab.tsx):
  *
  *   - `buildFailoverBadge(servedBy)` → a compact, non-alarming turn chip when the
  *     turn was served by a FALLBACK ('via OpenRouter (Anthropic 529)'), or `null`
  *     when the turn was served normally (no noise — the whole point is quiet).
- *   - `failoverMetadataPatch(servedBy)` → the tiny, bounded object to spread into
- *     assistant message metadata so the Feed/Office run cards can show the same
- *     route later; `{}` (a no-op merge) when there was no fallback.
- *   - `readFailoverBadgeFromMetadata(metadata)` → rebuild the identical badge from
- *     a persisted row (untrusted after round-trip — re-validated + re-redacted).
+ *
+ * The earlier `failoverMetadataPatch` / `readFailoverBadgeFromMetadata` pair was
+ * pruned as redundant: the persisted `routing` block (persistedChatMetadata.ts)
+ * already round-trips `routing_fallback` on assistant rows, so ChatTab rebuilds
+ * the badge from `message.routing` directly — a second metadata key would have
+ * duplicated bounded state.
  *
  * Grounding (verified against real files):
  *   - `ChatLaneServedBy` — `{ model?, transport?, fallback?, fallbackReason? }`
@@ -32,12 +33,10 @@
  *     and `fallbackReason = \`${fallback.provider}: ${fallback.reason}\``
  *     (chatLaneOutcome.ts:309-331) — the "anthropic: 529" shape this core
  *     prettifies to "Anthropic 529".
- *   - Persisted assistant metadata is a bounded, per-field-clamped record
- *     (persistedChatMetadata.ts) — this patch matches that discipline.
  *
  * PURITY: zero imports (tsx-loadable). No Date.now()/Math.random(). Every export
  * is TOTAL — hostile input (null/undefined/wrong-type/huge/cyclic/hostile)
- * returns a safe neutral (`null` / `{}`) instead of throwing. Bounded (every
+ * returns a safe neutral (`null`) instead of throwing. Bounded (every
  * emitted string is clamped). Secret-safe (every model-visible / persisted string
  * runs the redactor first, so a key/token that leaked into a reason never reaches
  * a chip or a DB row).
@@ -69,9 +68,6 @@ const MAX_LABEL_CHARS = 72;
 const MAX_DETAIL_CHARS = 220;
 const MAX_REASON_CHARS = 56;
 const MAX_WHO_CHARS = 40;
-const MAX_MODEL_CHARS = 80;
-const MAX_TRANSPORT_CHARS = 48;
-const MAX_META_REASON_CHARS = 120;
 
 // ─── Provider display labels (aliases normalized: hugging_face→huggingface,
 //     z_ai→zai, github_models→github-models — mirrors CLAUDE.md provider set) ──
@@ -264,52 +260,4 @@ export function buildFailoverBadge(servedBy: unknown): FailoverBadge | null {
   );
 
   return { show: true, label, tone, detail };
-}
-
-/**
- * The compact, bounded object to spread into persisted assistant message
- * metadata (`persistedChatMetadata`) so the Feed/Office run cards can render the
- * same route later. Namespaced under `failover` so it merges cleanly; `{}` (a
- * no-op) when there was no fallback. Every persisted string is redacted +
- * clamped.
- */
-export function failoverMetadataPatch(servedBy: unknown): Record<string, unknown> {
-  const rec = asRecord(servedBy);
-  if (!rec || !isFallbackFlag(rec.fallback)) return {};
-  const badge = buildFailoverBadge(rec);
-  if (!badge) return {};
-
-  const failover: Record<string, unknown> = {
-    fallback: true,
-    label: badge.label,
-    tone: badge.tone,
-  };
-  const model = cleanText(rec.model, MAX_MODEL_CHARS);
-  const transport = cleanText(rec.transport, MAX_TRANSPORT_CHARS);
-  const reason = cleanText(rawReasonOf(rec), MAX_META_REASON_CHARS);
-  if (model) failover.model = model;
-  if (transport) failover.transport = transport;
-  if (reason) failover.reason = reason;
-
-  return { failover };
-}
-
-/**
- * Rebuild the failover badge from a persisted metadata row (or the inner patch
- * object directly). The row is untrusted after a round-trip, so this
- * re-validates and re-redacts by reconstructing a `servedBy` and running the
- * same `buildFailoverBadge` path — the read badge is byte-identical to the live
- * one. `null` when the row carries no fallback.
- */
-export function readFailoverBadgeFromMetadata(metadata: unknown): FailoverBadge | null {
-  const rec = asRecord(metadata);
-  if (!rec) return null;
-  const inner = asRecord(rec.failover) || (isFallbackFlag(rec.fallback) ? rec : null);
-  if (!inner || !isFallbackFlag(inner.fallback)) return null;
-  return buildFailoverBadge({
-    fallback: true,
-    model: typeof inner.model === 'string' ? inner.model : null,
-    transport: typeof inner.transport === 'string' ? inner.transport : null,
-    fallbackReason: typeof inner.reason === 'string' ? inner.reason : null,
-  });
 }

@@ -29,6 +29,7 @@ import type { ChatComputerHandoffMetadata } from './chatComputerHandoffContext';
 import type { ChatAutomationPlanPreview } from './chatAutomationPlanPreview';
 import type { ChatOutcomeVerdict, ChatUserSignal } from './chatOutcomeSignals';
 import type { CrossSurfaceFollowup } from './crossSurfaceFollowupCore';
+import type { SurfaceReferenceMatch } from './crossSurfaceReferenceResolverCore';
 import type { OpenSwanTaskPlan } from './openswanTaskPlanner';
 import type { OpenSwanToolEvent } from './openswanToolRuntime';
 import type { OpenSwanVerificationResult } from './openswanVerificationRuntime';
@@ -93,10 +94,18 @@ export type ChatMessage = {
    *  tiny enums so it becomes BlackSwan training data. See chatOutcomeSignals. */
   outcomeSignal?: { verdict: ChatOutcomeVerdict; signal?: ChatUserSignal; lane?: string; model?: string } | null;
   quickReplies?: string[];    // tappable suggested replies (e.g. clarification answers)
+  /** Optional kicker above the quickReplies chips (defaults to "Tap to answer"
+   *  in QuickReplyChips). Session-local only — never persisted. */
+  quickRepliesLabel?: string;
   /** Cross-surface follow-up chips (create Feed task / open run / approve /
    *  retry) derived at finalize time by crossSurfaceFollowupCore. NOT
    *  persisted — cheap to re-derive and keeps message rows bounded. */
   crossSurfaceFollowups?: CrossSurfaceFollowup[];
+  /** Jump-to chips for entities the USER's own message referenced ("open the
+   *  Acme mission"), resolved fire-and-forget against the circle snapshot by
+   *  crossSurfaceReferenceResolverCore. Transient — NOT persisted (the
+   *  user-row persist sends explicit fields only), gone on reload. */
+  referenceChips?: SurfaceReferenceMatch[];
   delegatedTo?: string;       // subagent that handled this message
   delegatedSubagents?: string[];
   runId?: string | null;
@@ -144,6 +153,8 @@ export type ChatBotMessageExtra = {
   computerFindings?: PersistedComputerFindings | null;
   bestOfN?: PersistedBestOfNRace | null;
   quickReplies?: string[];
+  /** Optional kicker above the quickReplies chips (see ChatMessage). */
+  quickRepliesLabel?: string;
   localOnly?: boolean;
   runId?: string | null;
   /**

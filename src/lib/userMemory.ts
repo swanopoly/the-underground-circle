@@ -19,14 +19,6 @@
 
 import { supabase } from './supabase';
 
-export type UserMemory = {
-  id: string;
-  userId: string;
-  circleId: string | null;
-  content: string;
-  updatedAt: string;
-};
-
 // Cap helpers live in `userMemoryCaps` (pure, no Supabase) so smoke
 // tests and edge functions can import them without react-native.
 // Re-exported here so existing callers don't change.

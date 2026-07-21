@@ -6,10 +6,11 @@
  *     ('via OpenRouter (Anthropic 529)'); a normal route → null (no noise).
  *   - who derivation (transport → model-prefix → generic) + reason prettify
  *     (provider-prefixed "anthropic: 529" → "Anthropic 529") + tone (info/warn).
- *   - failoverMetadataPatch: fallback → { failover: {…} } bounded; normal → {}.
- *   - readFailoverBadgeFromMetadata: round-trips a persisted row back to the
- *     identical badge; rejects junk.
- *   - secret-safety: keys/tokens leaked into any field never reach a chip or row.
+ *   - ChatTab adapter parity: the `failoverBadgeForMessage` mapping of a
+ *     persisted `routing` block (routing_fallback → servedBy) yields the
+ *     canonical chip. (The `failoverMetadataPatch` / `readFailoverBadgeFromMetadata`
+ *     pair was pruned — the persisted routing block already round-trips this.)
+ *   - secret-safety: keys/tokens leaked into any field never reach a chip.
  *   - bounds + hostile no-throw (null/undefined/wrong-type/huge/cyclic/hostile).
  *
  * Imports the REAL module (pure, zero runtime imports).
@@ -18,8 +19,6 @@
 
 import {
   buildFailoverBadge,
-  failoverMetadataPatch,
-  readFailoverBadgeFromMetadata,
   type FailoverBadge,
 } from '../src/lib/transportFailoverBadgeCore';
 
@@ -164,15 +163,6 @@ assertEq(buildFailoverBadge({ transport: 'openrouter', fallback: true })?.tone, 
   assert((badge?.detail.length || 0) <= 220, 'detail is clamped ≤ 220', String(badge?.detail.length));
   assert(badge?.tone === 'info' || badge?.tone === 'warn', 'tone stays a valid enum');
 }
-{
-  const patch = failoverMetadataPatch({ transport: 'y'.repeat(400), model: 'z'.repeat(400), fallback: true, fallbackReason: 'w'.repeat(4000) });
-  const f = (patch as any).failover;
-  assert(!!f, 'huge input still yields a patch');
-  assert((f.model?.length || 0) <= 80, 'patch.model clamped ≤ 80', String(f.model?.length));
-  assert((f.transport?.length || 0) <= 48, 'patch.transport clamped ≤ 48', String(f.transport?.length));
-  assert((f.reason?.length || 0) <= 120, 'patch.reason clamped ≤ 120', String(f.reason?.length));
-  assert((f.label?.length || 0) <= 72, 'patch.label clamped ≤ 72', String(f.label?.length));
-}
 
 // ── 7. Secret-safety: leaked keys/tokens never reach a chip or a row ──────────
 {
@@ -188,84 +178,70 @@ assertEq(buildFailoverBadge({ transport: 'openrouter', fallback: true })?.tone, 
   assert((badge?.label || '').includes('[redacted]') || !(badge?.label || '').includes('sk-ant-'), 'secret in label is redacted/absent');
   assertEq(badge?.tone, 'warn', 'auth-failure reason → warn');
 }
-{
-  const patch = failoverMetadataPatch({
-    transport: `Bearer ${SECRET}`,
-    model: `openai_compatible/${SECRET}`,
-    fallback: true,
-    fallbackReason: `api_key=${SECRET} rejected`,
-  });
-  assertNoSecret(patch, 'persisted patch carries no secret anywhere');
-  assertNoSecret((patch as any).failover?.reason, 'patch.reason carries no secret');
-  assertNoSecret((patch as any).failover?.model, 'patch.model carries no secret');
-  assertNoSecret((patch as any).failover?.transport, 'patch.transport carries no secret');
-}
 // A long contiguous hex/base64 run is redacted too.
 assertNoSecret(
   buildFailoverBadge({ transport: 'openrouter', fallback: true, fallbackReason: `token ${'a1b2c3d4'.repeat(6)} invalid` })?.label,
   'long token run is redacted from the label',
 );
 
-// ── 8. failoverMetadataPatch shape ────────────────────────────────────────────
-assertEq(JSON.stringify(failoverMetadataPatch({ transport: 'openrouter' })), '{}', 'no fallback → {} (no-op merge)');
-assertEq(JSON.stringify(failoverMetadataPatch({ transport: 'openrouter', fallback: false })), '{}', 'fallback:false → {}');
-assertEq(JSON.stringify(failoverMetadataPatch(null)), '{}', 'null → {}');
-{
-  const patch = failoverMetadataPatch({
-    model: 'anthropic/claude-3.5-sonnet',
-    transport: 'openrouter',
+// ── 8. ChatTab adapter parity — failoverBadgeForMessage's exact mapping ───────
+// Mirrors `failoverBadgeForMessage` in ChatTab.tsx (keep in sync): the badge is
+// rebuilt from the PERSISTED `routing` block (routing_fallback survives the
+// persistedChatMetadata round-trip), so this mapping IS the round-trip path.
+type AdapterMessage = {
+  isBot?: boolean;
+  routing?: { provider_routed?: string; provider_model?: string; routing_fallback?: { provider: string; reason: string } };
+  usage?: { model?: string };
+};
+function adapterBadge(message: AdapterMessage): FailoverBadge | null {
+  const rf = message.isBot ? message.routing?.routing_fallback : null;
+  if (!rf) return null;
+  return buildFailoverBadge({
     fallback: true,
-    fallbackReason: 'anthropic: 529',
+    model: message.routing?.provider_model ?? message.usage?.model ?? null,
+    transport: message.routing?.provider_routed ?? null,
+    fallbackReason: `${rf.provider}: ${rf.reason}`,
   });
-  const f = (patch as any).failover;
-  assert(!!f, 'fallback → { failover } present');
-  assertEq(f.fallback, true, 'patch.failover.fallback true');
-  assertEq(f.label, 'via OpenRouter (Anthropic 529)', 'patch carries the same label as the badge');
-  assertEq(f.tone, 'warn', 'patch carries tone');
-  assertEq(f.transport, 'openrouter', 'patch carries served transport');
-  assertEq(f.model, 'anthropic/claude-3.5-sonnet', 'patch carries served model');
-  assertEq(f.reason, 'anthropic: 529', 'patch carries the raw (redacted) reason');
-  // Only the expected keys — bounded, no leakage of extra fields.
-  assert(Object.keys(f).every((k) => ['fallback', 'label', 'tone', 'model', 'transport', 'reason'].includes(k)), 'patch keys are bounded to the allow-list', Object.keys(f).join(','));
 }
 {
-  // Missing optionals are omitted, not stored as empty.
-  const f = (failoverMetadataPatch({ fallback: true }) as any).failover;
-  assert(!!f, 'bare fallback → patch present');
-  assert(!('model' in f) && !('transport' in f) && !('reason' in f), 'empty optionals omitted from patch');
-  assertEq(f.label, 'Served by a fallback route', 'bare fallback patch has the generic label');
+  // The item's canonical example: OpenRouter 529 → served via Anthropic.
+  const badge = adapterBadge({
+    isBot: true,
+    routing: {
+      provider_routed: 'anthropic',
+      provider_model: 'claude-haiku-4-5',
+      routing_fallback: { provider: 'openrouter', reason: '529' },
+    },
+  });
+  assertEq(badge?.label, 'via Anthropic (OpenRouter 529)', 'persisted routing block → canonical chip');
+  assertEq(badge?.tone, 'warn', '529 fallback → warn tone');
+  assert((badge?.detail || '').includes('Anthropic'), 'adapter detail names the serving provider');
+}
+assertEq(adapterBadge({ isBot: true, routing: { provider_routed: 'anthropic', provider_model: 'claude-haiku-4-5' } }), null, 'routing without routing_fallback → no chip (no noise)');
+assertEq(adapterBadge({ isBot: true }), null, 'no routing block → no chip');
+assertEq(adapterBadge({ isBot: false, routing: { routing_fallback: { provider: 'openrouter', reason: '529' } } }), null, 'user message never gets a failover chip');
+{
+  // provider_routed absent → who falls back to the served model's provider prefix.
+  const badge = adapterBadge({
+    isBot: true,
+    routing: { routing_fallback: { provider: 'openrouter', reason: 'timeout' } },
+    usage: { model: 'groq/llama-3.1-70b' },
+  });
+  assertEq(badge?.label, 'via Groq (OpenRouter timeout)', 'usage.model prefix derives who when provider_routed absent');
+}
+// An unbounded / secret-laden edge reason never reaches the chip raw.
+{
+  const badge = adapterBadge({
+    isBot: true,
+    routing: { provider_routed: 'anthropic', routing_fallback: { provider: 'openrouter', reason: `auth failed for key ${SECRET} ${'x'.repeat(4000)}` } },
+  });
+  assert(badge !== null, 'hostile edge reason still yields a chip');
+  assertNoSecret(badge?.label, 'adapter chip label carries no secret');
+  assertNoSecret(badge?.detail, 'adapter chip detail carries no secret');
+  assert((badge?.label.length || 0) <= 72, 'adapter chip label stays clamped ≤ 72', String(badge?.label.length));
 }
 
-// ── 9. readFailoverBadgeFromMetadata: round-trip + rejects junk ───────────────
-{
-  const servedBy = { model: 'anthropic/claude-3.5-sonnet', transport: 'openrouter', fallback: true, fallbackReason: 'anthropic: 529' };
-  const live = buildFailoverBadge(servedBy);
-  const patch = failoverMetadataPatch(servedBy);
-  const readBack = readFailoverBadgeFromMetadata(patch);
-  assert(readBack !== null, 'read-back from a persisted patch yields a badge');
-  assertEq(readBack?.label, live?.label, 'round-trip label equals the live badge');
-  assertEq(readBack?.tone, live?.tone, 'round-trip tone equals the live badge');
-  assertEq(readBack?.detail, live?.detail, 'round-trip detail equals the live badge');
-}
-{
-  // Accepts a wider persisted-metadata envelope (patch merged into a row).
-  const row = { usage: { model: 'x' }, source: { actor: 'openswan' }, ...failoverMetadataPatch({ transport: 'groq', fallback: true, fallbackReason: 'openai: 503' }) };
-  const badge = readFailoverBadgeFromMetadata(row);
-  assertEq(badge?.label, 'via Groq (OpenAI 503)', 'reads the failover key out of a full metadata row');
-}
-{
-  // Accepts the inner patch object directly (no `failover` wrapper).
-  const badge = readFailoverBadgeFromMetadata({ fallback: true, transport: 'openrouter', reason: 'anthropic: 429' });
-  assertEq(badge?.label, 'via OpenRouter (Anthropic 429)', 'reads a bare inner patch object');
-}
-assertEq(readFailoverBadgeFromMetadata({ usage: { model: 'x' } }), null, 'metadata with no failover key → null');
-assertEq(readFailoverBadgeFromMetadata({ failover: { fallback: false, label: 'x' } }), null, 'persisted failover with fallback:false → null');
-assertEq(readFailoverBadgeFromMetadata(null), null, 'null metadata → null');
-assertEq(readFailoverBadgeFromMetadata({ failover: 'not-an-object' }), null, 'non-object failover → null');
-// A secret that somehow sat in a persisted reason is re-redacted on read.
-assertNoSecret(readFailoverBadgeFromMetadata({ failover: { fallback: true, transport: 'openrouter', reason: `key ${SECRET}` } })?.label, 'read-path re-redacts a persisted secret');
-
-// ── 10. Hostile inputs never throw (all three exports) ────────────────────────
+// ── 10. Hostile inputs never throw ────────────────────────────────────────────
 const cyclic: any = { fallback: true, transport: 'openrouter' };
 cyclic.self = cyclic;
 cyclic.chain = { back: cyclic };
@@ -283,18 +259,11 @@ const hostiles: unknown[] = [
 for (const input of hostiles) {
   const label = JSON.stringify(input === undefined ? 'undefined' : (typeof input === 'object' && input && (input as any).self ? 'cyclic' : input)) || String(input);
   noThrow(() => buildFailoverBadge(input), `buildFailoverBadge no-throw: ${label}`);
-  noThrow(() => failoverMetadataPatch(input), `failoverMetadataPatch no-throw: ${label}`);
-  noThrow(() => readFailoverBadgeFromMetadata(input), `readFailoverBadgeFromMetadata no-throw: ${label}`);
 }
 // Cyclic input still degrades to a coherent badge (top-level read only).
 {
   const badge = buildFailoverBadge(cyclic);
   assertEq(badge?.label, 'via OpenRouter', 'cyclic input degrades to a coherent who-only badge');
-}
-// A patch is always a plain object (safe to spread), never null/array.
-for (const input of hostiles) {
-  const patch = failoverMetadataPatch(input);
-  assert(patch !== null && typeof patch === 'object' && !Array.isArray(patch), 'patch is always a plain object', JSON.stringify(patch));
 }
 // buildFailoverBadge is always null or the full shape.
 for (const input of hostiles) {

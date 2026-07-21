@@ -304,3 +304,217 @@ export function buildRunProofPublication(input: RunProofPublicationInput): RunPr
 
   return { proofRow, activityRow, gitReferences };
 }
+
+// ─── OpenSwan chat/room turn bridge (adapter + publication gate) ─────────────
+//
+// The chat/room OpenSwan session runtime finishes a turn holding runtime tool
+// actions in the SwanBotStructuredToolAction shape — { tool_name, status,
+// title, output_preview } — which NEITHER sub-core can read:
+//   - `openswanRunProofCore.toolNameOf` reads el.tool ⏐ el.toolName ⏐ el.name
+//     (never `tool_name`), so the proof card would count zero tools.
+//   - `taskPRLinkageCore` scans e.summary / e.result / e.preview text (never
+//     `output_preview`), so a `git.run` commit/push output would never become
+//     a canonical git_reference.
+// `mapRuntimeToolActionsToProofEvents` is that missing adapter, and
+// `decideOpenSwanTurnProofPublication` is the honest publish/suppress gate the
+// runtime consults before writing the Feed rows.
+
+const MAX_MAPPED_EVENTS = 200; // sub-cores cap their own scans; this bounds the bridge
+const MAX_MAPPED_NAME = 120; // tool / status clip
+const MAX_MAPPED_SUMMARY = 300; // title → summary clip
+const MAX_MAPPED_RESULT = 1600; // output_preview (runtime clips at 1200) → result clip
+const MAX_REASON_LEN = 60;
+
+/** Proof-event shape both sub-cores understand (see bridge note above). */
+export interface OpenSwanMappedProofEvent {
+  tool: string;
+  status: string;
+  summary: string;
+  result: string;
+}
+
+/**
+ * Adapt openswanSessionRuntime's runtime tool actions —
+ * `{ tool_name, status, title, output_preview }` — into the
+ * `{ tool, status, summary, result }` proof-event shape.
+ *
+ * `output_preview → result` is the load-bearing move: it puts the git
+ * commit/push output ("To github.com:owner/repo.git … [main abc1234]") and any
+ * pasted PR URL where `extractGitReferences` scans, so real mutations become
+ * canonical `git_references` on the proof row.
+ *
+ * `status` passes through RAW: the runtime's failure statuses — 'failed',
+ * 'manual_required', 'blocked' — are all already in the proof core's
+ * TOOL_FAIL_STATUS set, and 'completed' counts as success; re-mapping would
+ * only invite drift.
+ *
+ * TOTAL + bounded: non-array → []; malformed elements skipped; ≤200 events;
+ * per-field clips. Accepts an already-mapped `tool` key too (idempotent).
+ * Never throws.
+ */
+export function mapRuntimeToolActionsToProofEvents(actions: unknown): OpenSwanMappedProofEvent[] {
+  if (!Array.isArray(actions)) return [];
+  const out: OpenSwanMappedProofEvent[] = [];
+  for (const el of actions) {
+    if (out.length >= MAX_MAPPED_EVENTS) break;
+    if (!isRecord(el)) continue;
+    let tool = '';
+    if (typeof el.tool_name === 'string') tool = el.tool_name;
+    else if (typeof el.tool === 'string') tool = el.tool;
+    tool = clipText(tool.trim(), MAX_MAPPED_NAME);
+    if (!tool) continue;
+    const status = typeof el.status === 'string' ? clipText(el.status, MAX_MAPPED_NAME) : '';
+    const summary = typeof el.title === 'string' ? clipText(el.title, MAX_MAPPED_SUMMARY) : '';
+    const result =
+      typeof el.output_preview === 'string' ? clipText(el.output_preview, MAX_MAPPED_RESULT) : '';
+    out.push({ tool, status, summary, result });
+  }
+  return out;
+}
+
+// Mutation-shaped evidence for the receipt-less legacy fallback: tool-name
+// prefixes plus the two real edit tools (LOCKSTEP with
+// openswanRunProofCore.EDIT_TOOLS / openswanToolRuntime — the catalog's file
+// mutators are desktop.*, not fs.*). `git.` is DELIBERATELY EXCLUDED: git.run
+// is dual-use (read auto / mutate ask per CLAUDE.md), so a read-only `git
+// status`/`log`/`diff` success must NEVER tally as proof-of-work. A genuine
+// commit/push is still covered — its `[branch sha]` / pushed-ref output yields
+// a git reference, so it publishes via the `committed` (typed loop) or
+// `gitRefCount` (both loops) branches above, never this bare-prefix fallback.
+const MUTATION_TOOL_PREFIXES = ['fs.', 'file.'];
+const MUTATION_TOOL_NAMES = new Set<string>(['desktop.edit_file', 'desktop.file_write_text']);
+// Explicit success statuses ('completed' = runtime shape, 'passed' = raw
+// OpenSwanToolEvent). Anything else — failed/blocked/manual_required/missing —
+// is NOT mutation evidence: the gate fails closed.
+const TOOL_SUCCESS_STATUS = new Set<string>(['completed', 'passed']);
+
+export type OpenSwanTurnStopReason = 'cancelled' | 'max_iterations' | 'end_turn';
+
+export interface OpenSwanTurnProofDecisionInput {
+  /** agent_runs surface for this turn ('main_chat' / 'room_chat' / 'feed_task' / …). */
+  runSurface?: unknown;
+  /** True when the user STOPped the turn (loop cancel or DB-side cancel). */
+  cancelled?: unknown;
+  /** True when the tool loop hit its per-turn step cap before a final answer. */
+  incomplete?: unknown;
+  /** verificationReceiptCore.VerificationReceipt — { editedFiles, committed, verdict }. */
+  receipt?: unknown;
+  /** Mapped proof events (mapRuntimeToolActionsToProofEvents output). */
+  toolEvents?: unknown;
+  /** structured.artifacts count for this turn. */
+  artifactCount?: unknown;
+  /** buildRunProofPublication(...).gitReferences.length once known. */
+  gitRefCount?: unknown;
+}
+
+export interface OpenSwanTurnProofDecision {
+  /** Write the proof_of_work row (and, unless suppressed, the activity row). */
+  publish: boolean;
+  /** True when a failed coding receipt must never tally a 'task_completed'
+   *  activity — the durable proof row may still publish, honest and unverified. */
+  suppressCompletedActivity: boolean;
+  /** Honest stop family for buildRunProofPublication.stopReason. */
+  stopReason: OpenSwanTurnStopReason;
+  /** Short machine reason for observability/logs. */
+  reason: string;
+}
+
+function nonNegCount(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) return 0;
+  return Math.floor(v);
+}
+
+/**
+ * The publish/suppress gate for a finished chat/room OpenSwan turn.
+ *
+ * PUBLISH — only when the turn holds mutation-shaped evidence AND may publish:
+ *   - `cancelled` → never publish. A user STOP leaves zero Feed rows; the
+ *     partial work stays on the (honestly 'cancelled') agent_runs row.
+ *   - `runSurface === 'feed_task'` → never publish. DOUBLE-POST GUARD: the
+ *     Kanban/missions completion path (useKanbanData.runAgentOnTask) already
+ *     publishes its own, richer proof for feed-task runs — task linkage,
+ *     deliverable, attachments — so the session runtime must stay silent for
+ *     that surface or every task run would hit the Feed twice.
+ *   - Evidence, any of: receipt.editedFiles non-empty ⏐ receipt.committed ⏐
+ *     gitRefCount>0 ⏐ artifactCount>0 ⏐ legacy fallback (no typed receipt on
+ *     the legacy loop): a tool event with an explicit success status whose
+ *     name starts fs./file. or is one of the catalog's edit tools. A bare
+ *     git.* success is NOT evidence (git.run is dual-use); a real commit/push
+ *     publishes via the committed / gitRefCount branches instead.
+ *     A plain read-only Q&A turn publishes nothing.
+ *
+ * SUPPRESS — `receipt.verdict === 'failed'` (the typed loop's coding receipt
+ * failed its checks): the 'task_completed' activity row is suppressed so a
+ * failed change never tallies as a completion; the honest 'task_failed'
+ * activity (from a failure-family stopReason) is never suppressed, and the
+ * durable proof row still publishes when evidence exists.
+ *
+ * STOP REASON — cancelled → 'cancelled', incomplete → 'max_iterations', else
+ * 'end_turn'. Both failure values sit in openswanRunProofCore's STOP_FAIL
+ * family, so buildRunProofPublication stamps outcome 'stopped' → activity
+ * 'task_failed' — a capped/stopped turn can never masquerade as a clean
+ * completion. stopReason depends ONLY on cancelled/incomplete, so callers may
+ * take it from a pre-pass call (before git references are known) and re-gate
+ * `publish` with the real gitRefCount afterwards.
+ *
+ * TOTAL: hostile / null / wrong-type input never throws and fails closed
+ * (publish false).
+ */
+export function decideOpenSwanTurnProofPublication(
+  input: OpenSwanTurnProofDecisionInput,
+): OpenSwanTurnProofDecision {
+  const safe: OpenSwanTurnProofDecisionInput = isRecord(input) ? input : {};
+
+  const cancelled = safe.cancelled === true;
+  const incomplete = safe.incomplete === true;
+  const stopReason: OpenSwanTurnStopReason = cancelled
+    ? 'cancelled'
+    : incomplete
+      ? 'max_iterations'
+      : 'end_turn';
+
+  const receipt = isRecord(safe.receipt) ? safe.receipt : null;
+  const editedCount = receipt
+    ? Array.isArray(receipt.editedFiles)
+      ? receipt.editedFiles.length
+      : nonNegCount(receipt.editedFiles)
+    : 0;
+  const committed = receipt?.committed === true;
+  const suppressCompletedActivity = receipt?.verdict === 'failed';
+
+  const build = (publish: boolean, reason: string): OpenSwanTurnProofDecision => ({
+    publish,
+    suppressCompletedActivity,
+    stopReason,
+    reason: clipText(reason, MAX_REASON_LEN),
+  });
+
+  if (cancelled) return build(false, 'cancelled');
+  const runSurface = typeof safe.runSurface === 'string' ? safe.runSurface : '';
+  if (runSurface === 'feed_task') return build(false, 'feed-task-surface');
+
+  if (editedCount > 0) return build(true, 'edited-files');
+  if (committed) return build(true, 'committed');
+  if (nonNegCount(safe.gitRefCount) > 0) return build(true, 'git-references');
+  if (nonNegCount(safe.artifactCount) > 0) return build(true, 'artifacts');
+
+  // Legacy fallback: the pre-typed loop produces no verification receipt, so a
+  // successful file/git tool call is the remaining mutation signal.
+  if (Array.isArray(safe.toolEvents)) {
+    const n = Math.min(safe.toolEvents.length, MAX_MAPPED_EVENTS * 2);
+    for (let i = 0; i < n; i += 1) {
+      const el = safe.toolEvents[i];
+      if (!isRecord(el)) continue;
+      const tool =
+        typeof el.tool === 'string' ? el.tool : typeof el.tool_name === 'string' ? el.tool_name : '';
+      if (!tool) continue;
+      const status = typeof el.status === 'string' ? el.status.toLowerCase() : '';
+      if (!TOOL_SUCCESS_STATUS.has(status)) continue;
+      if (MUTATION_TOOL_NAMES.has(tool) || MUTATION_TOOL_PREFIXES.some((p) => tool.startsWith(p))) {
+        return build(true, 'mutating-tool');
+      }
+    }
+  }
+
+  return build(false, 'no-mutation-evidence');
+}

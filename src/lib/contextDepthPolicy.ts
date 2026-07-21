@@ -202,6 +202,7 @@ export const CONTEXT_SECTION_LABELS: Readonly<Record<ChatPromptSectionKey, strin
   agent_identity: 'Agent identity',
   missions: 'Missions',
   circle_snapshot: 'Circle snapshot',
+  proactive_surfacing: 'Proactive heads-up (failed runs / stalled missions / approvals)',
   last_session: 'Previous sessions + persistent knowledge',
 };
 

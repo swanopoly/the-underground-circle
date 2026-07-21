@@ -61,6 +61,10 @@ import { selectToolGroups } from "../../../src/lib/v2ToolSelectionCore.ts";
 import { nextContinuationDecision } from "../../../src/lib/swanbotContinuationBudgetCore.ts";
 import { buildToolFailureFeedback } from "../../../src/lib/toolFailureFeedback.ts";
 import { gateToolNames, type ToolPrereqRule } from "../../../src/lib/toolConnectivityGateCore.ts";
+// Pre-turn context compaction — Deno lockstep mirror of agentExecutionCore's
+// tiered compaction (drop stale tool_result bytes + unconditional hard-limit
+// shave) so long multi-round runs never die on a "prompt too long" 400.
+import { compactEdgeMessagesBeforeTurn, EDGE_CONTEXT_WINDOW_TOKENS } from "../_shared/context-compaction.ts";
 
 // ─── Types (mirroring src/lib/agentExecutionCore.ts) ────────────────────────
 
@@ -2792,6 +2796,42 @@ async function runLoop(args: {
     if (runId) {
       void supabase.from("agent_run_events").insert({ run_id: runId, kind: "turn_start", payload: { iteration: iter } });
     }
+    // Pre-turn context compaction (lockstep mirror of agentExecutionCore's
+    // tiered path): free local stub of STALE tool_result bytes + an
+    // unconditional hard-limit shave, so a long multi-round run (fresh or
+    // resumed — both enter this loop) never forwards an over-window prompt
+    // and 400s with "prompt too long". No summariser on the edge, so the
+    // 'summarize_oldest' tier degrades to drop-only (client parity). Only
+    // tool_result CONTENT / text is touched — tool_use ids and the
+    // pendingToolUseIds pairing survive, and the continuation snapshot
+    // persisted on a client-tool pause shrinks with the live history.
+    // Errors are swallowed: compaction must never break the loop.
+    try {
+      let systemChars = 0;
+      for (const b of systemBlocks) systemChars += typeof b?.text === "string" ? b.text.length : 0;
+      const compaction = compactEdgeMessagesBeforeTurn(messages, {
+        // System blocks ride OUTSIDE `messages` on the edge — carve their
+        // estimate out of the window before budgeting the history.
+        contextWindowTokens: EDGE_CONTEXT_WINDOW_TOKENS - Math.ceil(systemChars / 4),
+        reservedOutputTokens: turnMaxTokensForModel(model),
+        keepRecentCount: 6,
+        turnCount: iter,
+      });
+      if (compaction.tier !== "none" && runId) {
+        // Bounded, secret-safe payload: tier label + counts-only reason (≤240).
+        void supabase.from("agent_run_events").insert({
+          run_id: runId,
+          kind: "context_compaction_tier",
+          payload: {
+            iteration: iter,
+            tier: compaction.tier,
+            reason: compaction.reason,
+            est_before: compaction.estBefore,
+            est_after: compaction.estAfter,
+          },
+        });
+      }
+    } catch { /* compaction must never break the loop */ }
     // Fix #2: per-model output budget instead of a flat 2048 (was starving fable/opus).
     const turn = await anthropicTurn({ apiKey, model, messages, tools: activeTools, systemBlocks, maxTokens: turnMaxTokensForModel(model) });
     usageTotal = addUsage(usageTotal, turn.usage);

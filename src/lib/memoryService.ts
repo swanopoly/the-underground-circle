@@ -16,6 +16,7 @@ import {
 } from './agentRunSystem';
 import { decideSoulMemoryRouting, getAgentSoulInfo, getMemorySoulKey } from './agentSoulMemory';
 import { wrapUntrusted } from './untrustedContent';
+import { annotateUntrustedHeading, type UntrustedHeadingScanSummary } from './untrustedScanAnnotate';
 
 export type MemoryNamespace =
   | 'startup_bundle'
@@ -472,8 +473,17 @@ export function formatSoulWisdomBlock(entry: SoulWisdomEntry | null): string {
   const header = `## ${title} wisdom in this circle${dateStr ? ` (updated ${dateStr})` : ''}${sourceSuffix}`;
   // Wisdom bodies are distilled from circle memories (member/model-authored)
   // — untrusted (rule 5). wrapUntrusted fences + strips any embedded fence
-  // markers so the body can't break out of the fence.
-  return wrapUntrusted(entry.body, { heading: header });
+  // markers so the body can't break out of the fence. The advisory injection
+  // scan escalates the heading (compact summary only — never body text) when
+  // the distilled body carries hijack-style wording; unflagged stays byte-
+  // identical. Covers both the SwanBot wisdom loader and the bundle path.
+  const ann = annotateUntrustedHeading(entry.body, header);
+  if (ann.flagged) {
+    console.warn('[memoryService] soul wisdom body carries injection-style wording:', {
+      seam: 'soul_wisdom', level: ann.scan.level, kinds: ann.scan.kinds,
+    });
+  }
+  return wrapUntrusted(entry.body, { heading: ann.heading });
 }
 
 async function synthesizeSoulWisdomFromMemories(opts: {
@@ -838,7 +848,13 @@ export async function retrieveForTurn(opts: {
   budgetChars?: number;
   candidatePoolSize?: number;
   finalCount?: number;
-}): Promise<{ memories: RetrievedMemory[]; formatted: string }> {
+}): Promise<{
+  memories: RetrievedMemory[];
+  formatted: string;
+  /** Advisory injection-scan summary for the recalled block (ephemeral v1 —
+   *  not persisted; compact {level,score,kinds} only, never spans/excerpts). */
+  injectionScan?: UntrustedHeadingScanSummary;
+}> {
   const cfg = { ...TURN_RETRIEVAL_DEFAULTS, ...opts };
   if (!opts.queryText?.trim() || !opts.circleId) {
     return { memories: [], formatted: '' };
@@ -1076,10 +1092,18 @@ export async function retrieveForTurn(opts: {
   // Retrieved memory is untrusted (rule 5): a circle member or an external
   // source may have written content into it. wrapUntrusted fences it (so the
   // model treats recalled text as data) and strips embedded fence markers so
-  // a member's memory can't break out. Header stays outside the fence.
-  const formatted = body.trim() ? wrapUntrusted(body, { heading: header }) : '';
+  // a member's memory can't break out. Header stays outside the fence. The
+  // advisory injection scan escalates that header when the recalled block
+  // carries hijack-style wording (unflagged → byte-identical header).
+  const ann = annotateUntrustedHeading(body, header);
+  if (ann.flagged) {
+    console.warn('[memoryService] retrieveForTurn recalled injection-style wording:', {
+      seam: 'turn_retrieval', level: ann.scan.level, kinds: ann.scan.kinds,
+    });
+  }
+  const formatted = body.trim() ? wrapUntrusted(body, { heading: ann.heading }) : '';
 
-  return { memories: kept, formatted };
+  return { memories: kept, formatted, injectionScan: ann.scan };
 }
 
 export async function retrieveSoulMemories(opts: {
@@ -2176,37 +2200,6 @@ export async function saveCompactedSession(
       retrievalMode: 'startup',
     });
   }
-}
-
-// ── Memory Evaluation ───────────────────────────────────────────────────────
-
-/**
- * Simple evaluator: should this memory be kept, updated, or discarded?
- */
-export function evaluateMemoryCandidate(
-  candidate: { kind: string; title: string; content: string },
-  existing: MemoryEntry[],
-): 'save' | 'update' | 'skip' {
-  // Too short to be useful
-  if (candidate.content.length < 10) return 'skip';
-  // Too generic
-  if (/^(yes|no|ok|sure|thanks|got it)$/i.test(candidate.content.trim())) return 'skip';
-
-  // Check for contradiction with existing
-  const titleLower = candidate.title.toLowerCase();
-  const match = existing.find(e => {
-    const t = e.title.toLowerCase();
-    return t === titleLower || t.includes(titleLower) || titleLower.includes(t);
-  });
-
-  if (match) {
-    // Content changed → update
-    if (match.content.toLowerCase() !== candidate.content.toLowerCase()) return 'update';
-    // Same content → skip
-    return 'skip';
-  }
-
-  return 'save';
 }
 
 function normalizeRememberContent(content: string): string {

@@ -1327,15 +1327,6 @@ export function subscribeToRunSteps(runId: string, callback: (step: RunStep) => 
     .subscribe();
 }
 
-export function subscribeToApprovals(circleId: string, callback: (approval: RunApproval) => void) {
-  return supabase
-    .channel(`approvals:${circleId}`)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'agent_run_approvals', filter: `circle_id=eq.${circleId}` }, (payload) => {
-      callback(mapApproval(payload.new));
-    })
-    .subscribe();
-}
-
 /**
  * Subscribe to INSERT/UPDATE on agent_runs for a circle (ops-board live
  * tracking). The callback is debounced so bursty tool-loop updates trigger
@@ -1398,74 +1389,6 @@ export function subscribeToCircleRuns(
     }
     handle.unsubscribe();
   };
-}
-
-// ── 9. High-Level Orchestrated Run ──────────────────────────────────────────
-
-export async function executeTrackedRun(opts: {
-  circleId: string;
-  userId: string;
-  surface: RunSurface;
-  title: string;
-  goal?: string;
-  mode?: string;
-  model?: string;
-  provider?: string;
-  roomId?: string;
-  taskId?: string;
-  executeFn: (run: AgentRun) => Promise<{ response: string; artifacts?: Array<{ kind: ArtifactKind; title: string; content?: string; url?: string }>; tokens?: { input: number; output: number; cached?: number } }>;
-}): Promise<{ run: AgentRun; response: string; artifacts: RunArtifact[] }> {
-  // Create the run
-  const run = await createRun(opts);
-  if (!run) throw new Error('Failed to create agent run');
-
-  // Mark running
-  await updateRunStatus(run.id, 'running');
-
-  // Add planning step
-  await addStep({ runId: run.id, circleId: opts.circleId, stepIndex: 0, stepKind: 'plan', title: opts.title, body: opts.goal });
-
-  try {
-    // Execute the actual work
-    const startMs = Date.now();
-    const result = await opts.executeFn(run);
-    const durationMs = Date.now() - startMs;
-
-    // Record the message step
-    await addStep({
-      runId: run.id, circleId: opts.circleId, stepIndex: 1, stepKind: 'message',
-      title: 'Response', body: result.response.slice(0, 5000), durationMs,
-      tokensUsed: (result.tokens?.input || 0) + (result.tokens?.output || 0),
-    });
-
-    // Record artifacts
-    const savedArtifacts: RunArtifact[] = [];
-    if (result.artifacts) {
-      for (const art of result.artifacts) {
-        const saved = await addArtifact({
-          runId: run.id, circleId: opts.circleId,
-          artifactKind: art.kind, title: art.title,
-          content: art.content, url: art.url,
-        });
-        if (saved) savedArtifacts.push(saved);
-      }
-    }
-
-    // Mark completed with token totals
-    await updateRunStatus(run.id, 'completed', {
-      input_tokens: result.tokens?.input || 0,
-      output_tokens: result.tokens?.output || 0,
-      cached_tokens: result.tokens?.cached || 0,
-      current_step_index: 2,
-      total_steps: 2,
-    });
-
-    return { run: { ...run, status: 'completed' }, response: result.response, artifacts: savedArtifacts };
-  } catch (err: any) {
-    await addStep({ runId: run.id, circleId: opts.circleId, stepIndex: 99, stepKind: 'error', title: 'Run failed', body: err.message });
-    await updateRunStatus(run.id, 'failed');
-    throw err;
-  }
 }
 
 // ── Mappers ─────────────────────────────────────────────────────────────────

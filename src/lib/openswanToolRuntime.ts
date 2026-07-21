@@ -53,7 +53,6 @@ import {
 // it here is purely ADDITIVE: it enriches discovery prose only and never
 // changes which tools are advertised by default.
 import {
-  buildCapabilityManifestPrompt,
   suggestCapabilitiesForMessage,
 } from './chatCapabilityManifest';
 import {
@@ -5511,45 +5510,6 @@ export function buildOpenSwanToolBrief(
   }
 
   return `Recommended tools for this turn:\n${lines.join('\n')}`;
-}
-
-/**
- * The capability-manifest brief for a surface — the model-facing *menu* of
- * capability families (browser, desktop, WordPress, Adobe design, vault,
- * agent deploy …) plus the instruction to call `tools.search` to load the
- * concrete deferred tool on demand. This is the discovery counterpart to the
- * per-turn `buildOpenSwanToolBrief` (which lists the few tools recommended for
- * THIS turn): the manifest makes the model aware of the whole long tail that
- * is otherwise deferred out of the prompt, so frontier models + BlackSwan /
- * OpenSwan all route from the same surface.
- *
- * Additive + flag-neutral: this only produces prose. It does NOT advertise or
- * unlock any tool, and it does not depend on `DEPLOY_AGENTS_TOOL_ENABLED`
- * (the deploy family is listed as a discoverable capability, but the actual
- * `team.deploy_agents` tool stays gated by that flag in `TOOL_DEFINITIONS`).
- * Hosts wire this into the system prompt alongside the tool list; nothing in
- * the default tool-advertisement path calls it.
- *
- * `message` is optional: when present, the families that message is likely to
- * need are surfaced first so the model reaches for the right family quickly.
- */
-export function buildOpenSwanCapabilityManifestBrief(opts?: {
-  surface?: OpenSwanToolSurface;
-  message?: string;
-  enabledFamilies?: string[];
-}): string {
-  const manifest = buildCapabilityManifestPrompt({
-    surface: opts?.surface,
-    enabledFamilies: opts?.enabledFamilies,
-  });
-
-  const likely = opts?.message ? suggestCapabilitiesForMessage(opts.message) : [];
-  if (likely.length === 0) return manifest;
-
-  // Prepend a short, quiet hint so the model knows which families this turn
-  // probably needs — it still decides, and `tools.search` still enforces the
-  // real load. Kept to one line per CLAUDE.md's quiet-in-chat rule.
-  return `${manifest}\nLikely relevant for this request (still your call): ${likely.join(', ')} — tools.search to load.`;
 }
 
 // Surface actionable hints for desktop-bridge failure modes so the agent

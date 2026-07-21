@@ -93,6 +93,7 @@ import { getBridgeUrl } from '../../../lib/bridgeEnvironment';
 import { ensureBridgeToken, bridgeAuthHeaders } from '../../../lib/bridgeAuth';
 import RunTraceCard from './chat/RunTraceCard';
 import RunCostDrawer from './chat/RunCostDrawer';
+import ChatSourcesRow from './chat/ChatSourcesRow';
 import SkillAdminPanel from './chat/SkillAdminPanel';
 import SpawnAgentsModal from './chat/SpawnAgentsModal';
 import { createStagedFile, getSignedUrl, revokeStagedPreviews, uploadAttachment, type StagedFile } from '../../../lib/chatAttachments';
@@ -171,6 +172,10 @@ import {
   type ChatAttentionAction,
   type ChatAttentionItem,
 } from '../../../lib/chatAttentionQueue';
+// Proactive heads-up: fold the live "Needs you" items into the prompt
+// builder's surfacing signals (pure adapter; anti-nag decision happens in
+// proactiveSurfacingRuntime behind buildStreamableSystemPrompt).
+import { attentionItemsToSurfacingSignals } from '../../../lib/proactiveSurfacingSignals';
 import { isApprovalRowLive } from '../../../lib/approvalCardModelCore';
 import {
   formatChatUserFacingOutcome,
@@ -198,6 +203,7 @@ import { matchStopResolution as matchChatStopResolution, resolveChatStopMessage 
 import { assessStreamDegeneracy, describeStreamDegeneracy } from '../../../lib/streamDegeneracyCore';
 import { formatVerificationReceipt } from '../../../lib/verificationReceiptCore';
 import { guardChatSend } from '../../../lib/chatSendGuardCore';
+import { segmentChatIntents } from '../../../lib/chatMultiIntentCore';
 import ChatArtifacts from '../../../components/chat/ChatArtifacts';
 // V2 Builder adds copy/download/publish toolbar, device frames, and an
 // iframe runtime error overlay. Lives in tabs/chat/ because the components/
@@ -242,6 +248,9 @@ import {
   deriveCrossSurfaceFollowups,
   type CrossSurfaceFollowup,
 } from '../../../lib/crossSurfaceFollowupCore';
+// reference-nav-chips: type-only — the resolver itself is dynamic-imported in
+// addUserMessage so the send path stays lean.
+import type { SurfaceReferenceMatch } from '../../../lib/crossSurfaceReferenceResolverCore';
 import { extractGitReferences } from '../../../lib/taskPRLinkageCore';
 import {
   buildChatInfluenceReferences,
@@ -293,6 +302,7 @@ import { decideChatOrchestration } from '../../../lib/aiFirstChatPolicy';
 import { attachPlanDecisionToRun } from '../../../lib/runChatAutomationPlanObserver';
 import { deriveChatActivityFlags, shapePersistedChatMessage } from '../../../lib/chatMessageShape';
 import type { ChatMessage, ChatMessageSource, ChatBotMessageExtra } from '../../../lib/chatMessageTypes';
+import { buildFailoverBadge, type FailoverBadge } from '../../../lib/transportFailoverBadgeCore';
 import {
   applyOpenSwanMemoryRecommendation,
   getLatestSpiritMemoryReferences,
@@ -978,6 +988,28 @@ function buildMessageRouteChips(message: ChatMessage): ChatMessageRouteChip[] {
   }
 
   return chips.slice(0, 4);
+}
+
+/**
+ * failover-badge: fallback provenance chip ("via Anthropic (OpenRouter 529)")
+ * on the exact bot message a fallback served. Reads the persisted routing
+ * block (routing_fallback round-trips via persistedChatMetadata, so the chip
+ * also appears retroactively on historical fallback turns) and mirrors the
+ * servedBy shape chatLaneOutcome.normalizeStructuredResponse builds.
+ * Deliberately NOT inside buildMessageRouteChips — that fn is gated on
+ * source.showRouteChips, and a provider fallback must never be silent.
+ * NEVER render routing_fallback.reason raw (unbounded edge string):
+ * buildFailoverBadge redacts secrets and clips every emitted string.
+ */
+function failoverBadgeForMessage(message: ChatMessage): FailoverBadge | null {
+  const rf = message.isBot ? message.routing?.routing_fallback : null;
+  if (!rf) return null;
+  return buildFailoverBadge({
+    fallback: true,
+    model: message.routing?.provider_model ?? message.usage?.model ?? null,
+    transport: message.routing?.provider_routed ?? null,
+    fallbackReason: `${rf.provider}: ${rf.reason}`,
+  });
 }
 
 function describeLastTaskModel(messages: ChatMessage[]): string {
@@ -5255,6 +5287,41 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       persistMessage();
     }
 
+    // reference-nav-chips: resolve "open the Acme mission"-style entity
+    // references in the user's message against the circle context snapshot and
+    // patch tappable jump-to chips onto this row (by-id map, so the persisted
+    // `msg` object itself is never mutated). Fire-and-forget + time-boxed
+    // (~1.5s, mirroring circleSnapshotContextInjection) so sending is never
+    // delayed; slash commands skip it (they already route explicitly). Chips
+    // are transient — the persist call above sends explicit fields only.
+    if (!content.trimStart().startsWith('/')) {
+      void (async () => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const [snapshotMod, resolverMod] = await Promise.all([
+            import('../../../lib/circleContextSnapshot'),
+            import('../../../lib/crossSurfaceReferenceResolverCore'),
+          ]);
+          const snapshot = await Promise.race([
+            (async () => snapshotMod.getCircleContextSnapshot(circleId))().catch(() => null),
+            new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), 1500); }),
+          ]);
+          if (!snapshot) return;
+          const { matches } = resolverMod.resolveCrossSurfaceReferences(
+            content,
+            snapshotMod.snapshotReferenceEntities(snapshot),
+            { maxMatches: 3, minConfidence: 'medium', surfaceHint: 'chat' },
+          );
+          if (matches.length === 0) return;
+          setMessages(prev => prev.map(m => (m.id === msg.id ? { ...m, referenceChips: matches } : m)));
+        } catch {
+          // Best-effort: no chips on failure, the send itself is untouched.
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      })();
+    }
+
     syncSessionArchiveMessage(msg);
 
     return msg;
@@ -5354,6 +5421,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       computerFindings: extra?.computerFindings,
       bestOfN: extra?.bestOfN,
       quickReplies: autoQuickReplies,
+      quickRepliesLabel: extra?.quickRepliesLabel,
       crossSurfaceFollowups: crossSurfaceFollowups.length > 0 ? crossSurfaceFollowups : undefined,
       taskPlan: extra?.taskPlan,
       toolEvents: extra?.toolEvents,
@@ -7559,6 +7627,58 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
         })),
         selectedMode: effectiveChatMode,
       });
+      // multi-intent-loop: compound-message notice. The single-intent execution
+      // lanes below (computer task / command handler / build discovery) classify
+      // ONE ask per turn and early-return, silently dropping
+      // the later asks — so when the deterministic segmenter finds 2-3 verb-led
+      // asks, post a local notice with the later asks as "tap to run next"
+      // chips BEFORE lane #1 runs. Excluded on purpose: ask_clarification (the
+      // clarify-resume seam would fold a chip tap into the pending answer) and
+      // run_openswan/run_plain_chat/local_reply/open_modal (the tool-loop agent /
+      // SwanBot sees the full text and handles every ask itself; run_openswan's
+      // only ask-specific branch is a local-desktop short-circuit, otherwise it
+      // falls through to the same full-content handler). Suppressed for clarify-resume re-sends
+      // (resolvingClarificationRef / displayText). The pipeline continues
+      // UNCHANGED with the full message; segment text is already bounded,
+      // control/bidi-stripped, and secret-redacted by chatMultiIntentCore.
+      if (!resolvingClarificationRef.current && !options?.displayText) {
+        const multiAsk = segmentChatIntents(content);
+        const laterAsks = multiAsk.isMultiIntent
+          ? multiAsk.segments.slice(1).map((segment) => segment.text).filter((text) => text.trim().length > 0)
+          : [];
+        const multiAskNoticeLanes: string[] = [
+          'run_computer_task',
+          'run_command_handler',
+          'run_build_discovery',
+        ];
+        if (
+          multiAsk.isMultiIntent
+          && multiAsk.segments.length >= 2
+          && multiAsk.segments.length <= 3
+          && laterAsks.length === multiAsk.segments.length - 1
+          && multiAsk.segments[0].text.trim().length > 0
+          && multiAskNoticeLanes.includes(plan.execution.kind)
+        ) {
+          const firstAsk = multiAsk.segments[0].text.length > 80
+            ? `${multiAsk.segments[0].text.slice(0, 79).trimEnd()}…`
+            : multiAsk.segments[0].text;
+          addBotMessage(
+            `I count ${multiAsk.segments.length} asks in that message — I'm on #1 now: «${firstAsk}». If the run doesn't cover the rest, tap one below to run it next.`,
+            undefined,
+            {
+              localOnly: true,
+              quickReplies: laterAsks,
+              quickRepliesLabel: 'TAP TO RUN NEXT',
+              source: {
+                actor: 'OpenSwan',
+                surface: 'main_chat_multi_intent_notice',
+                selectedModel,
+                effectiveModel: 'deterministic-multi-intent',
+              },
+            },
+          );
+        }
+      }
       if (plan.execution.kind === 'run_computer_task') {
         if (currentAttachments.length === 0 && shouldRunImmediateLocalAppLaunch(content)) {
           const handledLocalAppLaunch = await executeLocalComputerAwarenessRequest(content);
@@ -9654,6 +9774,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   agentSubjectMetadata: selectedAgentSubjectContext.agentSubjectMetadata,
                   chatHistory,
                   sessionArchiveContext: sessionArchiveContext || undefined,
+                  attentionSignals: attentionItemsToSurfacingSignals(chatAttentionItemsRef.current, Date.now()),
                 });
                 // Auto resolution honours the connected marketplace
                 // providers — when OpenRouter is wired, this picks an
@@ -11025,6 +11146,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
 
   const renderContent = (item: ChatMessage) => {
     const routeChips = buildMessageRouteChips(item);
+    const failoverBadge = failoverBadgeForMessage(item);
     const handoffMetadata = item.computerHandoff || null;
     const appChoiceCard = buildChatAppChoiceCard(handoffMetadata);
     const designTaskCard = buildChatDesignTaskCardModel(handoffMetadata);
@@ -11311,8 +11433,38 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             ))}
           </View>
         ) : null}
-        {routeChips.length > 0 ? (
+        {(routeChips.length > 0 || failoverBadge) ? (
           <View style={styles.messageRouteStrip}>
+            {/* failover-badge: never-silent fallback provenance chip — first in
+                the strip; renders even when route chips are hidden. Inline
+                styles only (StyleSheet zone is foreign WIP; delegation badge
+                above is the precedent). */}
+            {failoverBadge ? (
+              <View
+                accessibilityLabel={failoverBadge.detail}
+                style={{
+                  maxWidth: 230,
+                  borderRadius: 999,
+                  borderWidth: 1,
+                  borderColor: failoverBadge.tone === 'warn' ? '#f59e0b40' : '#64748b40',
+                  backgroundColor: failoverBadge.tone === 'warn' ? '#f59e0b15' : '#64748b15',
+                  paddingHorizontal: 8,
+                  paddingVertical: 4,
+                }}
+              >
+                <Text
+                  style={{
+                    color: failoverBadge.tone === 'warn' ? '#f59e0b' : '#64748b',
+                    fontSize: 10,
+                    fontWeight: '800',
+                    fontFamily: 'monospace',
+                  }}
+                  numberOfLines={1}
+                >
+                  {failoverBadge.label}
+                </Text>
+              </View>
+            ) : null}
             {routeChips.map((chip) => (
               <View
                 key={`${chip.label}-${chip.value}`}
@@ -11738,6 +11890,21 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     return curr.timestamp.getTime() - prev.timestamp.getTime() < 300000;
   };
 
+  // Shared tab jump (hoisted from handleFollowupChipPress so the reference
+  // chips below reuse it): web rides the existing uc:switch-tab event;
+  // native falls back to route params.
+  const goTab = (tab: string) => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab } })); } catch {}
+      return;
+    }
+    try {
+      navigation.setParams?.({ tab, _tabTs: Date.now() });
+    } catch {
+      navigation.navigate?.('CircleDetail', { circleId, tab, _tabTs: Date.now() });
+    }
+  };
+
   // followup-chips: dispatch one tapped cross-surface follow-up chip
   // (FollowupChipRow). create_feed_task mirrors /mission create's pending-key
   // + event + tab-switch pattern (missionChatCommands) so FeedTab's already
@@ -11745,17 +11912,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   // Office-surface chips ride the existing uc:switch-tab event; retry seeds
   // the composer with the prior user prompt (onRaceAgain pattern).
   const handleFollowupChipPress = (followup: CrossSurfaceFollowup, item: ChatMessage) => {
-    const goTab = (tab: string) => {
-      if (Platform.OS === 'web' && typeof window !== 'undefined') {
-        try { window.dispatchEvent(new CustomEvent('uc:switch-tab', { detail: { tab } })); } catch {}
-        return;
-      }
-      try {
-        navigation.setParams?.({ tab, _tabTs: Date.now() });
-      } catch {
-        navigation.navigate?.('CircleDetail', { circleId, tab, _tabTs: Date.now() });
-      }
-    };
     switch (followup.kind) {
       case 'create_feed_task': {
         const title = (followup.seedCommand || '').replace(/^\/task new\s*/i, '').trim();
@@ -11796,6 +11952,30 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       }
     }
   };
+
+  // reference-nav-chips: dispatch a tapped jump-to chip on a USER message.
+  // mission/task ride the same localStorage deeplink keys the mention chips
+  // use (consumers: MissionsTab / FeedTab, web only — native lands on the tab
+  // best-effort); run lands on OFFICE only (no run-focus consumer exists —
+  // AgentRunsPanel is 3 UI layers deep, so the chip hint must not promise
+  // "opens the run"); room lands on ROOMS. We hold the typed handle here, so
+  // nothing on this path encodes/decodes the entity-handle string form
+  // (decodeEntityHandle stays consumer-less).
+  const handleReferenceChipPress = (match: SurfaceReferenceMatch) => {
+    const { kind, id, surface } = match.handle;
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      try {
+        if (kind === 'mission') window.localStorage.setItem('uc_pending_mission_deeplink', id);
+        else if (kind === 'task') window.localStorage.setItem('uc_pending_task_deeplink', id);
+      } catch {}
+    }
+    // Tab keys are the UPPERCASE surface names (CircleDetailScreen TABS).
+    goTab((surface || 'chat').toUpperCase());
+  };
+
+  // reference-nav-chips: bounded chip labels ("Open mission: Acme redesign").
+  const clampReferenceChipLabel = (text: string): string =>
+    (text.length > 48 ? `${text.slice(0, 47)}…` : text);
 
   // followup-chips: suppress the retry chip when the message already renders a
   // retry affordance — the recovery-options card or AgentReceiptCard's Retry
@@ -11965,6 +12145,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               <QuickReplyChips
                 replies={item.quickReplies}
                 accentColor={accentColor}
+                label={item.quickRepliesLabel || undefined}
                 onPick={(reply) => { void sendMessage(reply); }}
               />
             ) : null}
@@ -11991,6 +12172,18 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                 accentColor={accentColor}
               />
             ) : null}
+            {item.isBot && !item.isPending ? (
+              /* sources-row: exactly which files/URLs/commits/tools the
+                 answer drew on — derived in-memo from answer text + tool
+                 events (secret-safe in chatSourcesSurfaceCore); display-only.
+                 Covers v1 addBotMessage, v2 updateBotMessage, and reloaded
+                 history (metadata.toolEvents) uniformly. */
+              <ChatSourcesRow
+                content={item.content}
+                toolEvents={item.toolEvents}
+                accentColor={accentColor}
+              />
+            ) : null}
             {item.showRunTrace && item.runId ? (
               <RunTraceCard
                 runId={item.runId}
@@ -12014,6 +12207,26 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             />
           </View>
         )}
+        {item.isUser && item.referenceChips && item.referenceChips.length > 0 ? (
+          /* reference-nav-chips: jump-to chips for entities the user's own
+             message referenced ("open the Acme mission"), resolved fire-and-
+             forget in addUserMessage. Right-aligned so they read as part of
+             the user's row (the paddingLeft:44 stack above is bot-side);
+             transient — gone on reload. */
+          <View style={{ paddingLeft: 44, alignItems: 'flex-end' }}>
+            <FollowupChipRow
+              followups={item.referenceChips.map((match) => ({
+                kind: match.handle.kind,
+                label: clampReferenceChipLabel(`Open ${match.handle.kind}: ${match.title}`),
+                hint: match.matchedText,
+                match,
+              }))}
+              accentColor={accentColor}
+              label="Referenced"
+              onPress={(chip) => handleReferenceChipPress(chip.match)}
+            />
+          </View>
+        ) : null}
       </Animated.View>
     );
   };
@@ -12080,6 +12293,14 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     recoveryRefId: attentionRecoverySource?.id ?? null,
     providerBlockers: attentionProviderBlocker ? [attentionProviderBlocker] : null,
   }, { dismissedIds: dismissedAttentionIds });
+  // Proactive surfacing: expose the CURRENT attention items to sendMessage
+  // (declared far above this derived block) through a ref — read at send
+  // time, so there is no TDZ on the render-scoped const and no stale
+  // closure. Unfiltered items on purpose: pending/expiring approvals are
+  // hidden from the strip rows (banners own them) but the agent should
+  // still open with them.
+  const chatAttentionItemsRef = useRef<ChatAttentionItem[]>([]);
+  chatAttentionItemsRef.current = chatAttention.items;
   const chatAttentionItems = chatAttention.items.filter((item) =>
     // Live pending approvals already render with approve/reject buttons in
     // HitlApprovalBanner directly below the strip; keep them out of the row
@@ -13748,6 +13969,27 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             // granted mid-turn drain when the turn ends.
             queuedApprovalResumesRef.current.push({ id: approval.id, tool: toolName });
             flushQueuedApprovalResumesRef.current();
+          }}
+          onResolvedBatch={(batchApprovals, status) => {
+            // approval-batch: an "Approve all N" card delivers every resolved
+            // row in ONE callback so the whole bundle lands in a SINGLE
+            // combined continuation turn (per-row onResolved calls would
+            // dispatch the flush on the first row and split the batch into
+            // two continuations). Same fail-closed run-ownership gate as
+            // onResolved above: only rows whose run_id this chat surface
+            // originated auto-resume; foreign rows resolve without one.
+            if (status !== 'approved') return;
+            let queued = false;
+            for (const approval of batchApprovals) {
+              const isChatOwnedRun = !!approval.run_id && messages.some((m) => m.runId === approval.run_id);
+              if (!isChatOwnedRun) continue;
+              const approvalPayload = (approval.payload || null) as Record<string, unknown> | null;
+              const payloadTool = approvalPayload?.tool;
+              const toolName = typeof payloadTool === 'string' && payloadTool ? payloadTool : 'the approved action';
+              queuedApprovalResumesRef.current.push({ id: approval.id, tool: toolName });
+              queued = true;
+            }
+            if (queued) flushQueuedApprovalResumesRef.current();
           }}
         />
       ) : null}

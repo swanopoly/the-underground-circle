@@ -91,7 +91,7 @@ export type AppAutomationRecipe = {
   noteBody?: string | null;
 };
 
-export const APPLE_NOTES_CREATE_NOTE_SOURCE_REFS = [
+const APPLE_NOTES_CREATE_NOTE_SOURCE_REFS = [
   'Apple Notes User Guide - Create and edit notes on Mac: https://support.apple.com/guide/notes/create-and-edit-notes-not9474646a9/mac',
   'Apple Mac Automation Scripting Guide: https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/',
   'Apple UI scripting and Accessibility: https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/AutomatetheUserInterface.html',
@@ -112,7 +112,7 @@ function cleanAppleNotesNoteBody(raw: string | undefined): string | null {
   return unwrapped || null;
 }
 
-export function extractAppleNotesNoteBody(task: string): string | null {
+function extractAppleNotesNoteBody(task: string): string | null {
   const text = String(task || '').trim();
   for (const pattern of APPLE_NOTES_NOTE_BODY_PATTERNS) {
     const match = text.match(pattern);

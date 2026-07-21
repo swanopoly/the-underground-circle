@@ -1076,7 +1076,10 @@ async function runTypedCoreToolLoop(args: {
       // the resumable checkpoint the transcript persists is built from
       // toolEvents on cap exhaustion (buildLegacyToolLoopResult), matching
       // what the legacy loop stored and what toolLoopResume reads back.
-      const stage = mapAgentEventToOpenSwanStage(event);
+      // Honest step denominator: share the turn's resolved round cap so run
+      // labels read "step i of N" (+ ' — wrapping up' near/at the cap) instead
+      // of an open-ended counter. Label-only — no loop behavior change.
+      const stage = mapAgentEventToOpenSwanStage(event, { maxRounds });
       if (stage) args.onStage?.(stage.stage, stage.label);
     },
     // T2 progressive disclosure: when tools-first is ON this resolver returns
@@ -1869,6 +1872,11 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   // or DB-side console cancel). Finalization then writes status 'cancelled'
   // (keeping token/cost extras) instead of overwriting the row as 'completed'.
   let turnCancelled = false;
+  // Honest partial: true when the tool loop hit its per-turn step cap before a
+  // final answer. The Feed proof publication then carries stopReason
+  // 'max_iterations' — a failure-family stop — so a capped turn can never be
+  // published as a clean completion.
+  let turnIncomplete = false;
   // Proof-of-work receipt from the typed tool loop (files edited / checks /
   // commit) — surfaced on the turn result so chat can render an honest
   // receipt line instead of burying it in agent_run_events.
@@ -2026,6 +2034,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       // Honest STOP: a user-cancelled loop must finalize the run as
       // 'cancelled', never 'completed'. (Legacy loop never sets this flag.)
       turnCancelled = toolLoopResult.cancelled === true;
+      turnIncomplete = toolLoopResult.incomplete === true;
       turnVerificationReceipt = toolLoopResult.verificationReceipt || null;
 
       const designManifestLedgerActions = buildDesignAppRuntimeManifestLedgerActions({
@@ -2420,6 +2429,105 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         await updateRunStatus(run.id, 'cancelled', finalRunExtras);
       } else {
         await completeRunUnlessCancelled(run.id, finalRunExtras);
+      }
+      // Accountability (proof-of-work): a chat/room OpenSwan turn that actually
+      // mutated something — edited files, a git commit, canonical github refs,
+      // or produced artifacts — becomes visible to the team Feed as a durable
+      // proof_of_work row plus a realtime agent_activity row. The gate lives in
+      // decideOpenSwanTurnProofPublication: cancelled turns publish nothing,
+      // feed_task runs are excluded (the Kanban completion path in
+      // useKanbanData.runAgentOnTask already publishes its richer proof — this
+      // guard prevents a double-post), and read-only Q&A turns stay quiet.
+      // Mirrors the Kanban block: fire-and-forget / non-fatal — a publish
+      // failure never affects run finalization. Payloads stay bounded and
+      // secret-safe via the publisher core's caps (headline ≤120, ≤8 bullets,
+      // body ≤700, basenames only, masked tokens, github.com-scoped URLs).
+      {
+        const publishRunId = run.id;
+        const publishCircleId = opts.context.circleId;
+        const publishStartedAt = run.started_at || run.created_at || null;
+        void (async () => {
+          try {
+            const {
+              buildRunProofPublication,
+              decideOpenSwanTurnProofPublication,
+              mapRuntimeToolActionsToProofEvents,
+            } = await import('./agentRunProofPublisherCore');
+            const proofEvents = mapRuntimeToolActionsToProofEvents(runtimeToolActions);
+            const gateInput = {
+              runSurface,
+              cancelled: turnCancelled,
+              incomplete: turnIncomplete,
+              receipt: turnVerificationReceipt,
+              toolEvents: proofEvents,
+              artifactCount: (structured.artifacts || []).length,
+            };
+            // stopReason depends only on cancelled/incomplete — take it from a
+            // pre-pass so the proof card carries the honest stop family, then
+            // re-gate publish once the git references are known.
+            const preDecision = decideOpenSwanTurnProofPublication({ ...gateInput, gitRefCount: 0 });
+            const nowMs = Date.now();
+            const startedMs = publishStartedAt ? Date.parse(publishStartedAt) : NaN;
+            const pub = buildRunProofPublication({
+              runId: publishRunId,
+              taskId: opts.taskId,
+              toolsUsed: proofEvents,
+              toolEvents: proofEvents,
+              filesTouched: turnVerificationReceipt?.editedFiles,
+              verification: verificationResults,
+              stopReason: preDecision.stopReason,
+              durationMs: Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : undefined,
+              outputSummary: structured.response?.slice(0, 240),
+              deliverable: structured.response,
+              nowMs,
+            });
+            // Publication gate: count git references from REAL TOOL OUTPUT
+            // only (git.run commit/push output → proofEvents[].result), NEVER
+            // from pub.gitReferences — which ALSO scans the untrusted model
+            // `deliverable` prose, so a chat turn that merely NAMES a PR ("what
+            // changed in PR #128?") or quotes a github.com URL would otherwise
+            // trip a false task_completed proof. Real mutations still publish
+            // via edited-files / committed / artifacts; a genuine commit/push
+            // still publishes because its output flows through proofEvents.
+            // pub.gitReferences (deliverable + tool) stays the display-only
+            // "Linked:" label on turns that legitimately published.
+            const { extractGitReferences } = await import('./taskPRLinkageCore');
+            const toolGitRefs = extractGitReferences({ toolEvents: proofEvents });
+            const decision = decideOpenSwanTurnProofPublication({
+              ...gateInput,
+              gitRefCount: toolGitRefs.length,
+            });
+            if (!decision.publish) return;
+            const { addProofOfWork } = await import('./missions');
+            const { logActivity } = await import('../services/agentActivityLogger');
+            await addProofOfWork({
+              circle_id: publishCircleId,
+              user_id: opts.context.userId || undefined,
+              agent_name: runtimeSubject.displayName,
+              pow_type: (pub.proofRow as any).pow_type,
+              title: String((pub.proofRow as any).title || 'OpenSwan run'),
+              detail: {
+                ...pub.proofRow,
+                ...(turnVerificationReceipt ? { receipt_verdict: turnVerificationReceipt.verdict } : {}),
+                surface: runSurface,
+              },
+            });
+            // A failed coding receipt never tallies a 'task_completed' activity;
+            // honest failures ('task_failed') always ride the realtime Feed.
+            if (
+              (pub.activityRow as any).activity_type === 'task_failed'
+              || !decision.suppressCompletedActivity
+            ) {
+              await logActivity({
+                circle_id: publishCircleId,
+                agent_name: runtimeSubject.displayName,
+                ...(pub.activityRow as any),
+              });
+            }
+          } catch (e) {
+            console.warn('[OpenSwanRuntime] proof-of-work publish failed (non-fatal):', e);
+          }
+        })();
       }
       if (turnCancelled) {
         transcript = (await appendTranscriptEvent(transcriptKey, {

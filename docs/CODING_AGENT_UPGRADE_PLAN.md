@@ -112,7 +112,10 @@ and every mutating tool stays approval-gated.
   `parts[]` (head+tail preserved). Parity nets updated: dispatcher-parity
   parser recognizes the new prefixes, readiness pins re-set to 79 total / 54
   client-delegated (docs re-pinned). PENDING: `supabase functions deploy
-  swanbot-v2-ai` to make it live.
+  swanbot-v2-ai` to make it live. That same deploy also ships the pre-turn
+  context compaction mirror (2026-07-21: `_shared/context-compaction.ts`
+  wired into `runLoop`, `context_compaction_tier` run events; lockstep smoke
+  `scripts/edge-context-compaction-smoketest.ts`) — inert until deployed.
 - **P4 — Codebase index + semantic search + `@file` mentions.** ✅ DONE + WIRED
   (2026-07-13). Pure cores: `src/lib/codebaseIndexCore.ts` (smoke
   `codebase-index-core`, 78), `src/lib/codebaseSymbolCore.ts` (symbol/summary
