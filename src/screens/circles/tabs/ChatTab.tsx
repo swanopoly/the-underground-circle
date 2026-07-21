@@ -381,6 +381,7 @@ import { executeComputerTaskWithAgent, refreshComputerTaskCapabilityBuildoutFrom
 import { executeDirectImageConversionRequest } from '../../../lib/directImageConversionRuntime';
 import { executeDirectLocalFileRequest, routeHasDirectLocalFileActionItems } from '../../../lib/directLocalFileRuntime';
 import { listApiKeys } from '../../../lib/llmProviders';
+import { filterDynamicModels } from '../../../lib/modelCatalogFilterCore';
 import {
   buildImplicitBusinessModelProfiles,
   loadCircleBusinessModelProfiles,
@@ -15657,7 +15658,9 @@ function EnhancedInput({
         if (error) throw error;
         const rankedModels = Array.isArray((data as any)?.models) ? (data as any).models : [];
         if (!cancelled && rankedModels.length > 0) {
-          setPopularModels(rankedModels.map(popularRankingToChatModel));
+          // Filter the live popularity feed through the shared banned-vendor
+          // gate so Grok/xAI can never surface here even when it trends.
+          setPopularModels(filterDynamicModels(rankedModels.map(popularRankingToChatModel)));
         }
       })
       .catch((error) => {

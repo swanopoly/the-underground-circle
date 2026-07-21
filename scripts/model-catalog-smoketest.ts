@@ -21,6 +21,7 @@ const llmProvidersSource = readFileSync(join(root, 'src/lib/llmProviders.ts'), '
 const modelCapabilitiesSource = readFileSync(join(root, 'src/lib/modelCapabilities.ts'), 'utf8');
 const serviceProfileSoulsSource = readFileSync(join(root, 'src/lib/serviceProfileSouls.ts'), 'utf8');
 const chatTabSource = readFileSync(join(root, 'src/screens/circles/tabs/ChatTab.tsx'), 'utf8');
+const modelProviderRegistrySource = readFileSync(join(root, 'src/lib/integrations/modelProviderRegistry.ts'), 'utf8');
 
 function fail(message: string, detail?: unknown) {
   failures += 1;
@@ -291,6 +292,34 @@ function main() {
     return GROK_XAI_PATTERNS.some((p) => segments.includes(p) || bare === p || bare.startsWith(`${p}-`));
   });
   assert(grokHits.length === 0, 'No Grok / xAI model ids in picker catalogs (project decision: no Grok / no xAI)', grokHits);
+
+  // ── Drift guard: the DYNAMIC feeds are Grok-safe too ───────────────────────
+  // The picker also merges dynamic sources (the static OpenRouter fallback
+  // shortlist + the live OpenRouter fetch in modelProviderRegistry). Those
+  // used to bypass the hardcoded-allowlist scan above, so a static
+  // `openrouter/x-ai/grok-2` fallback (and `x-ai` in the family-rank list)
+  // slipped banned vendors into chat. Assert the static shortlist is clean and
+  // that the live feed is routed through the shared filter.
+  const registryStaticIds = (modelProviderRegistrySource.match(/id:\s*'([^']+)'/g) || [])
+    .map((entry) => entry.match(/'([^']+)'/)?.[1])
+    .filter(Boolean) as string[];
+  const registryGrokHits = registryStaticIds.filter((id) => {
+    const segments = id.toLowerCase().split('/');
+    return GROK_XAI_PATTERNS.some((p) => segments.includes(p));
+  });
+  assert(registryGrokHits.length === 0, 'modelProviderRegistry static OpenRouter shortlist has no Grok / xAI', registryGrokHits);
+  assert(
+    /filterDynamicModels\s*\(/.test(modelProviderRegistrySource),
+    'modelProviderRegistry routes its live OpenRouter feed through filterDynamicModels (banned vendors filtered by construction)',
+  );
+  assert(
+    !/'x-ai'/.test(modelProviderRegistrySource.match(/const OR_PRIMARY_FAMILIES[^;]*/)?.[0] || ''),
+    "modelProviderRegistry OR_PRIMARY_FAMILIES no longer lists 'x-ai'",
+  );
+  assert(
+    /filterDynamicModels\s*\(/.test(chatTabSource),
+    'ChatTab routes its OpenRouter popularity feed through filterDynamicModels',
+  );
 
   if (failures > 0) {
     console.error(`\n${failures} model-catalog smoke-test failure(s)`);

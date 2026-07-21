@@ -13,6 +13,7 @@
 import { listCircleIntegrations, type CircleIntegrationProvider } from '../circleIntegrations';
 import { listApiKeys, PROVIDER_MODELS, type LLMProvider } from '../llmProviders';
 import { getModelsByProvider, refreshModelRegistry, type RegisteredModel } from '../modelRegistry';
+import { filterDynamicModels } from '../modelCatalogFilterCore';
 
 export interface ModelOption {
   /** Identifier passed all the way to the edge function. */
@@ -74,7 +75,6 @@ const OPENROUTER_MODELS: Omit<ModelOption, 'ready'>[] = [
   { id: 'openrouter/google/gemini-2.5-flash', label: 'Gemini 2.5 Flash', provider: 'openrouter', description: 'Fast, cheap' },
   { id: 'openrouter/meta-llama/llama-3.3-70b-instruct', label: 'Llama 3.3 70B', provider: 'openrouter', description: 'OSS frontier' },
   { id: 'openrouter/qwen/qwen-2.5-72b-instruct', label: 'Qwen 2.5 72B', provider: 'openrouter', description: 'OSS frontier' },
-  { id: 'openrouter/x-ai/grok-2', label: 'Grok 2', provider: 'openrouter', description: 'xAI' },
   { id: 'openrouter/deepseek/deepseek-r1', label: 'DeepSeek R1', provider: 'openrouter', description: 'Reasoning OSS' },
 ];
 
@@ -84,7 +84,11 @@ const OPENROUTER_MODELS: Omit<ModelOption, 'ready'>[] = [
 let _openRouterCatalogCache: { fetchedAt: number; models: Omit<ModelOption, 'ready'>[] } | null = null;
 const OPENROUTER_CATALOG_TTL_MS = 5 * 60_000;
 
-const OR_PRIMARY_FAMILIES = ['anthropic', 'openai', 'google', 'meta-llama', 'qwen', 'mistralai', 'deepseek', 'x-ai'];
+// Vendor families to surface first in the picker. Deliberately excludes
+// 'x-ai' (house invariant: NO Grok / xAI) — and the live feed is also passed
+// through filterDynamicModels below so a banned vendor can never slip in even
+// if it appears in the raw OpenRouter list.
+const OR_PRIMARY_FAMILIES = ['anthropic', 'openai', 'google', 'moonshotai', 'meta-llama', 'qwen', 'mistralai', 'deepseek', 'z-ai', 'minimax'];
 const DIRECT_PROVIDER_REFRESH_TTL_MS = 60 * 60_000;
 const _lastDirectProviderRefresh: Partial<Record<LLMProvider, number>> = {};
 
@@ -118,7 +122,12 @@ async function loadLiveOpenRouterCatalog(): Promise<Omit<ModelOption, 'ready'>[]
       return idx >= 0 ? idx : 999;
     };
 
-    const sorted = [...json.data].sort((a, b) => {
+    // Drop banned vendors (Grok/xAI) from the live firehose before ranking —
+    // the single-source gate that also guards the deploy path and the
+    // popularity feed, so no dynamic source can reintroduce a banned model.
+    const allowedRows = filterDynamicModels(json.data);
+
+    const sorted = [...allowedRows].sort((a, b) => {
       const ra = familyRank(a.id);
       const rb = familyRank(b.id);
       if (ra !== rb) return ra - rb;
