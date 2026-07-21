@@ -100,7 +100,7 @@ const PROVIDER_PREFIX_HEADS = new Set<string>([
   'openswan',
   // Vendor/org heads seen inside OpenRouter/HF-style ids.
   'meta-llama', 'deepseek-ai', 'qwen', 'black-forest-labs', 'stabilityai',
-  'moonshotai', 'x-ai',
+  'moonshotai', 'x-ai', 'z-ai', 'minimaxai',
 ]);
 
 /**
@@ -265,6 +265,14 @@ const MODEL_CAPABILITY_FLAGS: Record<string, ModelCapabilityFlags> = {
   'deepseek-v3.2': STRONG_CODER_TOOL_FLAGS,
   'deepseek-r1':   flagSet({ codingTier: 'strong' }),
 
+  // Moonshot Kimi — K3 is a 1M-context multimodal reasoning flagship (tool +
+  // vision + strong coding); K2.7 Code is a strong coder; K2.6 is general
+  // tool-capable chat. The `^kimi` family fallback below keeps any future
+  // Kimi variant tool-capable rather than fail-closed to text-only.
+  'kimi-k3':          STRONG_CODER_VISION_FLAGS,
+  'kimi-k2.7-code':   STRONG_CODER_TOOL_FLAGS,
+  'kimi-k2.6':        TOOL_CHAT_FLAGS,
+
   // Mistral / Qwen / Llama (Groq-hosted etc.)
   'mistral-large-3':  TOOL_CHAT_FLAGS,
   'qwen-3.5-coder':   STRONG_CODER_TOOL_FLAGS,
@@ -294,6 +302,9 @@ const FAMILY_FLAG_PATTERNS: Array<{ pattern: RegExp; flags: ModelCapabilityFlags
   { pattern: /^llama-4/,                         flags: TOOL_VISION_FLAGS },
   { pattern: /^llama-3/,                         flags: TOOL_CHAT_FLAGS },
   { pattern: /^qwen/,                            flags: TOOL_CHAT_FLAGS },
+  { pattern: /^kimi/,                            flags: TOOL_VISION_FLAGS },
+  { pattern: /^glm-/,                            flags: TOOL_CHAT_FLAGS },
+  { pattern: /^minimax-/,                        flags: TOOL_CHAT_FLAGS },
   { pattern: /^sonar\b/,                         flags: SONAR_FLAGS },
 ];
 

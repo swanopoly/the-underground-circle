@@ -95,6 +95,27 @@ export const MODEL_PRICING: Record<string, ModelRate> = {
   'sonar-pro':           { inPer1M: 3,   outPer1M: 15,   cachedInPer1M: 0.3,  label: 'Sonar Pro'           },
   'sonar-reasoning-pro': { inPer1M: 2,   outPer1M: 8,    cachedInPer1M: 0.2,  label: 'Sonar Reasoning Pro' },
   'sonar-deep-research': { inPer1M: 2,   outPer1M: 8,    cachedInPer1M: 0.2,  label: 'Sonar Deep Research' },
+  // ── Moonshot Kimi ─────────────────────────────────────────────────────────
+  // Published (openrouter.ai/api/v1/models) + 25% buffer. The bare `kimi`
+  // family key gives any FUTURE Kimi variant a sane rate instead of the
+  // Unknown-Model default — part of keeping the catalog auto-fresh.
+  'kimi-k3':          { inPer1M: 3.75,  outPer1M: 18.75, cachedInPer1M: 0.375, label: 'Kimi K3'          },
+  'kimi-k2-7-code':   { inPer1M: 1.025, outPer1M: 4.6875,cachedInPer1M: 0.1025,label: 'Kimi K2.7 Code'   },
+  'kimi-k2-6':        { inPer1M: 0.855, outPer1M: 4.275, cachedInPer1M: 0.0855,label: 'Kimi K2.6'        },
+  'kimi':             { inPer1M: 0.855, outPer1M: 4.275, cachedInPer1M: 0.0855,label: 'Kimi'             },
+  // ── DeepSeek ──────────────────────────────────────────────────────────────
+  'deepseek-v4-pro':  { inPer1M: 0.544, outPer1M: 1.088, cachedInPer1M: 0.054, label: 'DeepSeek V4 Pro'   },
+  'deepseek-v4-flash':{ inPer1M: 0.118, outPer1M: 0.235, cachedInPer1M: 0.012, label: 'DeepSeek V4 Flash' },
+  'deepseek':         { inPer1M: 0.34,  outPer1M: 1.375, cachedInPer1M: 0.034, label: 'DeepSeek'          },
+  // ── Z.ai GLM ──────────────────────────────────────────────────────────────
+  'glm-5-2':          { inPer1M: 0.98,  outPer1M: 3.08,  cachedInPer1M: 0.098, label: 'GLM-5.2'          },
+  'glm':              { inPer1M: 0.75,  outPer1M: 2.50,  cachedInPer1M: 0.075, label: 'GLM'              },
+  // ── MiniMax ───────────────────────────────────────────────────────────────
+  'minimax-m3':       { inPer1M: 0.375, outPer1M: 1.50,  cachedInPer1M: 0.0375,label: 'MiniMax M3'       },
+  'minimax':          { inPer1M: 0.375, outPer1M: 1.50,  cachedInPer1M: 0.0375,label: 'MiniMax'          },
+  // ── Qwen ──────────────────────────────────────────────────────────────────
+  'qwen3-7-max':      { inPer1M: 1.844, outPer1M: 5.531, cachedInPer1M: 0.184, label: 'Qwen3.7 Max'      },
+  'qwen':             { inPer1M: 0.40,  outPer1M: 1.60,  cachedInPer1M: 0.04,  label: 'Qwen'             },
   // ── Default fallback ──────────────────────────────────────────────────────
   'default':          { inPer1M: 4,     outPer1M: 20,    cachedInPer1M: 0.4,   label: 'Unknown Model'    },
 };
