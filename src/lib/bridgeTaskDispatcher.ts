@@ -23,7 +23,12 @@ function envFlag(name: string): boolean {
     || String(process.env[name] || '').trim() === '1';
 }
 
-function isClaudeCodeBillingAllowed(): boolean {
+/**
+ * Whether Claude Code bridge launch/terminal-send dispatch is allowed to incur
+ * Anthropic charges. Exported so UI surfaces (ConnectAllBridgesPanel) can show
+ * the gate state up front instead of only at dispatch-failure time.
+ */
+export function isClaudeCodeBillingAllowed(): boolean {
   return envFlag('EXPO_PUBLIC_ALLOW_CLAUDE_CODE_BILLING')
     || envFlag('EXPO_PUBLIC_ALLOW_CLAUDE_BRIDGE_BILLING');
 }
