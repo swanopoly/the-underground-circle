@@ -74,10 +74,12 @@ export type {
 import {
   validateIllustratorDocumentStatusParams,
   validateIllustratorExportProofParams,
+  validateIllustratorVectorizeParams,
   type IllustratorExportProofFormat,
+  type IllustratorTracingMode,
 } from './illustratorExtendScriptAdapters';
 
-export type { IllustratorExportProofFormat } from './illustratorExtendScriptAdapters';
+export type { IllustratorExportProofFormat, IllustratorTracingMode } from './illustratorExtendScriptAdapters';
 
 export type { DesktopBridgeError, DesktopResult, DesktopHealth } from './desktopBridgeProtocol';
 
@@ -4138,6 +4140,96 @@ export async function illustratorExportProof(args: {
       sizeBytes: toNumber(d?.sizeBytes),
       docModified: d?.docModified === true,
       docSaved: d?.docSaved === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type IllustratorVectorizeResult = {
+  appName: string | null;
+  appRunning: boolean;
+  /** Raster actually traced (provided, or read from the front document). */
+  sourceImagePath: string | null;
+  /** 'provided' | 'active_document_placed' — where the raster came from. */
+  sourceKind: string | null;
+  outputPath: string;
+  outputFileName: string | null;
+  mode: string;
+  maxColors: number;
+  threshold: number;
+  ignoreWhite: boolean;
+  pathCount: number;
+  fileExists: boolean;
+  sizeBytes: number;
+  error: string | null;
+};
+
+/**
+ * Vectorize a raster image (Image Trace → expand → SVG) to a NEW .svg file.
+ * Mutating (writes outputPath) — approval-gated like other local file writes.
+ * The trace runs in a throwaway document Illustrator creates and closes without
+ * saving, so the user's OPEN document is never touched. Omit imagePath to trace
+ * the front document's first placed/linked image.
+ */
+export async function illustratorVectorize(args: {
+  appName?: string;
+  imagePath?: string | null;
+  outputPath: string;
+  mode?: IllustratorTracingMode;
+  maxColors?: number;
+  threshold?: number;
+  ignoreWhite?: boolean;
+  preset?: string;
+  expectedDocumentName?: string | null;
+}): Promise<DesktopResult<IllustratorVectorizeResult>> {
+  const validated = validateIllustratorVectorizeParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const outputPathResult = validateDesktopPath(params.outputPath);
+  if (!outputPathResult.ok) return { ok: false, error: outputPathResult.error, errorCode: 'invalid_input' };
+  const grantRoots = [outputPathResult.path];
+  let imagePathResolved: string | null = null;
+  if (params.imagePath) {
+    const imagePathResult = validateDesktopPath(params.imagePath);
+    if (!imagePathResult.ok) return { ok: false, error: imagePathResult.error, errorCode: 'invalid_input' };
+    imagePathResolved = imagePathResult.path;
+    grantRoots.push(imagePathResult.path);
+  }
+  // One write-scoped grant covers the output (.svg write) and the input image
+  // (server-side, write scope satisfies the image read check) — same posture as
+  // compileCadCode/designExport, which pass both paths under one write grant.
+  const grantHeaders = await ensureLocalFileGrantHeaders(grantRoots, 'write', `Vectorize image to ${outputPathResult.path}`);
+  if (!grantHeaders.ok || !grantHeaders.data) return localFileGrantFailure<IllustratorVectorizeResult>(grantHeaders);
+  const r = await callBridge('POST', '/desktop/illustrator_vectorize', {
+    appName: params.appName,
+    imagePath: imagePathResolved || undefined,
+    outputPath: outputPathResult.path,
+    mode: params.mode,
+    maxColors: params.maxColors,
+    threshold: params.threshold,
+    ignoreWhite: params.ignoreWhite,
+  }, { headers: grantHeaders.data });
+  if (!r.ok) return r as DesktopResult<IllustratorVectorizeResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      sourceImagePath: d?.sourceImagePath ? String(d.sourceImagePath) : (imagePathResolved || null),
+      sourceKind: d?.sourceKind ? String(d.sourceKind) : null,
+      outputPath: d?.outputPath ? String(d.outputPath) : outputPathResult.path,
+      outputFileName: d?.outputFileName ? String(d.outputFileName) : null,
+      mode: d?.mode ? String(d.mode) : params.mode,
+      maxColors: toNumber(d?.maxColors),
+      threshold: toNumber(d?.threshold),
+      ignoreWhite: d?.ignoreWhite === true,
+      pathCount: toNumber(d?.pathCount),
+      fileExists: d?.fileExists === true,
+      sizeBytes: toNumber(d?.sizeBytes),
       error: d?.error ? String(d.error) : null,
     },
   };

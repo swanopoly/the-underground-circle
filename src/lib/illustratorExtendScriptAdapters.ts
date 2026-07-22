@@ -567,6 +567,329 @@ ${illustratorExportProofJsxBody({
   return { jsx, errors: [] };
 }
 
+// ─── 3) Vectorize (Image Trace → expand → SVG in a throwaway document) ───────
+//
+// Turns a raster image into true vector paths and writes an .svg. To honor the
+// never-touch-the-source contract, the trace happens in a FRESH document the
+// script creates and then closes WITHOUT saving — the user's open document is
+// never modified. Two input modes cover the chat asks:
+//   - imagePath given  → trace that file ("pull an image first, then vectorize")
+//   - imagePath omitted → read the front document's FIRST placed image's linked
+//                         file path (read-only) and trace a fresh copy of it
+//                         ("vectorize the image I already have up"). An embedded
+//                         image with no source file fails closed (honest).
+
+export const ILLUSTRATOR_TRACING_MODES = ['color', 'gray', 'blackwhite'] as const;
+export type IllustratorTracingMode = (typeof ILLUSTRATOR_TRACING_MODES)[number];
+
+export const ILLUSTRATOR_MIN_TRACE_COLORS = 2;
+export const ILLUSTRATOR_MAX_TRACE_COLORS = 256;
+export const ILLUSTRATOR_DEFAULT_TRACE_COLORS = 6;
+export const ILLUSTRATOR_MIN_TRACE_THRESHOLD = 0;
+export const ILLUSTRATOR_MAX_TRACE_THRESHOLD = 255;
+export const ILLUSTRATOR_DEFAULT_TRACE_THRESHOLD = 128;
+
+/** Raster extensions Illustrator can place + trace. */
+export const ILLUSTRATOR_TRACE_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'tif', 'tiff', 'bmp', 'psd', 'webp'] as const;
+
+/**
+ * Friendly presets the user names in chat, resolved DETERMINISTICALLY to a
+ * tracing mode + params. We set tracingMode/maxColors/threshold explicitly
+ * rather than call tracingOptions.loadFromPreset, which is unreliable and
+ * version-dependent (LOCKSTEP(scripts/claude-bridge.js): same table).
+ */
+export const ILLUSTRATOR_TRACE_PRESETS: Record<string, { mode: IllustratorTracingMode; maxColors?: number; threshold?: number }> = {
+  'black-and-white-logo': { mode: 'blackwhite', threshold: 128 },
+  'bw-logo':              { mode: 'blackwhite', threshold: 128 },
+  'silhouettes':          { mode: 'blackwhite', threshold: 200 },
+  'grayscale':            { mode: 'gray', maxColors: 50 },
+  '3-colors':             { mode: 'color', maxColors: 3 },
+  '6-colors':             { mode: 'color', maxColors: 6 },
+  '16-colors':            { mode: 'color', maxColors: 16 },
+};
+
+/** ExtendScript enum literal for a tracing mode (resolved at build time). */
+function tracingModeEnumLiteral(mode: IllustratorTracingMode): string {
+  if (mode === 'blackwhite') return 'TracingModeType.TRACINGMODEBLACKANDWHITE';
+  if (mode === 'gray') return 'TracingModeType.TRACINGMODEGRAY';
+  return 'TracingModeType.TRACINGMODECOLOR';
+}
+
+/** Validate the optional input image path: same shell/control-char/length
+ *  safety as the output path, but the extension must be a placeable raster. */
+export function validateIllustratorTraceImagePathParam(raw: unknown): IllustratorParamCheck<string> {
+  if (typeof raw !== 'string') return { ok: false, error: 'imagePath must be a string' };
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: false, error: 'imagePath is empty' };
+  if (trimmed.length > 1024) return { ok: false, error: 'imagePath exceeds 1024 chars' };
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\u2028\u2029]/.test(trimmed)) return { ok: false, error: 'imagePath contains control characters' };
+  if (/[`$;|&><\n]/.test(trimmed)) return { ok: false, error: 'imagePath contains shell metacharacter' };
+  const ext = extensionOf(trimmed);
+  if (!(ILLUSTRATOR_TRACE_IMAGE_EXTENSIONS as readonly string[]).includes(ext)) {
+    return { ok: false, error: `imagePath must be a raster image (${ILLUSTRATOR_TRACE_IMAGE_EXTENSIONS.join(', ')}).` };
+  }
+  return { ok: true, value: trimmed };
+}
+
+function normalizeIllustratorTracingMode(value: unknown): IllustratorParamCheck<IllustratorTracingMode | null> {
+  if (value === undefined || value === null || value === '') return { ok: true, value: null };
+  const mode = String(value).trim().toLowerCase();
+  if (!(ILLUSTRATOR_TRACING_MODES as readonly string[]).includes(mode)) {
+    return { ok: false, error: `mode must be one of: ${ILLUSTRATOR_TRACING_MODES.join(', ')}.` };
+  }
+  return { ok: true, value: mode as IllustratorTracingMode };
+}
+
+function normalizeTraceIntInRange(value: unknown, min: number, max: number, label: string): IllustratorParamCheck<number | null> {
+  if (value === undefined || value === null) return { ok: true, value: null };
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < min || value > max) {
+    return { ok: false, error: `${label} must be a finite integer between ${min} and ${max}.` };
+  }
+  return { ok: true, value };
+}
+
+export type IllustratorVectorizeParams = {
+  appName?: string;
+  /** Raster to vectorize. Omit to trace the front document's placed image. */
+  imagePath?: string | null;
+  /** Output path; must end in .svg. */
+  outputPath: string;
+  /** color | gray | blackwhite. Defaults to color (or the preset's mode). */
+  mode?: IllustratorTracingMode | string | null;
+  /** color/gray only, 2..256. Defaults to 6 (or the preset's colors). */
+  maxColors?: number | null;
+  /** blackwhite only, 0..255. Defaults to 128 (or the preset's threshold). */
+  threshold?: number | null;
+  /** Best-effort white-background removal (unreliable on Illustrator 2024+). */
+  ignoreWhite?: boolean | null;
+  /** Friendly preset name; resolves to mode + params. See ILLUSTRATOR_TRACE_PRESETS. */
+  preset?: string | null;
+};
+
+export type NormalizedIllustratorVectorizeParams = {
+  appName: string;
+  imagePath: string | null;
+  outputPath: string;
+  mode: IllustratorTracingMode;
+  maxColors: number;
+  threshold: number;
+  ignoreWhite: boolean;
+};
+
+export function validateIllustratorVectorizeParams(
+  params: IllustratorVectorizeParams,
+): { ok: true; params: NormalizedIllustratorVectorizeParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizeIllustratorBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+
+  // imagePath is optional (null = use the front document's placed image).
+  let imagePath: string | null = null;
+  if (params?.imagePath != null && String(params.imagePath).trim() !== '') {
+    const checked = validateIllustratorTraceImagePathParam(params.imagePath);
+    if (!checked.ok) errors.push(checked.error);
+    else imagePath = checked.value;
+  }
+
+  const outputPath = validateIllustratorOutputPathParam(params?.outputPath);
+  if (!outputPath.ok) errors.push(outputPath.error);
+  else if (extensionOf(outputPath.value) !== 'svg') {
+    errors.push('vectorize outputPath must end in .svg (Image Trace produces vector paths).');
+  }
+
+  // Resolve preset first; explicit mode/maxColors/threshold override it.
+  let presetMode: IllustratorTracingMode | null = null;
+  let presetMaxColors: number | null = null;
+  let presetThreshold: number | null = null;
+  if (params?.preset != null && String(params.preset).trim() !== '') {
+    const key = String(params.preset).trim().toLowerCase();
+    const preset = ILLUSTRATOR_TRACE_PRESETS[key];
+    if (!preset) {
+      errors.push(`preset must be one of: ${Object.keys(ILLUSTRATOR_TRACE_PRESETS).join(', ')}.`);
+    } else {
+      presetMode = preset.mode;
+      presetMaxColors = preset.maxColors ?? null;
+      presetThreshold = preset.threshold ?? null;
+    }
+  }
+
+  const modeCheck = normalizeIllustratorTracingMode(params?.mode);
+  if (!modeCheck.ok) errors.push(modeCheck.error);
+  const maxColorsCheck = normalizeTraceIntInRange(params?.maxColors, ILLUSTRATOR_MIN_TRACE_COLORS, ILLUSTRATOR_MAX_TRACE_COLORS, 'maxColors');
+  if (!maxColorsCheck.ok) errors.push(maxColorsCheck.error);
+  const thresholdCheck = normalizeTraceIntInRange(params?.threshold, ILLUSTRATOR_MIN_TRACE_THRESHOLD, ILLUSTRATOR_MAX_TRACE_THRESHOLD, 'threshold');
+  if (!thresholdCheck.ok) errors.push(thresholdCheck.error);
+
+  if (errors.length > 0) return { ok: false, errors };
+
+  const mode: IllustratorTracingMode = (modeCheck.ok && modeCheck.value) || presetMode || 'color';
+  const maxColors = (maxColorsCheck.ok ? maxColorsCheck.value : null)
+    ?? presetMaxColors
+    ?? ILLUSTRATOR_DEFAULT_TRACE_COLORS;
+  const threshold = (thresholdCheck.ok ? thresholdCheck.value : null)
+    ?? presetThreshold
+    ?? ILLUSTRATOR_DEFAULT_TRACE_THRESHOLD;
+
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Illustrator',
+      imagePath,
+      outputPath: outputPath.ok ? outputPath.value : '',
+      mode,
+      maxColors,
+      threshold,
+      ignoreWhite: params?.ignoreWhite === true,
+    },
+  };
+}
+
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): illustratorVectorizeJsxBody — keep this
+ * JSX body byte-identical with the bridge duplicate. It creates its OWN
+ * document, places + traces the image, expands to vectors, exports SVG, and
+ * closes ITS document without saving. It never saves, exports from, or closes
+ * the user's open (source) document — the only doc it closes is the one it
+ * created via app.documents.add().
+ */
+function illustratorVectorizeJsxBody(
+  { imagePath, outputPath, mode, maxColors, threshold, ignoreWhite }:
+  { imagePath: string | null; outputPath: string; mode: IllustratorTracingMode; maxColors: number; threshold: number; ignoreWhite: boolean },
+): string {
+  const imagePathLiteral = imagePath == null ? 'null' : jsxLiteral(String(imagePath));
+  const modeLiteral = tracingModeEnumLiteral(mode);
+  return `
+  var imagePath = ${imagePathLiteral};
+  var outputPath = ${jsxLiteral(String(outputPath ?? ''))};
+
+  function stringifyVectorizeResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"sourceImagePath\\":" + jsonNullableString(value.sourceImagePath),
+      "\\"sourceKind\\":" + jsonNullableString(value.sourceKind),
+      "\\"outputFileName\\":" + jsonNullableString(value.outputFileName),
+      "\\"mode\\":" + jsonString(value.mode),
+      "\\"maxColors\\":" + jsonNumber(value.maxColors),
+      "\\"threshold\\":" + jsonNumber(value.threshold),
+      "\\"ignoreWhite\\":" + jsonBoolean(value.ignoreWhite),
+      "\\"pathCount\\":" + jsonNumber(value.pathCount),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  function firstPlacedImagePath() {
+    if (collectionLength(app.documents) < 1) return "";
+    var src;
+    try { src = app.activeDocument; } catch (_) { return ""; }
+    try {
+      for (var i = 0; i < src.placedItems.length; i += 1) {
+        try { return src.placedItems[i].file.fsName; } catch (_) {}
+      }
+    } catch (_) {}
+    try {
+      for (var r = 0; r < src.rasterItems.length; r += 1) {
+        try { return src.rasterItems[r].file.fsName; } catch (_) {}
+      }
+    } catch (_) {}
+    return "";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    sourceImagePath: null,
+    sourceKind: null,
+    outputFileName: String(outputPath).split("/").pop() || null,
+    mode: "${mode}",
+    maxColors: ${String(Math.trunc(maxColors))},
+    threshold: ${String(Math.trunc(threshold))},
+    ignoreWhite: ${ignoreWhite ? 'true' : 'false'},
+    pathCount: 0,
+    error: null
+  };
+
+  // Resolve the raster to trace. Omitted imagePath => read the front
+  // document's placed/linked image path (READ-ONLY: the source doc is only
+  // inspected for a file path, never modified).
+  if (imagePath) {
+    result.sourceImagePath = imagePath;
+    result.sourceKind = "provided";
+  } else {
+    var resolved = firstPlacedImagePath();
+    if (!resolved) {
+      result.error = collectionLength(app.documents) < 1 ? "no_document" : "no_source_image";
+      return stringifyVectorizeResult(result);
+    }
+    imagePath = resolved;
+    result.sourceImagePath = resolved;
+    result.sourceKind = "active_document_placed";
+  }
+
+  var inFile = new File(imagePath);
+  if (!inFile.exists) {
+    result.error = "image_not_found";
+    return stringifyVectorizeResult(result);
+  }
+
+  // Work entirely in a throwaway document so the user's open document is never
+  // touched. The ONLY document this script closes is the one it creates here.
+  var tempDoc = app.documents.add();
+  try {
+    var placed = tempDoc.placedItems.add();
+    placed.file = inFile;
+    var traced = placed.trace();
+    var opts = traced.tracing.tracingOptions;
+    opts.tracingMode = ${modeLiteral};
+    try { opts.ignoreWhite = result.ignoreWhite; } catch (_) {}
+    if (${mode === 'blackwhite' ? 'true' : 'false'}) {
+      try { opts.threshold = result.threshold; } catch (_) {}
+    } else {
+      try { opts.maxColors = result.maxColors; } catch (_) {}
+    }
+    try { app.redraw(); } catch (_) {}
+    traced.tracing.expandTracing();
+    try {
+      var total = 0;
+      for (var p = 0; p < tempDoc.pathItems.length; p += 1) total += 1;
+      result.pathCount = total;
+    } catch (_) {}
+    var outFile = new File(outputPath);
+    var svgOptions = new ExportOptionsSVG();
+    svgOptions.embedRasterImages = false;
+    tempDoc.exportFile(outFile, ExportType.SVG, svgOptions);
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  try { tempDoc.close(SaveOptions.DONOTSAVECHANGES); } catch (_) {}
+  return stringifyVectorizeResult(result);
+`;
+}
+
+export function buildIllustratorVectorizeJsx(params: IllustratorVectorizeParams): IllustratorExtendScriptBuild {
+  const validated = validateIllustratorVectorizeParams(params);
+  if (!validated.ok) return { jsx: '', errors: validated.errors };
+  const normalized = validated.params;
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: '' })}
+${illustratorVectorizeJsxBody({
+    imagePath: normalized.imagePath,
+    outputPath: normalized.outputPath,
+    mode: normalized.mode,
+    maxColors: normalized.maxColors,
+    threshold: normalized.threshold,
+    ignoreWhite: normalized.ignoreWhite,
+  })}
+}());
+`;
+  return { jsx, errors: [] };
+}
+
 // ─── Receipt types + guards ─────────────────────────────────────────────────
 
 export type IllustratorDocumentSummary = {
@@ -663,6 +986,46 @@ export function isIllustratorExportProofReceipt(value: unknown): value is Illust
     && isNullableString(v.outputFileName)
     && (ILLUSTRATOR_EXPORT_PROOF_FORMATS as readonly string[]).includes(String(v.format))
     && (v.scalePercent === null || isFiniteNumber(v.scalePercent))
+    && typeof v.fileExists === 'boolean'
+    && isFiniteNumber(v.sizeBytes)
+    && isNullableString(v.error);
+}
+
+export type IllustratorVectorizeReceipt = {
+  ok: boolean;
+  appName: string | null;
+  appRunning: boolean;
+  /** Resolved raster path traced (provided, or read from the front document). */
+  sourceImagePath: string | null;
+  /** 'provided' | 'active_document_placed' — where the raster came from. */
+  sourceKind: string | null;
+  outputFileName: string | null;
+  mode: IllustratorTracingMode;
+  maxColors: number;
+  threshold: number;
+  ignoreWhite: boolean;
+  /** Vector paths produced by the expand (0 on failure). */
+  pathCount: number;
+  /** stat()'d by the bridge AFTER the export — the proof the .svg landed. */
+  fileExists: boolean;
+  sizeBytes: number;
+  error: string | null;
+};
+
+export function isIllustratorVectorizeReceipt(value: unknown): value is IllustratorVectorizeReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.ok === 'boolean'
+    && isNullableString(v.appName)
+    && typeof v.appRunning === 'boolean'
+    && isNullableString(v.sourceImagePath)
+    && isNullableString(v.sourceKind)
+    && isNullableString(v.outputFileName)
+    && (ILLUSTRATOR_TRACING_MODES as readonly string[]).includes(String(v.mode))
+    && isFiniteNumber(v.maxColors)
+    && isFiniteNumber(v.threshold)
+    && typeof v.ignoreWhite === 'boolean'
+    && isFiniteNumber(v.pathCount)
     && typeof v.fileExists === 'boolean'
     && isFiniteNumber(v.sizeBytes)
     && isNullableString(v.error);

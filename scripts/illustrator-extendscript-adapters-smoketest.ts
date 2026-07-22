@@ -17,10 +17,18 @@ import {
   ILLUSTRATOR_MAX_SCALE_PERCENT,
   ILLUSTRATOR_MIN_SCALE_PERCENT,
   ILLUSTRATOR_MAX_STATUS_DOCUMENTS,
+  ILLUSTRATOR_TRACING_MODES,
+  ILLUSTRATOR_MIN_TRACE_COLORS,
+  ILLUSTRATOR_MAX_TRACE_COLORS,
+  ILLUSTRATOR_MIN_TRACE_THRESHOLD,
+  ILLUSTRATOR_MAX_TRACE_THRESHOLD,
+  ILLUSTRATOR_TRACE_IMAGE_EXTENSIONS,
   buildIllustratorDocumentStatusJsx,
   buildIllustratorExportProofJsx,
+  buildIllustratorVectorizeJsx,
   isIllustratorDocumentStatusReceipt,
   isIllustratorExportProofReceipt,
+  isIllustratorVectorizeReceipt,
   validateIllustratorExportProofParams,
 } from '../src/lib/illustratorExtendScriptAdapters';
 
@@ -33,6 +41,26 @@ function assertNeverTouchesSource(jsx: string, label: string) {
   assert.equal(/PDFSaveOptions/i.test(jsx), false, `${label}: jsx must never construct PDFSaveOptions`);
   assert.equal(/\.close\s*\(/.test(jsx), false, `${label}: jsx must never close the document`);
   assert.equal(/\bexecuteAction\b/.test(jsx), false, `${label}: jsx stays on the typed DOM (no raw action dispatch)`);
+}
+
+// Vectorize has a DIFFERENT — but equally strict — source-safety contract than
+// status/export: it legitimately CREATES its own throwaway document and closes
+// it. It must still never save/saveAs/PDFSaveOptions/executeAction anything, and
+// the ONLY `.close(` it performs must be the scoped
+// `tempDoc.close(SaveOptions.DONOTSAVECHANGES)` on the doc it created — so the
+// user's open document is never saved, exported from, or closed.
+function assertVectorizeSafety(jsx: string, label: string) {
+  assert.equal(/\.save\s*\(/.test(jsx), false, `${label}: vectorize jsx must never call .save( (incl. doc.save()/saveAs save path)`);
+  assert.equal(/saveAs/i.test(jsx), false, `${label}: vectorize jsx must never call saveAs`);
+  assert.equal(/PDFSaveOptions/i.test(jsx), false, `${label}: vectorize jsx must never construct PDFSaveOptions`);
+  assert.equal(/\bexecuteAction\b/.test(jsx), false, `${label}: vectorize jsx stays on the typed DOM (no raw action dispatch)`);
+  assert.ok(/app\.documents\.add\s*\(/.test(jsx), `${label}: vectorize traces in its OWN document (app.documents.add())`);
+  const closeCalls = jsx.match(/\.close\s*\(/g) || [];
+  assert.equal(closeCalls.length, 1, `${label}: vectorize closes exactly one document (the throwaway it created)`);
+  assert.ok(
+    /tempDoc\.close\(SaveOptions\.DONOTSAVECHANGES\)/.test(jsx),
+    `${label}: the only close is the scoped tempDoc.close(SaveOptions.DONOTSAVECHANGES)`,
+  );
 }
 
 // ── 1) illustrator_document_status (READ-ONLY) ──────────────────────────────
@@ -175,6 +203,92 @@ assert.ok(
   'empty outputPath is rejected',
 );
 
+// ── 3) illustrator_vectorize (Image Trace → expand → SVG) ───────────────────
+
+assert.equal(ILLUSTRATOR_TRACING_MODES.length, 3, 'tracing modes are exactly color|gray|blackwhite');
+assert.ok((ILLUSTRATOR_TRACE_IMAGE_EXTENSIONS as readonly string[]).includes('png'), 'png is a traceable raster extension');
+
+// Provided imagePath + preset (bw-logo → blackwhite, threshold 128).
+const quotedImagePath = '/Users/demo/Desk "shots"/logo art.png';
+const bwVectorize = buildIllustratorVectorizeJsx({
+  appName: 'Adobe Illustrator',
+  imagePath: quotedImagePath,
+  outputPath: '/Users/demo/Desktop/logo.svg',
+  preset: 'bw-logo',
+});
+assert.deepEqual(bwVectorize.errors, [], 'bw-logo vectorize builds with no errors');
+assert.ok(bwVectorize.jsx.includes('(function () {'), 'vectorize jsx is an IIFE');
+assert.ok(bwVectorize.jsx.includes('}());'), 'vectorize jsx closes its IIFE');
+assert.ok(bwVectorize.jsx.includes(`var imagePath = ${JSON.stringify(quotedImagePath)};`), 'imagePath quotes are escaped via JSON.stringify');
+assert.equal(bwVectorize.jsx.includes(`= "${quotedImagePath}"`), false, 'raw unescaped imagePath never reaches the jsx');
+assert.ok(bwVectorize.jsx.includes('TracingModeType.TRACINGMODEBLACKANDWHITE'), 'bw-logo preset resolves to the blackwhite tracing enum');
+assert.ok(bwVectorize.jsx.includes('mode: "blackwhite",'), 'bw-logo preset reports blackwhite mode');
+assert.ok(bwVectorize.jsx.includes('threshold: 128,'), 'bw-logo preset resolves threshold 128');
+assert.ok(bwVectorize.jsx.includes('expandTracing()'), 'vectorize expands the tracing to real vector paths');
+assert.ok(bwVectorize.jsx.includes('ExportType.SVG'), 'vectorize exports SVG');
+assert.ok(bwVectorize.jsx.includes(`var expectedDocumentName = ${JSON.stringify('')};`), 'vectorize composes the prelude with an EMPTY document guard (throwaway doc)');
+assertVectorizeSafety(bwVectorize.jsx, 'vectorize bw-logo');
+
+// Omitted imagePath → traces the front document's placed image (var imagePath = null;).
+const activeDocVectorize = buildIllustratorVectorizeJsx({
+  outputPath: '/tmp/trace.svg',
+  mode: 'color',
+  maxColors: 12,
+});
+assert.deepEqual(activeDocVectorize.errors, [], 'active-document vectorize builds with no errors');
+assert.ok(activeDocVectorize.jsx.includes('var imagePath = null;'), 'omitted imagePath emits var imagePath = null; (trace the front document image)');
+assert.ok(activeDocVectorize.jsx.includes('firstPlacedImagePath()'), 'active-document vectorize resolves the front placed/linked image path');
+assert.ok(activeDocVectorize.jsx.includes('TracingModeType.TRACINGMODECOLOR'), 'explicit color mode resolves to the color tracing enum');
+assert.ok(activeDocVectorize.jsx.includes('mode: "color",'), 'color mode reported in the receipt');
+assert.ok(activeDocVectorize.jsx.includes('maxColors: 12,'), 'explicit maxColors lands in the receipt');
+assert.ok(activeDocVectorize.jsx.includes('"no_source_image"'), 'active-document vectorize fails closed when no placed image exists');
+assertVectorizeSafety(activeDocVectorize.jsx, 'vectorize active-document');
+
+// Explicit params override the preset.
+const overrideVectorize = buildIllustratorVectorizeJsx({ outputPath: '/tmp/o.svg', preset: '6-colors', maxColors: 24 });
+assert.deepEqual(overrideVectorize.errors, [], '6-colors preset + explicit maxColors builds with no errors');
+assert.ok(overrideVectorize.jsx.includes('mode: "color",'), '6-colors preset resolves to color mode');
+assert.ok(overrideVectorize.jsx.includes('maxColors: 24,'), 'explicit maxColors overrides the preset value');
+
+// Rejections (fail closed, no jsx).
+assert.ok(
+  buildIllustratorVectorizeJsx({ outputPath: '/tmp/trace.png' }).errors.some((e) => e.includes('.svg')),
+  'non-.svg vectorize output is rejected',
+);
+assert.equal(buildIllustratorVectorizeJsx({ outputPath: '/tmp/trace.png' }).jsx, '', 'rejected vectorize emits no jsx');
+assert.ok(
+  buildIllustratorVectorizeJsx({ outputPath: '/tmp/trace.svg', preset: 'watercolor' }).errors.some((e) => e.includes('preset must be one of')),
+  'unknown preset is rejected',
+);
+assert.ok(
+  buildIllustratorVectorizeJsx({ outputPath: '/tmp/trace.svg', imagePath: '/tmp/art.svg' }).errors.some((e) => e.includes('raster image')),
+  'non-raster imagePath extension is rejected',
+);
+assert.ok(
+  buildIllustratorVectorizeJsx({ outputPath: '/tmp/trace.svg', imagePath: '/tmp/a;b.png' }).errors.some((e) => e.includes('shell metacharacter')),
+  'shell-metacharacter imagePath is rejected',
+);
+assert.ok(
+  buildIllustratorVectorizeJsx({ outputPath: '/tmp/trace.svg', maxColors: ILLUSTRATOR_MAX_TRACE_COLORS + 1 }).errors.some((e) => e.includes('maxColors')),
+  'above-range maxColors is rejected',
+);
+assert.ok(
+  buildIllustratorVectorizeJsx({ outputPath: '/tmp/trace.svg', maxColors: ILLUSTRATOR_MIN_TRACE_COLORS - 1 }).errors.some((e) => e.includes('maxColors')),
+  'below-range maxColors is rejected',
+);
+assert.ok(
+  buildIllustratorVectorizeJsx({ outputPath: '/tmp/trace.svg', threshold: ILLUSTRATOR_MAX_TRACE_THRESHOLD + 1 }).errors.some((e) => e.includes('threshold')),
+  'above-range threshold is rejected',
+);
+assert.ok(
+  buildIllustratorVectorizeJsx({ outputPath: '/tmp/trace.svg', threshold: ILLUSTRATOR_MIN_TRACE_THRESHOLD - 1 }).errors.some((e) => e.includes('threshold')),
+  'below-range threshold is rejected',
+);
+assert.ok(
+  buildIllustratorVectorizeJsx({ outputPath: '/tmp/trace.svg', mode: 'sepia' as unknown as 'color' }).errors.some((e) => e.includes('mode must be one of')),
+  'unknown tracing mode is rejected',
+);
+
 // ── Receipt guards ──────────────────────────────────────────────────────────
 
 const validStatusReceipt = {
@@ -239,6 +353,44 @@ assert.equal(
 );
 assert.equal(isIllustratorExportProofReceipt(null), false, 'null fails the export guard');
 
+const validVectorizeReceipt = {
+  ok: true,
+  appName: 'Adobe Illustrator',
+  appRunning: true,
+  sourceImagePath: '/Users/demo/logo.png',
+  sourceKind: 'provided',
+  outputFileName: 'logo.svg',
+  mode: 'blackwhite',
+  maxColors: 6,
+  threshold: 128,
+  ignoreWhite: false,
+  pathCount: 42,
+  fileExists: true,
+  sizeBytes: 8123,
+  error: null,
+};
+assert.ok(isIllustratorVectorizeReceipt(validVectorizeReceipt), 'valid vectorize receipt passes the guard');
+assert.ok(
+  isIllustratorVectorizeReceipt({ ...validVectorizeReceipt, sourceImagePath: null, sourceKind: null }),
+  'vectorize receipt with a null source (front-document trace before resolve) passes the guard',
+);
+assert.equal(
+  isIllustratorVectorizeReceipt({ ...validVectorizeReceipt, mode: 'duotone' }),
+  false,
+  'vectorize receipt with an unknown tracing mode fails the guard',
+);
+assert.equal(
+  isIllustratorVectorizeReceipt({ ...validVectorizeReceipt, pathCount: '42' }),
+  false,
+  'string pathCount fails the vectorize guard',
+);
+assert.equal(
+  isIllustratorVectorizeReceipt({ ...validVectorizeReceipt, ignoreWhite: 'false' }),
+  false,
+  'string ignoreWhite fails the vectorize guard',
+);
+assert.equal(isIllustratorVectorizeReceipt(null), false, 'null fails the vectorize guard');
+
 assert.equal(ILLUSTRATOR_EXPORT_PROOF_FORMATS.length, 2, 'format enum is exactly png|svg (PDF stays out by design)');
 
 // ── LOCKSTEP drift check against scripts/claude-bridge.js ──────────────────
@@ -288,19 +440,53 @@ assert.ok(
   'LOCKSTEP: bridge max scale matches the pure module',
 );
 
+// The duplicated vectorize enum/range/preset constants exist bridge-side too.
+assert.ok(
+  extractBridgeConstLine('ILLUSTRATOR_TRACING_MODES').includes("['color', 'gray', 'blackwhite']"),
+  'LOCKSTEP: bridge tracing-mode enum matches the pure module',
+);
+assert.ok(
+  extractBridgeConstLine('ILLUSTRATOR_MAX_TRACE_COLORS').includes(String(ILLUSTRATOR_MAX_TRACE_COLORS)),
+  'LOCKSTEP: bridge max trace colors matches the pure module',
+);
+assert.ok(
+  extractBridgeConstLine('ILLUSTRATOR_MAX_TRACE_THRESHOLD').includes(String(ILLUSTRATOR_MAX_TRACE_THRESHOLD)),
+  'LOCKSTEP: bridge max trace threshold matches the pure module',
+);
+assert.ok(
+  extractBridgeConstLine('ILLUSTRATOR_TRACE_IMAGE_EXTENSIONS').includes("'webp'"),
+  'LOCKSTEP: bridge traceable raster extensions match the pure module',
+);
+assert.ok(
+  extractBridgeConstLine('ILLUSTRATOR_TRACE_PRESETS').includes("'bw-logo'"),
+  'LOCKSTEP: bridge trace preset table matches the pure module',
+);
+
 type BridgeJsxFns = {
   illustratorJsxPrelude: (args: { expectedDocumentName: string }) => string;
   illustratorDocumentStatusJsxBody: () => string;
   illustratorExportProofJsxBody: (args: { outputPath: string; format: string; scalePercent: number | null }) => string;
+  illustratorVectorizeJsxBody: (args: {
+    imagePath: string | null;
+    outputPath: string;
+    mode: string;
+    maxColors: number;
+    threshold: number;
+    ignoreWhite: boolean;
+  }) => string;
 };
 
+// tracingModeEnumLiteral is a dependency of illustratorVectorizeJsxBody, so it
+// must be in the extracted scope even though it composes no jsx on its own.
 const bridgeFns = new Function(`
 ${extractBridgeConstLine('ILLUSTRATOR_DEFAULT_SCALE_PERCENT')}
 ${extractBridgeTopLevel('jsxLiteral')}
+${extractBridgeTopLevel('tracingModeEnumLiteral')}
 ${extractBridgeTopLevel('illustratorJsxPrelude')}
 ${extractBridgeTopLevel('illustratorDocumentStatusJsxBody')}
 ${extractBridgeTopLevel('illustratorExportProofJsxBody')}
-return { illustratorJsxPrelude, illustratorDocumentStatusJsxBody, illustratorExportProofJsxBody };
+${extractBridgeTopLevel('illustratorVectorizeJsxBody')}
+return { illustratorJsxPrelude, illustratorDocumentStatusJsxBody, illustratorExportProofJsxBody, illustratorVectorizeJsxBody };
 `)() as BridgeJsxFns;
 
 function composeBridgeJsx(expectedDocumentName: string, body: string): string {
@@ -332,9 +518,29 @@ assert.equal(
   'LOCKSTEP: bridge svg export jsx is byte-identical with the pure module',
 );
 
+// Vectorize composes the prelude with an EMPTY expectedDocumentName (it always
+// works in a throwaway document), so the bridge check uses composeBridgeJsx('').
+assert.equal(
+  composeBridgeJsx('', bridgeFns.illustratorVectorizeJsxBody({
+    imagePath: quotedImagePath, outputPath: '/Users/demo/Desktop/logo.svg', mode: 'blackwhite', maxColors: 6, threshold: 128, ignoreWhite: false,
+  })),
+  bwVectorize.jsx,
+  'LOCKSTEP: bridge vectorize jsx (provided image + bw-logo preset) is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('', bridgeFns.illustratorVectorizeJsxBody({
+    imagePath: null, outputPath: '/tmp/trace.svg', mode: 'color', maxColors: 12, threshold: 128, ignoreWhite: false,
+  })),
+  activeDocVectorize.jsx,
+  'LOCKSTEP: bridge vectorize jsx (omitted image → front-document trace) is byte-identical with the pure module',
+);
+
 // The bridge-composed scripts must satisfy the same source-safety contract.
 assertNeverTouchesSource(composeBridgeJsx('', bridgeFns.illustratorExportProofJsxBody({
   outputPath: '/tmp/x.png', format: 'png', scalePercent: null,
 })), 'bridge-composed export_proof');
+assertVectorizeSafety(composeBridgeJsx('', bridgeFns.illustratorVectorizeJsxBody({
+  imagePath: '/tmp/x.png', outputPath: '/tmp/x.svg', mode: 'color', maxColors: 6, threshold: 128, ignoreWhite: false,
+})), 'bridge-composed vectorize');
 
 console.log('All Illustrator ExtendScript adapter smoke cases passed.');

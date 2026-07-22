@@ -196,6 +196,7 @@ export type OpenSwanRuntimeToolName =
   | 'desktop.photoshop_convert_color_mode'
   | 'desktop.illustrator_document_status'
   | 'desktop.illustrator_export_proof'
+  | 'desktop.illustrator_vectorize'
   | 'desktop.cad_compile'
   | 'desktop.cad_inspect_file'
   | 'desktop.design_export'
@@ -571,6 +572,7 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.photoshop_convert_color_mode': { appName?: string; targetDocumentName?: string; mode: 'rgb' | 'cmyk' | 'grayscale' };
   'desktop.illustrator_document_status': { appName?: string; expectedDocumentName?: string };
   'desktop.illustrator_export_proof': { appName?: string; outputPath: string; format?: 'png' | 'svg'; scalePercent?: number; expectedDocumentName?: string };
+  'desktop.illustrator_vectorize': { appName?: string; imagePath?: string; outputPath: string; mode?: 'color' | 'gray' | 'blackwhite'; maxColors?: number; threshold?: number; ignoreWhite?: boolean; preset?: string; expectedDocumentName?: string };
   'desktop.cad_compile': { engine: 'openscad' | 'freecadcmd' | 'blender'; sourcePath: string; outputPath: string; extraArgs?: string[]; timeoutMs?: number };
   'desktop.cad_inspect_file': { path: string; maxBytes?: number };
   'desktop.design_export': { engine: 'inkscape' | 'sketchtool'; sourcePath: string; outputPath: string; options?: { widthPx?: number; heightPx?: number; pdfVersion?: string; format?: string; scale?: number }; timeoutMs?: number };
@@ -863,6 +865,7 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.photoshop_convert_color_mode': { ok: boolean; resultsText: string };
   'desktop.illustrator_document_status': { ok: boolean; resultsText: string };
   'desktop.illustrator_export_proof': { ok: boolean; resultsText: string };
+  'desktop.illustrator_vectorize': { ok: boolean; resultsText: string };
   'desktop.cad_compile': { ok: boolean; resultsText: string };
   'desktop.cad_inspect_file': { ok: boolean; resultsText: string };
   'desktop.design_export': { ok: boolean; resultsText: string };
@@ -3233,6 +3236,28 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     },
   },
   {
+    name: 'desktop.illustrator_vectorize',
+    label: 'Vectorize Image in Illustrator (Image Trace)',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Turns a raster image into true vector paths via Illustrator Image Trace (trace → expand → export .svg). The trace runs in a THROWAWAY document the script creates and then closes WITHOUT saving, so the user\'s currently open document is never altered. Provide imagePath to trace a specific file, or omit it to trace the front document\'s first placed/linked image (read-only path lookup). mode is color|gray|blackwhite; maxColors (2-256) applies to color/gray, threshold (0-255) to blackwhite; a preset name resolves to those (e.g. bw-logo, silhouettes, 6-colors). ignoreWhite is best-effort background removal and is unreliable on Illustrator 2024+. Approval-gated local file write; fails closed unless the .svg verifiably exists after export.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Illustrator app name. Defaults to Illustrator.' },
+        imagePath: { type: 'string', description: 'Optional raster to trace (png/jpg/jpeg/gif/tif/tiff/bmp/psd/webp). Omit to trace the front document\'s first placed/linked image.' },
+        outputPath: { type: 'string', description: 'Approved local output path ending in .svg.' },
+        mode: { type: 'string', enum: ['color', 'gray', 'blackwhite'], description: 'Tracing mode. Defaults to color (or the preset\'s mode).' },
+        maxColors: { type: 'number', description: 'color/gray only: integer 2-256. Defaults to 6 (or the preset\'s value).' },
+        threshold: { type: 'number', description: 'blackwhite only: integer 0-255. Defaults to 128 (or the preset\'s value).' },
+        ignoreWhite: { type: 'boolean', description: 'Best-effort white-background removal (unreliable on Illustrator 2024+).' },
+        preset: { type: 'string', description: 'Friendly preset (bw-logo, black-and-white-logo, silhouettes, grayscale, 3-colors, 6-colors, 16-colors) resolving to mode + params.' },
+        expectedDocumentName: { type: 'string', description: 'Optional; accepted for parity. Vectorize always traces in a throwaway document, so this guard does not affect the open document.' },
+      },
+      required: ['outputPath'],
+    },
+  },
+  {
     name: 'desktop.cad_compile',
     label: 'Compile CAD Code (OpenSCAD / FreeCAD / Blender)',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
@@ -4692,6 +4717,7 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'desktop.photoshop_convert_color_mode': ['execute'],
   'desktop.illustrator_document_status': ['execute'],
   'desktop.illustrator_export_proof': ['execute'],
+  'desktop.illustrator_vectorize': ['execute'],
   'desktop.cad_compile': ['execute'],
   'desktop.cad_inspect_file': ['execute'],
   'desktop.design_export': ['execute'],
@@ -4924,6 +4950,7 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'desktop.photoshop_convert_color_mode',
   'desktop.illustrator_document_status',
   'desktop.illustrator_export_proof',
+  'desktop.illustrator_vectorize',
   'desktop.cad_compile',
   'desktop.cad_inspect_file',
   'desktop.design_export',
@@ -5859,6 +5886,7 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'desktop.photoshop_convert_color_mode':
     case 'desktop.illustrator_document_status':
     case 'desktop.illustrator_export_proof':
+    case 'desktop.illustrator_vectorize':
     case 'desktop.cad_compile':
     case 'desktop.cad_inspect_file':
     case 'desktop.design_export':
@@ -9674,6 +9702,38 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           ok: true,
           ...d,
           resultsText: `Exported ${d.documentName || 'document'} as ${String(d.format || '').toUpperCase()} proof → ${d.outputFileName} (${d.sizeBytes} bytes). Source document not saved.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.illustrator_vectorize': {
+      try {
+        const { illustratorVectorize, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const outputPath = typeof a.outputPath === 'string' ? a.outputPath.trim() : '';
+        if (!outputPath) return { ok: false, resultsText: 'outputPath is required (.svg).' } as any;
+        const r = await illustratorVectorize({
+          appName: typeof a.appName === 'string' ? a.appName : 'Illustrator',
+          imagePath: typeof a.imagePath === 'string' && a.imagePath.trim() ? a.imagePath.trim() : undefined,
+          outputPath,
+          mode: typeof a.mode === 'string' ? a.mode as any : undefined,
+          maxColors: Number.isFinite(Number(a.maxColors)) ? Number(a.maxColors) : undefined,
+          threshold: Number.isFinite(Number(a.threshold)) ? Number(a.threshold) : undefined,
+          ignoreWhite: a.ignoreWhite === true,
+          preset: typeof a.preset === 'string' ? a.preset : undefined,
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Illustrator'} is not running.` } as any;
+        if (d.error || !d.fileExists) return { ok: false, ...d, resultsText: `Illustrator vectorize failed: ${d.error || 'output file was not created'}.` } as any;
+        const sourceLabel = d.sourceKind === 'active_document_placed'
+          ? 'front-document image'
+          : (d.sourceImagePath ? d.sourceImagePath.split('/').pop() : 'image');
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Vectorized ${sourceLabel} → ${d.outputFileName} (${d.mode}, ${d.pathCount} paths, ${d.sizeBytes} bytes). Traced in a throwaway document; the open document was not touched.`,
         } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }

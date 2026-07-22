@@ -2318,7 +2318,7 @@ const server = http.createServer(async (req, res) => {
            'photoshop_document_status', 'photoshop_layer_inventory', 'photoshop_set_layer_state', 'photoshop_update_text_layer', 'photoshop_place_asset', 'photoshop_export_proof',
            'photoshop_apply_adjustment_layer', 'photoshop_apply_selection_or_mask', 'photoshop_resize_canvas_or_image',
            'photoshop_manage_layers', 'photoshop_transform_layer', 'photoshop_convert_color_mode',
-           'illustrator_document_status', 'illustrator_export_proof',
+           'illustrator_document_status', 'illustrator_export_proof', 'illustrator_vectorize',
            'screenshot', 'wait_for_app', 'open_url', 'open_path', 'stage_attachment', 'stage_attachment_manifest', 'click_at', 'screen_size',
            ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper')) ? ['a11y_tree', 'click_element', 'set_element_value'] : [])]
         : [],
@@ -6164,6 +6164,169 @@ end tell`;
             sizeBytes,
             docModified: result?.docModified === true,
             docSaved: result?.docSaved === true,
+            error: result?.error
+              ? String(result.error).slice(0, 500)
+              : (jsxOk && !fileExists ? 'output_not_created' : null),
+          }));
+        });
+      });
+      return;
+    }
+
+    // ── Illustrator vectorize (Image Trace → expand → SVG) ───────────
+    //
+    // LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): validation
+    // (app-name pattern, raster/.svg extension gates, tracing-mode enum,
+    // color/threshold ranges, preset table, error strings) and the JSX
+    // builder are duplicated from the pure module. Never-touch-the-source:
+    // the trace runs in a FRESH document the script creates and closes
+    // WITHOUT saving — the user's open document is never modified. Requires
+    // a WRITE grant for the output .svg (+ parent) and a READ grant for the
+    // input image; fails closed unless the .svg verifiably exists after.
+    if (url === '/desktop/illustrator_vectorize' && req.method === 'POST') {
+      const parsedUrl = new URL(req.url, 'http://localhost');
+      readJsonBody(req, 16 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Illustrator').trim() || 'Illustrator';
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        // outputPath must validate + end in .svg (Image Trace produces vectors).
+        const outputValidated = validateDesktopPathServer(String(parsed?.outputPath || '').trim());
+        if (!outputValidated.ok) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `outputPath: ${outputValidated.error}` }));
+          return;
+        }
+        const outputPath = expandDesktopPath(outputValidated.path);
+        const outExtMatch = /\.([A-Za-z0-9]{1,12})$/.exec(outputPath);
+        const outExt = outExtMatch ? outExtMatch[1].toLowerCase() : '';
+        if (outExt !== 'svg') {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'vectorize outputPath must end in .svg (Image Trace produces vector paths).' }));
+          return;
+        }
+        // imagePath is optional: omit => trace the front document's placed image.
+        let imagePath = null;
+        const rawImagePath = parsed?.imagePath == null ? '' : String(parsed.imagePath).trim();
+        if (rawImagePath) {
+          const imageValidated = validateDesktopPathServer(rawImagePath);
+          if (!imageValidated.ok) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `imagePath: ${imageValidated.error}` }));
+            return;
+          }
+          imagePath = expandDesktopPath(imageValidated.path);
+          const imgExtMatch = /\.([A-Za-z0-9]{1,12})$/.exec(imagePath);
+          const imgExt = imgExtMatch ? imgExtMatch[1].toLowerCase() : '';
+          if (!ILLUSTRATOR_TRACE_IMAGE_EXTENSIONS.includes(imgExt)) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `imagePath must be a raster image (${ILLUSTRATOR_TRACE_IMAGE_EXTENSIONS.join(', ')}).` }));
+            return;
+          }
+        }
+        // Resolve preset first; explicit mode/maxColors/threshold override it.
+        let presetMode = null;
+        let presetMaxColors = null;
+        let presetThreshold = null;
+        const rawPreset = parsed?.preset == null ? '' : String(parsed.preset).trim().toLowerCase();
+        if (rawPreset) {
+          const preset = ILLUSTRATOR_TRACE_PRESETS[rawPreset];
+          if (!preset) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `preset must be one of: ${Object.keys(ILLUSTRATOR_TRACE_PRESETS).join(', ')}.` }));
+            return;
+          }
+          presetMode = preset.mode;
+          presetMaxColors = preset.maxColors == null ? null : preset.maxColors;
+          presetThreshold = preset.threshold == null ? null : preset.threshold;
+        }
+        const rawMode = (parsed?.mode == null || String(parsed.mode).trim() === '') ? null : String(parsed.mode).trim().toLowerCase();
+        if (rawMode != null && !ILLUSTRATOR_TRACING_MODES.includes(rawMode)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `mode must be one of: ${ILLUSTRATOR_TRACING_MODES.join(', ')}.` }));
+          return;
+        }
+        const validIntInRange = (value, min, max) => value === undefined || value === null
+          || (typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= min && value <= max);
+        if (!validIntInRange(parsed?.maxColors, ILLUSTRATOR_MIN_TRACE_COLORS, ILLUSTRATOR_MAX_TRACE_COLORS)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `maxColors must be a finite integer between ${ILLUSTRATOR_MIN_TRACE_COLORS} and ${ILLUSTRATOR_MAX_TRACE_COLORS}.` }));
+          return;
+        }
+        if (!validIntInRange(parsed?.threshold, ILLUSTRATOR_MIN_TRACE_THRESHOLD, ILLUSTRATOR_MAX_TRACE_THRESHOLD)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `threshold must be a finite integer between ${ILLUSTRATOR_MIN_TRACE_THRESHOLD} and ${ILLUSTRATOR_MAX_TRACE_THRESHOLD}.` }));
+          return;
+        }
+        const mode = rawMode || presetMode || 'color';
+        const maxColors = (typeof parsed?.maxColors === 'number' ? parsed.maxColors : null) ?? presetMaxColors ?? ILLUSTRATOR_DEFAULT_TRACE_COLORS;
+        const threshold = (typeof parsed?.threshold === 'number' ? parsed.threshold : null) ?? presetThreshold ?? ILLUSTRATOR_DEFAULT_TRACE_THRESHOLD;
+        const ignoreWhite = parsed?.ignoreWhite === true;
+        // Grants: WRITE for the output .svg (+ its parent), READ for the input image.
+        const outputGrant = requireLocalFileAccessGrant(req, parsedUrl, outputPath, 'write');
+        if (!outputGrant.ok) {
+          res.writeHead(outputGrant.status, CORS);
+          res.end(JSON.stringify({ ok: false, error: outputGrant.error }));
+          return;
+        }
+        const parentGrant = requireLocalFileAccessGrant(req, parsedUrl, path.dirname(outputPath), 'write');
+        if (!parentGrant.ok) {
+          res.writeHead(parentGrant.status, CORS);
+          res.end(JSON.stringify({ ok: false, error: parentGrant.error }));
+          return;
+        }
+        if (imagePath) {
+          const imageGrant = requireLocalFileAccessGrant(req, parsedUrl, imagePath, 'read');
+          if (!imageGrant.ok) {
+            res.writeHead(imageGrant.status, CORS);
+            res.end(JSON.stringify({ ok: false, error: imageGrant.error }));
+            return;
+          }
+        }
+        const built = buildIllustratorVectorizeScript({ appName, imagePath, outputPath, mode, maxColors, threshold, ignoreWhite });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Illustrator app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 90000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator vectorize failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          // Fail closed: the trace only counts when the JSX reported ok AND the
+          // .svg actually exists on disk afterward.
+          let fileExists = false;
+          let sizeBytes = 0;
+          try {
+            const stat = fs.statSync(outputPath);
+            fileExists = stat.isFile();
+            sizeBytes = stat.size;
+          } catch {}
+          const jsxOk = result?.ok === true;
+          const toNumber = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: jsxOk && fileExists,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            sourceImagePath: result?.sourceImagePath ? String(result.sourceImagePath).slice(0, 1024) : (imagePath || null),
+            sourceKind: result?.sourceKind ? String(result.sourceKind).slice(0, 40) : null,
+            outputPath,
+            outputFileName: path.basename(outputPath).slice(0, 260),
+            mode: result?.mode ? String(result.mode).slice(0, 20) : mode,
+            maxColors: toNumber(result?.maxColors),
+            threshold: toNumber(result?.threshold),
+            ignoreWhite: result?.ignoreWhite === true,
+            pathCount: toNumber(result?.pathCount),
+            fileExists,
+            sizeBytes,
             error: result?.error
               ? String(result.error).slice(0, 500)
               : (jsxOk && !fileExists ? 'output_not_created' : null),
@@ -13149,6 +13312,17 @@ const ILLUSTRATOR_MIN_SCALE_PERCENT = 50;
 const ILLUSTRATOR_MAX_SCALE_PERCENT = 400;
 const ILLUSTRATOR_DEFAULT_SCALE_PERCENT = 100;
 
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): vectorize (Image Trace) consts
+const ILLUSTRATOR_TRACING_MODES = ['color', 'gray', 'blackwhite'];
+const ILLUSTRATOR_MIN_TRACE_COLORS = 2;
+const ILLUSTRATOR_MAX_TRACE_COLORS = 256;
+const ILLUSTRATOR_DEFAULT_TRACE_COLORS = 6;
+const ILLUSTRATOR_MIN_TRACE_THRESHOLD = 0;
+const ILLUSTRATOR_MAX_TRACE_THRESHOLD = 255;
+const ILLUSTRATOR_DEFAULT_TRACE_THRESHOLD = 128;
+const ILLUSTRATOR_TRACE_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'tif', 'tiff', 'bmp', 'psd', 'webp'];
+const ILLUSTRATOR_TRACE_PRESETS = { 'black-and-white-logo': { mode: 'blackwhite', threshold: 128 }, 'bw-logo': { mode: 'blackwhite', threshold: 128 }, 'silhouettes': { mode: 'blackwhite', threshold: 200 }, 'grayscale': { mode: 'gray', maxColors: 50 }, '3-colors': { mode: 'color', maxColors: 3 }, '6-colors': { mode: 'color', maxColors: 6 }, '16-colors': { mode: 'color', maxColors: 16 } };
+
 const runningIllustratorResolveCache = new Map();
 
 function getRunningIllustratorAppRows() {
@@ -13270,6 +13444,22 @@ function illustratorNotRunningJson(targetName, kind) {
       scalePercent: null,
       docModified: false,
       docSaved: false,
+      error: 'Illustrator is not running.',
+    });
+  }
+  if (kind === 'vectorize') {
+    return JSON.stringify({
+      ok: false,
+      appRunning: false,
+      appName: targetName,
+      sourceImagePath: null,
+      sourceKind: null,
+      outputFileName: null,
+      mode: '',
+      maxColors: 0,
+      threshold: 0,
+      ignoreWhite: false,
+      pathCount: 0,
       error: 'Illustrator is not running.',
     });
   }
@@ -13583,6 +13773,132 @@ ${foot}`;
 ${foot}`;
 }
 
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts):
+// tracingModeEnumLiteral — keep byte-identical (build-time enum literal).
+function tracingModeEnumLiteral(mode) {
+  if (mode === 'blackwhite') return 'TracingModeType.TRACINGMODEBLACKANDWHITE';
+  if (mode === 'gray') return 'TracingModeType.TRACINGMODEGRAY';
+  return 'TracingModeType.TRACINGMODECOLOR';
+}
+
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts):
+// illustratorVectorizeJsxBody — keep byte-identical. Traces the image in a
+// throwaway document it creates + closes without saving; the user's open
+// document is never touched (the only doc it closes is the one it added).
+function illustratorVectorizeJsxBody({ imagePath, outputPath, mode, maxColors, threshold, ignoreWhite }) {
+  const imagePathLiteral = imagePath == null ? 'null' : jsxLiteral(String(imagePath));
+  const modeLiteral = tracingModeEnumLiteral(mode);
+  return `
+  var imagePath = ${imagePathLiteral};
+  var outputPath = ${jsxLiteral(String(outputPath ?? ''))};
+
+  function stringifyVectorizeResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"sourceImagePath\\":" + jsonNullableString(value.sourceImagePath),
+      "\\"sourceKind\\":" + jsonNullableString(value.sourceKind),
+      "\\"outputFileName\\":" + jsonNullableString(value.outputFileName),
+      "\\"mode\\":" + jsonString(value.mode),
+      "\\"maxColors\\":" + jsonNumber(value.maxColors),
+      "\\"threshold\\":" + jsonNumber(value.threshold),
+      "\\"ignoreWhite\\":" + jsonBoolean(value.ignoreWhite),
+      "\\"pathCount\\":" + jsonNumber(value.pathCount),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  function firstPlacedImagePath() {
+    if (collectionLength(app.documents) < 1) return "";
+    var src;
+    try { src = app.activeDocument; } catch (_) { return ""; }
+    try {
+      for (var i = 0; i < src.placedItems.length; i += 1) {
+        try { return src.placedItems[i].file.fsName; } catch (_) {}
+      }
+    } catch (_) {}
+    try {
+      for (var r = 0; r < src.rasterItems.length; r += 1) {
+        try { return src.rasterItems[r].file.fsName; } catch (_) {}
+      }
+    } catch (_) {}
+    return "";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    sourceImagePath: null,
+    sourceKind: null,
+    outputFileName: String(outputPath).split("/").pop() || null,
+    mode: "${mode}",
+    maxColors: ${String(Math.trunc(maxColors))},
+    threshold: ${String(Math.trunc(threshold))},
+    ignoreWhite: ${ignoreWhite ? 'true' : 'false'},
+    pathCount: 0,
+    error: null
+  };
+
+  // Resolve the raster to trace. Omitted imagePath => read the front
+  // document's placed/linked image path (READ-ONLY: the source doc is only
+  // inspected for a file path, never modified).
+  if (imagePath) {
+    result.sourceImagePath = imagePath;
+    result.sourceKind = "provided";
+  } else {
+    var resolved = firstPlacedImagePath();
+    if (!resolved) {
+      result.error = collectionLength(app.documents) < 1 ? "no_document" : "no_source_image";
+      return stringifyVectorizeResult(result);
+    }
+    imagePath = resolved;
+    result.sourceImagePath = resolved;
+    result.sourceKind = "active_document_placed";
+  }
+
+  var inFile = new File(imagePath);
+  if (!inFile.exists) {
+    result.error = "image_not_found";
+    return stringifyVectorizeResult(result);
+  }
+
+  // Work entirely in a throwaway document so the user's open document is never
+  // touched. The ONLY document this script closes is the one it creates here.
+  var tempDoc = app.documents.add();
+  try {
+    var placed = tempDoc.placedItems.add();
+    placed.file = inFile;
+    var traced = placed.trace();
+    var opts = traced.tracing.tracingOptions;
+    opts.tracingMode = ${modeLiteral};
+    try { opts.ignoreWhite = result.ignoreWhite; } catch (_) {}
+    if (${mode === 'blackwhite' ? 'true' : 'false'}) {
+      try { opts.threshold = result.threshold; } catch (_) {}
+    } else {
+      try { opts.maxColors = result.maxColors; } catch (_) {}
+    }
+    try { app.redraw(); } catch (_) {}
+    traced.tracing.expandTracing();
+    try {
+      var total = 0;
+      for (var p = 0; p < tempDoc.pathItems.length; p += 1) total += 1;
+      result.pathCount = total;
+    } catch (_) {}
+    var outFile = new File(outputPath);
+    var svgOptions = new ExportOptionsSVG();
+    svgOptions.embedRasterImages = false;
+    tempDoc.exportFile(outFile, ExportType.SVG, svgOptions);
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  try { tempDoc.close(SaveOptions.DONOTSAVECHANGES); } catch (_) {}
+  return stringifyVectorizeResult(result);
+`;
+}
+
 function buildIllustratorDocumentStatusScript({ appName, expectedDocumentName }) {
   const targetName = resolveIllustratorScriptTarget(appName);
   if (!targetName) return null;
@@ -13605,6 +13921,21 @@ ${illustratorExportProofJsxBody({ outputPath, format, scalePercent })}
 }());
 `;
   return buildIllustratorAppleScript(targetName, jsx, illustratorNotRunningJson(targetName, 'export_proof'));
+}
+
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): buildIllustratorVectorizeJsx —
+// the vectorize script always traces in a throwaway document, so the prelude is
+// composed with an EMPTY expectedDocumentName (no source-doc guard needed).
+function buildIllustratorVectorizeScript({ appName, imagePath, outputPath, mode, maxColors, threshold, ignoreWhite }) {
+  const targetName = resolveIllustratorScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${illustratorJsxPrelude({ expectedDocumentName: '' })}
+${illustratorVectorizeJsxBody({ imagePath, outputPath, mode, maxColors, threshold, ignoreWhite })}
+}());
+`;
+  return buildIllustratorAppleScript(targetName, jsx, illustratorNotRunningJson(targetName, 'vectorize'));
 }
 
 function getOrCreateDesktopToken() {
