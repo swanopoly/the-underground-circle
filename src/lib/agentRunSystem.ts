@@ -281,6 +281,32 @@ export async function completeRunUnlessCancelled(
   return true;
 }
 
+// Cancel-guarded failure finalize: the mirror of completeRunUnlessCancelled but
+// terminal status 'failed'. The `.neq('status','cancelled')` predicate means a
+// run the user already STOPped is never overwritten to 'failed' — the honest
+// user-cancel receipt wins. Used by the OpenSwan session runtime's outer
+// try/catch to finalize a thrown turn immediately instead of leaving the row
+// stuck at 'running' until a heartbeat reaper claims it ~RUN_STALL_DEAD_MS later.
+export async function failRunUnlessCancelled(
+  runId: string,
+  extra?: Partial<{ plan_summary: string; current_step_index: number; total_steps: number; completed_at: string; input_tokens: number; output_tokens: number; cached_tokens: number; estimated_cost: number; metadata: Record<string, unknown> }>,
+): Promise<boolean> {
+  const updates: Record<string, unknown> = {
+    status: 'failed',
+    updated_at: new Date().toISOString(),
+    completed_at: new Date().toISOString(),
+  };
+  if (extra) Object.assign(updates, extra);
+
+  const { error } = await supabase
+    .from('agent_runs')
+    .update(updates)
+    .eq('id', runId)
+    .neq('status', 'cancelled');
+  if (error) { console.error('[AgentRunSystem] failRunUnlessCancelled error:', error); return false; }
+  return true;
+}
+
 // Cancel-guarded 'running' progress write: same shape as
 // updateRunStatus(runId, 'running', extra) but with the
 // `.neq('status','cancelled')` predicate (mirroring completeRunUnlessCancelled)

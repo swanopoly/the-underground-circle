@@ -36,7 +36,7 @@ function assertShape(r: LaunchReadiness, label: string) {
   assert(Array.isArray(r.warnings), label + ': warnings array');
   assert(Array.isArray(r.chips), label + ': chips array');
   assert(r.blockers.length <= 5, label + ': blockers bounded', String(r.blockers.length));
-  assert(r.warnings.length <= 3, label + ': warnings bounded', String(r.warnings.length));
+  assert(r.warnings.length <= 5, label + ': warnings bounded', String(r.warnings.length));
   assert(r.chips.length <= 4, label + ': chips bounded', String(r.chips.length));
   assert(
     r.blockers.every((x) => typeof x === 'string' && x.length > 0),
@@ -291,6 +291,118 @@ function main() {
     JSON.stringify(resolveLaunchReadiness(input)),
     'purity → deterministic',
   );
+
+  // 13) extraBlockers / extraWarnings — the wiring feeds the empty-task, missing-capability,
+  //     load-window, and non-bridge review copy the core did not previously model.
+  const extraBlk = resolveLaunchReadiness({ extraBlockers: ['Add a task before launch.'] });
+  assertShape(extraBlk, 'extraBlk');
+  assertEq(extraBlk.grade, 'blocked', 'extraBlockers → blocked');
+  assertEq(extraBlk.canLaunch, false, 'extraBlockers → canLaunch false');
+  assertEq(extraBlk.blockers[0], 'Add a task before launch.', 'extraBlockers → copy preserved');
+  // task-blocker + capability-gap together (the missing-REQUIRED-capability wiring feeds the
+  // controlRecommendation "Setup needed" summary via extraBlockers) → one 'blocked' state.
+  const taskPlusGap = resolveLaunchReadiness({
+    extraBlockers: ['Add a task before launch.', 'Before launch, connect or configure: Desktop control.'],
+  });
+  assertShape(taskPlusGap, 'taskPlusGap');
+  assertEq(taskPlusGap.grade, 'blocked', 'task+gap → blocked');
+  assertEq(taskPlusGap.canLaunch, false, 'task+gap → canLaunch false');
+  assertEq(taskPlusGap.blockers.length, 2, 'task+gap → both blockers kept');
+  assertEq(taskPlusGap.blockers[0], 'Add a task before launch.', 'task+gap → task headline first');
+  // extraBlockers are prepended ahead of native blockers so the empty-task headline wins the
+  // summary slot (parity with the inline gate's first-pushed blocker).
+  const prepend = resolveLaunchReadiness({
+    extraBlockers: ['Add a task before launch.'],
+    hasBracketPlaceholder: true,
+    capabilityAuditFailed: 'boom',
+  });
+  assertEq(prepend.grade, 'blocked', 'extraBlockers+native → blocked');
+  assertEq(prepend.blockers[0], 'Add a task before launch.', 'extraBlockers → prepended before native');
+  assert(
+    prepend.blockers.includes('Replace bracketed placeholders in Task + Mode before launch.'),
+    'extraBlockers+native → native bracket still present',
+  );
+  // extraWarnings → review (no blocker), deduped, hostile-safe.
+  const extraWarn = resolveLaunchReadiness({
+    extraWarnings: ['Automation readiness check failed: x', 'Local bridge probing is not enabled for this runtime.'],
+  });
+  assertShape(extraWarn, 'extraWarn');
+  assertEq(extraWarn.grade, 'review', 'extraWarnings → review');
+  assertEq(extraWarn.canLaunch, true, 'extraWarnings → still launchable');
+  assertEq(extraWarn.warnings.length, 2, 'extraWarnings → both kept');
+  // MAX_WARNINGS bumped 3→5: five distinct warnings all survive (matches the inline slice(0,5)).
+  const fiveWarn = resolveLaunchReadiness({ extraWarnings: ['w1', 'w2', 'w3', 'w4', 'w5', 'w6'] });
+  assertShape(fiveWarn, 'fiveWarn');
+  assertEq(fiveWarn.warnings.length, 5, 'extraWarnings → capped at 5 (bumped from 3)');
+  assertEq(fiveWarn.grade, 'review', 'five warnings → review');
+  assertEq(
+    resolveLaunchReadiness({ extraWarnings: ['dup', 'dup'] }).warnings.length,
+    1,
+    'extraWarnings → deduped',
+  );
+  // Hostile / non-array / non-string / blank / over-cap extras never throw and never block spuriously.
+  assertEq(resolveLaunchReadiness({ extraBlockers: 'nope' }).grade, 'ready', 'extraBlockers non-array → ready');
+  assertEq(resolveLaunchReadiness({ extraWarnings: 'nope' }).grade, 'ready', 'extraWarnings non-array → ready');
+  assertEq(resolveLaunchReadiness({ extraBlockers: [1, null, {}] }).grade, 'ready', 'extraBlockers non-strings → ready');
+  assertEq(resolveLaunchReadiness({ extraBlockers: ['', '   '] }).grade, 'ready', 'extraBlockers blank → ready (no empty bullet)');
+  const overCapBlk = resolveLaunchReadiness({ extraBlockers: ['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7'] });
+  assertShape(overCapBlk, 'overCapBlk');
+  assertEq(overCapBlk.blockers.length, 5, 'extraBlockers → capped at 5');
+  assertEq(overCapBlk.grade, 'blocked', 'extraBlockers over-cap → blocked');
+  // Huge hostile extras: bounded scan, no throw, still graded from whatever survived.
+  const hugeExtra = new Array(100000).fill('w');
+  hugeExtra[0] = 'w0';
+  const hugeWarnOut = resolveLaunchReadiness({ extraWarnings: hugeExtra } as LaunchReadinessInput);
+  assertShape(hugeWarnOut, 'hugeExtraWarn');
+  assertEq(hugeWarnOut.grade, 'review', 'huge extraWarnings → review');
+  const hugeBlkOut = resolveLaunchReadiness({ extraBlockers: hugeExtra } as LaunchReadinessInput);
+  assertShape(hugeBlkOut, 'hugeExtraBlk');
+  assertEq(hugeBlkOut.grade, 'blocked', 'huge extraBlockers → blocked');
+
+  // 14) SAFETY GATE PARITY — the wiring must be NEVER MORE PERMISSIVE than the old inline gate.
+  //     Each of today's six inline launch blockers, mapped to its core input, must still yield
+  //     grade='blocked' + canLaunch=false. Prove canLaunch is never true where the inline gate
+  //     returned false.
+  const inlineBlockerCases: Array<[string, LaunchReadinessInput]> = [
+    // (1) empty task → 'Add a task before launch.' (via extraBlockers)
+    ['empty-task', { extraBlockers: ['Add a task before launch.'] }],
+    // (2) bracket placeholder still in Task + Mode
+    ['bracket-placeholder', { hasBracketPlaceholder: true }],
+    // (3) capability audit errored
+    ['capability-audit-failed', { capabilityAuditFailed: 'timeout probing bridge' }],
+    // (4) automation-readiness blockers present
+    ['automation-blockers', { automationBlockers: ['Connect the repo.'] }],
+    // (5) missing REQUIRED capability — controlRecommendation 'Setup needed' → extraBlockers.
+    //     e.g. "Use my computer" with desktop_control missing / bridge unpaired.
+    ['missing-required-capability', { extraBlockers: ['Before launch, connect or configure: Desktop control.'] }],
+    // (6) projected 24h spend over the budget cap
+    ['budget-over-cap', { budgetOverCap: 'Projected 24h spend $12.00 is over the $10.00 cap.' }],
+  ];
+  for (const [label, gateInput] of inlineBlockerCases) {
+    const r = resolveLaunchReadiness(gateInput);
+    assertShape(r, 'gate ' + label);
+    assertEq(r.grade, 'blocked', 'gate ' + label + ' → blocked');
+    assertEq(r.canLaunch, false, 'gate ' + label + ' → canLaunch FALSE (never more permissive)');
+  }
+  // The NEW load-window guard (selectedIntentMeta && capabilityLoading) is strictly stricter:
+  // while the access check runs, launch is blocked.
+  const loadWindow = resolveLaunchReadiness({
+    extraBlockers: ['Access check still running — waiting before launch.'],
+  });
+  assertEq(loadWindow.grade, 'blocked', 'load-window guard → blocked');
+  assertEq(loadWindow.canLaunch, false, 'load-window guard → canLaunch false (stricter)');
+  // Combined missing-capability + load-window + task + native blockers stays blocked.
+  const combinedGate = resolveLaunchReadiness({
+    extraBlockers: [
+      'Add a task before launch.',
+      'Access check still running — waiting before launch.',
+      'Before launch, connect or configure: Desktop control.',
+    ],
+    capabilityAuditFailed: 'x',
+    budgetOverCap: 'over',
+  });
+  assertEq(combinedGate.grade, 'blocked', 'combined gate → blocked');
+  assertEq(combinedGate.canLaunch, false, 'combined gate → canLaunch false');
 
   if (failures > 0) {
     console.error('\n' + failures + ' fail');

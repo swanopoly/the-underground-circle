@@ -945,6 +945,18 @@ const CLAUDE_MODEL_MAP: Record<string, string> = {
   "claude-opus-4-6": "claude-opus-4-6",
 };
 
+// Cache-boundary marker for the tool-loop relay system prompt. LOCKSTEP copy of
+// `CHAT_PROMPT_CACHE_BOUNDARY` (src/lib/chatPromptAssembly.ts) and
+// `promptCacheSplitCore.DEFAULT_CACHE_BOUNDARY_MARKER`
+// (src/lib/promptCacheSplitCore.ts) — byte-identical; edit all three together.
+// The client composes `system_override` as `frozenBase + <marker> + volatileTail`
+// (chatPromptAssembly.composeChatSystemPrompt), so splitting on it lets the
+// frozen base carry the system cache_control breakpoint while the per-turn tail
+// stays un-cached. Inlined rather than imported so the edge deploy stays
+// decoupled from src/lib — the same duplication the core itself uses.
+const RELAY_PROMPT_CACHE_BOUNDARY =
+  "\n\n---\n<!-- dynamic context below — changes per turn -->\n";
+
 // P26 history-cache breakpoint helper (relay transport).
 //
 // Returns a copy of `messages` with `cache_control: {type:'ephemeral'}`
@@ -3960,10 +3972,36 @@ Deno.serve(async (req: Request) => {
       // untouched (no throw).
       const cachedRelayMessages = withHistoryCacheBreakpoint(relayMessages);
 
+      // Split the relay system prompt at the cache boundary so the FROZEN base
+      // (personality, tools list, guardrails) carries the only system
+      // cache_control breakpoint and the VOLATILE per-turn tail is a second,
+      // un-cached block. Wrapping the whole blob in one cache_control block put
+      // the only breakpoint AFTER the volatile tail, so turn N+1's prefix never
+      // matched turn N's cache entry and the frozen base was re-billed at full
+      // input price every round. Mirrors the tool-less callClaude 2-block split.
+      // Marker absent (or the default fallback prompt) → the whole prompt stays
+      // the frozen block, byte-identical to the prior single-block behavior. The
+      // volatile block is pushed only when non-empty (an empty text block 400s).
+      // ≤4 breakpoints total: this frozen-system block + the message breakpoint
+      // from withHistoryCacheBreakpoint above.
+      const relayBoundaryIdx = relaySystem.indexOf(RELAY_PROMPT_CACHE_BOUNDARY);
+      const relayFrozenSystem = relayBoundaryIdx < 0
+        ? relaySystem
+        : relaySystem.slice(0, relayBoundaryIdx);
+      const relayVolatileSystem = relayBoundaryIdx < 0
+        ? ""
+        : relaySystem.slice(relayBoundaryIdx + RELAY_PROMPT_CACHE_BOUNDARY.length);
+      const relaySystemBlocks: any[] = [
+        { type: "text", text: relayFrozenSystem, cache_control: { type: "ephemeral" } },
+      ];
+      if (relayVolatileSystem && relayVolatileSystem.trim().length > 0) {
+        relaySystemBlocks.push({ type: "text", text: relayVolatileSystem });
+      }
+
       const relayBody: Record<string, unknown> = {
         model: relayModel,
         max_tokens: relayMaxTokens,
-        system: [{ type: "text", text: relaySystem, cache_control: { type: "ephemeral" } }],
+        system: relaySystemBlocks,
         messages: cachedRelayMessages,
         // Tool-less mode sends NO tools field at all — the model cannot call
         // anything, so an abandoned/raced clarifier call is side-effect free.

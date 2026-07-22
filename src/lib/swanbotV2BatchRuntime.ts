@@ -391,6 +391,7 @@ export async function runSwanbotV2Batch(
         iterations: runResult.iterations,
         finalStopReason: v2.stopReason,
         usage,
+        loopModel,
         targetAgentName,
         targetAgentSubject,
         rawStopReason: String(runResult.stopReason),

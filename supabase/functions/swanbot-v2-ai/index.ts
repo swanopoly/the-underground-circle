@@ -54,7 +54,7 @@ import {
 // Canonical edge-side Anthropic client — routes pricing + cache accounting +
 // claude_api_usage logging through one module so the dashboard shows real
 // numbers. See docs/AGENTS_ROADMAP.md §6 Rule #3.
-import { callClaude, addUsage, EMPTY_USAGE, logClaudeUsage, type UsageBreakdown } from "../_claude/anthropic.ts";
+import { callClaude, addUsage, EMPTY_USAGE, logClaudeUsage, computeCostUsd, type UsageBreakdown } from "../_claude/anthropic.ts";
 import { wrapUntrusted } from "../_shared/untrusted.ts";
 import { attachToolInputExamples } from "../../../src/lib/toolInputExamples.ts";
 import { selectToolGroups } from "../../../src/lib/v2ToolSelectionCore.ts";
@@ -3228,6 +3228,12 @@ Deno.serve(async (req: Request) => {
         iteration_count: result.iterations,
         final_stop_reason: finalStopReason,
         ...agentRunTokenUsageFields(result.usage),
+        // Cost attribution: write the long-dead estimated_cost column so this
+        // terminal run reports real spend (office ops board / recent-runs /
+        // circleCostTelemetry) instead of $0. Deno-side pricing via the shared
+        // computeCostUsd (cache-aware, over-charges on an unknown model — a spend
+        // guard). Deploy of this edge is a separate ops step.
+        estimated_cost: computeCostUsd(model, result.usage),
         status: terminalStatus,
         completed_at: new Date().toISOString(),
         // Clear the continuation blob on terminal completion — the run

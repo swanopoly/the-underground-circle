@@ -9,16 +9,18 @@
 //
 // GRADE LADDER (blocked > review > ready):
 //   - A bracket placeholder still sitting in the Task/Mode draft, a failed capability
-//     audit, an automation blocker, or a projected-spend-over-cap → BLOCKED
-//     (canLaunch false). Any single one is sufficient.
-//   - A local bridge that is offline / degraded / unpaired → a WARNING → REVIEW (still
-//     launchable, but flagged). A null or 'paired' bridge adds no spurious warning.
+//     audit, an automation blocker, a projected-spend-over-cap, or any caller-supplied
+//     extraBlocker (empty task, missing REQUIRED capability, capability audit still
+//     loading) → BLOCKED (canLaunch false). Any single one is sufficient.
+//   - A local bridge that is offline / degraded / unpaired, or any caller-supplied
+//     extraWarning → a WARNING → REVIEW (still launchable, but flagged). A null or
+//     'paired' bridge adds no spurious warning.
 //   - Subagent access and vault tools surface as capability CHIPS; the run label and
 //     cost label ride along as trailing status chips when present.
 //
 // TOTALITY: every input field is `unknown`. null / undefined / wrong-type / huge /
 // hostile / cyclic inputs collapse to a safe neutral ('ready', no blockers) and never
-// throw. All output lists are Set-deduped and bounded (blockers <= 5, warnings <= 3,
+// throw. All output lists are Set-deduped and bounded (blockers <= 5, warnings <= 5,
 // chips <= 4). No module-scope Date.now()/Math.random(); no I/O; secret-safe.
 
 export interface LaunchReadinessInput {
@@ -40,6 +42,15 @@ export interface LaunchReadinessInput {
   costLabel?: unknown;
   /** Run identity label (intent title / mode label; display only). */
   runLabel?: unknown;
+  /** Extra caller-supplied blockers the fields above do not model (empty task, missing
+   *  REQUIRED capability, capability audit still loading). Bounded string-array; any
+   *  present forces grade 'blocked' — the same weight as a native blocker. */
+  extraBlockers?: unknown;
+  /** Extra caller-supplied warnings the fields above do not model (automation-readiness
+   *  check error, projected spend near the cap, bridge probing disabled, offline /
+   *  degraded / unpaired local bridges). Bounded string-array; grade 'review' when
+   *  present with no blocker. */
+  extraWarnings?: unknown;
 }
 
 export type LaunchGrade = 'blocked' | 'review' | 'ready';
@@ -53,10 +64,10 @@ export interface LaunchReadiness {
 }
 
 const MAX_BLOCKERS = 5;
-const MAX_WARNINGS = 3;
+const MAX_WARNINGS = 5;
 const MAX_CHIPS = 4;
 const MAX_AUTOMATION_BLOCKERS = 3;
-const MAX_AUTOMATION_SCAN = 64;
+const MAX_ARRAY_SCAN = 64;
 const MAX_TEXT = 200;
 
 const BRACKET_BLOCKER = 'Replace bracketed placeholders in Task + Mode before launch.';
@@ -93,15 +104,16 @@ function bridgeWarning(value: unknown): string {
   return '';
 }
 
-// Read up to MAX_AUTOMATION_BLOCKERS string blockers from an array input. The scan is
-// bounded to MAX_AUTOMATION_SCAN elements so a hostile huge/cyclic array of non-strings
-// cannot cause an unbounded loop, and array items are read positionally (no recursion).
-function readAutomationBlockers(value: unknown): string[] {
+// Read up to `maxItems` trimmed, non-empty strings from an array input. The scan is
+// bounded to MAX_ARRAY_SCAN elements so a hostile huge/cyclic array of non-strings cannot
+// cause an unbounded loop, and array items are read positionally (no recursion). Shared by
+// automationBlockers, extraBlockers, and extraWarnings.
+function readStringArray(value: unknown, maxItems: number): string[] {
   if (!Array.isArray(value)) return [];
   const out: string[] = [];
-  const limit = Math.min(value.length, MAX_AUTOMATION_SCAN);
+  const limit = Math.min(value.length, MAX_ARRAY_SCAN);
   for (let i = 0; i < limit; i += 1) {
-    if (out.length >= MAX_AUTOMATION_BLOCKERS) break;
+    if (out.length >= maxItems) break;
     const text = asDetail(value[i]);
     if (text) out.push(text);
   }
@@ -136,12 +148,15 @@ export function resolveLaunchReadiness(input: LaunchReadinessInput): LaunchReadi
   const chips: string[] = [];
 
   // --- Blockers: any one forces grade 'blocked' and canLaunch false. ---
+  // Caller extras are pushed FIRST so an empty-task / missing-capability headline leads
+  // the list (parity with the inline gate, whose first-pushed blocker drives the summary).
+  for (const item of readStringArray(src.extraBlockers, MAX_BLOCKERS)) blockers.push(item);
   if (truthy(src.hasBracketPlaceholder)) blockers.push(BRACKET_BLOCKER);
   if (truthy(src.capabilityAuditFailed)) {
     const detail = asDetail(src.capabilityAuditFailed);
     blockers.push(detail ? `Capability audit failed: ${detail}` : CAPABILITY_BLOCKER);
   }
-  for (const item of readAutomationBlockers(src.automationBlockers)) blockers.push(item);
+  for (const item of readStringArray(src.automationBlockers, MAX_AUTOMATION_BLOCKERS)) blockers.push(item);
   if (truthy(src.budgetOverCap)) {
     const detail = asDetail(src.budgetOverCap);
     blockers.push(detail || BUDGET_BLOCKER);
@@ -150,6 +165,7 @@ export function resolveLaunchReadiness(input: LaunchReadinessInput): LaunchReadi
   // --- Warnings: grade 'review' when present and there are no blockers. ---
   const bridge = bridgeWarning(src.bridgeState);
   if (bridge) warnings.push(bridge);
+  for (const item of readStringArray(src.extraWarnings, MAX_WARNINGS)) warnings.push(item);
 
   // --- Capability chips: access badges first (so the cap keeps them), then labels. ---
   if (truthy(src.hasVaultTools)) chips.push('vault tools');

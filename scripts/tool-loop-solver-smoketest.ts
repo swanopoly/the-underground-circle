@@ -80,6 +80,43 @@ function makeTools(onOtherTool?: () => void): AgentToolDefinition[] {
   ];
 }
 
+// ── A-B-A-B oscillation harness (cross-tool thrash) ─────────────────────────
+// Two DIFFERENT failing tools (so the exact-repeat guard never trips — every
+// call differs from the one before it) plus a succeeding re-observe tool. The
+// loop maps each ring entry to `{ name, argsKey: inputHash }`, so constant
+// inputs keep A and B as two stable symbols the oscillation detector can cycle.
+function makeOscTools(hooks?: { onFail?: () => void; onSuccess?: () => void }): AgentToolDefinition[] {
+  return [
+    {
+      name: 'desktop.click_element',
+      description: 'Click a UI element',
+      input_schema: { type: 'object', properties: { label: { type: 'string' } } },
+      handler: async () => { hooks?.onFail?.(); return { ok: false, error: 'element not found: "Export"' }; },
+    },
+    {
+      name: 'desktop.menu_click',
+      description: 'Open a menu path',
+      input_schema: { type: 'object', properties: { path: { type: 'string' } } },
+      handler: async () => { hooks?.onFail?.(); return { ok: false, error: 'menu path not found: File > Export' }; },
+    },
+    {
+      name: 'desktop.read_a11y_tree',
+      description: 'Read the accessibility tree',
+      input_schema: { type: 'object', properties: {} },
+      handler: async () => { hooks?.onSuccess?.(); return { ok: true, data: { summary: 'Export lives under File > Share' } }; },
+    },
+  ];
+}
+
+const oscClickA = (id: string): ProviderTurnResult => ({
+  stop_reason: 'tool_use',
+  content: [{ type: 'tool_use', id, name: 'desktop.click_element', input: { label: 'Export' } }],
+});
+const oscClickB = (id: string): ProviderTurnResult => ({
+  stop_reason: 'tool_use',
+  content: [{ type: 'tool_use', id, name: 'desktop.menu_click', input: { path: 'File>Export' } }],
+});
+
 async function main() {
   // ─── Case 1: pure module ────────────────────────────────────────────────
   {
@@ -295,6 +332,106 @@ async function main() {
     assert(observed === 1, 'case3: the different tool actually ran after the consultation');
     assert(result.text.includes('File menu'), 'case3: run completed normally with the recovered answer');
     assert(result.hitMaxIterations === false, 'case3: clean termination');
+  }
+
+  // ─── Case 4: E2E — A-B-A-B oscillation (cross-tool thrash) now gets the
+  // SAME one solver consultation the exact-repeat exit already gets, BEFORE the
+  // hard stop. The consultation is ignored (the model keeps oscillating), so
+  // the hard stop still fires — but only after the nudge, and the run's one
+  // consultation is spent. Proves parity with case2 for the failure mode the
+  // exact-repeat guard misses, and that the SHARED `solverConsulted` flag holds
+  // the <=1-consult bound even though the oscillation detector trips TWICE. ──
+  {
+    const events: AgentEvent[] = [];
+    let dispatches = 0;
+    const tools = makeOscTools({ onFail: () => { dispatches += 1; } });
+
+    const result = await runAgent({
+      provider: scriptedProvider([
+        oscClickA('a1'), oscClickB('b1'), oscClickA('a2'), oscClickB('b2'), // A-B-A-B → oscillation → ONE consultation (ring cleared)
+        oscClickA('a3'), oscClickB('b3'), oscClickA('a4'), oscClickB('b4'), // keeps thrashing → 2nd trip → hard stop (consult spent)
+      ]),
+      tools,
+      initialMessages: [{ role: 'user', content: 'Export the document' }],
+      maxIterations: 20,
+      onEvent: (e) => events.push(e),
+    });
+
+    const consults = events.filter((e) => e.kind === 'solver_consultation');
+    const stops = events.filter((e) => e.kind === 'loop_stopped_no_progress');
+    assert(consults.length === 1,
+      'case4: A-B-A-B oscillation triggers exactly ONE consultation even though it trips twice (shared bound holds)', `got ${consults.length}`);
+    assert(stops.length === 1, 'case4: hard stop still fires once the consultation is spent');
+    assert(dispatches === 8,
+      'case4: all eight oscillating calls dispatched — the oscillation stop is POST-dispatch (both windows)', `got ${dispatches}`);
+
+    const consultIdx = events.findIndex((e) => e.kind === 'solver_consultation');
+    const stopIdx = events.findIndex((e) => e.kind === 'loop_stopped_no_progress');
+    assert(consultIdx >= 0 && stopIdx > consultIdx, 'case4: consultation precedes the hard stop');
+    assert(!events.some((e) => e.kind === 'max_iterations_exceeded') && result.hitMaxIterations === false,
+      'case4: exits via the progress stop, not the iteration cap', result.text);
+    assert(/^stopped:/.test(result.text) && /cycl|oscillat/.test(result.text),
+      'case4: terminal text explains the oscillation stop', result.text);
+
+    // The consultation was seeded from the ring (no single "requested" call):
+    // the most-recent failing tool + its captured error (tool B, the 4th call).
+    const solverMsg = result.messages.find((m) =>
+      m.role === 'user' && typeof m.content === 'string' && m.content.startsWith(SOLVER_CONSULTATION_MARKER));
+    assert(!!solverMsg, 'case4: consultation message present in the transcript');
+    const solverText = typeof solverMsg?.content === 'string' ? solverMsg.content : '';
+    assert(solverText.includes('desktop.menu_click'),
+      'case4: consultation names the most-recent failing tool from the ring');
+    assert(solverText.includes('menu path not found'),
+      'case4: consultation quotes the most-recent captured error (the last failing call)');
+    assert(solverText.includes('oscillat'), 'case4: consultation carries the oscillation stuck-reason');
+
+    // Transcript well-formedness: every tool_use id has a matching tool_result.
+    const useIds: string[] = [];
+    const resultIds: string[] = [];
+    for (const m of result.messages) {
+      if (Array.isArray(m.content)) {
+        for (const b of m.content as any[]) {
+          if (b?.type === 'tool_use') useIds.push(b.id);
+          if (b?.type === 'tool_result') resultIds.push(b.tool_use_id);
+        }
+      }
+    }
+    assert(useIds.length > 0 && useIds.every((id) => resultIds.includes(id)),
+      'case4: every tool_use closed by a tool_result (resumable transcript)');
+  }
+
+  // ─── Case 4b: E2E — oscillation consultation actually helps: the model
+  // re-plans to a DIFFERENT tool after the nudge and the run recovers with NO
+  // hard stop (the whole point of extending the consultation to this exit). ──
+  {
+    const events: AgentEvent[] = [];
+    let dispatches = 0;
+    let recovered = 0;
+    const tools = makeOscTools({ onFail: () => { dispatches += 1; }, onSuccess: () => { recovered += 1; } });
+
+    const result = await runAgent({
+      provider: scriptedProvider([
+        oscClickA('a1'), oscClickB('b1'), oscClickA('a2'), oscClickB('b2'), // A-B-A-B → oscillation → consultation
+        { // the consultation lands: model re-observes with a DIFFERENT tool
+          stop_reason: 'tool_use',
+          content: [{ type: 'tool_use', id: 'r1', name: 'desktop.read_a11y_tree', input: {} }],
+        },
+        { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Found it — Export is under File > Share; proceeding.' }] },
+      ]),
+      tools,
+      initialMessages: [{ role: 'user', content: 'Export the document' }],
+      maxIterations: 12,
+      onEvent: (e) => events.push(e),
+    });
+
+    assert(events.filter((e) => e.kind === 'solver_consultation').length === 1,
+      'case4b: one consultation on the oscillation recovery path');
+    assert(events.filter((e) => e.kind === 'loop_stopped_no_progress').length === 0,
+      'case4b: NO hard stop when the model changes approach after the nudge');
+    assert(dispatches === 4, 'case4b: only the four A-B-A-B calls failed before the re-plan', `got ${dispatches}`);
+    assert(recovered === 1, 'case4b: the different (re-observe) tool actually ran after the consultation');
+    assert(result.text.includes('File > Share'), 'case4b: run completed normally with the recovered answer');
+    assert(result.hitMaxIterations === false, 'case4b: clean termination (not the iteration cap)');
   }
 
   console.log(failures === 0 ? '\ntool-loop-solver smoke: ALL GREEN' : `\n${failures} FAILURES`);

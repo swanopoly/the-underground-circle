@@ -12,12 +12,14 @@
  * them off the DOM/Supabase.
  *
  * PURITY CONTRACT (load-bearing):
- *  - ZERO runtime imports ⇒ tsx-loadable. No react-native, no supabase, no
- *    `Date.now()` / `Math.random()` (timestamps are caller-injected).
+ *  - Imports ONLY pure sibling cores (runCostRollupCore, itself zero-import) ⇒
+ *    still tsx-loadable. No react-native, no supabase, no `Date.now()` /
+ *    `Math.random()` (timestamps are caller-injected).
  *  - Every export is TOTAL: never throws on any input, returns a safe neutral.
  *  - Deterministic: same input → same output.
  *  - Secret-safe: only reshapes caller-held control data (never logs/persists).
  */
+import { estimateRunCostUsd } from './runCostRollupCore';
 // ── Cohort tags (telemetry parity §3) ────────────────────────────────────────
 
 /**
@@ -214,6 +216,9 @@ export function buildV2BatchTerminalRow(args: {
   iterations: unknown;
   finalStopReason: V2BatchStopReason | string;
   usage: V2BatchUsage;
+  /** Resolved loop model (from resolveV2BatchModel) — priced into estimated_cost.
+   *  Optional: absent → the core's conservative default price (never under-reports). */
+  loopModel?: unknown;
   targetAgentName: string;
   targetAgentSubject?: unknown;
   rawStopReason: string;
@@ -227,6 +232,17 @@ export function buildV2BatchTerminalRow(args: {
     input_tokens: clampCount(usage.inputTokens),
     output_tokens: clampCount(usage.outputTokens),
     cached_tokens: clampCount(usage.cachedTokens),
+    // Cost attribution parity with agentRunPersistence.finalize: this terminal
+    // write owns its own row (bypasses finalize), so it must price the token
+    // rollup itself or the run would report $0. loopModel is threaded from the
+    // caller; estimateRunCostUsd clamps tokens + falls back to a conservative
+    // price for an unknown/absent model, so this is total.
+    estimated_cost: estimateRunCostUsd({
+      model: args.loopModel,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cachedTokens: usage.cachedTokens,
+    }),
     status: v2BatchTerminalStatus(args.finalStopReason),
     completed_at: args.completedAt,
     // Cohort tag + raw reason kept, continuation blob deliberately dropped

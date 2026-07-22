@@ -1,6 +1,6 @@
 import { buildAgenticCodingPrompt, detectAgenticCodingProfile, type AgenticCodingProfile, type AgenticCodingSurface } from './agenticCodingProfile';
 import { getChatPromptLaneSpec } from './chatPromptAssembly';
-import { addArtifact, addStep, completeRunUnlessCancelled, createRun, mergeRunMetadata, type ArtifactKind, type RunSurface, updateRunProgressUnlessCancelled, updateRunStatus } from './agentRunSystem';
+import { addArtifact, addStep, completeRunUnlessCancelled, createRun, failRunUnlessCancelled, mergeRunMetadata, type ArtifactKind, type RunSurface, updateRunProgressUnlessCancelled, updateRunStatus } from './agentRunSystem';
 import { planTelemetrySchedule } from './openswanTelemetryDeferCore';
 import { startRunHeartbeat } from './agentRunPersistence';
 import { buildOpenSwanExecutionStream, type OpenSwanExecutionContract } from './openswanExecution';
@@ -56,7 +56,7 @@ import { createRunAndFixGateState, foldRunAndFixRound, markNudgeSent, planVerifi
 import { buildUserActionReceipt } from './userActionReceiptCore';
 import { estimateRunCostUsd } from './runCostRollupCore';
 import { resolveCapabilityFallback } from './capabilityFallbackCore';
-import { getModelCapabilityFlags } from './modelCapabilities';
+import { getModelCapabilityFlags, getModelCodingTier } from './modelCapabilities';
 import { getModelContextWindow } from './modelContextBudgetCore';
 import { evaluateTurnSpend } from './turnSpendGovernorCore';
 import { assessStreamDegeneracy } from './streamDegeneracyCore';
@@ -642,14 +642,34 @@ async function runTypedCoreToolLoop(args: {
   // tools are enabled), swap to a tool-capable platform default. Fail-open: returns
   // the same model unchanged when there's no gap — the same operation class as the
   // BlackSwan grounding swap resolveOpenSwanToolLoopModel already performs.
-  const loopModel = resolveCapabilityFallback(
+  // Substitute STRENGTH matches the user's pick: derive a coding-tier floor from
+  // the picked model so a strong no-tool reasoner (deepseek-r1, tier 'strong')
+  // lands on claude-sonnet-4-6 instead of the basic-tier Haiku default. Tier
+  // 'none' (sonar / deepseek-reasoner) imposes no floor and still resolves to
+  // Haiku — but now VISIBLY (see substitutionNotice). ('none' ⇒ omit the field ⇒
+  // no coding-tier requirement.)
+  const baseLoopCodingTier = getModelCodingTier(baseLoopModel);
+  const capabilityFallback = resolveCapabilityFallback(
     {
       model: baseLoopModel,
       flags: getModelCapabilityFlags(baseLoopModel),
       contextWindow: getModelContextWindow(baseLoopModel),
     },
-    { toolUse: true },
-  ).model;
+    {
+      toolUse: true,
+      ...(baseLoopCodingTier === 'none' ? {} : { minCodingTier: baseLoopCodingTier }),
+    },
+  );
+  const loopModel = capabilityFallback.model;
+  // FAIL-VISIBLE (CLAUDE.md): a silent model swap is exactly the "it got dumber"
+  // failure mode. When we actually substituted (always a DIFFERENT model — the
+  // core never reports substituted for an identity), surface a one-line notice —
+  // mirroring the main-chat delegate-executor notice (buildDelegateExecutorNotice
+  // in swanbot.ts) — so the user sees their picked model was replaced, and thread
+  // it into route_decision telemetry below.
+  const substitutionNotice = capabilityFallback.substituted
+    ? `${baseLoopModel} can't use tools here — running this on ${loopModel} instead.`
+    : null;
   const blackswanGroundingBlock = isBlackSwanModel(args.model)
     ? buildBlackSwanGroundingBlock({
         model: args.model,
@@ -1046,7 +1066,13 @@ async function runTypedCoreToolLoop(args: {
               model: loopModel,
               confidence: null,
               source: 'openswan_session_runtime',
-              note: `allowed tools: ${args.allowedToolNames.length}`,
+              // Make the (previously silent) capability swap observable in the
+              // run event stream. capabilityFallback.reason is already bounded +
+              // secret-safe (gap enums + the safe substitute literal only — never
+              // the raw picked id), so it's safe to persist here.
+              note: capabilityFallback.substituted
+                ? `${capabilityFallback.reason}; allowed tools: ${args.allowedToolNames.length}`
+                : `allowed tools: ${args.allowedToolNames.length}`,
             });
             void supabase.from('agent_run_events').insert({
               run_id: args.runId,
@@ -1203,12 +1229,19 @@ async function runTypedCoreToolLoop(args: {
     usage: finalizeLoopUsage(usageAcc),
     verificationReceipt,
   });
+  // FAIL-VISIBLE: prepend the capability-substitution notice (blank-line
+  // separated, mirroring the main-chat delegate-executor notice) so a swapped
+  // model is never silent to the user. filter(Boolean) keeps an empty / edge-fail
+  // response from leaving a dangling separator (notice stands alone).
+  const withNotice: LegacyToolLoopResult = substitutionNotice
+    ? { ...legacyResult, response: [substitutionNotice, legacyResult.response].filter(Boolean).join('\n\n') }
+    : legacyResult;
   // Honest STOP: a user cancel (signal abort or DB-side console cancel) is a
   // distinct outcome from cap-exhaustion `incomplete` — surface it so the
   // session finalization writes 'cancelled' instead of 'completed'.
   return runResult.aborted === true || dbCancelled
-    ? { ...legacyResult, cancelled: true }
-    : legacyResult;
+    ? { ...withNotice, cancelled: true }
+    : withNotice;
 }
 
 type OpenSwanUsageLike = {
@@ -1432,6 +1465,13 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
           recommendedTools: taskPlan.recommendedTools,
           connectedProviders: connectedProviders ? Array.from(connectedProviders) : [],
           ...(opts.metadata || {}),
+          // Run-reaper opt-in (fail-safe floor): mark this run reap-eligible so
+          // the dashboard reapers (OpenSwanConsole / AgentRunsPanel, both gated
+          // on metadata.heartbeat===true) may flip a dead-heartbeat zombie to
+          // 'failed'. Placed AFTER the opts spread so a caller can't clear it.
+          // The lifetime heartbeat started right after createRun keeps
+          // updated_at fresh for the WHOLE turn so a live run is never reaped.
+          heartbeat: true,
           agentSubjectKey: runtimeSubject.subjectKey,
           agentId: runtimeSubject.runAgentId,
           agentName: runtimeSubject.displayName,
@@ -1446,6 +1486,27 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
         },
       })
     : null;
+
+  // Deferred-telemetry handles, declared at function scope so BOTH the normal
+  // join barrier (inside the try) and the outer catch's finalize-on-throw can
+  // settle any in-flight 'running' status write before the terminal write —
+  // otherwise a late updateRunProgressUnlessCancelled could resurrect the row.
+  const pendingTelemetry: Array<Promise<unknown>> = [];
+
+  // ── Run-reaper wire (lifetime heartbeat + finalize-on-throw) ──────────────
+  // This runtime does NOT go through agentRunPersistence.createPersistedRun, and
+  // the tool-loop heartbeat (in runTypedCoreToolLoop) only covers the loop
+  // itself — the pre-loop delegateToSubagents + buildOpenSwanMemoryStores
+  // windows can legally outlast RUN_STALL_DEAD_MS with no write, so a reaper
+  // could false-kill a genuinely live long-delegating run. Beat
+  // agent_runs.updated_at on wall-clock time for the WHOLE turn lifetime,
+  // stopped in the outer finally on every exit (return / throw). Pairs with
+  // metadata.heartbeat:true above (reaper opt-in). The try/catch below finalizes
+  // a thrown turn as 'failed' (cancel-guarded) instead of leaving the row stuck
+  // at 'running'. NOTE: the wrapped body keeps its original indentation to make
+  // this a surgical wrap (single-exit function; repo has no formatter).
+  const stopRunHeartbeat = run ? startRunHeartbeat(run.id) : null;
+  try {
 
   // ── Telemetry defer (hot-path R2): take the ~7 serial pre-loop Supabase
   // telemetry writes off time-to-first-token. planTelemetrySchedule (pure
@@ -1478,7 +1539,6 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     for (const writeId of chain) telemetryChainByWriteId.set(writeId, chainIndex);
   });
   const telemetryChainTails = new Map<number, Promise<unknown>>();
-  const pendingTelemetry: Array<Promise<unknown>> = [];
   /**
    * Start a telemetry write per the schedule. Returns a promise the call site
    * awaits: for deferred writes it resolves immediately (write started, not
@@ -2780,4 +2840,28 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       summary: action.output_preview || action.title || action.tool_name,
     })),
   };
+  } catch (turnErr) {
+    // Finalize-on-throw: without this, a throw at delegateToSubagents /
+    // buildOpenSwanMemoryStores / the text-only fallback leaves the row stuck at
+    // 'running' until a reaper claims it ~RUN_STALL_DEAD_MS later. Record the
+    // reason WITHOUT clobbering the metadata column (mergeRunMetadata is a
+    // read-merge-write; a whole-column .update({metadata}) would wipe
+    // agentSubject/posture/delegation keys accumulated during the run), flip
+    // status to 'failed' cancel-guarded so a concurrent user STOP still wins,
+    // then re-throw to preserve the caller's error semantics.
+    if (run) {
+      // Settle in-flight deferred telemetry FIRST (mirrors the normal-path join
+      // barrier) so a late 'running' status write can't land after — and
+      // resurrect — the 'failed' terminal write below.
+      await Promise.allSettled(pendingTelemetry);
+      const errText = turnErr instanceof Error ? turnErr.message : String(turnErr);
+      await mergeRunMetadata(run.id, { runtime_error: errText.slice(0, 500) }).catch(() => undefined);
+      await failRunUnlessCancelled(run.id).catch(() => undefined);
+    }
+    throw turnErr;
+  } finally {
+    // Stop the lifetime heartbeat on EVERY exit (normal return above or throw)
+    // so the timer never keeps beating updated_at for a finished run.
+    stopRunHeartbeat?.();
+  }
 }

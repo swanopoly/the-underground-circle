@@ -16,6 +16,7 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View, Platf
 import {
   getRun,
   getRunSteps,
+  mergeRunMetadata,
   subscribeToRun,
   updateRunStatus,
   type AgentRun,
@@ -253,12 +254,15 @@ export default function RunTraceCard({ runId, onRunAgain, accentColor = '#a78bfa
               // even if the realtime UPDATE event takes a beat.
               setRun((prev) => (prev ? { ...prev, status: 'cancelled' } : prev));
               try {
-                await updateRunStatus(runId, 'cancelled', {
-                  metadata: {
-                    ...(run.metadata || {}),
-                    cancelled_by: 'user',
-                    cancelled_at: new Date().toISOString(),
-                  },
+                // Split the STOP write so we don't clobber the metadata column
+                // with the lagging realtime snapshot (run.metadata): a bare
+                // status flip leaves the column untouched (preserving runtime
+                // keys written after this snapshot), then a read-merge-write
+                // records cancel provenance without dropping them.
+                await updateRunStatus(runId, 'cancelled');
+                await mergeRunMetadata(runId, {
+                  cancelled_by: 'user',
+                  cancelled_at: new Date().toISOString(),
                 });
               } catch {
                 // Revert if the write failed — the realtime sub will

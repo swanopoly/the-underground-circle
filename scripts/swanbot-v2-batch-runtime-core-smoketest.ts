@@ -166,6 +166,25 @@ const capRow = buildV2BatchTerminalRow({
 ok(capRow.status === 'failed', 'max_tokens row → failed');
 ok((capRow.metadata as Record<string, unknown>).rawStopReason === 'tool_use', 'raw tool_use preserved in metadata only');
 
+// ── 8b. Cost attribution (TEL1) — estimated_cost priced via threaded loopModel ─
+// The terminal write owns its own row (bypasses finalize), so it prices the token
+// rollup itself; before TEL1 this path wrote no estimated_cost (column DEFAULT 0).
+// Value must track loopModel — opus > haiku for identical usage — proving the
+// model actually flows into estimateRunCostUsd (not a hardcoded constant).
+group('8b. buildV2BatchTerminalRow — estimated_cost cost attribution');
+const costUsage = { inputTokens: 1_000_000, outputTokens: 1_000_000, cachedTokens: 0 };
+const opusCostRow = buildV2BatchTerminalRow({
+  toolCalls: [], iterations: 1, finalStopReason: 'end_turn', usage: costUsage,
+  loopModel: 'claude-opus', targetAgentName: 'BlackSwan', rawStopReason: 'end_turn', completedAt: now,
+});
+const haikuCostRow = buildV2BatchTerminalRow({
+  toolCalls: [], iterations: 1, finalStopReason: 'end_turn', usage: costUsage,
+  loopModel: 'claude-haiku', targetAgentName: 'BlackSwan', rawStopReason: 'end_turn', completedAt: now,
+});
+ok(typeof opusCostRow.estimated_cost === 'number' && (opusCostRow.estimated_cost as number) > 0, 'estimated_cost priced > 0 for a real model (was absent/$0)');
+ok((opusCostRow.estimated_cost as number) > (haikuCostRow.estimated_cost as number), 'estimated_cost tracks loopModel (opus > haiku, same usage)');
+ok(typeof capRow.estimated_cost === 'number' && Number.isFinite(capRow.estimated_cost as number), 'estimated_cost finite even with no loopModel (never NaN/under-report)');
+
 // ── 9. Error row shape (DE-RISK #2 / edge index.ts:3093-3106) ────────────────
 group('9. buildV2BatchErrorRow (orphan finalizer)');
 const errRow = buildV2BatchErrorRow({ targetAgentName: 'BlackSwan', errorMessage: new Error('boom'), completedAt: now });

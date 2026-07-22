@@ -14,7 +14,8 @@
  */
 
 import { supabase } from './supabase';
-import { boundEventPayload } from './eventBoundCore';
+import { boundEventPayload, boundToolCallsAggregate } from './eventBoundCore';
+import { estimateRunCostUsd } from './runCostRollupCore';
 import { createRun, updateRunStatus, type AgentRun, type RunSurface } from './agentRunSystem';
 import type { AgentEvent, AgentRunResult, AgentToolResult } from './agentExecutionCore';
 
@@ -325,13 +326,33 @@ export async function createPersistedRun(opts: CreatePersistedRunOptions): Promi
       await supabase
         .from('agent_runs')
         .update({
-          tool_calls: toolCalls,
+          // Bound the aggregate the same way writeEvent bounds each event row:
+          // this jsonb column otherwise stored the FULL tool_calls array with raw,
+          // un-truncated error strings — oversized rows and unmasked secret-shaped
+          // tokens. boundToolCallsAggregate caps entries (~50 + marker), clips
+          // per-entry size/strings, and secret-masks. (NOT boundEventPayload —
+          // that is tuned for a single event row, not this aggregate.)
+          tool_calls: boundToolCallsAggregate(toolCalls),
           iteration_count: result.iterations || finalIteration,
           final_stop_reason: result.stopReason || lastStopReason || null,
           ...(sawUsage ? {
             input_tokens: tokenTotals.input,
             output_tokens: tokenTotals.output,
             cached_tokens: tokenTotals.cached,
+            // Cost attribution: the estimated_cost column (plain numeric DEFAULT 0,
+            // no trigger) was never written on this path, so every run except the
+            // openswanSessionRuntime path reported $0 to the office ops board,
+            // console recent-runs, AgentRunsPanel, RunTraceCard, and
+            // circleCostTelemetry. Price the token rollup with the zero-import core.
+            // Honest caveat: a delegating parent already folds its child runs'
+            // tokens into its own totals, so a parent's estimate double-counts the
+            // child's spend — a pre-existing token-rollup property, not new here.
+            estimated_cost: estimateRunCostUsd({
+              model: run.model,
+              inputTokens: tokenTotals.input,
+              outputTokens: tokenTotals.output,
+              cachedTokens: tokenTotals.cached,
+            }),
           } : {}),
         })
         .eq('id', run.id);

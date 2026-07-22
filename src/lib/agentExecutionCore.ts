@@ -1445,6 +1445,41 @@ export async function runAgent(opts: AgentRunOptions): Promise<AgentRunResult> {
         recentToolCalls.map((c) => ({ name: c.name, ok: c.ok, argsKey: c.inputHash })),
       );
       if (osc.stuck) {
+        // P56 parity: give the oscillation (A-B-A-B thrash) exit the SAME one
+        // fresh-eyes solver consultation the exact-repeat exit already gets,
+        // before hard-stopping — a cross-tool cycle is the failure mode most
+        // likely to respond to a forced re-plan. The transcript is already
+        // well-formed here (every tool_use is closed by the tool_result push
+        // above), so nothing needs closing: inject the consultation as a plain
+        // user turn and `continue`. The SHARED `solverConsulted` flag preserves
+        // the <=1-consult-per-run bound — a consult already spent (here OR at
+        // the exact-repeat exit) falls straight through to the hard stop below.
+        // Every post-consultation dispatch still passes the same
+        // constraint/approval gates: this changes the plan, not permissions.
+        if (shouldConsultSolver({ stuck: true, alreadyConsulted: solverConsulted })) {
+          solverConsulted = true;
+          emit({ kind: 'solver_consultation', iteration, reason: osc.reason });
+          // The oscillation is a CROSS-tool cycle, so there is no single
+          // "requested" call to name — seed the consultation with the most
+          // recent failing tool from the ring. The raw input is not
+          // reconstructable from the ring (name + hash only), so `inputPreview`
+          // is omitted (it is optional on SolverFailureContext).
+          const lastFailing = [...recentToolCalls].reverse().find((c) => c.ok === false);
+          messages.push({
+            role: 'user',
+            content: buildSolverConsultationMessage({
+              tool: lastFailing?.name ?? 'the last tool',
+              stuckReason: osc.reason,
+              lastError: lastToolErrorText,
+              availableTools: Array.from(toolsByName.keys()),
+            }),
+          });
+          // Fresh window (edge/legacy loop parity — mirrors the exact-repeat
+          // exit's ring clear) so the re-planned approach is judged on its own
+          // outcomes, not re-tripped instantly by the pre-consultation thrash.
+          recentToolCalls.length = 0;
+          continue;
+        }
         const note = `stopped: ${osc.reason} — the last several tool attempts are cycling without progress; re-observe or ask the user before trying a different approach.`;
         emit({ kind: 'loop_stopped_no_progress', iteration, reason: osc.reason });
         lastText = note;
