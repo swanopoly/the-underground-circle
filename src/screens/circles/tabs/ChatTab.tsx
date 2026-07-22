@@ -1883,7 +1883,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     );
     nextState.notifications = appendComputerTaskNotification(previousForNotifications?.notifications, notification);
     setComputerTaskState(nextState);
-    await saveComputerTaskState(nextState);
+    // Best-effort persistence (UI recovery convenience, not task-critical): on
+    // native, storage is AsyncStorage directly and setItem can reject (I/O
+    // pressure / oversized row). Swallow it here so a persist failure can never
+    // unwind out of the caller's pre-try preamble and strand the typing
+    // indicator (executeSharedComputerTask sets botTyping before its try/finally).
+    await saveComputerTaskState(nextState).catch(() => {});
   }, [activeThreadId, circleId, computerTaskState?.checkpointRecovery]);
 
   useEffect(() => {
@@ -2244,6 +2249,12 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
   }) => {
     const trimmed = taskText.trim();
     if (!trimmed) return;
+    // Show the typing indicator immediately so the ~430-line multi-await
+    // preamble below (capability audit, Supabase reads, optional bridge
+    // autoconnect, persist writes) never leaves the user staring at their own
+    // bubble. This runs before the try/finally, so the two top-level blocked
+    // early-returns below reset it explicitly; the normal path's finally does.
+    setBotTyping(true);
     // T7 sticky allow scopes: re-hydrate the standing-grant registry before
     // the synchronous route build below reads it, so a grant persisted on a
     // previous load can downgrade approval on the first task of this session.
@@ -2407,6 +2418,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               effectiveModel: 'local-desktop-bridge',
             },
           });
+          setBotTyping(false);
           return { handled: true as const, browser: false as const };
         }
         recordSessionArchiveEvent({
@@ -2516,6 +2528,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           effectiveModel: 'local-desktop-bridge',
         },
       });
+      setBotTyping(false);
       return { handled: true as const, browser: false as const };
     }
     await persistComputerTaskState({

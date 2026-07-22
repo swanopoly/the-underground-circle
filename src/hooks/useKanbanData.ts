@@ -1058,12 +1058,31 @@ export function useKanbanData(circleId: string): KanbanData {
       mode: fields.mode || null,
       position: maxPos + 1,
     };
+    if (fields.mission_id) payload.mission_id = fields.mission_id;
     let insertResult = await supabase.from('tasks').insert(payload).select('id').single();
-    if (insertResult.error && payload.completion_policy && String(insertResult.error.message || '').includes('completion_policy')) {
-      completionPolicySupportRef.current = false;
-      delete payload.completion_policy;
-      insertResult = await supabase.from('tasks').insert(payload).select('id').single();
-    } else if (!insertResult.error && payload.completion_policy) {
+    if (insertResult.error) {
+      // A circle's prod DB may be missing EITHER completion_policy or mission_id
+      // (or BOTH, when neither migration is applied). PostgREST/Postgres names
+      // only one missing column per error, so peel them one-per-error with a
+      // small bounded loop (cap 2 retries / 3 inserts total) — stripping, never
+      // reassigning, whichever optional column the CURRENT error names — so a
+      // mission-linked create still succeeds unlinked when both are absent.
+      for (let attempt = 0; attempt < 2 && insertResult.error; attempt++) {
+        const insertErrorMessage = String(insertResult.error.message || '');
+        let strippedColumn = false;
+        if (payload.completion_policy && insertErrorMessage.includes('completion_policy')) {
+          completionPolicySupportRef.current = false;
+          delete payload.completion_policy;
+          strippedColumn = true;
+        }
+        if (payload.mission_id && insertErrorMessage.includes('mission_id')) {
+          delete payload.mission_id;
+          strippedColumn = true;
+        }
+        if (!strippedColumn) break;
+        insertResult = await supabase.from('tasks').insert(payload).select('id').single();
+      }
+    } else if (payload.completion_policy) {
       completionPolicySupportRef.current = true;
     }
 

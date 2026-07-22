@@ -5,10 +5,17 @@
  *
  *   1. `deriveSnapshotSurfacingSignals` — turns a `circleContextSnapshot`
  *      into candidate signals: recentRuns in status failed/error become
- *      `failed_run`; missions in a troubled status become `stalled_mission`.
- *      The `overdue_task` / `expiring_credential` kinds stay DORMANT here:
- *      the snapshot carries no due/expiry timestamps, and faking them from
- *      status strings would manufacture false urgency.
+ *      `failed_run`; missions in a troubled status become `stalled_mission`;
+ *      snapshot `credentials` become `expiring_credential` only on genuine
+ *      near-term trouble: a future expiry/rotation within
+ *      CREDENTIAL_SURFACE_HORIZON_MS (derive gates the surface window; the
+ *      core's 24h horizon then ramps urgency inside it), OR an overdue rotation
+ *      (carried as sinceMs age-pressure so it surfaces precisely when overdue,
+ *      never dropped as moot). A hard-expired credential passes expiresAtMs in
+ *      the past so the core moots it; a far-future or dateless credential is
+ *      skipped. Only `overdue_task` stays DORMANT here: kanban/mission
+ *      tasks have no due_date column yet, and faking one from a status string
+ *      would manufacture false urgency.
  *   2. `attentionItemsToSurfacingSignals` — folds live chatAttentionQueue
  *      items (pending/expiring approvals, human-blocked runs) in as
  *      `blocked_approval` signals so the prompt heads-up and the "Needs you"
@@ -49,6 +56,16 @@ export const STALLED_MISSION_STATUSES: ReadonlySet<string> = new Set([
 
 /** Run statuses treated as failed-and-unresolved. */
 export const FAILED_RUN_STATUSES: ReadonlySet<string> = new Set(['failed', 'error']);
+
+/**
+ * Near-term window within which a credential's FUTURE expiry/rotation deadline
+ * counts as "expiring soon" and is surfaced as a heads-up. Deliberately WIDER
+ * than the core's 24h EXPIRY_HORIZON_MS time-pressure ramp (a week's actionable
+ * warning to coordinate a rotation), and it GATES surfacing (the core's horizon
+ * only ranks urgency). A deadline further out than this stays out of the top-k
+ * so a 30/45/90-day-out credential never displaces a genuinely-waiting item.
+ */
+export const CREDENTIAL_SURFACE_HORIZON_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Attention kinds that fold in as `blocked_approval` signals. */
 export const BLOCKED_APPROVAL_ATTENTION_KINDS: ReadonlySet<string> = new Set([
@@ -108,6 +125,49 @@ export function deriveSnapshotSurfacingSignals(
         title: String(mission.title || ''),
         entityId: mission.id ? String(mission.id) : null,
         surface: 'feed',
+      });
+    }
+
+    // Expiring / rotation-due credentials (top-level, NOT a section).
+    // Two semantically distinct deadlines are separated (they used to be
+    // collapsed into a single min, which both surfaced far-future credentials
+    // and silently dropped overdue rotations):
+    //   • a HARD expiry that has passed → still moots (nagging can't un-expire);
+    //   • the soonest FUTURE deadline (expiry or rotation) → drives urgency, but
+    //     only surfaces when within CREDENTIAL_SURFACE_HORIZON_MS (near-term
+    //     gate — a 45-day-out credential is not "expiring soon");
+    //   • a PAST rotation date → an overdue-rotation reminder carried as sinceMs
+    //     (age pressure), which the core never moots, so it surfaces precisely
+    //     when it matters most instead of vanishing once overdue.
+    // A credential with no finite deadline at all is skipped (never fabricated).
+    // Titles are member-authored → the core sanitizes/masks them.
+    const creds = snapshot?.credentials;
+    const credentials = Array.isArray(creds) ? creds : [];
+    for (const cred of credentials) {
+      if (!cred || typeof cred !== 'object') continue;
+      const expiryParsed = Date.parse(String(cred.expiresAtIso || ''));
+      const rotParsed = Date.parse(String(cred.rotationDueIso || ''));
+      const expiryMs = Number.isFinite(expiryParsed) ? expiryParsed : null;
+      const rotMs = Number.isFinite(rotParsed) ? rotParsed : null;
+      if (expiryMs === null && rotMs === null) continue;
+      const trulyExpired = expiryMs !== null && expiryMs <= now;
+      const futureDeadlines = [expiryMs, rotMs].filter((n): n is number => n !== null && n > now);
+      const expiresAtMs = trulyExpired
+        ? expiryMs
+        : (futureDeadlines.length > 0 ? Math.min(...futureDeadlines) : null);
+      const sinceMs = rotMs !== null && rotMs <= now ? rotMs : null;
+      const nearTermFutureExpiry = expiresAtMs !== null && expiresAtMs > now && expiresAtMs - now <= CREDENTIAL_SURFACE_HORIZON_MS;
+      // Near-term horizon gate: surface only genuine near-term trouble (a
+      // deadline inside the window), an overdue rotation, or a hard-expired
+      // credential (the core then moots the last). Far-future deadlines skip.
+      if (!nearTermFutureExpiry && sinceMs === null && !trulyExpired) continue;
+      out.push({
+        kind: 'expiring_credential',
+        title: String(cred.label || cred.platform || ''),
+        entityId: cred.id ? String(cred.id) : null,
+        surface: 'marketplace',
+        expiresAtMs,
+        sinceMs,
       });
     }
   } catch {

@@ -84,6 +84,17 @@ import { SWANBOT_CONTINUATION_BASE_MAX } from './swanbotContinuationBudgetCore';
 // everything heavy stay dynamically imported inside the flag guard.
 import { isSwanbotV2ClientLoopEnabled } from './swanbotV2ClientLoopFlag';
 import { buildBlackSwanGroundingBlock, isBlackSwanModel, isLocalOllamaBlackSwan, planBlackSwanEndpointFailover } from './blackswanRouting';
+// Budget-cap downshift: give a circle's EXPLICIT Claude cap teeth by dropping an
+// Auto-ish pick to a cheaper tier when spend is running hot. Pure classifier +
+// substitution table; the live cap/spend numbers come from circleBudgetSnapshot.
+import {
+  classifySpendLevel,
+  downshiftForBudget,
+  inferDownshiftTier,
+  MODEL_DOWNSHIFT_TIERS,
+  type SpendAlertLevel,
+} from './budgetModelDownshiftCore';
+import { getCircleBudgetSnapshot } from './circleBudgetSnapshot';
 // Pure csv/table helpers (no react-native) — see the LOCKSTEP note on
 // SwanBotStructuredArtifact below.
 import { looksLikeCsvArtifact } from './tableArtifact';
@@ -601,6 +612,13 @@ export interface SwanBotStructuredResponse {
      * to the response text — this field is the machine-readable receipt.
      */
     blackswan_failover?: { failover_from: string; fallback_model: string; reason: string };
+    /**
+     * BUDGET DOWNSHIFT: set when this circle has an explicit Claude spend cap
+     * and an Auto-ish pick was dropped to a cheaper tier to stay under it. The
+     * matching user notice is prepended to the response text — this field is the
+     * compact machine-readable receipt (never the raw model id or reason string).
+     */
+    budget_downshift?: { level: string; from_tier: string; to_tier: string };
   };
 }
 
@@ -3496,6 +3514,8 @@ function buildSystemPrompt(
   const taskInfo = data.stats
     ? `Tasks - Open: ${data.stats.openTasks}, In Progress: ${data.stats.inProgress}, Done: ${data.stats.done}`
     : '';
+  const nowUtc = new Date();
+  const todayLine = `${nowUtc.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' })}, ${nowUtc.toISOString().slice(0, 10)} (UTC)`;
 
   // STABLE prefix — zero per-turn interpolation, so it stays byte-identical
   // across every turn and actually hits the ephemeral prompt cache. The volatile
@@ -3552,6 +3572,7 @@ function buildSystemPrompt(
   // above stays byte-identical and hits the cache. Content is unchanged from the
   // legacy single-template layout; only position moved.
   const volatile = `## Current Context
+- Today: ${todayLine}
 - Talking to: ${name}
 - ${streakInfo}
 - ${memberList}
@@ -3841,6 +3862,50 @@ export async function tryHandleLocalSwanBotCommand(
 
 // ─── Main Response Engine ────────────────────────────────────────────────────
 
+/** The single friendly line prepended when a turn was budget-downshifted. Kept
+ *  generic on purpose — we never surface the raw model id or the core's reason
+ *  string to the user. */
+const BUDGET_DOWNSHIFT_NOTICE = "Using a lighter model to stay under this circle's budget.";
+
+/**
+ * Budget-cap downshift decision for an Auto-ish model pick. Returns the cheaper
+ * model plus a compact { level, from_tier, to_tier } receipt when this circle
+ * has an EXPLICIT Claude spend cap that is running hot, or `null` (no change)
+ * otherwise.
+ *
+ * Gated to auto-ish picks ONLY — an explicit premium selection (Opus/Sonnet/…)
+ * is the user's authoritative choice and is never overridden. FAIL-OPEN: no
+ * circle, no cap, a calm budget, or ANY read error → `null` (the turn is left
+ * un-downshifted). The tier labels are derived from the pure core's exported
+ * ladder so we never re-surface the core's raw reason string.
+ */
+async function resolveBudgetDownshift(
+  contextModel: string | null | undefined,
+  circleId: string | null | undefined,
+  resolvedModel: string,
+): Promise<{ model: string; level: SpendAlertLevel; from_tier: string; to_tier: string } | null> {
+  try {
+    const picked = (contextModel || '').trim().toLowerCase();
+    // Only an empty / 'auto' / 'blackswan' pick may be downshifted.
+    if (picked && picked !== 'auto' && picked !== 'blackswan') return null;
+    const snapshot = await getCircleBudgetSnapshot(circleId);
+    if (!snapshot) return null;
+    const level = classifySpendLevel({ spentUsd: snapshot.spentUsd, capUsd: snapshot.capUsd });
+    const decision = downshiftForBudget(resolvedModel, level);
+    if (!decision.downshifted) return null;
+    const fromIdx = inferDownshiftTier(resolvedModel);
+    const toIdx = inferDownshiftTier(decision.model);
+    return {
+      model: decision.model,
+      level,
+      from_tier: fromIdx >= 0 ? MODEL_DOWNSHIFT_TIERS[fromIdx].tier : 'unknown',
+      to_tier: toIdx >= 0 ? MODEL_DOWNSHIFT_TIERS[toIdx].tier : 'unknown',
+    };
+  } catch {
+    return null; // fail-open — a budget read must never block or alter a turn
+  }
+}
+
 export async function getSwanBotResponse(
   message: string,
   context: SwanBotContext
@@ -3889,7 +3954,7 @@ async function getSwanBotResponseImpl(
     | import('./conversationalBuild').BuildConversationState
     | undefined;
   const buildExploring = buildStateCtx === 'exploring';
-  const effectiveModel = resolveModelForSoul(
+  let effectiveModel = resolveModelForSoul(
     spiritId,
     context.model,
     msgRoute.intent,
@@ -3898,6 +3963,18 @@ async function getSwanBotResponseImpl(
     buildExploring,
     context.connectedProviders,
   );
+
+  // Budget-cap downshift (gives the circle's EXPLICIT Claude cap teeth): when
+  // this is an Auto-ish pick and the circle is running hot against its cap, drop
+  // `effectiveModel` to a cheaper tier before anything else reads it. Fail-open
+  // (no cap / read error / calm budget → unchanged), so an unconfigured circle
+  // and every eval golden case are byte-identical to the legacy path.
+  let budgetDownshift: { level: string; from_tier: string; to_tier: string } | undefined;
+  const bdText = await resolveBudgetDownshift(context.model, context.circleId, effectiveModel);
+  if (bdText) {
+    effectiveModel = bdText.model;
+    budgetDownshift = { level: bdText.level, from_tier: bdText.from_tier, to_tier: bdText.to_tier };
+  }
 
   // AI-models-first collaboration (DEFAULT ON since 2026-07-01 behind
   // uc_stream_escalate_on_tool_use):
@@ -4223,8 +4300,12 @@ async function getSwanBotResponseImpl(
     const aiResponse = aiResult?.response || null;
     if (aiResponse) {
       console.log('[SwanBot] Tier 2: Got response from edge function');
-      if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', aiResponse);
-      return aiResponse;
+      // A budget-downshifted Auto pick always resolves to a claude-* model, so it
+      // serves HERE (Tier 2) — lead with one friendly line, just like the
+      // fail-visible BlackSwan failover below.
+      const servedText = budgetDownshift ? `${BUDGET_DOWNSHIFT_NOTICE}\n\n${aiResponse}` : aiResponse;
+      if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', servedText);
+      return servedText;
     }
     if (aiResult?.error?.message) {
       lastFailureReason = aiResult.error.message;
@@ -4394,7 +4475,7 @@ async function getSwanBotStructuredResponseImpl(
   const { analyzeMessageRouting } = await import('./messageRouting');
   const { route: structuredRoute } = analyzeMessageRouting(cleaned, 'main_chat');
   const { resolveModelForSoul } = await import('./serviceProfileSouls');
-  const effectiveModel = resolveModelForSoul(
+  let effectiveModel = resolveModelForSoul(
     spiritId,
     context.model,
     structuredRoute.intent,
@@ -4403,6 +4484,14 @@ async function getSwanBotStructuredResponseImpl(
     false,
     context.connectedProviders,
   );
+  // Budget-cap downshift — same guard as the text path (fail-open, auto-ish only).
+  // Threaded into the structured result's routing receipt + a leading notice below.
+  let budgetDownshift: { level: string; from_tier: string; to_tier: string } | undefined;
+  const bdStructured = await resolveBudgetDownshift(context.model, context.circleId, effectiveModel);
+  if (bdStructured) {
+    effectiveModel = bdStructured.model;
+    budgetDownshift = { level: bdStructured.level, from_tier: bdStructured.from_tier, to_tier: bdStructured.to_tier };
+  }
   const needsKnowledgeStructured = structuredRoute.complexity !== 'trivial' && structuredRoute.complexity !== 'simple';
   const knowledgeBundle = needsKnowledgeStructured
     ? (context.wikiContext || await buildCombinedKnowledgeBundle(cleaned, context.circleId, spiritId))
@@ -4456,11 +4545,19 @@ async function getSwanBotStructuredResponseImpl(
     : null;
 
   if (structured) {
+    if (budgetDownshift) {
+      // Lead with one friendly line + carry the compact routing receipt (no raw
+      // model id / reason string). Mirrors the fail-visible BlackSwan failover.
+      structured.response = `${BUDGET_DOWNSHIFT_NOTICE}\n\n${structured.response}`;
+      structured.routing = { ...(structured.routing || {}), budget_downshift: budgetDownshift };
+    }
     if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'user', cleaned);
     if (enrichedContext.circleId) addToHistory(enrichedContext.circleId, 'model', structured.response);
     return structured;
   }
 
+  // Fallback path: getSwanBotResponse runs its OWN budget guard, so we do NOT
+  // re-apply the notice here (no double-prepend).
   const response = await getSwanBotResponse(cleaned, context);
   return { response };
 }

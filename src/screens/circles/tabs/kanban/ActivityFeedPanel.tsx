@@ -8,6 +8,7 @@ import {
 } from 'react-native';
 import { supabase } from '../../../../lib/supabase';
 import RunMetadataSummary from '../../../../components/chat/RunMetadataSummary';
+import AgentRunProofDetail from '../../../../components/feed/AgentRunProofDetail';
 import type { CircleOfficeAgent } from '../../../../lib/circleOffice';
 import {
   buildRunMetadataSummaryProps,
@@ -350,6 +351,7 @@ export default function ActivityFeedPanel({ circleId, agents }: Props) {
                     <Text style={[s.sourceBadge, { color }]}>POW</Text>
                   </View>
                   <Text style={s.itemAction}>{pow.title}</Text>
+                  {pow.pow_type === 'agent_run' && <AgentRunProofDetail detail={pow.detail} />}
                   <Text style={s.timestamp}>{timeAgo(pow.created_at)}</Text>
                 </View>
               </View>

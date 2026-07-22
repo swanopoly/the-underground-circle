@@ -3081,6 +3081,11 @@ export default function OpenSwanConsole({
                                 ? ` · step ${r.current_step_index}/${r.total_steps}`
                                 : ` · ${r.total_steps} step${r.total_steps === 1 ? '' : 's'}`
                             ) : ''}
+                            {/* Live run stage (published by emitStage → agent_runs.metadata.live_stage).
+                                isLive-gated so a completed/cancelled row never shows a stale terminal stage. */}
+                            {isLive && typeof r.metadata?.live_stage === 'string' && r.metadata.live_stage
+                              ? ` · ${r.metadata.live_stage}`
+                              : ''}
                           </Text>
                         </View>
                         {isLive ? (

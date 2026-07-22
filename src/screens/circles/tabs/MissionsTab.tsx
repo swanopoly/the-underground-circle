@@ -55,6 +55,7 @@ import MissionTimeline from '../../../components/MissionTimeline';
 import MissionHistoryPanel from '../../../components/MissionHistoryPanel';
 import BlockBriefEditor, { blocksFromText, blocksToPlainText, extractAllMentionsFromBlocks, type Block } from '../../../components/BlockBriefEditor';
 import MentionText from '../../../components/MentionText';
+import AgentRunProofDetail from '../../../components/feed/AgentRunProofDetail';
 import { persistMentions } from '../../../lib/mentions';
 import SuggestedTaskChips from '../../../components/SuggestedTaskChips';
 import { getEmptyStateSuggestions, type EmptyStateSuggestionAction } from '../../../lib/emptyStateSuggestions';
@@ -730,6 +731,7 @@ export default function MissionsTab({ circleId, accentColor = PIXEL_COLORS.indig
                 </View>
                 <View style={styles.proofContent}>
                   <MentionText content={entry.title} style={styles.proofTitle} />
+                  {entry.pow_type === 'agent_run' && <AgentRunProofDetail detail={entry.detail} />}
                   <Text style={styles.proofTime}>{timeAgo(entry.created_at)}</Text>
                   {/* Render structured blocks (from the expanded proof
                       editor) as a read-only preview directly below the

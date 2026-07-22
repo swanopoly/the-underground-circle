@@ -79,6 +79,21 @@ export type CircleContextRun = {
 };
 export type CircleContextSkill = { name: string; version: string; description?: string };
 
+/**
+ * Secret-SAFE carrier for an expiring / rotation-due site credential — used by
+ * the proactive heads-up path, NOT a searchable `CircleContextSection`. Only
+ * the identity + display fields + the two deadline ISO strings ride here; the
+ * encrypted blob and username NEVER leave the DB row (the fetcher does not even
+ * select them).
+ */
+export type CircleContextCredential = {
+  id: string;
+  label: string;
+  platform: string;
+  expiresAtIso?: string;
+  rotationDueIso?: string;
+};
+
 export type CircleContextSnapshotSections = {
   members: CircleContextMember[];
   tasks: CircleContextTask[];
@@ -110,7 +125,18 @@ export type CircleContextSnapshot = {
   counts: CircleContextSnapshotCounts;
   /** Per-section dropped-row counts when a section exceeded its cap. */
   truncated: Partial<Record<CircleContextSection, number>>;
+  /**
+   * Expiring / rotation-due site credentials (secret-safe, bounded, capped at
+   * CIRCLE_CONTEXT_CREDENTIAL_LIMIT). TOP-LEVEL, deliberately OUTSIDE `sections`
+   * so the render/search/reference-entity machinery never touches it — it feeds
+   * only the proactive heads-up derivation. Present only when at least one such
+   * credential exists.
+   */
+  credentials?: CircleContextCredential[];
 };
+
+/** Cap on expiring/rotation-due credentials carried (not a section). */
+export const CIRCLE_CONTEXT_CREDENTIAL_LIMIT = 25;
 
 /** Per-section row caps — keep the whole snapshot bounded and renderable. */
 export const CIRCLE_CONTEXT_SECTION_LIMITS: Record<CircleContextSection, number> = {
@@ -183,6 +209,7 @@ export type CircleContextSnapshotInput = {
   integrations?: CircleContextIntegration[];
   recentRuns?: CircleContextRun[];
   skills?: CircleContextSkill[];
+  credentials?: CircleContextCredential[];
 };
 
 /**
@@ -262,6 +289,17 @@ export function assembleCircleContextSnapshot(input: CircleContextSnapshotInput)
     ...(s.description ? { description: boundSnapshotText(s.description, CIRCLE_CONTEXT_DESCRIPTION_MAX) } : {}),
   }));
 
+  // Secret-safe credential carrier (NOT a section): bound label/platform, cap
+  // the list, and NEVER carry the encrypted blob or username. The two deadline
+  // strings pass through as-is (parsed downstream in proactiveSurfacingSignals).
+  const credentials = (input.credentials || []).slice(0, CIRCLE_CONTEXT_CREDENTIAL_LIMIT).map((c) => ({
+    id: String(c.id || ''),
+    label: boundSnapshotText(c.label, CIRCLE_CONTEXT_TITLE_MAX),
+    platform: boundSnapshotText(c.platform, 48),
+    ...(c.expiresAtIso ? { expiresAtIso: String(c.expiresAtIso) } : {}),
+    ...(c.rotationDueIso ? { rotationDueIso: String(c.rotationDueIso) } : {}),
+  }));
+
   return {
     v: 1,
     circleId: input.circleId,
@@ -287,6 +325,7 @@ export function assembleCircleContextSnapshot(input: CircleContextSnapshotInput)
       totalSkills: skills.length,
     },
     truncated,
+    ...(credentials.length > 0 ? { credentials } : {}),
   };
 }
 
@@ -549,6 +588,7 @@ type RawRoomRow = { id: string; name: string; createdAt?: string | null };
 type RawIntegrationRow = { provider: string; status: string };
 type RawRunRow = { id: string; title: string; status: string; surface: string; atIso: string };
 type RawSkillRow = { name: string; version: string; description?: string | null };
+type RawCredentialRow = { id: string; label: string; platform: string; expiresAtIso?: string | null; rotationDueIso?: string | null };
 
 /**
  * Per-section fetchers the builder Promise.all's over. Each mirrors the query
@@ -567,6 +607,12 @@ export type CircleContextSnapshotDeps = {
   fetchIntegrations: (circleId: string) => Promise<RawIntegrationRow[]>;
   fetchRecentRuns: (circleId: string) => Promise<RawRunRow[]>;
   fetchSkills: (circleId: string) => Promise<RawSkillRow[]>;
+  /**
+   * Expiring/rotation-due credential heads-up source. Optional so existing
+   * deps-seam callers (which predate it) keep working — the builder guards the
+   * call and degrades to `[]`. `createDefaultDeps` always provides it.
+   */
+  fetchCredentials?: (circleId: string) => Promise<RawCredentialRow[]>;
 };
 
 /**
@@ -708,6 +754,27 @@ async function createDefaultDeps(): Promise<CircleContextSnapshotDeps> {
         description: s.description || null,
       }));
     },
+    // Secret-SAFE credential heads-up read: ONLY id/label/platform + the two
+    // deadline columns (NEVER credential_encrypted/username). Filtered to active
+    // rows that actually carry an expiry or rotation deadline, RLS-scoped by the
+    // circle_site_credentials SELECT policy.
+    fetchCredentials: async (circleId) => {
+      const { data, error } = await supabase
+        .from('circle_site_credentials')
+        .select('id, label, platform, expires_at, rotation_due_at')
+        .eq('circle_id', circleId)
+        .eq('is_active', true)
+        .or('expires_at.not.is.null,rotation_due_at.not.is.null')
+        .limit(CIRCLE_CONTEXT_CREDENTIAL_LIMIT);
+      if (error) throw new Error(error.message);
+      return (data || []).map((c: any) => ({
+        id: String(c.id || ''),
+        label: c.label || '',
+        platform: c.platform || '',
+        expiresAtIso: c.expires_at || null,
+        rotationDueIso: c.rotation_due_at || null,
+      }));
+    },
   };
 }
 
@@ -723,7 +790,7 @@ export async function buildCircleContextSnapshot(
 ): Promise<CircleContextSnapshot> {
   const d = deps ?? await createDefaultDeps();
 
-  const [memberRows, kanbanRows, missionRows, goalRows, roomRows, integrationRows, runRows, skillRows] =
+  const [memberRows, kanbanRows, missionRows, goalRows, roomRows, integrationRows, runRows, skillRows, credentialRows] =
     await Promise.all([
       d.fetchMembers(circleId).catch(() => [] as RawMemberRow[]),
       d.fetchKanbanTasks(circleId).catch(() => [] as RawKanbanTaskRow[]),
@@ -733,6 +800,8 @@ export async function buildCircleContextSnapshot(
       d.fetchIntegrations(circleId).catch(() => [] as RawIntegrationRow[]),
       d.fetchRecentRuns(circleId).catch(() => [] as RawRunRow[]),
       d.fetchSkills(circleId).catch(() => [] as RawSkillRow[]),
+      (d.fetchCredentials ? d.fetchCredentials(circleId) : Promise.resolve([] as RawCredentialRow[]))
+        .catch(() => [] as RawCredentialRow[]),
     ]);
 
   const missionIds = missionRows.slice(0, CIRCLE_CONTEXT_SECTION_LIMITS.missions).map((m) => m.id);
@@ -803,6 +872,13 @@ export async function buildCircleContextSnapshot(
     integrations: integrationRows,
     recentRuns: runRows,
     skills: skillRows.map((s) => ({ name: s.name, version: s.version, ...(s.description ? { description: s.description } : {}) })),
+    credentials: credentialRows.map((c) => ({
+      id: c.id,
+      label: c.label,
+      platform: c.platform,
+      ...(c.expiresAtIso ? { expiresAtIso: c.expiresAtIso } : {}),
+      ...(c.rotationDueIso ? { rotationDueIso: c.rotationDueIso } : {}),
+    })),
   });
 }
 

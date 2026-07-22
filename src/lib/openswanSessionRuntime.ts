@@ -284,8 +284,43 @@ function getToolRoundBudget(taskPlan: OpenSwanTaskPlan, mode?: string | null): n
   return 2;
 }
 
-function emitStage(callbacks: OpenSwanRunCallbacks, stage: OpenSwanRunStage, label: string) {
+// Last live_stage label published per run — dedups the fire-and-forget
+// agent_runs metadata write below so an unchanged stage never costs a
+// redundant read+write. mergeRunMetadata writes only {metadata, updated_at}
+// (never status), so publishing a stage can never resurrect a STOPped /
+// cancelled run to 'running' (honest-STOP-safe). Bounded so a long app
+// session can't grow it without limit; evicting an active run's entry is
+// harmless (at most one extra write on that run's next stage).
+const lastPublishedStageLabelByRun = new Map<string, string>();
+
+function emitStage(
+  callbacks: OpenSwanRunCallbacks,
+  stage: OpenSwanRunStage,
+  label: string,
+  runId?: string,
+): Promise<unknown> | undefined {
   callbacks.onStageChange?.(stage, label);
+  // Fire-and-forget (void, never awaited → no added turn latency): publish the
+  // live stage to the run row so the console (subscribed to agent_runs) can
+  // show it beside "step N/M". Skipped entirely before the run exists (runId
+  // undefined, e.g. the pre-createRun 'booting' emit).
+  // RETURNS the merge promise (already .catch-guarded) so a caller emitting a
+  // stage CONCURRENT with the terminal metadata merges — i.e. after the
+  // telemetry join barrier — can await it first: mergeRunMetadata is a
+  // non-atomic read-merge-write, so an in-flight stage write racing a terminal
+  // merge would lost-update-drop the terminal keys.
+  if (runId && lastPublishedStageLabelByRun.get(runId) !== label) {
+    if (lastPublishedStageLabelByRun.size >= 256) {
+      const oldest = lastPublishedStageLabelByRun.keys().next().value;
+      if (oldest !== undefined) lastPublishedStageLabelByRun.delete(oldest);
+    }
+    lastPublishedStageLabelByRun.set(runId, label);
+    return mergeRunMetadata(runId, {
+      live_stage: label.slice(0, 120),
+      live_stage_at: new Date().toISOString(),
+    }).catch(() => {});
+  }
+  return undefined;
 }
 
 function mapStructuredArtifactKind(kind: SwanBotStructuredArtifact['kind']): ArtifactKind {
@@ -1580,7 +1615,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     }));
   }
 
-  emitStage(opts, 'loading_context', 'Loading context');
+  emitStage(opts, 'loading_context', 'Loading context', run?.id);
   transcript = (await appendTranscriptEvent(transcriptKey, {
     kind: 'context_loaded',
     title: 'Context assembled',
@@ -1638,7 +1673,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   const delegatedUsageTotals = emptyOpenSwanTokenTotals();
   if (delegationSpecs.length > 0 && opts.context.circleId) {
     opts.onDelegationPlan?.(delegatedAgents);
-    emitStage(opts, 'delegating', `Delegating to ${delegationSpecs.map((spec) => spec.subagent.displayName).join(', ')}`);
+    emitStage(opts, 'delegating', `Delegating to ${delegationSpecs.map((spec) => spec.subagent.displayName).join(', ')}`, run?.id);
     transcript = (await appendTranscriptEvent(transcriptKey, {
       kind: 'delegation_planned',
       title: 'Delegation planned',
@@ -1799,7 +1834,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     }
   }
 
-  emitStage(opts, 'reasoning', 'Reasoning over the task');
+  emitStage(opts, 'reasoning', 'Reasoning over the task', run?.id);
   const memoryBundle = await buildOpenSwanMemoryStores({
     circleId: opts.context.circleId,
     userId: opts.context.userId,
@@ -2003,7 +2038,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
             mode: opts.mode || null,
             maxToolRounds: toolRoundBudget,
             toolApprovalGate: opts.onToolApproval,
-            onStage: (stage, label) => emitStage(opts, stage, label),
+            onStage: (stage, label) => emitStage(opts, stage, label, run?.id),
             codingPlanSplit,
             agentSubject: runtimeSubject.metadata,
             signal: opts.signal,
@@ -2276,7 +2311,7 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     await updateRunStatus(run.id, turnCancelled ? 'cancelled' : 'running', { current_step_index: actualAssistantResponseStepIndex, total_steps: totalSteps });
   }
 
-  emitStage(opts, 'rendering_artifacts', 'Rendering artifacts');
+  const stageWriteArtifacts = emitStage(opts, 'rendering_artifacts', 'Rendering artifacts', run?.id);
   if ((structured.artifacts || []).length > 0) {
     transcript = (await appendTranscriptEvent(transcriptKey, {
       kind: 'artifacts_rendered',
@@ -2320,7 +2355,14 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
     await updateRunStatus(run.id, turnCancelled ? 'cancelled' : 'running', { current_step_index: currentStepIndex, total_steps: totalSteps });
   }
 
-  emitStage(opts, 'finalizing', 'Finalizing run');
+  const stageWriteFinalizing = emitStage(opts, 'finalizing', 'Finalizing run', run?.id);
+  // Serialize the two finalization-phase stage writes ahead of the terminal
+  // metadata merges below (verification_results / posture / transcript pointer).
+  // All hit agent_runs.metadata via mergeRunMetadata (a non-atomic
+  // read-merge-write), so a stage write still in flight during a terminal merge
+  // would lost-update-drop the terminal keys. Pre-barrier stage writes settled
+  // long ago during the tool loop; only these two are temporally close.
+  await Promise.allSettled([stageWriteArtifacts, stageWriteFinalizing].filter(Boolean));
   let verificationResults: OpenSwanVerificationResult[] | undefined;
   let memoryRecommendations: OpenSwanMemoryRecommendation[] = [];
   let modeOutcomeSummary: OpenSwanModeOutcomeSummary | null = null;
