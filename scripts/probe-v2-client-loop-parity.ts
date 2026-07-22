@@ -30,6 +30,10 @@
  *       (4) buildV2BatchErrorRow: version kept + final_stop_reason:'error' +
  *           status:'failed' — a client-only crash must NOT leave a clean row the
  *           gate miscounts as a completion (index.ts:3323-3331).
+ *       (5) replay-safety parity: the batch runtime supplies
+ *           toolParallelPolicyProvider to runAgent (session/typed-core R3 posture)
+ *           WITHOUT a parallelToolConcurrency bump — a source assertion so the
+ *           replay-safety gap can't silently reopen (swanbotV2BatchRuntime.ts).
  *     Echoes the real flag key + the Phase-2 delegation anchors. GO/NO-GO 0/1.
  *
  *   MODE B — LIVE readiness comparison (creds + UC_PROBE_CONFIRM=1 + a recorded
@@ -227,6 +231,23 @@ async function runModeA(): Promise<never> {
     id: 'error-row',
     ok: errMd?.version === EDGE_VERSION && errRow.final_stop_reason === 'error' && errRow.status === 'failed',
     detail: `version='${String(errMd?.version)}' final_stop_reason='${String(errRow.final_stop_reason)}' status='${String(errRow.status)}'`,
+  });
+
+  // (5) Replay-safety parity (B1): the batch runtime must supply the SAME
+  //     dependency-aware policy provider the session/typed-core loop uses (R3)
+  //     so a failed outcome-unknown mutate gets the bounded "verify first"
+  //     appendix instead of a blind replay that could double a committed side
+  //     effect — WITHOUT bumping concurrency (the provider must never be paired
+  //     with a parallelism bump). The runtime module pulls RN transitively (not
+  //     tsx-loadable) and the lane is opt-in, so this is a source-text assertion:
+  //     pin the wiring so the replay-safety gap can't silently reopen.
+  const batchRuntimeSrc = readFileSync(join(repoRoot, 'src/lib/swanbotV2BatchRuntime.ts'), 'utf8');
+  const suppliesPolicyProvider = /toolParallelPolicyProvider:\s*createOpenSwanToolParallelPolicyProvider\(/.test(batchRuntimeSrc);
+  const concurrencyStillSequential = /parallelToolConcurrency:\s*1\b/.test(batchRuntimeSrc);
+  checks.push({
+    id: 'replay-safety-provider',
+    ok: suppliesPolicyProvider && concurrencyStillSequential,
+    detail: `runAgent supplies toolParallelPolicyProvider=${suppliesPolicyProvider} at parallelToolConcurrency:1=${concurrencyStillSequential} (replay-safety parity, no concurrency bump)`,
   });
 
   console.log('MODE A — DRY-RUN static telemetry-parity contract (no creds, no network, no spend).\n');

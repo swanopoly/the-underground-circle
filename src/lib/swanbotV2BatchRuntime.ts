@@ -53,7 +53,7 @@ import {
   type AgentActivityRow,
 } from './v2AgentEventActivityCore';
 import { buildSnapshotAwareInitialMessages } from './circleSnapshotContextInjection';
-import { getOpenSwanToolsForSurface } from './openswanBridge';
+import { getOpenSwanToolsForSurface, createOpenSwanToolParallelPolicyProvider } from './openswanBridge';
 import type { OpenSwanRuntimeToolContext } from './openswanToolRuntime';
 import {
   buildSwanbotToolTurnBody,
@@ -330,6 +330,16 @@ export async function runSwanbotV2Batch(
       // Sequential dispatch (safe superset of legacy ordering, incl. approval
       // prompts) — same posture the session path holds until T8 is flipped on.
       parallelToolConcurrency: 1,
+      // Replay-safety parity (R3) — the SAME dependency-aware policy provider the
+      // session/typed-core loop supplies. At parallelToolConcurrency:1 this adds
+      // ZERO parallelism/reordering (runWithConcurrency is a strict sequential
+      // loop, partitionParallelSafeBatch is greedy in-order); its ONLY effect is
+      // the bounded, secret-safe replay-safety appendix on a failed outcome-
+      // unknown mutate ("verify first before retrying") so this lane can't
+      // silently double a committed side effect the edge round-trip guarded.
+      toolParallelPolicyProvider: createOpenSwanToolParallelPolicyProvider({
+        activePluginIds: extra.activePluginIds,
+      }),
       ...(extra.toolApprovalGate
         ? { toolApprovalGate: createLegacyApprovalGateAdapter(extra.toolApprovalGate) }
         : {}),

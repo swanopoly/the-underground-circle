@@ -2384,6 +2384,12 @@ type RunLoopTerminal = {
   hitMax: boolean;
   toolCalls: any[];
   usage: UsageBreakdown;
+  // Honest STOP: set when the loop-top cooperative-cancel poll (or the late
+  // re-select in the HTTP handler) found the run was cancelled by the user. The
+  // handler finalizes the row as status='cancelled' (never 'completed'/'failed')
+  // and keeps the value OUT of final_stop_reason so it can't skew the readiness
+  // topNonEndTurn / error-rate metrics.
+  cancelled?: boolean;
 };
 
 type RunLoopPending = {
@@ -2795,6 +2801,31 @@ async function runLoop(args: {
   for (let iter = startIter; iter <= MAX_ITERATIONS; iter++) {
     if (runId) {
       void supabase.from("agent_run_events").insert({ run_id: runId, kind: "turn_start", payload: { iteration: iter } });
+    }
+    // Honest STOP (cooperative cancel): poll the run row at the TOP of each
+    // round — after turn_start, BEFORE the model turn and the clientOnly pending
+    // branch — so a console STOP halts the loop within one round and all further
+    // token/cost accrual stops. Fail-OPEN: any poll error leaves the loop running
+    // (a transient read failure must never fabricate a cancel). On cancel we
+    // return terminal with the partial assistant tail + the `cancelled` marker
+    // (the HTTP handler writes status='cancelled'); returning BEFORE the pending
+    // branch means no continuation snapshot is stranded.
+    if (runId) {
+      try {
+        const { data: cancelRow } = await supabase
+          .from("agent_runs")
+          .select("status")
+          .eq("id", runId)
+          .maybeSingle();
+        if ((cancelRow as { status?: string } | null)?.status === "cancelled") {
+          const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+          let cancelTail = "";
+          if (lastAssistant && Array.isArray(lastAssistant.content)) {
+            for (const b of lastAssistant.content) if (b.type === "text") cancelTail += b.text;
+          }
+          return { kind: "terminal", text: cancelTail, iterations: iter, stopReason: "cancelled", hitMax: false, toolCalls, usage: usageTotal, cancelled: true };
+        }
+      } catch { /* fail-open: a poll error must never fabricate a cancel */ }
     }
     // Pre-turn context compaction (lockstep mirror of agentExecutionCore's
     // tiered path): free local stub of STALE tool_result bytes + an
@@ -3216,30 +3247,93 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    // A loop-top cancel carries the synthetic 'cancelled' marker rather than a
+    // real model stop reason. Classify from the model's real reason so a user
+    // cancel never fabricates an 'error' (which would inflate the readiness
+    // error-rate) — 'cancelled' stays OUT of the final_stop_reason union and is
+    // recorded honestly via status='cancelled' + metadata.cancelled instead.
     const finalStopReason = classifySwanBotV2FinalStopReason({
       kind: "terminal",
       hitMax: result.hitMax,
-      modelStopReason: result.stopReason,
+      modelStopReason: result.stopReason === "cancelled" ? "end_turn" : result.stopReason,
     });
-    const terminalStatus = finalStopReason === "end_turn" ? "completed" : "failed";
+    // Honest STOP (late cancel): the loop-top poll only fires between rounds, so
+    // a console STOP that lands during the final model round or finalization is
+    // invisible to the loop. Re-check the row once here (mirror of
+    // openswanSessionRuntime.ts) so a late cancel still finalizes as 'cancelled'
+    // with its partial usage/cost — never presented as a clean completion.
+    let cancelled = result.cancelled === true;
+    if (runId && !cancelled) {
+      try {
+        const { data: lateRunRow } = await supabase
+          .from("agent_runs")
+          .select("status")
+          .eq("id", runId)
+          .maybeSingle();
+        if ((lateRunRow as { status?: string } | null)?.status === "cancelled") cancelled = true;
+      } catch { /* re-check failure must never break finalization */ }
+    }
+    const terminalStatus = cancelled ? "cancelled" : finalStopReason === "end_turn" ? "completed" : "failed";
     if (runId) {
-      await supabase.from("agent_runs").update({
-        tool_calls: result.toolCalls,
-        iteration_count: result.iterations,
-        final_stop_reason: finalStopReason,
-        ...agentRunTokenUsageFields(result.usage),
-        // Cost attribution: write the long-dead estimated_cost column so this
-        // terminal run reports real spend (office ops board / recent-runs /
-        // circleCostTelemetry) instead of $0. Deno-side pricing via the shared
-        // computeCostUsd (cache-aware, over-charges on an unknown model — a spend
-        // guard). Deploy of this edge is a separate ops step.
-        estimated_cost: computeCostUsd(model, result.usage),
-        status: terminalStatus,
-        completed_at: new Date().toISOString(),
-        // Clear the continuation blob on terminal completion — the run
-        // isn't paused anymore, don't confuse later dashboards.
-        metadata: { version: "swanbot-v2-ai", ...targetAgentMetadata, rawStopReason: result.stopReason },
-      }).eq("id", runId);
+      if (cancelled) {
+        // Honest STOP: finalize as 'cancelled', MERGING cancel-safe metadata so
+        // the console's cancelled_by / cancelled_at / cancelled_from provenance
+        // survives instead of being clobbered by a wholesale metadata replace.
+        // Read-merge-write and DROP the now-dead (potentially large) continuation
+        // blob to keep the row bounded. No .neq guard here — this write IS the
+        // cancel finalize and must land.
+        let mergedMetadata: Record<string, unknown> = {
+          version: "swanbot-v2-ai",
+          ...targetAgentMetadata,
+          rawStopReason: result.stopReason,
+          cancelled: true,
+        };
+        try {
+          const { data: existingRow } = await supabase
+            .from("agent_runs")
+            .select("metadata")
+            .eq("id", runId)
+            .maybeSingle();
+          const existingMeta = (existingRow as { metadata?: Record<string, unknown> } | null)?.metadata;
+          if (existingMeta && typeof existingMeta === "object") {
+            const safeExisting = { ...existingMeta };
+            delete safeExisting.continuation;
+            mergedMetadata = { ...safeExisting, ...mergedMetadata };
+          }
+        } catch { /* merge is best-effort; fall back to the cancel-safe defaults */ }
+        await supabase.from("agent_runs").update({
+          tool_calls: result.toolCalls,
+          iteration_count: result.iterations,
+          final_stop_reason: finalStopReason,
+          ...agentRunTokenUsageFields(result.usage),
+          estimated_cost: computeCostUsd(model, result.usage),
+          status: "cancelled",
+          completed_at: new Date().toISOString(),
+          metadata: mergedMetadata,
+        }).eq("id", runId);
+      } else {
+        await supabase.from("agent_runs").update({
+          tool_calls: result.toolCalls,
+          iteration_count: result.iterations,
+          final_stop_reason: finalStopReason,
+          ...agentRunTokenUsageFields(result.usage),
+          // Cost attribution: write the long-dead estimated_cost column so this
+          // terminal run reports real spend (office ops board / recent-runs /
+          // circleCostTelemetry) instead of $0. Deno-side pricing via the shared
+          // computeCostUsd (cache-aware, over-charges on an unknown model — a spend
+          // guard). Deploy of this edge is a separate ops step.
+          estimated_cost: computeCostUsd(model, result.usage),
+          status: terminalStatus,
+          completed_at: new Date().toISOString(),
+          // Clear the continuation blob on terminal completion — the run
+          // isn't paused anymore, don't confuse later dashboards.
+          metadata: { version: "swanbot-v2-ai", ...targetAgentMetadata, rawStopReason: result.stopReason },
+        // Resurrection guard: only finalize as completed/failed if the row hasn't
+        // been cancelled out from under us between the re-select above and this
+        // write. A raced console STOP keeps status='cancelled' (matches 0 rows
+        // here) — the run must NEVER be resurrected to 'completed'.
+        }).eq("id", runId).neq("status", "cancelled");
+      }
     }
 
     // Feed-loop-in: v1 never wrote to agent_activity so Feed tab was
@@ -3247,13 +3341,20 @@ Deno.serve(async (req: Request) => {
     // run so `useAgentActivity` realtime subscription picks it up.
     // Best-effort — a schema/RLS hiccup must never mask the successful
     // chat response.
+    // Honest STOP: a user cancel is neutral, not a failure — never emit the
+    // alarming task_failed card. agent_activity.status is constrained to
+    // running|completed|failed, so map the cancelled run to the neutral
+    // 'completed' status + a message_out card and carry the real cancel signal in
+    // metadata.cancelled.
+    const feedActivityStatus: "running" | "completed" | "failed" =
+      terminalStatus === "failed" ? "failed" : "completed";
     void logFeedActivity(supabase, {
       circleId,
       agentName: targetAgentName,
       source: "system",
       sourceDetail: "swanbot-v2-ai",
-      activityType: terminalStatus === "failed" ? "task_failed" : "message_out",
-      status: terminalStatus,
+      activityType: feedActivityStatus === "failed" ? "task_failed" : "message_out",
+      status: feedActivityStatus,
       title: summariseRunTitle(message ?? "", result.text, mode),
       body: formatToolTraceSummary(result.toolCalls),
       metadata: {
@@ -3263,6 +3364,7 @@ Deno.serve(async (req: Request) => {
         iterations: result.iterations,
         stopReason: finalStopReason,
         rawStopReason: result.stopReason,
+        cancelled,
         toolCallCount: result.toolCalls?.length ?? 0,
         usage: result.usage,
         ...targetAgentMetadata,
@@ -3288,6 +3390,7 @@ Deno.serve(async (req: Request) => {
       stopReason: finalStopReason,
       rawStopReason: result.stopReason,
       hitMaxIterations: result.hitMax,
+      cancelled,
       toolCalls: result.toolCalls,
       usage: result.usage,
       model,
@@ -3304,6 +3407,19 @@ Deno.serve(async (req: Request) => {
     // `runWithTransientRetry` can re-issue the turn. We do NOT add a second
     // retry loop here (retry at one layer). Structural errors stay fatal 500.
     const transient = isRetryableLoopError(e);
+    // Honest STOP on the error path: if a console cancel raced this throw (STOP
+    // clicked during the in-flight turn that then 4xx'd), the row is already
+    // 'cancelled'. The status UPDATE below is guarded with .neq so it can't
+    // resurrect the row, but the independent Feed card must ALSO be suppressed
+    // — a user cancel is not a failure. Fail-open: a re-check error leaves
+    // cancelledInCatch false (worst case = today's behavior).
+    let cancelledInCatch = false;
+    if (runId) {
+      try {
+        const { data: catchRow } = await supabase.from("agent_runs").select("status").eq("id", runId).maybeSingle();
+        if ((catchRow as { status?: string } | null)?.status === "cancelled") cancelledInCatch = true;
+      } catch { /* fail-open: never fabricate a cancel from a read error */ }
+    }
     if (runId) {
       if (transient && resumeFrom) {
         // Transient blip while RESUMING a paused (client_pending) run: the
@@ -3335,14 +3451,20 @@ Deno.serve(async (req: Request) => {
           final_stop_reason: "error",
           ...(transient ? {} : { completed_at: new Date().toISOString() }),
           metadata: { error: msg, version: "swanbot-v2-ai", transient, ...targetAgentMetadata },
-        }).eq("id", runId);
+          // Resurrection guard (parity with the happy-path terminal write): a
+          // raced console STOP set status='cancelled', which matches 0 rows here
+          // — the cancelled run is NEVER flipped to 'failed'/'running' or stripped
+          // of its cancel provenance by this error finalize.
+        }).eq("id", runId).neq("status", "cancelled");
         await supabase.from("agent_run_events").insert({ run_id: runId, kind: "error", payload: { message: msg, transient } });
       }
     }
     // Feed loop-in: only emit the alarming "Run failed" card for TERMINAL
     // failures. A transient upstream blip that the client will retry shouldn't
-    // spam the Feed with a failure the user can't act on.
-    if (!transient) {
+    // spam the Feed with a failure the user can't act on — and neither should a
+    // user cancel that raced this throw (cancelledInCatch): a STOP is neutral,
+    // not a failure.
+    if (!transient && !cancelledInCatch) {
       void logFeedActivity(supabase, {
         circleId: circleId ?? "",
         agentName: "BlackSwan",

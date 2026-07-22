@@ -4016,23 +4016,6 @@ async function getSwanBotResponseImpl(
   const knowledgeBundle = needsKnowledge
     ? (context.wikiContext || await buildCombinedKnowledgeBundle(cleaned, context.circleId, spiritId))
     : '';
-  const memoryStores = !buildInProgress && msgRoute.complexity !== 'trivial' && context.circleId
-    ? (context.memoryStores || await import('./openswanMemoryStores').then(({ buildOpenSwanMemoryStores }) => buildOpenSwanMemoryStores({
-        circleId: context.circleId,
-        userId: context.userId,
-	        query: cleaned,
-	        agentId: getContextAgentSubjectKey(context),
-	        agentAliases: getContextAgentLegacyIds(context),
-	        agentName: context.agentName,
-        spiritId,
-        surface: 'main_chat',
-        limit: 8,
-      })))
-    : null;
-  const memoryBundle = [
-    memoryStores?.combined || context.memoryContext || '',
-    context.sessionArchiveContext || '',
-  ].filter(Boolean).join('\n\n');
   // When the ChatTab tells us a build conversation is active, compute the
   // orchestrator protocol and ship it separately as a high-priority
   // `systemDirective`. DO NOT stuff it into wikiContext — the edge function
@@ -4052,8 +4035,6 @@ async function getSwanBotResponseImpl(
     ...context,
     model: effectiveModel,
     wikiContext: knowledgeBundle,
-    memoryContext: memoryBundle,
-    memoryStores: memoryStores || undefined,
     spiritId,
   };
   if (buildDirective) {
@@ -4496,29 +4477,10 @@ async function getSwanBotStructuredResponseImpl(
   const knowledgeBundle = needsKnowledgeStructured
     ? (context.wikiContext || await buildCombinedKnowledgeBundle(cleaned, context.circleId, spiritId))
     : '';
-  const memoryStores = structuredRoute.complexity !== 'trivial' && context.circleId
-    ? (context.memoryStores || await import('./openswanMemoryStores').then(({ buildOpenSwanMemoryStores }) => buildOpenSwanMemoryStores({
-        circleId: context.circleId,
-        userId: context.userId,
-	        query: cleaned,
-	        agentId: getContextAgentSubjectKey(context),
-	        agentAliases: getContextAgentLegacyIds(context),
-	        agentName: context.agentName,
-        spiritId,
-        surface: 'main_chat',
-        limit: 8,
-      })))
-    : null;
-  const memoryBundle = [
-    memoryStores?.combined || context.memoryContext || '',
-    context.sessionArchiveContext || '',
-  ].filter(Boolean).join('\n\n');
   const enrichedContext: SwanBotContext = {
     ...context,
     model: effectiveModel,
     wikiContext: knowledgeBundle,
-    memoryContext: memoryBundle,
-    memoryStores: memoryStores || undefined,
     spiritId,
   };
   // Advisory collaboration plan (DEFAULT ON since 2026-07-01). Carried for

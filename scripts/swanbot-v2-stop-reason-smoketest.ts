@@ -114,8 +114,11 @@ assert(
 );
 
 assert(
-  edgeSource.includes('const terminalStatus = finalStopReason === "end_turn" ? "completed" : "failed"'),
-  'edge marks max_tokens/error terminal runs as failed, not completed',
+  // Honest STOP (wave 6): a user-cancelled run finalizes as 'cancelled'; the
+  // original max_tokens/error → 'failed' vs end_turn → 'completed' logic is
+  // preserved as the non-cancelled tail of the same expression.
+  edgeSource.includes('const terminalStatus = cancelled ? "cancelled" : finalStopReason === "end_turn" ? "completed" : "failed"'),
+  'edge marks max_tokens/error terminal runs as failed (and cancelled runs as cancelled), not completed',
 );
 
 if (failures > 0) {

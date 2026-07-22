@@ -156,6 +156,32 @@ function expect(condition: unknown, message: string) {
   pass('peek size tracks push/drain');
 }
 
+// ── R2: loop throw → finally-unregister BEFORE the text-only fallback ─────────
+// Models openswanSessionRuntime's tool-loop try/finally: when the loop throws,
+// the finally unregisters the scope, then the exception propagates to the outer
+// catch(toolErr) that runs the text-only fallback. During that fallback the
+// scope must already be inactive so a steering push fails cleanly ("No live run
+// to steer") instead of queuing into a dead scope that falsely reported "Sent".
+{
+  const scope = 'turn-loop-throw';
+  registerOpenSwanSteeringScope(scope);
+  expect(isOpenSwanSteeringScopeActive(scope), 'scope active while the loop runs');
+  try {
+    try {
+      throw new Error('simulated tool-loop failure');
+    } finally {
+      unregisterOpenSwanSteeringScope(scope);
+    }
+  } catch {
+    // outer catch(toolErr) → runTextOnlyResponse(): scope is already closed.
+    expect(!isOpenSwanSteeringScopeActive(scope), 'scope inactive inside the fallback (finally ran before catch)');
+    const res = pushOpenSwanSteeringNote(scope, 'steer during fallback');
+    expect(!res.ok && res.error.includes('No live run to steer'), 'push during fallback fails cleanly (no false Sent)');
+  }
+  expect(peekOpenSwanSteeringQueueSize(scope) === 0, 'no note queued into the dead scope');
+  pass('R2: loop-throw → finally-unregister before fallback → push rejected');
+}
+
 if (failures > 0) {
   console.error(`\n${failures} openswan steering bus smoke failure(s)`);
   process.exit(1);

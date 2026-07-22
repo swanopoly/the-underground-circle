@@ -7,7 +7,7 @@ import { buildOpenSwanExecutionStream, type OpenSwanExecutionContract } from './
 import { buildOpenSwanMemoryRecommendations, captureOpenSwanOutcomeMemory, recordArchiveDerivedMemorySuccess, recordArchiveDerivedMemoryWeakSignal, type OpenSwanMemoryRecommendation, type PromptMemoryReference } from './memoryService';
 import { buildOpenSwanObservedEvalSummary } from './openswanObservedEvals';
 import { extractBrowserPlansFromToolActions } from './openswanRuntimeToolLoop';
-import { buildOpenSwanTaskPlan, type OpenSwanTaskPlan } from './openswanTaskPlanner';
+import { buildOpenSwanTaskPlan, type OpenSwanTaskPlan, type OpenSwanVerificationCheck } from './openswanTaskPlanner';
 import {
   drainOpenSwanSteeringNotes,
   registerOpenSwanSteeringScope,
@@ -62,6 +62,7 @@ import { evaluateTurnSpend } from './turnSpendGovernorCore';
 import { assessStreamDegeneracy } from './streamDegeneracyCore';
 import { appendOpenSwanTranscriptEvent, buildOpenSwanTranscriptKey, upsertOpenSwanTranscriptHeader, type OpenSwanSessionTranscript } from './openswanTranscripts';
 import { executeOpenSwanVerificationPlan, type OpenSwanVerificationResult } from './openswanVerificationRuntime';
+import { planVerificationDepth } from './verificationDepthPolicyCore';
 import { getSwanBotStructuredResponse, executeToolUseLoop, buildStreamableSystemPrompt, type SwanBotContext, type SwanBotStructuredArtifact, type SwanBotStructuredResponse } from './swanbot';
 import { findPendingResumeCheckpoint, buildResumeContextBlock } from './toolLoopResume';
 import { buildSnapshotAwareInitialMessages } from './circleSnapshotContextInjection';
@@ -1976,6 +1977,12 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
   // commit) — surfaced on the turn result so chat can render an honest
   // receipt line instead of burying it in agent_run_events.
   let turnVerificationReceipt: import('./verificationReceiptCore').VerificationReceipt | null = null;
+  // Captured while toolLoopResult is in scope: toolEvents is present on BOTH
+  // loop paths (typed-core AND legacy), unlike verificationReceipt which only
+  // the typed core sets. The verification-depth seam below derives its
+  // changed-file set from this so depth escalation works — and the run's proof
+  // is honest — even when the operator reverts to the legacy loop.
+  let turnToolEvents: LegacyToolEvent[] = [];
 
   const runTextOnlyResponse = async () => getSwanBotStructuredResponse(prompt, {
     ...opts.context,
@@ -2081,56 +2088,68 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       // legacy executeToolUseLoop stays callable behind the manual revert
       // flag (`uc_openswan_typed_core` = '0'). Both paths return the same
       // contract, so everything below is path-agnostic.
-      const toolLoopResult: LegacyToolLoopResult & { cancelled?: boolean } = typedCoreEnabled
-        ? await runTypedCoreToolLoop({
-            systemPrompt: systemPromptWithResume,
-            userMessage: prompt,
-            snapshotContextMessage,
-            model: resolvedModel || 'claude-haiku-4-5',
-            circleId: opts.context.circleId!,
-            userId: opts.context.userId,
-            threadId: opts.chatSessionId || undefined,
-            runId: run?.id,
-            activeSoulKey,
-            activePluginIds: opts.activePluginIds,
-            allowedToolNames: runtimeToolNames,
-            surface: surfaceForTools,
-            mode: opts.mode || null,
-            maxToolRounds: toolRoundBudget,
-            toolApprovalGate: opts.onToolApproval,
-            onStage: (stage, label) => emitStage(opts, stage, label, run?.id),
-            codingPlanSplit,
-            agentSubject: runtimeSubject.metadata,
-            signal: opts.signal,
-          })
-        : await executeToolUseLoop({
-            systemPrompt: systemPromptWithResume,
-            userMessage: prompt,
-            model: resolvedModel || 'claude-haiku-4-5',
-            circleId: opts.context.circleId!,
-            userId: opts.context.userId,
-            threadId: opts.chatSessionId || undefined,
-            runId: run?.id,
-            activeSoulKey,
-            activePluginIds: opts.activePluginIds,
-            allowedToolNames: runtimeToolNames,
-            surface: surfaceForTools,
-            mode: opts.mode || null,
-            maxToolRounds: toolRoundBudget,
-            agentSubject: runtimeSubject.metadata,
-            toolApprovalGate: opts.onToolApproval,
-          });
-      // Steering scope closes with the loop. A thrown loop skips this line,
-      // which is safe: the bar hides when the run state clears, pushes to a
-      // stale scope are bounded (queue cap 5), and the next turn's register
-      // clears them before its loop starts.
-      if (steeringScopeKey) unregisterOpenSwanSteeringScope(steeringScopeKey);
+      let toolLoopResult: LegacyToolLoopResult & { cancelled?: boolean };
+      try {
+        toolLoopResult = typedCoreEnabled
+          ? await runTypedCoreToolLoop({
+              systemPrompt: systemPromptWithResume,
+              userMessage: prompt,
+              snapshotContextMessage,
+              model: resolvedModel || 'claude-haiku-4-5',
+              circleId: opts.context.circleId!,
+              userId: opts.context.userId,
+              threadId: opts.chatSessionId || undefined,
+              runId: run?.id,
+              activeSoulKey,
+              activePluginIds: opts.activePluginIds,
+              allowedToolNames: runtimeToolNames,
+              surface: surfaceForTools,
+              mode: opts.mode || null,
+              maxToolRounds: toolRoundBudget,
+              toolApprovalGate: opts.onToolApproval,
+              onStage: (stage, label) => emitStage(opts, stage, label, run?.id),
+              codingPlanSplit,
+              agentSubject: runtimeSubject.metadata,
+              signal: opts.signal,
+            })
+          : await executeToolUseLoop({
+              systemPrompt: systemPromptWithResume,
+              userMessage: prompt,
+              model: resolvedModel || 'claude-haiku-4-5',
+              circleId: opts.context.circleId!,
+              userId: opts.context.userId,
+              threadId: opts.chatSessionId || undefined,
+              runId: run?.id,
+              activeSoulKey,
+              activePluginIds: opts.activePluginIds,
+              allowedToolNames: runtimeToolNames,
+              surface: surfaceForTools,
+              mode: opts.mode || null,
+              maxToolRounds: toolRoundBudget,
+              agentSubject: runtimeSubject.metadata,
+              toolApprovalGate: opts.onToolApproval,
+            });
+      } finally {
+        // Steering scope closes with the loop on EVERY exit — a normal return
+        // OR a throw into the catch(toolErr) text-only fallback below. Closing
+        // it here (rather than after the loop) means that during that fallback
+        // the scope is already inactive, so pushOpenSwanSteeringNote fails
+        // cleanly ("No live run to steer" — the steering bar keeps the text and
+        // the user re-sends it as a regular message) instead of silently
+        // queuing into a dead scope that reported "Sent" but is never drained.
+        // (The old skip-on-throw was NOT safe: botTyping stays true through the
+        // whole fallback, so the bar does not hide on its own.) Idempotent Map
+        // delete; register stays OUTSIDE this try and still clears stale
+        // prior-turn notes on the next turn, so there is no double-register.
+        if (steeringScopeKey) unregisterOpenSwanSteeringScope(steeringScopeKey);
+      }
 
       // Honest STOP: a user-cancelled loop must finalize the run as
       // 'cancelled', never 'completed'. (Legacy loop never sets this flag.)
       turnCancelled = toolLoopResult.cancelled === true;
       turnIncomplete = toolLoopResult.incomplete === true;
       turnVerificationReceipt = toolLoopResult.verificationReceipt || null;
+      turnToolEvents = toolLoopResult.toolEvents ?? [];
 
       const designManifestLedgerActions = buildDesignAppRuntimeManifestLedgerActions({
         task: cleanMessage,
@@ -2433,6 +2452,53 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       const finalStepIndex = verificationStepIndex + (opts.autoExecuteVerification ? 1 : 0);
       const finalTotalSteps = finalStepIndex + 1;
       if (opts.autoExecuteVerification) {
+        // Verification DEPTH dial (R1): before running the plan, escalate the
+        // REQUIRED check set to the risk/blast-radius of what this run actually
+        // touched (schema/auth/payments/edge/routing/config + breadth). Strictly
+        // MORE conservative — it only upgrades planned checks required→true and
+        // ADDS auto-runnable checks (typecheck/tests/lint); it never removes or
+        // downgrades one. changedFiles reuses THIS turn's already-built receipt:
+        // turnVerificationReceipt.editedFiles is the identical output of the
+        // buildVerificationReceipt primitive run at the tool-loop tail, and the
+        // loop's own toolLoopResult is block-scoped out of reach here. Any
+        // failure leaves the planner's checks byte-unchanged (fail-safe no-op).
+        let verificationDepth: { riskTier: string; reason: string; manualReviewKinds: string[] } | null = null;
+        try {
+          // Derive the changed-file set from turnToolEvents (present on BOTH loop
+          // paths) rather than turnVerificationReceipt (typed-core only), so depth
+          // escalation fires — and the 'risk' proof stamped below is honest — even
+          // on the legacy loop. parseEditedFiles reads the shared toolEvent shape.
+          const { buildVerificationReceipt } = await import('./verificationReceiptCore');
+          const changed = buildVerificationReceipt({ editedFiles: turnToolEvents }).editedFiles;
+          const depth = planVerificationDepth({
+            changedFiles: changed,
+            taskKind: taskPlan.kind,
+            plannedChecks: taskPlan.verification,
+            // destructiveOps omitted: deletes aren't represented in editedFiles.
+            // The tier is still driven by breadth + category (safe degradation).
+          });
+          const upgradeSet = new Set(depth.upgradeIndices);
+          const upgraded: OpenSwanVerificationCheck[] = taskPlan.verification.map((check, idx) =>
+            upgradeSet.has(idx) ? { ...check, required: true } : check,
+          );
+          // Only the auto-executor's runnable kinds (typecheck/tests/lint) may be
+          // ADDED as required. 'build' is explicitly skipped: the auto-executor
+          // can't run it, so a required 'build' would silently degrade to
+          // manual_required rather than actually gating the run.
+          const AUTO_ADDABLE = new Set<string>(['typecheck', 'tests', 'lint']);
+          for (const kind of depth.missingKinds) {
+            if (!AUTO_ADDABLE.has(kind)) continue; // skip 'build' etc.
+            upgraded.push({
+              id: `depth-${kind}`,
+              kind: kind as OpenSwanVerificationCheck['kind'],
+              required: true,
+              label: `Run ${kind} (risk: ${depth.riskTier})`,
+              reason: depth.reason,
+            });
+          }
+          taskPlan.verification = upgraded;
+          verificationDepth = { riskTier: depth.riskTier, reason: depth.reason, manualReviewKinds: depth.manualReviewKinds };
+        } catch { /* depth policy is advisory — never block finalization */ }
         verificationResults = await executeOpenSwanVerificationPlan(taskPlan);
         transcript = (await appendTranscriptEvent(transcriptKey, {
           kind: 'verification_completed',
@@ -2444,6 +2510,9 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
               status: result.execution.status,
               summary: result.summary,
             })),
+            // R1: surface the risk tier, path-free reason, and advisory manual
+            // follow-ups so Feed proof shows the DEPTH the checks ran at.
+            ...(verificationDepth ? { verificationDepth } : {}),
           },
         })) || transcript;
         executionStream = buildOpenSwanExecutionStream({
@@ -2744,6 +2813,20 @@ export async function runOpenSwanSessionTurn(opts: OpenSwanTurnOptions): Promise
       await mergeRunMetadata(run.id, {
         execution_stream: executionStream,
         verification_results: verificationResults || [],
+        // Bounded scalar projection of the full receipt so console run rows can
+        // surface a verdict + one-line summary WITHOUT persisting the ~30KB
+        // editedFiles[]/checks[] blob. verdict is a 3-value enum, summary ≤400
+        // chars (formatVerificationReceipt), editedFiles a count, committed a bool.
+        ...(turnVerificationReceipt
+          ? {
+              verificationReceipt: {
+                verdict: turnVerificationReceipt.verdict,
+                summary: turnVerificationReceipt.summary,
+                editedFiles: turnVerificationReceipt.editedFiles.length,
+                committed: turnVerificationReceipt.committed,
+              },
+            }
+          : {}),
         browserPlans,
         browserPlanEvents,
         memoryRecommendations,
