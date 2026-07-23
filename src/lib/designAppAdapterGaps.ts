@@ -108,6 +108,20 @@ const EXISTING_TOOLS: Record<DesignAppAutomationAppId, string[]> = {
     'desktop.photoshop_transform_layer',
     'desktop.photoshop_convert_color_mode',
   ],
+  adobe_illustrator: [
+    // Deterministic Illustrator ExtendScript adapters (shipped) — these vector
+    // ops are no longer gaps.
+    'desktop.illustrator_document_status',
+    'desktop.illustrator_export_proof',
+    'desktop.illustrator_vectorize',
+    'desktop.illustrator_set_appearance',
+    'desktop.illustrator_align',
+    'desktop.illustrator_arrange',
+    'desktop.illustrator_group',
+    'desktop.illustrator_add_artboard',
+    'desktop.illustrator_add_text',
+    'desktop.illustrator_add_shape',
+  ],
 };
 
 const GAP_OPERATIONS = new Set<DesignAppAutomationOperation>([
@@ -179,6 +193,14 @@ function operationLabel(operation: DesignAppAutomationOperation): string {
     manage_text_flow: 'Thread/unthread frames, autoflow, or fix overset',
     manage_smart_objects: 'Convert, edit, replace, or rasterize smart objects',
     manage_swatches: 'Add, edit, convert, or delete swatches/spot colors/inks',
+    vectorize: 'Vectorize/image-trace a raster asset',
+    set_appearance: 'Set vector appearance (fill/stroke/swatch/recolor)',
+    align: 'Align or distribute vector objects',
+    arrange: 'Arrange vector object z-order',
+    group: 'Group or ungroup vector objects',
+    add_artboard: 'Add or resize an artboard',
+    add_text: 'Add a vector text object',
+    add_shape: 'Add a vector shape (rectangle/ellipse/line)',
   };
   return labels[operation];
 }

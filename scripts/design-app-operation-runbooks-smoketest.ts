@@ -71,6 +71,18 @@ assert(promptBlock.includes('Run generative/content-aware action'));
 assert(promptBlock.includes('Fail closed'));
 assert(promptBlock.includes('Source refs:'));
 
+// ── Illustrator: vector requests route to the deterministic runbook ──────────
+const illustratorTask = 'Open this Illustrator file and vectorize the logo, then recolor it red.';
+const illustratorPlan = buildDesignAppOperationRunbookPlan(illustratorTask);
+assert.equal(illustratorPlan?.appId, 'adobe_illustrator');
+const vectorizeRunbook = illustratorPlan?.runbooks.find((runbook) => runbook.operation === 'vectorize');
+assert(vectorizeRunbook?.steps.some((step) => step.tool === 'desktop.illustrator_document_status'), 'vectorize runbook observes via illustrator_document_status');
+assert(vectorizeRunbook?.steps.some((step) => step.tool === 'desktop.illustrator_vectorize'), 'vectorize runbook acts through the shipped adapter');
+assert(vectorizeRunbook?.steps.some((step) => step.tool === 'approvals.request' && step.approvalRequired), 'vectorize runbook gates on approval');
+assert(vectorizeRunbook?.sourceRefs.some((ref) => /illustrator/i.test(ref.label)), 'vectorize runbook cites Illustrator source refs');
+const recolorRunbook = illustratorPlan?.runbooks.find((runbook) => runbook.operation === 'set_appearance');
+assert(recolorRunbook?.steps.some((step) => step.tool === 'desktop.illustrator_set_appearance'), 'recolor runbook acts through the appearance adapter');
+
 const handoff = buildChatComputerHandoffContext({
   task: photoshopTask,
   adapterId: 'app_adapter',

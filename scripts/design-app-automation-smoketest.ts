@@ -68,6 +68,16 @@ assert(photoshopPromptBlock.includes('desktop.photoshop_layer_inventory'), 'Phot
 assert(photoshopPromptBlock.includes('desktop.photoshop_set_layer_state'), 'Photoshop prompt block names layer-state tool');
 assert(photoshopPromptBlock.includes('fresh screenshot or raster proof'), 'Photoshop prompt block preserves visual proof requirement');
 
+const illustratorRequest = 'Open this Illustrator file and vectorize the logo, then recolor it red.';
+const illustratorPlan = buildDesignAppAutomationPlan(illustratorRequest);
+assert(shouldUseDesignAppAutomation(illustratorRequest), 'detects Illustrator vector automation');
+assert(illustratorPlan?.appId === 'adobe_illustrator', 'selects Adobe Illustrator');
+assert(illustratorPlan?.operations.includes('vectorize'), 'detects vectorize operation');
+assert(illustratorPlan?.operations.includes('set_appearance'), 'detects recolor/appearance operation');
+assert(illustratorPlan?.recommendedTools.includes('desktop.illustrator_document_status'), 'recommends Illustrator document status tool');
+assert(illustratorPlan?.recommendedTools.includes('desktop.illustrator_vectorize'), 'recommends Illustrator vectorize tool');
+assert(illustratorPlan?.recommendedTools.includes('desktop.illustrator_export_proof'), 'recommends Illustrator export proof tool');
+
 const unrelated = buildDesignAppAutomationPlan('Summarize unread Gmail messages');
 assert(unrelated === null, 'non-design task does not get a design automation plan');
 

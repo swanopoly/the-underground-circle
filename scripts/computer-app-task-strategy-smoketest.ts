@@ -64,11 +64,11 @@ assertStrategy('Upload banner.jpg and create a Dealer Inspire DI Slide, assign i
 assertStrategyLabelIncludes('Upload banner.jpg and create a Dealer Inspire DI Slide after approval', 'WordPress');
 assertStrategy('Quick Edit Dealer Inspire DI Slide Promaster expiration_date in wp-admin after approval', 'credentialed_browser', ['wp.discover_types', 'wp.list_posts', 'wp.update_post', 'browser.wp_admin_source_intelligence', 'browser.dom_snapshot', 'browser.fill_field', 'approvals.request']);
 assertStrategy('Open Figma and crop this image after I approve desktop control', 'desktop_canvas_vision', ['desktop.screenshot', 'desktop.screen_size']);
-assertStrategy('Open Photoshop and crop this image after I approve desktop control', 'creative_layout_control', ['desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory', 'desktop.photoshop_set_layer_state', 'desktop.photoshop_export_proof']);
+assertStrategy('Open Photoshop and crop this image after I approve desktop control', 'creative_layout_control', ['desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory', 'desktop.photoshop_set_layer_state', 'desktop.photoshop_set_layer_appearance', 'desktop.photoshop_create_text_layer', 'desktop.photoshop_add_fill_layer', 'desktop.photoshop_export_proof']);
 assertStrategy('Open this InDesign file and make changes for a marketing banner with different layers', 'creative_layout_control', ['desktop.indesign_document_status', 'desktop.indesign_text_inventory', 'desktop.indesign_set_layer_state', 'desktop.indesign_batch_update_text_layers', 'desktop.indesign_relink_asset', 'desktop.indesign_package_document', 'desktop.indesign_export_proof']);
 assertStrategyLabelIncludes('Open Photoshop and crop this image after I approve desktop control', 'Adobe Photoshop');
 assertStrategyLabelIncludes('Open this InDesign file and make changes for a marketing banner with different layers', 'Adobe InDesign');
-assertStrategy('Open Illustrator and update this logo then export SVG', 'adobe_cc_control', ['desktop.file_stat', 'desktop.read_a11y_tree', 'agent.build_app_capability', 'approvals.request']);
+assertStrategy('Open Illustrator and update this logo then export SVG', 'adobe_cc_control', ['desktop.illustrator_vectorize', 'desktop.illustrator_set_appearance', 'desktop.illustrator_align', 'desktop.illustrator_arrange', 'desktop.illustrator_group', 'desktop.illustrator_add_artboard', 'desktop.illustrator_add_text', 'desktop.illustrator_add_shape', 'desktop.file_stat', 'desktop.read_a11y_tree', 'agent.build_app_capability', 'approvals.request']);
 assertStrategy('Open Adobe Audition and clean this podcast audio before exporting WAV', 'adobe_cc_control', ['desktop.window_state', 'desktop.screenshot', 'agent.build_app_capability', 'approvals.request']);
 assertStrategy('Open AutoCAD and create a 2D floor plan with two rooms and dimensions', 'engineering_cad_control', ['desktop.read_a11y_tree', 'desktop.file_stat', 'research.search', 'fetch_url', 'agent.build_app_capability', 'approvals.request']);
 assertStrategy('Open MATLAB and build a Simulink model, run the simulation, and export plots after approval', 'engineering_cad_control', ['desktop.read_a11y_tree', 'desktop.file_stat', 'research.search', 'fetch_url', 'agent.build_app_capability', 'approvals.request']);
@@ -90,6 +90,29 @@ assertStrategy('Book a flight to New York next Friday under $500', 'approval_sen
 assertStrategy('Compare vendors and buy five software licenses after approval', 'approval_sensitive_browser', ['browser.dom_snapshot', 'approvals.request']);
 assertStrategy('Check AWS logs and rollback the failed deploy after approval', 'ops_console_control', ['code.inspect', 'approvals.request']);
 assertStrategy('Extract the signed date and renewal clause from this contract PDF', 'document_data_workbench', ['desktop.file_read']);
+
+// ─── SLICE 1: bare design-verb requests reach a design strategy ──────────────
+// Vector-design verbs with no named Adobe app still route to the Illustrator
+// (adobe_cc_control) control loop.
+assertStrategy('vectorize this logo to SVG', 'adobe_cc_control');
+assertStrategy('align these objects', 'adobe_cc_control');
+assertStrategy('group these paths', 'adobe_cc_control');
+assertStrategy('image trace this photo', 'adobe_cc_control');
+// Bare Photoshop single-ops (no layout+layer noun pair) route to the layered
+// creative control loop.
+assertStrategy('make the selection red', 'creative_layout_control');
+assertStrategy('set the layer opacity to 50%', 'creative_layout_control');
+assertStrategy('change the blend mode to multiply', 'creative_layout_control');
+assertStrategy('add a white background', 'creative_layout_control');
+assertStrategy('add a fill layer', 'creative_layout_control');
+// Precision: plain conversation must NOT resolve a design strategy.
+for (const conversational of ['should we align our goals', 'add a note', 'group the tasks by priority']) {
+  if (buildComputerAppTaskStrategy(conversational) !== null) {
+    fail(`precision: "${conversational}" should not resolve a computer/app strategy`);
+  } else {
+    pass(`precision: "${conversational}" stays conversational (no strategy)`);
+  }
+}
 
 assertOpenSwanTools('Open Figma and crop this image after I approve desktop control', ['desktop.screenshot', 'desktop.screen_size', 'desktop.click_at']);
 assertOpenSwanTools('Open Photoshop and crop this image after I approve desktop control', ['desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory', 'desktop.photoshop_set_layer_state', 'desktop.photoshop_export_proof', 'approvals.request']);

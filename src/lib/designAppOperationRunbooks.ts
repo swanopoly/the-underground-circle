@@ -104,6 +104,18 @@ const PHOTOSHOP_BATCHPLAY_REF: AppAutomationResearchRef = {
   takeaway: 'batchPlay is the lower-level action descriptor surface for commands that the Photoshop DOM does not expose cleanly.',
 };
 
+const ILLUSTRATOR_SCRIPTING_REF: AppAutomationResearchRef = {
+  label: 'Adobe Illustrator Scripting',
+  url: 'https://developer.adobe.com/console/servicesandapis/',
+  takeaway: 'Illustrator automation should prefer scripted DOM/ExtendScript access to documents, artboards, page items, and swatches before menu or coordinate control.',
+};
+
+const ILLUSTRATOR_DOM_REF: AppAutomationResearchRef = {
+  label: 'Adobe Illustrator Object Model',
+  url: 'https://ai-scripting.docsforadobe.dev/',
+  takeaway: 'Illustrator exposes document, artboard, layer, pathItem, textFrame, and swatch objects, so vectorize/appearance/arrange/group/align/artboard/text/shape ops should be deterministic script calls with before/after status checks.',
+};
+
 function unique<T>(values: T[]): T[] {
   return Array.from(new Set(values.filter(Boolean)));
 }
@@ -135,16 +147,23 @@ function sourceRefs(...refs: Array<AppAutomationResearchRef | undefined>): AppAu
 }
 
 function baseSourceRefs(plan: DesignAppAutomationPlan): AppAutomationResearchRef[] {
-  return plan.appId === 'adobe_photoshop'
-    ? sourceRefs(
-        APP_AUTOMATION_RESEARCH_REFS.photoshopUxpScripting,
-        APP_AUTOMATION_RESEARCH_REFS.photoshopExecuteAsModal,
-        PHOTOSHOP_LAYER_REF,
-      )
-    : sourceRefs(
-        APP_AUTOMATION_RESEARCH_REFS.indesignUxpScripts,
-        INDESIGN_DOCUMENT_REF,
-      );
+  if (plan.appId === 'adobe_photoshop') {
+    return sourceRefs(
+      APP_AUTOMATION_RESEARCH_REFS.photoshopUxpScripting,
+      APP_AUTOMATION_RESEARCH_REFS.photoshopExecuteAsModal,
+      PHOTOSHOP_LAYER_REF,
+    );
+  }
+  if (plan.appId === 'adobe_illustrator') {
+    return sourceRefs(
+      ILLUSTRATOR_SCRIPTING_REF,
+      ILLUSTRATOR_DOM_REF,
+    );
+  }
+  return sourceRefs(
+    APP_AUTOMATION_RESEARCH_REFS.indesignUxpScripts,
+    INDESIGN_DOCUMENT_REF,
+  );
 }
 
 function operationLabel(operation: DesignAppAutomationOperation): string {
@@ -178,6 +197,14 @@ function operationLabel(operation: DesignAppAutomationOperation): string {
     manage_text_flow: 'Thread/unthread frames, autoflow, or fix overset',
     manage_smart_objects: 'Convert, edit, replace, or rasterize smart objects',
     manage_swatches: 'Add, edit, convert, or delete swatches/spot colors/inks',
+    vectorize: 'Vectorize/image-trace a raster asset',
+    set_appearance: 'Set vector appearance (fill/stroke/swatch/recolor)',
+    align: 'Align or distribute vector objects',
+    arrange: 'Arrange vector object z-order',
+    group: 'Group or ungroup vector objects',
+    add_artboard: 'Add or resize an artboard',
+    add_text: 'Add a vector text object',
+    add_shape: 'Add a vector shape (rectangle/ellipse/line)',
   };
   return labels[operation];
 }
@@ -997,7 +1024,161 @@ function photoshopRunbook(plan: DesignAppAutomationPlan, operation: DesignAppAut
   };
 }
 
+function illustratorRunbook(plan: DesignAppAutomationPlan, operation: DesignAppAutomationOperation): DesignAppOperationRunbook {
+  const controlSurface = buildAppAutomationControlSurfacePlan(operationLabel(operation), {
+    targetId: 'adobe_illustrator',
+    targetName: 'Adobe Illustrator',
+  }).candidates[0]?.label || 'Illustrator ExtendScript/DOM script surface';
+  const source = baseSourceRefs(plan);
+  const adapterGap = buildDesignAppAdapterGapContract(plan, operation);
+  const sharedObserve = [
+    step('observe', 'Resolve exact Illustrator file/asset', 'Verify the staged .ai/.eps/.svg file or source raster/asset before focusing Illustrator.', {
+      tool: 'desktop.file_stat',
+      evidence: ['source path exists', 'source file size/hash when available'],
+    }),
+    step('observe', 'Confirm Illustrator document status', 'Confirm active document name/path, saved/modified state, artboard count/size, color mode, selected objects, layers, and swatches.', {
+      tool: 'desktop.illustrator_document_status',
+      evidence: ['document identity', 'artboard/selection/layer state', 'saved/modified state'],
+    }),
+  ];
+
+  if (operation === 'inspect_layers') {
+    return {
+      appId: plan.appId,
+      appName: plan.appName,
+      operation,
+      label: operationLabel(operation),
+      risk: riskForOperation(operation),
+      controlSurface,
+      requiredInputs: ['staged Illustrator source path', 'active Illustrator document identity'],
+      approvalBefore: [],
+      steps: [
+        ...sharedObserve,
+        step('verify', 'Summarize safe edit targets', 'Return verified artboard/object/layer/swatch targets and blockers; do not mutate.', {
+          evidence: ['named editable targets', 'locked/hidden/missing blockers'],
+        }),
+      ],
+      successCriteria: ['active document matches staged source', 'artboard/object/layer/swatch state is known before mutation'],
+      failClosedConditions: ['active document mismatch', 'no active document', 'missing source file/asset'],
+      fallbackBuildoutTrigger: 'If document status cannot run, build a read-only Illustrator inventory adapter before any edit.',
+      userVisibleSummary: 'Document and vector-object inventory is ready, or the exact Illustrator blocker is known.',
+      sourceRefs: source,
+    };
+  }
+
+  // Deterministic Illustrator ExtendScript adapters (shipped): vectorize,
+  // appearance/recolor, align/distribute, arrange z-order, group, artboard,
+  // text, and shape. Each observes → approves → acts through the exact tool →
+  // verifies with refreshed document status plus a proof/receipt.
+  const toolByOp: Partial<Record<DesignAppAutomationOperation, string>> = {
+    vectorize: 'desktop.illustrator_vectorize',
+    set_appearance: 'desktop.illustrator_set_appearance',
+    align: 'desktop.illustrator_align',
+    arrange: 'desktop.illustrator_arrange',
+    group: 'desktop.illustrator_group',
+    add_artboard: 'desktop.illustrator_add_artboard',
+    add_text: 'desktop.illustrator_add_text',
+    add_shape: 'desktop.illustrator_add_shape',
+  };
+  const actTool = toolByOp[operation];
+  if (actTool) {
+    const isVectorize = operation === 'vectorize';
+    const isAppearance = operation === 'set_appearance';
+    const needsSelection = operation === 'set_appearance'
+      || operation === 'align'
+      || operation === 'arrange'
+      || operation === 'group';
+    const actDescription = isVectorize
+      ? 'Run the deterministic vectorize/image-trace adapter on the source raster and expand to editable vector paths. Never overwrites the source; export stays separate.'
+      : isAppearance
+      ? 'Run the appearance adapter to set fill/stroke/swatch (recolor) on the selected object(s); fails closed on an ambiguous or empty selection.'
+      : operation === 'align'
+      ? 'Run the align/distribute adapter on the current selection; fails closed when fewer than two objects are selected.'
+      : operation === 'arrange'
+      ? 'Run the arrange adapter to change z-order (bring to front / send to back / forward / backward) on the selection.'
+      : operation === 'group'
+      ? 'Run the group/ungroup adapter on the current selection; fails closed on an empty selection.'
+      : operation === 'add_artboard'
+      ? 'Run the artboard adapter to add or resize an artboard with the approved dimensions/index.'
+      : operation === 'add_text'
+      ? 'Run the text adapter to add a vector text object with the approved contents, position, and appearance.'
+      : 'Run the shape adapter to add a rectangle/ellipse/line with the approved geometry and appearance.';
+    return {
+      appId: plan.appId,
+      appName: plan.appName,
+      operation,
+      label: operationLabel(operation),
+      risk: riskForOperation(operation),
+      controlSurface,
+      requiredInputs: [
+        'fresh document status',
+        isVectorize ? 'source raster/asset path and trace mode/preset' : needsSelection ? 'target selection (object/path) evidence' : 'exact target artboard/object and operation parameters',
+      ],
+      approvalBefore: ['vector document/object mutation', 'save/export/write'],
+      steps: [
+        ...sharedObserve,
+        step('approve', 'Request mutation approval', 'Ask for approval naming the exact target (selection/artboard/source asset) and the operation parameters.', {
+          tool: 'approvals.request',
+          approvalRequired: true,
+          evidence: ['approved target and parameters'],
+        }),
+        step('act', 'Apply the deterministic Illustrator operation', actDescription, {
+          tool: actTool,
+          approvalRequired: true,
+          evidence: ['operation receipt (before/after object/artboard/appearance state)'],
+        }),
+        step('verify', 'Verify document state and proof', 'Re-run document status to confirm the change, then capture a screenshot or exported SVG/PDF/PNG proof.', {
+          tool: 'desktop.illustrator_document_status + desktop.illustrator_export_proof',
+          evidence: ['post-change document status', 'vector proof or screenshot'],
+        }),
+      ],
+      successCriteria: [
+        'receipt confirms the requested change',
+        'post-change document status matches the approved target',
+        'proof reflects the requested vector change',
+      ],
+      failClosedConditions: [
+        'active document mismatch',
+        isVectorize ? 'source raster or trace mode ambiguous' : needsSelection ? 'no/ambiguous object selection before mutation' : 'target artboard/object or parameters ambiguous',
+        'approval missing before vector mutation',
+        'post-change verification missing',
+      ],
+      fallbackBuildoutTrigger: `If ${actTool} is stale or missing, restart or rebuild the Illustrator ExtendScript adapter before retrying.`,
+      adapterGap,
+      userVisibleSummary: 'Vector edits run through the deterministic Illustrator adapter with receipts, then verify against the same document.',
+      sourceRefs: sourceRefs(...source, ILLUSTRATOR_DOM_REF),
+    };
+  }
+
+  return {
+    appId: plan.appId,
+    appName: plan.appName,
+    operation,
+    label: operationLabel(operation),
+    risk: riskForOperation(operation),
+    controlSurface,
+    requiredInputs: ['fresh document status', 'exact requested operation'],
+    approvalBefore: ['vector document/object mutation', 'save/export/write', 'new script/adapter execution'],
+    steps: [
+      ...sharedObserve,
+      step('recover', 'Delegate missing Illustrator capability', adapterGap?.connectedAgentTask || 'No first-class bridge tool exists for this operation yet; build a bounded Illustrator capability before retrying.', {
+        tool: 'agent.build_app_capability',
+        evidence: adapterGap
+          ? ['adapter gap contract', 'chosen control surface', 'source refs', 'focused smoke cases', 'ready-to-retry contract']
+          : ['chosen control surface', 'source refs', 'focused smoke case'],
+      }),
+    ],
+    successCriteria: ['capability buildout returns ready_to_retry with focused verification'],
+    failClosedConditions: adapterGap?.failClosedRules || ['operation requires blind coordinate edit', 'target object is ambiguous', 'approval is missing'],
+    fallbackBuildoutTrigger: adapterGap?.buildoutTrigger || 'Build a reusable Illustrator adapter/recipe instead of using blind desktop coordinates.',
+    adapterGap,
+    userVisibleSummary: 'The task needs a bounded Illustrator capability buildout before safe execution.',
+    sourceRefs: sourceRefs(...source, ...(adapterGap?.officialSourceRefs || [])),
+  };
+}
+
 function buildOperationRunbook(plan: DesignAppAutomationPlan, operation: DesignAppAutomationOperation): DesignAppOperationRunbook {
+  if (plan.appId === 'adobe_illustrator') return illustratorRunbook(plan, operation);
   return plan.appId === 'adobe_photoshop'
     ? photoshopRunbook(plan, operation)
     : indesignRunbook(plan, operation);

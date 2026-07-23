@@ -76,6 +76,29 @@ function expectTier(
     d.suggestedCapabilities.includes('desktop'),
   );
 }
+// SLICE 1: bare design-verb turns (no named app) still escalate on the design
+// family so they reach the tool loop.
+{
+  const d = decide('align these objects');
+  expectTier('"align these objects"', d, 'escalate_tools', true);
+  assert('"align these objects" -> suggests design', d.suggestedCapabilities.includes('design'));
+}
+{
+  const d = decide('vectorize this logo to SVG');
+  expectTier('"vectorize this logo to SVG"', d, 'escalate_tools', true);
+  assert('"vectorize this logo..." -> suggests design', d.suggestedCapabilities.includes('design'));
+}
+{
+  const d = decide('image trace this photo and recolor the shapes');
+  expectTier('"image trace..."', d, 'escalate_tools', true);
+  assert('"image trace..." -> suggests design', d.suggestedCapabilities.includes('design'));
+}
+{
+  // Precision: plain team-alignment conversation stays plain_model, no design.
+  const d = decide('should we align our goals this quarter');
+  expectTier('"should we align our goals" stays plain', d, 'plain_model', true);
+  assert('"align our goals" -> no design capability', !d.suggestedCapabilities.includes('design'));
+}
 {
   const d = decide('browse to example.com and fill out the contact form');
   expectTier('browser form', d, 'escalate_tools', true);

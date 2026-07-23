@@ -115,7 +115,7 @@ export const ADOBE_CREATIVE_CLOUD_APP_PROFILES: AdobeCreativeCloudAppProfile[] =
     category: 'vector_design',
     aliases: ['illustrator', 'adobe illustrator', 'ai file', 'vector art'],
     fileExtensions: ['ai', 'ait', 'eps', 'svg', 'pdf'],
-    taskSignals: ['logo', 'vector', 'artboard', 'path', 'anchor', 'swatch', 'outline', 'svg export'],
+    taskSignals: ['logo', 'vector', 'artboard', 'path', 'anchor', 'swatch', 'outline', 'svg export', 'vectorize', 'image trace', 'align', 'distribute', 'arrange', 'group'],
     controlSurfaces: ['script_dom', 'actions', 'semantic_desktop', 'agent_buildout'],
     firstObservations: ['desktop.file_stat', 'desktop.window_state', 'desktop.read_a11y_tree', 'desktop.screenshot'],
     safeActionOrder: ['Resolve the exact AI/SVG/EPS file, inspect artboards/layers via a script capability when available, then mutate one vector object or export at a time.'],
@@ -513,7 +513,10 @@ export function buildAdobeCreativeCloudAutomationPlan(task: string): AdobeCreati
         ? ['desktop.indesign_document_status', 'desktop.indesign_text_inventory', 'desktop.indesign_package_document', 'desktop.indesign_export_proof']
         : []),
       ...(profile.id === 'adobe_photoshop'
-        ? ['desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory', 'desktop.photoshop_export_proof']
+        ? ['desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory', 'desktop.photoshop_set_layer_appearance', 'desktop.photoshop_create_text_layer', 'desktop.photoshop_add_fill_layer', 'desktop.photoshop_export_proof']
+        : []),
+      ...(profile.id === 'adobe_illustrator'
+        ? ['desktop.illustrator_vectorize', 'desktop.illustrator_set_appearance', 'desktop.illustrator_align', 'desktop.illustrator_arrange', 'desktop.illustrator_group', 'desktop.illustrator_add_artboard', 'desktop.illustrator_add_text', 'desktop.illustrator_add_shape']
         : []),
       'office.list_agents',
       'research.search',

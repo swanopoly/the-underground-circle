@@ -237,6 +237,44 @@ assertRoute(
   },
 );
 
+// ─── SLICE 1: design-verb requests reach a desktop_app design task ───────────
+// A bare vector-design verb ("vectorize this logo to SVG") resolves to the
+// desktop Illustrator (adobe_cc_control) control loop when the app is available.
+{
+  const vec = buildChatComputerRequestRoute('vectorize this logo to svg', {
+    appResolutionContext: { bridgeOnline: true, installedApps: ['Adobe Illustrator 2026'] },
+  });
+  if (!vec) {
+    fail('SLICE1: "vectorize this logo to svg" expected a desktop_app design route');
+  } else if (vec.kind !== 'desktop_app') {
+    fail(`SLICE1: vectorize logo expected desktop_app, got ${vec.kind}`);
+  } else if (vec.appStrategy?.id !== 'adobe_cc_control') {
+    fail(`SLICE1: vectorize logo expected adobe_cc_control strategy, got ${vec.appStrategy?.id || 'none'}`);
+  } else {
+    pass('SLICE1: "vectorize this logo to svg" -> desktop_app / adobe_cc_control');
+  }
+  // SLICE 3: once routed, the request is steered to the exact shipped op — the
+  // deterministic vectorize adapter surfaces in recommendedTools and drives the
+  // execute-desktop-action item (not a blind menu/click fallback).
+  const vecActionTools = vec?.actionItems?.map((item) => item.tool) || [];
+  if (!vec?.recommendedTools?.includes('desktop.illustrator_vectorize')) {
+    fail('SLICE3: vectorize route should surface desktop.illustrator_vectorize in recommendedTools');
+  } else if (!vecActionTools.includes('desktop.illustrator_vectorize')) {
+    fail(`SLICE3: vectorize route should emit a desktop.illustrator_vectorize action item, got ${vecActionTools.join(', ') || 'none'}`);
+  } else {
+    pass('SLICE3: vectorize route steers to the desktop.illustrator_vectorize op');
+  }
+}
+// A bare Photoshop single-op ("make the selection red") is a desktop design task
+// on its own — no layout+layer noun pair or named app required.
+assertRoute('make the selection red', { kind: 'desktop_app', strategyId: 'creative_layout_control' });
+// Precision: plain team-alignment conversation must NOT spawn a computer route.
+if (buildChatComputerRequestRoute('should we align our goals this quarter')) {
+  fail('SLICE1 precision: "should we align our goals" must not create a computer route');
+} else {
+  pass('SLICE1 precision: "should we align our goals" stays conversational');
+}
+
 assertRoute(
   'Log into WordPress wp-admin and install the SEO plugin after approval',
   {
