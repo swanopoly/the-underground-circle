@@ -197,6 +197,9 @@ function operationLabel(operation: DesignAppAutomationOperation): string {
     manage_text_flow: 'Thread/unthread frames, autoflow, or fix overset',
     manage_smart_objects: 'Convert, edit, replace, or rasterize smart objects',
     manage_swatches: 'Add, edit, convert, or delete swatches/spot colors/inks',
+    create_text_layer: 'Add a new text/type layer',
+    set_layer_appearance: 'Set layer opacity, fill opacity, or blend mode',
+    add_fill_layer: 'Add a new solid-color fill layer',
     vectorize: 'Vectorize/image-trace a raster asset',
     set_appearance: 'Set vector appearance (fill/stroke/swatch/recolor)',
     align: 'Align or distribute vector objects',
@@ -959,6 +962,73 @@ function photoshopRunbook(plan: DesignAppAutomationPlan, operation: DesignAppAut
       adapterGap,
       userVisibleSummary: 'Layer management, transforms, and color mode run through deterministic adapters with receipts; destructive layer ops stay gated.',
       sourceRefs: sourceRefs(...source, PHOTOSHOP_BATCHPLAY_REF, ...(adapterGap?.officialSourceRefs || [])),
+    };
+  }
+
+  if (operation === 'create_text_layer' || operation === 'set_layer_appearance' || operation === 'add_fill_layer') {
+    // Additive/appearance ExtendScript adapters (shipped, non-destructive).
+    // create_text_layer + add_fill_layer add ONE new layer; set_layer_appearance
+    // sets opacity/fillOpacity/blendMode on an existing named layer. None save.
+    const toolByOp: Record<string, string> = {
+      create_text_layer: 'desktop.photoshop_create_text_layer',
+      set_layer_appearance: 'desktop.photoshop_set_layer_appearance',
+      add_fill_layer: 'desktop.photoshop_add_fill_layer',
+    };
+    const needsTargetLayer = operation === 'set_layer_appearance';
+    const actDescription = operation === 'create_text_layer'
+      ? 'Run the create-text-layer adapter — adds ONE new point-text art layer with the approved contents, position, size, and color. Additive only; never edits existing layers; never saves.'
+      : operation === 'set_layer_appearance'
+      ? 'Run the set-layer-appearance adapter — sets opacity, fill opacity, and/or blend mode on the exact named layer (fails closed on an ambiguous or missing layer). Non-destructive; never saves.'
+      : 'Run the add-fill-layer adapter — adds ONE new solid-color fill/content layer with the approved color. Additive only; never flattens; never saves.';
+    const targetInput = operation === 'set_layer_appearance'
+      ? 'exact target layer name plus opacity/fill-opacity/blend-mode values'
+      : operation === 'create_text_layer'
+      ? 'text contents, position, and style (size/color/justification)'
+      : 'fill color (and optional new layer name)';
+    return {
+      appId: plan.appId,
+      appName: plan.appName,
+      operation,
+      label: operationLabel(operation),
+      risk: riskForOperation(operation),
+      controlSurface,
+      requiredInputs: ['fresh document status', 'fresh layer inventory', targetInput],
+      approvalBefore: ['adding or changing a layer', 'save/export/write'],
+      steps: [
+        ...sharedObserve,
+        step('observe', 'Map target layer stack', needsTargetLayer
+          ? 'Find the exact target layer by name and stop if multiple plausible layers exist; capture its current opacity/blend.'
+          : 'Confirm the layer stack and the insertion point before adding a new layer.', {
+          tool: 'desktop.photoshop_layer_inventory',
+          evidence: needsTargetLayer
+            ? ['target layer id/name', 'current opacity/fill/blend']
+            : ['layer ids/names/types', 'active layer / insertion point'],
+        }),
+        step('approve', 'Request layer approval', 'Ask for approval naming the exact layer target and the operation parameters (text/color/opacity/blend).', {
+          tool: 'approvals.request',
+          approvalRequired: true,
+          evidence: ['approved target and parameters'],
+        }),
+        step('act', 'Apply the deterministic operation', actDescription, {
+          tool: toolByOp[operation],
+          approvalRequired: true,
+          evidence: ['operation receipt (new layer name or before/after appearance)'],
+        }),
+        step('verify', 'Verify layer state and proof', 'Re-run layer inventory to confirm the added/changed layer, then capture raster proof.', {
+          tool: 'desktop.photoshop_layer_inventory + desktop.photoshop_export_proof',
+          evidence: ['post-change layer inventory', 'raster proof'],
+        }),
+      ],
+      successCriteria: ['receipt confirms the added or changed layer', 'post-change inventory matches the approved target', 'nothing was saved'],
+      failClosedConditions: [
+        needsTargetLayer ? 'target layer ambiguous or missing' : 'active document missing or mismatched',
+        'approval missing before layer mutation',
+        'post-change verification missing',
+      ],
+      fallbackBuildoutTrigger: `If ${toolByOp[operation]} is stale or missing, restart or rebuild the Photoshop ExtendScript adapter before retrying.`,
+      adapterGap,
+      userVisibleSummary: 'Text/fill layers and layer appearance run through deterministic adapters with receipts; nothing saves without approval.',
+      sourceRefs: sourceRefs(...source, PHOTOSHOP_LAYER_REF, ...(adapterGap?.officialSourceRefs || [])),
     };
   }
 

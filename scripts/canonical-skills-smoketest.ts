@@ -37,6 +37,14 @@ const PROBES: Record<string, RegExp[]> = {
     /approvals\.request/,
     /double submission|re-?submit/i,
   ],
+  'design-app-edit': [
+    /desktop\.(illustrator_set_appearance|photoshop_set_layer_appearance)/,
+    /desktop\.(photoshop_create_text_layer|illustrator_add_text)/,
+    /_document_status/,
+    /agent\.build_app_capability/,
+    /approvals\.request/,
+    /re-?read/i,
+  ],
   'design-app-export': [
     /_export_proof/,
     /desktop\.file_stat/,

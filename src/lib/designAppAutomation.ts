@@ -36,6 +36,14 @@ export type DesignAppAutomationOperation =
   | 'manage_text_flow'
   | 'manage_smart_objects'
   | 'manage_swatches'
+  // Photoshop additive/appearance ExtendScript adapters (deterministic,
+  // shipped): add ONE new point-text layer, set opacity/fill/blend on a named
+  // layer, or add ONE new solid-color fill layer. Distinct from
+  // update_text_layers (edits existing copy), apply_layer_effects (styles/FX),
+  // and manage_layers (rename/duplicate/reorder/group).
+  | 'create_text_layer'
+  | 'set_layer_appearance'
+  | 'add_fill_layer'
   // Illustrator vector operation set (deterministic ExtendScript adapters).
   | 'vectorize'
   | 'set_appearance'
@@ -76,7 +84,7 @@ const PHOTOSHOP_TASK_RE = /\b(open|launch|focus|edit|change|update|replace|remov
 // background. Anchored to Photoshop-specific compounds (and a colour word for
 // the selection case) so plain writing ("make your selection", "a solid
 // background in economics", "add a note") never trips it.
-const PHOTOSHOP_SINGLE_OP_RE = /\b(?:set|change|lower|raise|reduce|increase|drop|adjust)\b[^.!?]{0,16}\b(?:layer\s+)?opacity\b|\b(?:layer\s+)?opacity\b[^.!?]{0,16}\b(?:to|=|%|percent|\d)|\bblend(?:ing)?\s+modes?\b|\b(?:add|create|new|insert|apply)\b[^.!?]{0,16}\b(?:fill|adjustment|solid[\s-]?colou?r)\s+layers?\b|\b(?:add|create|insert|place|new)\b[^.!?]{0,16}\b(?:text|type)\s+layers?\b|\b(?:make|set|fill|paint|colou?r|recolou?r|change|turn)\b[^.!?]{0,20}\bselection\b[^.!?]{0,16}\b(?:red|orange|yellow|green|blue|purple|pink|black|white|gray|grey|cyan|magenta|transparent|colou?r|gradient|#[0-9a-fA-F]{3,6})\b|\b(?:add|create|insert|place|fill)\b[^.!?]{0,20}\b(?:white|black|solid|transparent|colou?red?|gradient)\s+backgrounds?\b|\bbackgrounds?\s+(?:fill|layer)\b/i;
+const PHOTOSHOP_SINGLE_OP_RE = /\b(?:set|change|lower|raise|reduce|increase|drop|adjust|make)\b[^.!?]{0,24}\b(?:layer\s+)?opacity\b|\b(?:layer\s+)?opacity\b[^.!?]{0,16}\b(?:to|=|%|percent|\d)|\b\d{1,3}\s*%[^.!?]{0,16}\bopacity\b|\bblend(?:ing)?\s+modes?\b|\b(?:add|create|new|insert|apply)\b[^.!?]{0,16}\b(?:fill|adjustment|solid[\s-]?colou?r)\s+layers?\b|\b(?:add|create|insert|place|new)\b[^.!?]{0,16}\b(?:text|type)\s+layers?\b|\b(?:make|set|fill|paint|colou?r|recolou?r|change|turn)\b[^.!?]{0,20}\bselection\b[^.!?]{0,16}\b(?:red|orange|yellow|green|blue|purple|pink|black|white|gray|grey|cyan|magenta|transparent|colou?r|gradient|#[0-9a-fA-F]{3,6})\b|\b(?:add|create|insert|place|fill)\b[^.!?]{0,20}\b(?:white|black|solid|transparent|colou?red?|gradient)\s+backgrounds?\b|\bbackgrounds?\s+(?:fill|layer)\b/i;
 // Illustrator vector work: app name, .ai/.eps/.svg files, or vector-specific verbs.
 const ILLUSTRATOR_RE = /\b(illustrator|adobe\s+illustrator|\.ai\b|\.eps\b|\.svg\b|vector art|artboard|image trace|live trace|vectori[sz]e)\b/i;
 const ILLUSTRATOR_TASK_RE = /\b(open|launch|focus|edit|change|update|recolou?r|re-?colou?r|vectori[sz]e|image trace|live trace|trace|align|distribute|arrange|reorder|group|ungroup|artboard|stroke|swatch|add|create|draw|insert|export|save|convert|\.ai\b|\.eps\b|\.svg\b)\b/i;
@@ -175,10 +183,36 @@ function detectInDesignOperations(text: string): DesignAppAutomationOperation[] 
 
 function detectPhotoshopOperations(text: string): DesignAppAutomationOperation[] {
   const operations: DesignAppAutomationOperation[] = ['inspect_image_document', 'inspect_layers'];
+  // ── First-class additive/appearance ops (shipped ExtendScript adapters). ──
+  // These are detected BEFORE the overlapping generic arms and then suppress the
+  // wrong generics below, so the runbook names the exact deterministic tool
+  // (photoshop_create_text_layer / _set_layer_appearance / _add_fill_layer)
+  // instead of misrouting "add a headline" -> resize_layout, "50% opacity" ->
+  // apply_layer_effects, or "add a fill layer" -> replace_linked_asset.
+  // create_text_layer: ADD a new text/type layer (add/create/insert/place +
+  // headline/title/subhead/text/type). NOT change/update/replace ... text
+  // (that stays update_text_layers, which uses a disjoint verb set).
+  const wantsCreateTextLayer = /\b(?:add|create|insert|place)\b[^.!?]{0,24}\b(?:headline|title|sub-?head(?:ing|line)?|text|type\s+layers?)\b/i.test(text);
+  // set_layer_appearance: opacity / fill opacity / blend mode changes. Requires
+  // a set-intent verb OR a percent value bound to opacity, so a bare "opacity"
+  // reference never falsely fires.
+  const wantsSetLayerAppearance = /\b(?:set|change|lower|raise|reduce|increase|drop|adjust|make)\b[^.!?]{0,24}\b(?:fill[\s-]?)?opacity\b/i.test(text)
+    || /\bopacity\b[^.!?]{0,8}\d{1,3}\s*%/i.test(text)
+    || /\b\d{1,3}\s*%[^.!?]{0,12}\bopacity\b/i.test(text)
+    || /\bblend(?:ing)?\s+modes?\b/i.test(text);
+  // add_fill_layer: ADD a new solid-color fill/content layer (add/create/insert
+  // + fill / solid[-]color / content layer). Anchored to the "... layer" noun so
+  // "merge the background layers" (existing layers) never fires.
+  const wantsAddFillLayer = /\b(?:add|create|insert|new|apply)\b[^.!?]{0,24}\b(?:fill|solid[\s-]?colou?r|content)\s+layers?\b/i.test(text);
+  if (wantsCreateTextLayer) operations.push('create_text_layer');
+  if (wantsSetLayerAppearance) operations.push('set_layer_appearance');
+  if (wantsAddFillLayer) operations.push('add_fill_layer');
   if (/\b(change|update|replace|edit|write|set)\b[\s\S]{0,120}\b(text|copy|headline|subhead|cta|disclaimer|legal|price|apr|offer|dealer|phone|url)\b/i.test(text)) {
     operations.push('update_text_layers');
   }
-  if (/\b(place|insert|add|replace|swap|relink|import)\b[\s\S]{0,120}\b(image|photo|logo|asset|link|graphic|background|smart object)\b/i.test(text)) {
+  // Guard: an add-a-fill/text-layer request is not a placed-asset relink, even
+  // though "add ... background" and "add ... layer" would otherwise match here.
+  if (!wantsAddFillLayer && !wantsCreateTextLayer && /\b(place|insert|add|replace|swap|relink|import)\b[\s\S]{0,120}\b(image|photo|logo|asset|link|graphic|background|smart object)\b/i.test(text)) {
     operations.push('replace_linked_asset');
   }
   if (/\b(resize|size|dimension|dimensions|resolution|dpi|ppi|crop|canvas|scale|instagram|story|post|thumbnail|hero|banner)\b/i.test(text)) {
@@ -187,7 +221,7 @@ function detectPhotoshopOperations(text: string): DesignAppAutomationOperation[]
   if (/\b(show|hide|lock|unlock|toggle)\b[\s\S]{0,80}\blayers?\b/i.test(text)) {
     operations.push('toggle_layer_visibility');
   }
-  if (/\b(mask|selection|select subject|select and mask|background|clipping mask|marquee|lasso|highlight|selected area)\b/i.test(text)) {
+  if (!wantsAddFillLayer && /\b(mask|selection|select subject|select and mask|background|clipping mask|marquee|lasso|highlight|selected area)\b/i.test(text)) {
     operations.push('apply_selection_or_mask');
   }
   if (/\b(generative fill|content-aware|remove|erase|delete|clean up|replace background|ai edit|inpaint)\b/i.test(text)) {
@@ -202,13 +236,18 @@ function detectPhotoshopOperations(text: string): DesignAppAutomationOperation[]
   if (/\b(variations?|options?|versions?|colorways?|style variations?|brand variations?|localized|personalized|batch)\b/i.test(text)) {
     operations.push('create_creative_variants');
   }
-  if (/\b(adjust|retouch|curves|levels|color|tone|contrast|brightness|exposure|filter|blur|sharpen|neural filter|camera raw|harmonize)\b/i.test(text)) {
+  if (!wantsAddFillLayer && /\b(adjust|retouch|curves|levels|color|tone|contrast|brightness|exposure|filter|blur|sharpen|neural filter|camera raw|harmonize)\b/i.test(text)) {
     operations.push('edit_adjustment_layers');
   }
-  if (/\b(drop shadow|layer style|layer effect|layer fx|stroke|bevel|emboss|inner shadow|outer glow|inner glow|gradient overlay|color overlay|pattern overlay|satin|blend mode|blending mode|opacity)\b/i.test(text)) {
+  // apply_layer_effects = layer STYLES/FX only. Opacity + blend mode moved to
+  // set_layer_appearance (deterministic adapter) so an opacity/blend request
+  // routes to the exact tool instead of an apply_layer_effects buildout gap.
+  if (/\b(drop shadow|layer style|layer effect|layer fx|stroke|bevel|emboss|inner shadow|outer glow|inner glow|gradient overlay|color overlay|pattern overlay|satin)\b/i.test(text)) {
     operations.push('apply_layer_effects');
   }
-  if (/\b(create|add|new|duplicate|copy|delete|remove|merge|flatten|group|ungroup|rasterize|rename)\b[\s\S]{0,40}\b(layers?|groups?)\b/i.test(text)) {
+  // Guard: adding a text/fill layer is handled by create_text_layer /
+  // add_fill_layer above; manage_layers only does rename/duplicate/reorder/group.
+  if (!wantsCreateTextLayer && !wantsAddFillLayer && /\b(create|add|new|duplicate|copy|delete|remove|merge|flatten|group|ungroup|rasterize|rename)\b[\s\S]{0,40}\b(layers?|groups?)\b/i.test(text)) {
     operations.push('manage_layers');
   }
   if (/\b(rotate|flip|mirror|free transform|free-transform|skew|distort|warp|perspective|straighten|transform the layer|transform layer)\b/i.test(text)) {
