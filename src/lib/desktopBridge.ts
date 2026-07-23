@@ -48,7 +48,11 @@ import {
   validatePhotoshopManageLayersParams,
   validatePhotoshopTransformLayerParams,
   validatePhotoshopConvertColorModeParams,
+  validatePhotoshopSetLayerAppearanceParams,
+  validatePhotoshopCreateTextLayerParams,
   type PhotoshopAdjustmentLayerKind,
+  type PhotoshopTextJustification,
+  type PhotoshopBlendMode,
   type PhotoshopCanvasAnchor,
   type PhotoshopColorMode,
   type PhotoshopLayerReorderPosition,
@@ -61,6 +65,7 @@ import {
 
 export type {
   PhotoshopAdjustmentLayerKind,
+  PhotoshopBlendMode,
   PhotoshopCanvasAnchor,
   PhotoshopColorMode,
   PhotoshopLayerReorderPosition,
@@ -68,13 +73,20 @@ export type {
   PhotoshopResizeOp,
   PhotoshopSelectionBoundsPx,
   PhotoshopSelectionMaskMode,
+  PhotoshopTextJustification,
   PhotoshopTransformOp,
 } from './photoshopExtendScriptAdapters';
 
 import {
+  validateIllustratorAddShapeParams,
+  validateIllustratorAddTextParams,
+  validateIllustratorArrangeParams,
   validateIllustratorDocumentStatusParams,
   validateIllustratorExportProofParams,
+  validateIllustratorSetAppearanceParams,
   validateIllustratorVectorizeParams,
+  type IllustratorAddShapeKind,
+  type IllustratorArrangeDirection,
   type IllustratorExportProofFormat,
   type IllustratorTracingMode,
 } from './illustratorExtendScriptAdapters';
@@ -3989,6 +4001,133 @@ export async function photoshopConvertColorMode(args: {
   };
 }
 
+export type PhotoshopSetLayerAppearanceResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  targetDocumentName: string | null;
+  layerName: string | null;
+  opacity: number | null;
+  fillOpacity: number | null;
+  blendMode: string | null;
+  error: string | null;
+};
+
+/**
+ * Set opacity, fillOpacity, and/or blend mode on ONE exact-named layer. The
+ * SAFEST layer mutation: appearance-only, zero pixel loss, fully reversible via
+ * undo, and NEVER saves. Fails closed with 'layer_not_found' / 'layer_ambiguous'
+ * / 'document_mismatch'; the receipt carries the read-back appearance values.
+ * Like transform_layer there is no output file, so no local-file grant.
+ */
+export async function photoshopSetLayerAppearance(args: {
+  appName?: string;
+  targetDocumentName?: string | null;
+  layerName: string;
+  opacity?: number | null;
+  fillOpacity?: number | null;
+  blendMode?: PhotoshopBlendMode | null;
+}): Promise<DesktopResult<PhotoshopSetLayerAppearanceResult>> {
+  const validated = validatePhotoshopSetLayerAppearanceParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/photoshop_set_layer_appearance', {
+    appName: params.appName,
+    targetDocumentName: params.targetDocumentName || undefined,
+    layerName: params.layerName,
+    opacity: params.opacity == null ? undefined : params.opacity,
+    fillOpacity: params.fillOpacity == null ? undefined : params.fillOpacity,
+    blendMode: params.blendMode || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopSetLayerAppearanceResult>;
+  const d = r.data as any;
+  const toOpacity = (value: unknown): number | null =>
+    value == null || !Number.isFinite(Number(value)) ? null : Number(value);
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      targetDocumentName: d?.targetDocumentName ? String(d.targetDocumentName) : (params.targetDocumentName || null),
+      layerName: d?.layerName ? String(d.layerName) : (params.layerName || null),
+      opacity: toOpacity(d?.opacity),
+      fillOpacity: toOpacity(d?.fillOpacity),
+      blendMode: d?.blendMode ? String(d.blendMode) : null,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type PhotoshopCreateTextLayerResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  targetDocumentName: string | null;
+  layerName: string | null;
+  text: string;
+  sizePt: number;
+  colorApplied: boolean;
+  error: string | null;
+};
+
+/**
+ * Add ONE new point-text art layer (e.g. a headline or a name) to the guarded
+ * Photoshop document via doc.artLayers.add + LayerKind.TEXT. Additive and
+ * non-destructive — approval-gated — but NEVER saves/exports/closes the
+ * document, so the user keeps undo. hexColor is an optional #RRGGBB fill built
+ * as a SolidColor; justification is optional. Fails closed with 'no_document'
+ * or 'document_mismatch'. Like transform_layer there is no output file, so no
+ * local-file grant is required.
+ */
+export async function photoshopCreateTextLayer(args: {
+  appName?: string;
+  targetDocumentName?: string | null;
+  text: string;
+  xPx: number;
+  yPx: number;
+  sizePt?: number | null;
+  hexColor?: string | null;
+  justification?: PhotoshopTextJustification | null;
+  layerName?: string | null;
+}): Promise<DesktopResult<PhotoshopCreateTextLayerResult>> {
+  const validated = validatePhotoshopCreateTextLayerParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/photoshop_create_text_layer', {
+    appName: params.appName,
+    targetDocumentName: params.targetDocumentName || undefined,
+    text: params.text,
+    xPx: params.xPx,
+    yPx: params.yPx,
+    sizePt: params.sizePt,
+    hexColor: params.hexColor || undefined,
+    justification: params.justification || undefined,
+    layerName: params.layerName || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopCreateTextLayerResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      targetDocumentName: d?.targetDocumentName ? String(d.targetDocumentName) : (params.targetDocumentName || null),
+      layerName: d?.layerName ? String(d.layerName) : null,
+      text: d?.text ? String(d.text) : '',
+      sizePt: toNumber(d?.sizePt),
+      colorApplied: d?.colorApplied === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
 // ─── Illustrator ExtendScript base pair ─────────────────────────────────────
 //
 // Same ExtendScript-via-AppleScript mechanism as the Photoshop tools.
@@ -4230,6 +4369,273 @@ export async function illustratorVectorize(args: {
       pathCount: toNumber(d?.pathCount),
       fileExists: d?.fileExists === true,
       sizeBytes: toNumber(d?.sizeBytes),
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type IllustratorArrangeResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  direction: IllustratorArrangeDirection;
+  /** Selected objects whose z-order was changed (0 on failure). */
+  movedCount: number;
+  error: string | null;
+};
+
+/**
+ * Reorder the current selection in the guarded Illustrator document
+ * (bringToFront / sendToBack / bringForward / sendBackward) via pageItem.zOrder.
+ * Mutates the OPEN document in place — approval-gated — but NEVER saves/exports/
+ * closes it, so the user keeps undo. Fails closed with 'no_document',
+ * 'document_mismatch', or 'no_selection'. The receipt carries movedCount as
+ * proof. There is no output file, so no local-file grant is required.
+ */
+export async function illustratorArrange(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  direction: IllustratorArrangeDirection;
+}): Promise<DesktopResult<IllustratorArrangeResult>> {
+  const validated = validateIllustratorArrangeParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/illustrator_arrange', {
+    appName: params.appName,
+    expectedDocumentName: params.expectedDocumentName || undefined,
+    direction: params.direction,
+  });
+  if (!r.ok) return r as DesktopResult<IllustratorArrangeResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (params.expectedDocumentName || null),
+      direction: params.direction,
+      movedCount: toNumber(d?.movedCount),
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type IllustratorAddTextResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  contents: string;
+  xPt: number;
+  yPt: number;
+  sizePt: number;
+  /** Font actually applied (requested if resolved, else the inherited default). */
+  appliedFont: string | null;
+  fillApplied: boolean;
+  /** 'font_not_found' when a requested font could not be resolved (text still created). */
+  fontWarning: string | null;
+  error: string | null;
+};
+
+/**
+ * Add a new point-text frame (e.g. a headline) to the guarded Illustrator
+ * document at [xPt, yPt] via doc.textFrames.pointText. Additive and
+ * non-destructive — approval-gated — but NEVER saves/exports/closes the
+ * document, so the user keeps undo. fillColor is an optional #RRGGBB hex
+ * (built as RGBColor or CMYKColor to match the document color space); an
+ * unresolved fontName is reported via fontWarning while the text is still
+ * created with the default font. Fails closed with 'no_document' or
+ * 'document_mismatch'. There is no output file, so no local-file grant is
+ * required.
+ */
+export async function illustratorAddText(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  contents: string;
+  xPt: number;
+  yPt: number;
+  sizePt?: number | null;
+  fillColor?: string | null;
+  fontName?: string | null;
+}): Promise<DesktopResult<IllustratorAddTextResult>> {
+  const validated = validateIllustratorAddTextParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/illustrator_add_text', {
+    appName: params.appName,
+    expectedDocumentName: params.expectedDocumentName || undefined,
+    contents: params.contents,
+    xPt: params.xPt,
+    yPt: params.yPt,
+    sizePt: params.sizePt,
+    fillColor: params.fillColor || undefined,
+    fontName: params.fontName || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<IllustratorAddTextResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (params.expectedDocumentName || null),
+      contents: d?.contents ? String(d.contents) : '',
+      xPt: toNumber(d?.xPt),
+      yPt: toNumber(d?.yPt),
+      sizePt: toNumber(d?.sizePt),
+      appliedFont: d?.appliedFont ? String(d.appliedFont) : null,
+      fillApplied: d?.fillApplied === true,
+      fontWarning: d?.fontWarning ? String(d.fontWarning) : null,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type IllustratorAddShapeResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  kind: IllustratorAddShapeKind;
+  fillApplied: boolean;
+  strokeApplied: boolean;
+  error: string | null;
+};
+
+/**
+ * Add a new path item (rectangle / ellipse / line) to the guarded Illustrator
+ * document via the typed DOM (doc.pathItems.rectangle/ellipse, or
+ * doc.pathItems.add + setEntirePath for a line). Additive and non-destructive —
+ * approval-gated — but NEVER saves/exports/closes the document, so the user
+ * keeps undo. Rectangle/ellipse take a top-left anchor (xPt,yPt) + positive
+ * widthPt,heightPt; line takes x1Pt,y1Pt → x2Pt,y2Pt. Optional fillColor/
+ * strokeColor are #RRGGBB hex (built as an RGBColor or CMYKColor to match the
+ * document color space) and strokeWidthPt is in points. Fails closed with
+ * 'no_document' or 'document_mismatch'. There is no output file, so no
+ * local-file grant is required.
+ */
+export async function illustratorAddShape(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  kind: IllustratorAddShapeKind | string;
+  xPt?: number;
+  yPt?: number;
+  widthPt?: number;
+  heightPt?: number;
+  x1Pt?: number;
+  y1Pt?: number;
+  x2Pt?: number;
+  y2Pt?: number;
+  fillColor?: string | null;
+  strokeColor?: string | null;
+  strokeWidthPt?: number | null;
+}): Promise<DesktopResult<IllustratorAddShapeResult>> {
+  const validated = validateIllustratorAddShapeParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/illustrator_add_shape', {
+    appName: params.appName,
+    expectedDocumentName: params.expectedDocumentName || undefined,
+    kind: params.kind,
+    xPt: params.xPt,
+    yPt: params.yPt,
+    widthPt: params.widthPt,
+    heightPt: params.heightPt,
+    x1Pt: params.x1Pt,
+    y1Pt: params.y1Pt,
+    x2Pt: params.x2Pt,
+    y2Pt: params.y2Pt,
+    fillColor: params.fillColor || undefined,
+    strokeColor: params.strokeColor || undefined,
+    strokeWidthPt: params.strokeWidthPt == null ? undefined : params.strokeWidthPt,
+  });
+  if (!r.ok) return r as DesktopResult<IllustratorAddShapeResult>;
+  const d = r.data as any;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (params.expectedDocumentName || null),
+      kind: params.kind,
+      fillApplied: d?.fillApplied === true,
+      strokeApplied: d?.strokeApplied === true,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type IllustratorSetAppearanceResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  /** Leaf items (recursing into groups) whose appearance was changed (0 on failure). */
+  appliedToCount: number;
+  fillApplied: boolean;
+  strokeApplied: boolean;
+  error: string | null;
+};
+
+/**
+ * Recolor / re-stroke the current selection in the guarded Illustrator document
+ * via the typed DOM (item.fillColor/strokeColor/strokeWidth), recursing into
+ * groups. Mutates the OPEN document in place — approval-gated — but NEVER
+ * saves/exports/closes it, so the user keeps undo. fillColor/strokeColor are
+ * optional #RRGGBB hex (built as an RGBColor or CMYKColor to match the document
+ * color space); swatchName resolves at runtime to a named swatch's SOLID color
+ * and is the fill source (mutually exclusive with fillColor). At least one of
+ * fillColor/strokeColor/strokeWidthPt/swatchName is required. Fails closed with
+ * 'no_document', 'document_mismatch', 'no_selection', 'swatch_not_found', or
+ * 'swatch_not_solid'. The receipt carries appliedToCount as proof. There is no
+ * output file, so no local-file grant is required.
+ */
+export async function illustratorSetAppearance(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  fillColor?: string | null;
+  strokeColor?: string | null;
+  strokeWidthPt?: number | null;
+  swatchName?: string | null;
+}): Promise<DesktopResult<IllustratorSetAppearanceResult>> {
+  const validated = validateIllustratorSetAppearanceParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/illustrator_set_appearance', {
+    appName: params.appName,
+    expectedDocumentName: params.expectedDocumentName || undefined,
+    fillColor: params.fillColor || undefined,
+    strokeColor: params.strokeColor || undefined,
+    strokeWidthPt: params.strokeWidthPt == null ? undefined : params.strokeWidthPt,
+    swatchName: params.swatchName || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<IllustratorSetAppearanceResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (params.expectedDocumentName || null),
+      appliedToCount: toNumber(d?.appliedToCount),
+      fillApplied: d?.fillApplied === true,
+      strokeApplied: d?.strokeApplied === true,
       error: d?.error ? String(d.error) : null,
     },
   };

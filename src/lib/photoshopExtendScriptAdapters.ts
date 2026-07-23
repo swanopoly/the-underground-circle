@@ -14,6 +14,12 @@
  *                                        conversions discard color data in the
  *                                        UNSAVED working copy only — reversible
  *                                        until save, and these scripts never save)
+ *   - photoshop_set_layer_appearance    (set opacity / fillOpacity / blendMode on
+ *                                        ONE named layer — appearance-only, zero
+ *                                        pixel loss, fully reversible via undo)
+ *   - photoshop_create_text_layer       (add ONE new point-text art layer —
+ *                                        additive headline/name, typed DOM only,
+ *                                        never saves, fully reversible via undo)
  *
  * LOCKSTEP(scripts/claude-bridge.js): the bridge is a standalone Node script
  * that cannot import TS, so it carries byte-identical duplicates of the JSX
@@ -132,6 +138,62 @@ export const PHOTOSHOP_COLOR_MODE_CHANGE_MODES: Record<PhotoshopColorMode, strin
   grayscale: 'GRAYSCALE',
 };
 
+/**
+ * Allowlisted layer blend modes for photoshop_set_layer_appearance. This is a
+ * safe reversible subset — every entry maps to a stable DOM `BlendMode.<CONST>`
+ * enumerator and touches no pixels.
+ */
+export const PHOTOSHOP_BLEND_MODES = [
+  'normal',
+  'multiply',
+  'screen',
+  'overlay',
+  'darken',
+  'lighten',
+  'soft_light',
+  'hard_light',
+  'color_dodge',
+  'color_burn',
+  'difference',
+] as const;
+export type PhotoshopBlendMode = (typeof PHOTOSHOP_BLEND_MODES)[number];
+
+/** DOM `BlendMode.<CONSTANT>` names for layer.blendMode. */
+export const PHOTOSHOP_BLEND_MODE_CONSTANTS: Record<PhotoshopBlendMode, string> = {
+  normal: 'NORMAL',
+  multiply: 'MULTIPLY',
+  screen: 'SCREEN',
+  overlay: 'OVERLAY',
+  darken: 'DARKEN',
+  lighten: 'LIGHTEN',
+  soft_light: 'SOFTLIGHT',
+  hard_light: 'HARDLIGHT',
+  color_dodge: 'COLORDODGE',
+  color_burn: 'COLORBURN',
+  difference: 'DIFFERENCE',
+};
+
+export const PHOTOSHOP_MIN_LAYER_OPACITY = 0;
+export const PHOTOSHOP_MAX_LAYER_OPACITY = 100;
+
+// ─── Create-text-layer consts (LOCKSTEP(scripts/claude-bridge.js)) ──────────
+export const PHOTOSHOP_CREATE_TEXT_MAX_LENGTH = 2000;
+export const PHOTOSHOP_CREATE_TEXT_MIN_SIZE_PT = 1;
+export const PHOTOSHOP_CREATE_TEXT_MAX_SIZE_PT = 1400;
+export const PHOTOSHOP_CREATE_TEXT_DEFAULT_SIZE_PT = 24;
+export const PHOTOSHOP_CREATE_TEXT_MAX_COORD_PX = 100000;
+export const PHOTOSHOP_HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+
+export const PHOTOSHOP_TEXT_JUSTIFICATIONS = ['left', 'center', 'right'] as const;
+export type PhotoshopTextJustification = (typeof PHOTOSHOP_TEXT_JUSTIFICATIONS)[number];
+
+/** DOM `Justification.<CONSTANT>` names for textItem.justification. */
+export const PHOTOSHOP_TEXT_JUSTIFICATION_CONSTANTS: Record<PhotoshopTextJustification, string> = {
+  left: 'LEFT',
+  center: 'CENTER',
+  right: 'RIGHT',
+};
+
 // ─── Scalar validators (LOCKSTEP(scripts/claude-bridge.js): endpoint 400s) ─
 
 // Safe ExtendScript string/JSON embed: JSON.stringify + escape the ES3 line
@@ -219,6 +281,19 @@ export function normalizePhotoshopRangeNumber(value: unknown, label: string, min
   if (value === undefined || value === null) return { ok: true, value: null };
   if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
     return { ok: false, error: `${label} must be a finite number between ${min} and ${max}.` };
+  }
+  return { ok: true, value };
+}
+
+/**
+ * Optional integer layer opacity/fillOpacity 0..100. undefined/null -> null
+ * (not provided). Numeric strings and fractions are rejected (fail closed,
+ * mirrors the endpoint 400s).
+ */
+export function normalizePhotoshopOpacityParam(value: unknown, label: string): PhotoshopParamCheck<number | null> {
+  if (value === undefined || value === null) return { ok: true, value: null };
+  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < PHOTOSHOP_MIN_LAYER_OPACITY || value > PHOTOSHOP_MAX_LAYER_OPACITY) {
+    return { ok: false, error: `${label} must be a finite integer between ${PHOTOSHOP_MIN_LAYER_OPACITY} and ${PHOTOSHOP_MAX_LAYER_OPACITY}.` };
   }
   return { ok: true, value };
 }
@@ -1694,6 +1769,432 @@ ${photoshopConvertColorModeJsxBody({
   return { jsx, errors: [] };
 }
 
+// ─── 7) Set layer appearance (opacity / fillOpacity / blendMode) ────────────
+
+export type PhotoshopSetLayerAppearanceParams = {
+  appName?: string;
+  targetDocumentName?: string | null;
+  /** Required exact-name target layer. 0 or >1 matches fail closed. */
+  layerName: string;
+  /** Layer opacity, integer 0..100. */
+  opacity?: number | null;
+  /** Fill opacity, integer 0..100. */
+  fillOpacity?: number | null;
+  /** Blend mode token from the allowlist (PHOTOSHOP_BLEND_MODES). */
+  blendMode?: PhotoshopBlendMode | string | null;
+};
+
+export type NormalizedPhotoshopSetLayerAppearanceParams = {
+  appName: string;
+  targetDocumentName: string;
+  layerName: string;
+  opacity: number | null;
+  fillOpacity: number | null;
+  blendMode: PhotoshopBlendMode | null;
+};
+
+export function validatePhotoshopSetLayerAppearanceParams(
+  params: PhotoshopSetLayerAppearanceParams,
+): { ok: true; params: NormalizedPhotoshopSetLayerAppearanceParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizePhotoshopBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+  const targetDocumentName = normalizePhotoshopTargetDocumentName(params?.targetDocumentName);
+  if (!targetDocumentName.ok) errors.push(targetDocumentName.error);
+  const layerName = normalizePhotoshopRequiredLayerNameParam(params?.layerName, 'layerName');
+  if (!layerName.ok) errors.push(layerName.error);
+  const opacity = normalizePhotoshopOpacityParam(params?.opacity, 'opacity');
+  if (!opacity.ok) errors.push(opacity.error);
+  const fillOpacity = normalizePhotoshopOpacityParam(params?.fillOpacity, 'fillOpacity');
+  if (!fillOpacity.ok) errors.push(fillOpacity.error);
+  const rawBlendMode = params?.blendMode == null ? '' : String(params.blendMode).trim();
+  let blendMode: PhotoshopBlendMode | null = null;
+  if (rawBlendMode) {
+    if (!(PHOTOSHOP_BLEND_MODES as readonly string[]).includes(rawBlendMode)) {
+      errors.push(`blendMode must be one of ${PHOTOSHOP_BLEND_MODES.join(', ')}.`);
+    } else {
+      blendMode = rawBlendMode as PhotoshopBlendMode;
+    }
+  }
+  if (opacity.ok && fillOpacity.ok && opacity.value == null && fillOpacity.value == null && !rawBlendMode) {
+    errors.push('At least one of opacity, fillOpacity, or blendMode is required.');
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Photoshop',
+      targetDocumentName: targetDocumentName.ok ? targetDocumentName.value : '',
+      layerName: layerName.ok ? layerName.value : '',
+      opacity: opacity.ok ? opacity.value : null,
+      fillOpacity: fillOpacity.ok ? fillOpacity.value : null,
+      blendMode,
+    },
+  };
+}
+
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): photoshopSetLayerAppearanceJsxBody — keep
+ * this JSX body byte-identical with the bridge duplicate. Sets opacity,
+ * fillOpacity, and/or blend mode on ONE exact-named layer in place, then reads
+ * every value back for an honest receipt. This is the SAFEST mutation: it never
+ * touches pixels, never saves, and is fully reversible with undo. Fails closed
+ * with 'layer_not_found' / 'layer_ambiguous' / 'document_mismatch'.
+ */
+function photoshopSetLayerAppearanceJsxBody(
+  { layerName, opacity, fillOpacity, blendModeConstant }: {
+    layerName: string;
+    opacity: number | null;
+    fillOpacity: number | null;
+    blendModeConstant: string;
+  },
+): string {
+  const hasOpacity = opacity != null;
+  const hasFillOpacity = fillOpacity != null;
+  const opacityLiteral = opacity == null ? 100 : Math.trunc(Number(opacity));
+  const fillOpacityLiteral = fillOpacity == null ? 100 : Math.trunc(Number(fillOpacity));
+  const blendModeExpr = blendModeConstant ? 'BlendMode.' + blendModeConstant : 'null';
+  return `
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+  var hasOpacity = ${jsxLiteral(hasOpacity)};
+  var hasFillOpacity = ${jsxLiteral(hasFillOpacity)};
+  var opacityParam = ${jsxLiteral(opacityLiteral)};
+  var fillOpacityParam = ${jsxLiteral(fillOpacityLiteral)};
+  var blendModeValue = ${blendModeExpr};
+
+  function stringifyAppearanceResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"layerName\\":" + jsonNullableString(value.layerName),
+      "\\"opacity\\":" + (value.opacity === null ? "null" : jsonNumber(value.opacity)),
+      "\\"fillOpacity\\":" + (value.fillOpacity === null ? "null" : jsonNumber(value.fillOpacity)),
+      "\\"blendMode\\":" + jsonNullableString(value.blendMode),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+${photoshopCollectLayersByExactNameJsx()}
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Photoshop"),
+    documentName: null,
+    layerName: layerName,
+    opacity: null,
+    fillOpacity: null,
+    blendMode: null,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyAppearanceResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyAppearanceResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  var target = findUniqueLayerByExactName(doc, layerName, result, "layer_not_found", "layer_ambiguous");
+  if (!target) return stringifyAppearanceResult(result);
+  try { doc.activeLayer = target; } catch (_) {}
+
+  // Appearance-only, fully reversible: opacity / fillOpacity / blendMode on the
+  // target layer in place. No pixels are touched; the user keeps undo.
+  try {
+    if (hasOpacity) target.opacity = opacityParam;
+    if (hasFillOpacity) target.fillOpacity = fillOpacityParam;
+    if (blendModeValue !== null) target.blendMode = blendModeValue;
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+
+  try { result.opacity = Math.round(Number(target.opacity)); } catch (_) {}
+  try { result.fillOpacity = Math.round(Number(target.fillOpacity)); } catch (_) {}
+  try { result.blendMode = String(target.blendMode).replace(/^BlendMode\\./, ""); } catch (_) {}
+  return stringifyAppearanceResult(result);
+`;
+}
+
+export function buildPhotoshopSetLayerAppearanceJsx(params: PhotoshopSetLayerAppearanceParams): PhotoshopExtendScriptBuild {
+  const validated = validatePhotoshopSetLayerAppearanceParams(params);
+  if (!validated.ok) return { jsx: '', errors: validated.errors };
+  const normalized = validated.params;
+  const jsx = `
+(function () {
+${photoshopExtendScriptJsxPrelude({ expectedDocumentName: normalized.targetDocumentName, sourceDocumentPath: '' })}
+${photoshopSetLayerAppearanceJsxBody({
+    layerName: normalized.layerName,
+    opacity: normalized.opacity,
+    fillOpacity: normalized.fillOpacity,
+    blendModeConstant: normalized.blendMode ? PHOTOSHOP_BLEND_MODE_CONSTANTS[normalized.blendMode] : '',
+  })}
+}());
+`;
+  return { jsx, errors: [] };
+}
+
+// ─── 8) Create text layer (additive point-text art layer) ───────────────────
+//
+// "Put a headline / my name on it." Adds ONE new point-text art layer to the
+// OPEN target document via the typed DOM (doc.artLayers.add + LayerKind.TEXT).
+// Additive and non-destructive: it only adds a layer, mutates the OPEN document
+// in place, NEVER saves/exports/closes it (the user keeps undo), and stays
+// entirely on the typed DOM (no executeAction/executeMenuCommand). Fails closed
+// with 'no_document'/'document_mismatch'. hexColor builds a SolidColor from the
+// #RRGGBB fill; font-by-name is OUT of scope (default font) to avoid a throw.
+
+/** Non-empty text, capped at PHOTOSHOP_CREATE_TEXT_MAX_LENGTH; no NUL. */
+function normalizePhotoshopCreateTextContents(value: unknown): PhotoshopParamCheck<string> {
+  if (typeof value !== 'string') return { ok: false, error: 'text must be a string.' };
+  if (value.trim().length < 1) return { ok: false, error: 'text must be a non-empty string.' };
+  if (value.length > PHOTOSHOP_CREATE_TEXT_MAX_LENGTH) {
+    return { ok: false, error: `text must be <= ${PHOTOSHOP_CREATE_TEXT_MAX_LENGTH} characters.` };
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00]/.test(value)) return { ok: false, error: 'text cannot contain NUL.' };
+  return { ok: true, value };
+}
+
+/** Finite pixel coordinate within a sane bound (fractions allowed). */
+function normalizePhotoshopCreateTextCoord(value: unknown, label: string): PhotoshopParamCheck<number> {
+  if (typeof value !== 'number' || !Number.isFinite(value) || Math.abs(value) > PHOTOSHOP_CREATE_TEXT_MAX_COORD_PX) {
+    return { ok: false, error: `${label} must be a finite number between -${PHOTOSHOP_CREATE_TEXT_MAX_COORD_PX} and ${PHOTOSHOP_CREATE_TEXT_MAX_COORD_PX}.` };
+  }
+  return { ok: true, value };
+}
+
+/** Optional font size: undefined/null -> default 24. Finite 1..1400. */
+function normalizePhotoshopCreateTextSize(value: unknown): PhotoshopParamCheck<number> {
+  if (value === undefined || value === null) return { ok: true, value: PHOTOSHOP_CREATE_TEXT_DEFAULT_SIZE_PT };
+  if (
+    typeof value !== 'number'
+    || !Number.isFinite(value)
+    || value < PHOTOSHOP_CREATE_TEXT_MIN_SIZE_PT
+    || value > PHOTOSHOP_CREATE_TEXT_MAX_SIZE_PT
+  ) {
+    return { ok: false, error: `sizePt must be a finite number between ${PHOTOSHOP_CREATE_TEXT_MIN_SIZE_PT} and ${PHOTOSHOP_CREATE_TEXT_MAX_SIZE_PT}.` };
+  }
+  return { ok: true, value };
+}
+
+/** Optional #RRGGBB hex fill: undefined/null/'' -> null. Strict format. */
+function normalizePhotoshopHexColor(value: unknown): PhotoshopParamCheck<string | null> {
+  if (value === undefined || value === null || value === '') return { ok: true, value: null };
+  if (typeof value !== 'string' || !PHOTOSHOP_HEX_COLOR_PATTERN.test(value.trim())) {
+    return { ok: false, error: 'hexColor must be a hex color in #RRGGBB format.' };
+  }
+  return { ok: true, value: value.trim() };
+}
+
+export type PhotoshopCreateTextLayerParams = {
+  appName?: string;
+  targetDocumentName?: string | null;
+  /** Non-empty text to add (capped at 2000 chars). */
+  text: string;
+  /** X anchor in pixels. */
+  xPx: number;
+  /** Y anchor in pixels. */
+  yPx: number;
+  /** Font size in points (1..1400). Defaults to 24. */
+  sizePt?: number | null;
+  /** Optional #RRGGBB hex fill for the text. */
+  hexColor?: string | null;
+  /** Optional paragraph justification. */
+  justification?: PhotoshopTextJustification | string | null;
+  /** Optional name for the created layer; defaults to Photoshop's default. */
+  layerName?: string | null;
+};
+
+export type NormalizedPhotoshopCreateTextLayerParams = {
+  appName: string;
+  targetDocumentName: string;
+  text: string;
+  xPx: number;
+  yPx: number;
+  sizePt: number;
+  hexColor: string | null;
+  justification: PhotoshopTextJustification | null;
+  layerName: string;
+};
+
+export function validatePhotoshopCreateTextLayerParams(
+  params: PhotoshopCreateTextLayerParams,
+): { ok: true; params: NormalizedPhotoshopCreateTextLayerParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizePhotoshopBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+  const targetDocumentName = normalizePhotoshopTargetDocumentName(params?.targetDocumentName);
+  if (!targetDocumentName.ok) errors.push(targetDocumentName.error);
+  const text = normalizePhotoshopCreateTextContents(params?.text);
+  if (!text.ok) errors.push(text.error);
+  const xPx = normalizePhotoshopCreateTextCoord(params?.xPx, 'xPx');
+  if (!xPx.ok) errors.push(xPx.error);
+  const yPx = normalizePhotoshopCreateTextCoord(params?.yPx, 'yPx');
+  if (!yPx.ok) errors.push(yPx.error);
+  const sizePt = normalizePhotoshopCreateTextSize(params?.sizePt);
+  if (!sizePt.ok) errors.push(sizePt.error);
+  const hexColor = normalizePhotoshopHexColor(params?.hexColor);
+  if (!hexColor.ok) errors.push(hexColor.error);
+  const rawJustification = params?.justification == null ? '' : String(params.justification).trim();
+  let justification: PhotoshopTextJustification | null = null;
+  if (rawJustification) {
+    if (!(PHOTOSHOP_TEXT_JUSTIFICATIONS as readonly string[]).includes(rawJustification)) {
+      errors.push(`justification must be one of ${PHOTOSHOP_TEXT_JUSTIFICATIONS.join(', ')}.`);
+    } else {
+      justification = rawJustification as PhotoshopTextJustification;
+    }
+  }
+  const layerName = normalizePhotoshopLayerNameParam(params?.layerName);
+  if (!layerName.ok) errors.push(layerName.error);
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Photoshop',
+      targetDocumentName: targetDocumentName.ok ? targetDocumentName.value : '',
+      text: text.ok ? text.value : '',
+      xPx: xPx.ok ? xPx.value : 0,
+      yPx: yPx.ok ? yPx.value : 0,
+      sizePt: sizePt.ok ? sizePt.value : PHOTOSHOP_CREATE_TEXT_DEFAULT_SIZE_PT,
+      hexColor: hexColor.ok ? hexColor.value : null,
+      justification,
+      layerName: layerName.ok ? layerName.value : '',
+    },
+  };
+}
+
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): photoshopCreateTextLayerJsxBody — keep
+ * this JSX body byte-identical with the bridge duplicate. It adds ONE new
+ * point-text art layer to the OPEN document via the typed DOM and NEVER saves,
+ * exports, or closes it (the user keeps undo). justification is resolved to its
+ * DOM enumerator at build time; hexColor builds a SolidColor from #RRGGBB.
+ */
+function photoshopCreateTextLayerJsxBody(
+  { text, xPx, yPx, sizePt, hexColor, justificationConstant, layerName }: {
+    text: string;
+    xPx: number;
+    yPx: number;
+    sizePt: number;
+    hexColor: string | null;
+    justificationConstant: string;
+    layerName: string;
+  },
+): string {
+  const hexLiteral = hexColor == null ? 'null' : jsxLiteral(String(hexColor));
+  const justificationExpr = justificationConstant ? 'Justification.' + justificationConstant : 'null';
+  return `
+  var text = ${jsxLiteral(String(text ?? ''))};
+  var xPx = ${jsxLiteral(xPx)};
+  var yPx = ${jsxLiteral(yPx)};
+  var sizePt = ${jsxLiteral(sizePt)};
+  var hexColor = ${hexLiteral};
+  var justificationValue = ${justificationExpr};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+
+  function stringifyCreateTextResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"layerName\\":" + jsonNullableString(value.layerName),
+      "\\"text\\":" + jsonString(value.text),
+      "\\"sizePt\\":" + jsonNumber(value.sizePt),
+      "\\"colorApplied\\":" + jsonBoolean(value.colorApplied),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Photoshop"),
+    documentName: null,
+    layerName: null,
+    text: String(text).slice(0, 240),
+    sizePt: sizePt,
+    colorApplied: false,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyCreateTextResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyCreateTextResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  // Additive/non-destructive: create ONE new text art layer in the OPEN
+  // document. Never saves, exports, or closes it; the user keeps undo.
+  try {
+    var textLayer = doc.artLayers.add();
+    textLayer.kind = LayerKind.TEXT;
+    var t = textLayer.textItem;
+    t.contents = text;
+    t.size = sizePt;
+    t.position = [xPx, yPx];
+
+    if (hexColor) {
+      try {
+        var solid = new SolidColor();
+        var h = String(hexColor).charAt(0) === "#" ? String(hexColor).substring(1) : String(hexColor);
+        solid.rgb.red = parseInt(h.substring(0, 2), 16);
+        solid.rgb.green = parseInt(h.substring(2, 4), 16);
+        solid.rgb.blue = parseInt(h.substring(4, 6), 16);
+        t.color = solid;
+        result.colorApplied = true;
+      } catch (_) {
+        result.colorApplied = false;
+      }
+    }
+
+    if (justificationValue !== null) t.justification = justificationValue;
+    if (layerName) textLayer.name = layerName;
+
+    try { result.layerName = String(textLayer.name || ""); } catch (_) {}
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  return stringifyCreateTextResult(result);
+`;
+}
+
+export function buildPhotoshopCreateTextLayerJsx(params: PhotoshopCreateTextLayerParams): PhotoshopExtendScriptBuild {
+  const validated = validatePhotoshopCreateTextLayerParams(params);
+  if (!validated.ok) return { jsx: '', errors: validated.errors };
+  const normalized = validated.params;
+  const jsx = `
+(function () {
+${photoshopExtendScriptJsxPrelude({ expectedDocumentName: normalized.targetDocumentName, sourceDocumentPath: '' })}
+${photoshopCreateTextLayerJsxBody({
+    text: normalized.text,
+    xPx: normalized.xPx,
+    yPx: normalized.yPx,
+    sizePt: normalized.sizePt,
+    hexColor: normalized.hexColor,
+    justificationConstant: normalized.justification ? PHOTOSHOP_TEXT_JUSTIFICATION_CONSTANTS[normalized.justification] : '',
+    layerName: normalized.layerName,
+  })}
+}());
+`;
+  return { jsx, errors: [] };
+}
+
 // ─── Receipt types + guards ─────────────────────────────────────────────────
 
 export type PhotoshopAdjustmentLayerReceipt = {
@@ -1848,5 +2349,58 @@ export function isPhotoshopConvertColorModeReceipt(value: unknown): value is Pho
     && isNullableString(v.modeBefore)
     && isNullableString(v.modeAfter)
     && typeof v.converted === 'boolean'
+    && isNullableString(v.error);
+}
+
+export type PhotoshopSetLayerAppearanceReceipt = {
+  ok: boolean;
+  appName: string | null;
+  documentName: string | null;
+  layerName: string | null;
+  /** Read-back layer opacity 0..100, or null when not resolved. */
+  opacity: number | null;
+  /** Read-back layer fill opacity 0..100, or null when not resolved. */
+  fillOpacity: number | null;
+  /** Normalized BlendMode token, e.g. 'MULTIPLY', 'NORMAL'. */
+  blendMode: string | null;
+  error: string | null;
+};
+
+export function isPhotoshopSetLayerAppearanceReceipt(value: unknown): value is PhotoshopSetLayerAppearanceReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.ok === 'boolean'
+    && isNullableString(v.appName)
+    && isNullableString(v.documentName)
+    && isNullableString(v.layerName)
+    && (v.opacity === null || isFiniteNumber(v.opacity))
+    && (v.fillOpacity === null || isFiniteNumber(v.fillOpacity))
+    && isNullableString(v.blendMode)
+    && isNullableString(v.error);
+}
+
+export type PhotoshopCreateTextLayerReceipt = {
+  ok: boolean;
+  appName: string | null;
+  documentName: string | null;
+  /** Name of the created text layer (read back after creation). */
+  layerName: string | null;
+  /** Text that was added (truncated for the receipt). */
+  text: string;
+  sizePt: number;
+  colorApplied: boolean;
+  error: string | null;
+};
+
+export function isPhotoshopCreateTextLayerReceipt(value: unknown): value is PhotoshopCreateTextLayerReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.ok === 'boolean'
+    && isNullableString(v.appName)
+    && isNullableString(v.documentName)
+    && isNullableString(v.layerName)
+    && typeof v.text === 'string'
+    && isFiniteNumber(v.sizePt)
+    && typeof v.colorApplied === 'boolean'
     && isNullableString(v.error);
 }

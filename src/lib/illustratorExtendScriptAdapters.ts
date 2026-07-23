@@ -890,6 +890,1181 @@ ${illustratorVectorizeJsxBody({
   return { jsx, errors: [] };
 }
 
+// ─── 4) Arrange (in-place z-order of the current selection) ──────────────────
+//
+// The SIMPLEST mutating op: reorder the currently selected objects front/back
+// via pageItem.zOrder. It mutates the OPEN target document in place, NEVER
+// saves/exports/closes it (the user keeps undo), and stays entirely on the
+// typed DOM (no executeAction/executeMenuCommand). Fails closed with
+// 'no_document'/'document_mismatch'/'no_selection'.
+
+export const ILLUSTRATOR_ARRANGE_DIRECTIONS = ['bringToFront', 'sendToBack', 'bringForward', 'sendBackward'] as const;
+export type IllustratorArrangeDirection = (typeof ILLUSTRATOR_ARRANGE_DIRECTIONS)[number];
+
+export type IllustratorArrangeParams = {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  /** bringToFront | sendToBack | bringForward | sendBackward (case-sensitive). */
+  direction: IllustratorArrangeDirection | string;
+};
+
+export type NormalizedIllustratorArrangeParams = {
+  appName: string;
+  expectedDocumentName: string;
+  direction: IllustratorArrangeDirection;
+};
+
+export function validateIllustratorArrangeParams(
+  params: IllustratorArrangeParams,
+): { ok: true; params: NormalizedIllustratorArrangeParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizeIllustratorBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+  const expectedDocumentName = normalizeIllustratorExpectedDocumentName(params?.expectedDocumentName);
+  if (!expectedDocumentName.ok) errors.push(expectedDocumentName.error);
+  // Case-sensitive enum (the ZOrderMethod names are camelCase) — do NOT lowercase.
+  const direction = String(params?.direction ?? '').trim();
+  if (!(ILLUSTRATOR_ARRANGE_DIRECTIONS as readonly string[]).includes(direction)) {
+    errors.push('direction must be bringToFront, sendToBack, bringForward, or sendBackward.');
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Illustrator',
+      expectedDocumentName: expectedDocumentName.ok ? expectedDocumentName.value : '',
+      direction: direction as IllustratorArrangeDirection,
+    },
+  };
+}
+
+/**
+ * ExtendScript ZOrderMethod enum literal for a direction (resolved at BUILD
+ * time, like tracingModeEnumLiteral). LOCKSTEP(scripts/claude-bridge.js): keep
+ * byte-identical. Only ever called with a validated direction, so the final
+ * return is the sendBackward case.
+ */
+function zOrderMethodEnumLiteral(direction: IllustratorArrangeDirection): string {
+  if (direction === 'bringToFront') return 'ZOrderMethod.BRINGTOFRONT';
+  if (direction === 'sendToBack') return 'ZOrderMethod.SENDTOBACK';
+  if (direction === 'bringForward') return 'ZOrderMethod.BRINGFORWARD';
+  return 'ZOrderMethod.SENDBACKWARD';
+}
+
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): illustratorArrangeJsxBody — keep this JSX
+ * body byte-identical with the bridge duplicate. The zOrder enum is resolved at
+ * build time. It reorders the OPEN document's current selection in place and
+ * NEVER saves, exports, or closes it; the user keeps undo.
+ */
+function illustratorArrangeJsxBody(
+  { direction }: { direction: IllustratorArrangeDirection },
+): string {
+  const zOrderLiteral = zOrderMethodEnumLiteral(direction);
+  return `
+  var direction = ${jsxLiteral(String(direction ?? ''))};
+
+  function stringifyArrangeResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"direction\\":" + jsonString(value.direction),
+      "\\"movedCount\\":" + jsonNumber(value.movedCount),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    documentName: null,
+    direction: direction,
+    movedCount: 0,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyArrangeResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyArrangeResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  // Snapshot the live selection into a stable array BEFORE reordering:
+  // doc.selection returns a fresh array and can reindex as items move, so we
+  // capture references first and reorder each in place. The user keeps undo.
+  var selection = null;
+  try { selection = doc.selection; } catch (_) { selection = null; }
+  var selectionCount = 0;
+  try { selectionCount = selection ? Number(selection.length) || 0 : 0; } catch (_) { selectionCount = 0; }
+  if (selectionCount < 1) {
+    result.error = "no_selection";
+    return stringifyArrangeResult(result);
+  }
+  var items = [];
+  for (var s = 0; s < selectionCount; s += 1) {
+    try { if (selection[s]) items.push(selection[s]); } catch (_) {}
+  }
+
+  // In-place reorder only: zOrder never saves, exports, or closes the document.
+  // Each selected object is reordered independently; failures are counted out
+  // and the first message is surfaced.
+  var moved = 0;
+  for (var i = 0; i < items.length; i += 1) {
+    try {
+      items[i].zOrder(${zOrderLiteral});
+      moved += 1;
+    } catch (err) {
+      if (!result.error) result.error = String(err && err.message ? err.message : err);
+    }
+  }
+  result.movedCount = moved;
+  result.ok = moved > 0;
+  if (moved < 1 && !result.error) result.error = "arrange_failed";
+  return stringifyArrangeResult(result);
+`;
+}
+
+export function buildIllustratorArrangeJsx(params: IllustratorArrangeParams): IllustratorExtendScriptBuild {
+  const validated = validateIllustratorArrangeParams(params);
+  if (!validated.ok) return { jsx: '', errors: validated.errors };
+  const normalized = validated.params;
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: normalized.expectedDocumentName })}
+${illustratorArrangeJsxBody({ direction: normalized.direction })}
+}());
+`;
+  return { jsx, errors: [] };
+}
+
+// ─── 5) Add text (additive point-text frame in the OPEN document) ────────────
+//
+// "Add a headline that says X." Creates a NEW point-text frame via the typed
+// DOM (doc.textFrames.pointText) in the OPEN target document. Additive and
+// non-destructive: it only adds an object, mutates the OPEN document in place,
+// NEVER saves/exports/closes it (the user keeps undo), and stays entirely on
+// the typed DOM (no executeAction/executeMenuCommand). Fails closed with
+// 'no_document'/'document_mismatch'. fillColor is built as an RGBColor or
+// CMYKColor to match the document color space; a requested fontName that cannot
+// be resolved is reported as fontWarning='font_not_found' and the text is still
+// created with the default font (honest appliedFont in the receipt).
+
+export const ILLUSTRATOR_ADD_TEXT_MAX_CONTENTS = 2000;
+export const ILLUSTRATOR_ADD_TEXT_MIN_SIZE_PT = 1;
+export const ILLUSTRATOR_ADD_TEXT_MAX_SIZE_PT = 1400;
+export const ILLUSTRATOR_ADD_TEXT_DEFAULT_SIZE_PT = 24;
+export const ILLUSTRATOR_ADD_TEXT_MAX_COORD_PT = 100000;
+export const ILLUSTRATOR_ADD_TEXT_MAX_FONT_NAME = 200;
+export const ILLUSTRATOR_HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+
+/** Non-empty text, capped at ILLUSTRATOR_ADD_TEXT_MAX_CONTENTS; no NUL. */
+function normalizeIllustratorAddTextContents(value: unknown): IllustratorParamCheck<string> {
+  if (typeof value !== 'string') return { ok: false, error: 'contents must be a string.' };
+  if (value.trim().length < 1) return { ok: false, error: 'contents must be a non-empty string.' };
+  if (value.length > ILLUSTRATOR_ADD_TEXT_MAX_CONTENTS) {
+    return { ok: false, error: `contents must be <= ${ILLUSTRATOR_ADD_TEXT_MAX_CONTENTS} characters.` };
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00]/.test(value)) return { ok: false, error: 'contents cannot contain NUL.' };
+  return { ok: true, value };
+}
+
+/** Finite point coordinate within a sane bound (fractions allowed). */
+function normalizeIllustratorAddTextCoord(value: unknown, label: string): IllustratorParamCheck<number> {
+  if (typeof value !== 'number' || !Number.isFinite(value) || Math.abs(value) > ILLUSTRATOR_ADD_TEXT_MAX_COORD_PT) {
+    return { ok: false, error: `${label} must be a finite number between -${ILLUSTRATOR_ADD_TEXT_MAX_COORD_PT} and ${ILLUSTRATOR_ADD_TEXT_MAX_COORD_PT}.` };
+  }
+  return { ok: true, value };
+}
+
+/** Optional font size: undefined/null -> default 24. Finite 1..1400. */
+function normalizeIllustratorAddTextSize(value: unknown): IllustratorParamCheck<number> {
+  if (value === undefined || value === null) return { ok: true, value: ILLUSTRATOR_ADD_TEXT_DEFAULT_SIZE_PT };
+  if (
+    typeof value !== 'number'
+    || !Number.isFinite(value)
+    || value < ILLUSTRATOR_ADD_TEXT_MIN_SIZE_PT
+    || value > ILLUSTRATOR_ADD_TEXT_MAX_SIZE_PT
+  ) {
+    return { ok: false, error: `sizePt must be a finite number between ${ILLUSTRATOR_ADD_TEXT_MIN_SIZE_PT} and ${ILLUSTRATOR_ADD_TEXT_MAX_SIZE_PT}.` };
+  }
+  return { ok: true, value };
+}
+
+/** Optional #RRGGBB hex fill: undefined/null/'' -> null. Strict format. */
+function normalizeIllustratorAddTextFillColor(value: unknown): IllustratorParamCheck<string | null> {
+  if (value === undefined || value === null || value === '') return { ok: true, value: null };
+  if (typeof value !== 'string' || !ILLUSTRATOR_HEX_COLOR_PATTERN.test(value.trim())) {
+    return { ok: false, error: 'fillColor must be a hex color in #RRGGBB format.' };
+  }
+  return { ok: true, value: value.trim() };
+}
+
+/** Optional font name: undefined/null/'' -> null. Bounded, no control chars. */
+function normalizeIllustratorAddTextFontName(value: unknown): IllustratorParamCheck<string | null> {
+  if (value === undefined || value === null || value === '') return { ok: true, value: null };
+  if (typeof value !== 'string') return { ok: false, error: 'fontName must be a string.' };
+  const name = value.trim();
+  if (!name) return { ok: true, value: null };
+  if (name.length > ILLUSTRATOR_ADD_TEXT_MAX_FONT_NAME) {
+    return { ok: false, error: `fontName must be <= ${ILLUSTRATOR_ADD_TEXT_MAX_FONT_NAME} characters.` };
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f]/.test(name)) return { ok: false, error: 'fontName contains control characters.' };
+  return { ok: true, value: name };
+}
+
+export type IllustratorAddTextParams = {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  /** Non-empty text to add (capped at 2000 chars). */
+  contents: string;
+  /** X anchor in points. */
+  xPt: number;
+  /** Y anchor in points. */
+  yPt: number;
+  /** Font size in points (1..1400). Defaults to 24. */
+  sizePt?: number | null;
+  /** Optional #RRGGBB hex fill. */
+  fillColor?: string | null;
+  /** Optional font name; falls back to the default font (fontWarning) if missing. */
+  fontName?: string | null;
+};
+
+export type NormalizedIllustratorAddTextParams = {
+  appName: string;
+  expectedDocumentName: string;
+  contents: string;
+  xPt: number;
+  yPt: number;
+  sizePt: number;
+  fillColor: string | null;
+  fontName: string | null;
+};
+
+export function validateIllustratorAddTextParams(
+  params: IllustratorAddTextParams,
+): { ok: true; params: NormalizedIllustratorAddTextParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizeIllustratorBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+  const expectedDocumentName = normalizeIllustratorExpectedDocumentName(params?.expectedDocumentName);
+  if (!expectedDocumentName.ok) errors.push(expectedDocumentName.error);
+  const contents = normalizeIllustratorAddTextContents(params?.contents);
+  if (!contents.ok) errors.push(contents.error);
+  const xPt = normalizeIllustratorAddTextCoord(params?.xPt, 'xPt');
+  if (!xPt.ok) errors.push(xPt.error);
+  const yPt = normalizeIllustratorAddTextCoord(params?.yPt, 'yPt');
+  if (!yPt.ok) errors.push(yPt.error);
+  const sizePt = normalizeIllustratorAddTextSize(params?.sizePt);
+  if (!sizePt.ok) errors.push(sizePt.error);
+  const fillColor = normalizeIllustratorAddTextFillColor(params?.fillColor);
+  if (!fillColor.ok) errors.push(fillColor.error);
+  const fontName = normalizeIllustratorAddTextFontName(params?.fontName);
+  if (!fontName.ok) errors.push(fontName.error);
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Illustrator',
+      expectedDocumentName: expectedDocumentName.ok ? expectedDocumentName.value : '',
+      contents: contents.ok ? contents.value : '',
+      xPt: xPt.ok ? xPt.value : 0,
+      yPt: yPt.ok ? yPt.value : 0,
+      sizePt: sizePt.ok ? sizePt.value : ILLUSTRATOR_ADD_TEXT_DEFAULT_SIZE_PT,
+      fillColor: fillColor.ok ? fillColor.value : null,
+      fontName: fontName.ok ? fontName.value : null,
+    },
+  };
+}
+
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): illustratorAddTextJsxBody — keep this JSX
+ * body byte-identical with the bridge duplicate. It adds a NEW point-text frame
+ * to the OPEN document and NEVER saves, exports, or closes it; the user keeps
+ * undo. fillColor/fontName are optional; a requested font that cannot be
+ * resolved is reported as fontWarning and the text is still created with the
+ * default font (honest appliedFont).
+ */
+function illustratorAddTextJsxBody(
+  { contents, xPt, yPt, sizePt, fillColor, fontName }:
+  { contents: string; xPt: number; yPt: number; sizePt: number; fillColor: string | null; fontName: string | null },
+): string {
+  const fillColorLiteral = fillColor == null ? 'null' : jsxLiteral(String(fillColor));
+  const fontNameLiteral = fontName == null ? 'null' : jsxLiteral(String(fontName));
+  return `
+  var contents = ${jsxLiteral(String(contents ?? ''))};
+  var xPt = ${jsxLiteral(xPt)};
+  var yPt = ${jsxLiteral(yPt)};
+  var sizePt = ${jsxLiteral(sizePt)};
+  var fillColor = ${fillColorLiteral};
+  var fontName = ${fontNameLiteral};
+
+  function normalizeHex(hex) {
+    var h = String(hex == null ? "" : hex);
+    if (h.charAt(0) === "#") h = h.substring(1);
+    return h;
+  }
+
+  function hexToRgbColor(hex) {
+    var h = normalizeHex(hex);
+    var color = new RGBColor();
+    color.red = parseInt(h.substring(0, 2), 16);
+    color.green = parseInt(h.substring(2, 4), 16);
+    color.blue = parseInt(h.substring(4, 6), 16);
+    return color;
+  }
+
+  function hexToCmykColor(hex) {
+    var h = normalizeHex(hex);
+    var r = parseInt(h.substring(0, 2), 16) / 255;
+    var g = parseInt(h.substring(2, 4), 16) / 255;
+    var b = parseInt(h.substring(4, 6), 16) / 255;
+    var k = 1 - Math.max(r, Math.max(g, b));
+    var c = 0, m = 0, y = 0;
+    if (k < 1) {
+      c = (1 - r - k) / (1 - k);
+      m = (1 - g - k) / (1 - k);
+      y = (1 - b - k) / (1 - k);
+    }
+    var color = new CMYKColor();
+    color.cyan = c * 100;
+    color.magenta = m * 100;
+    color.yellow = y * 100;
+    color.black = k * 100;
+    return color;
+  }
+
+  function stringifyAddTextResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"contents\\":" + jsonString(value.contents),
+      "\\"xPt\\":" + jsonNumber(value.xPt),
+      "\\"yPt\\":" + jsonNumber(value.yPt),
+      "\\"sizePt\\":" + jsonNumber(value.sizePt),
+      "\\"appliedFont\\":" + jsonNullableString(value.appliedFont),
+      "\\"fillApplied\\":" + jsonBoolean(value.fillApplied),
+      "\\"fontWarning\\":" + jsonNullableString(value.fontWarning),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    documentName: null,
+    contents: String(contents).slice(0, 2000),
+    xPt: xPt,
+    yPt: yPt,
+    sizePt: sizePt,
+    appliedFont: null,
+    fillApplied: false,
+    fontWarning: null,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyAddTextResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyAddTextResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  // Additive/non-destructive: create a NEW point-text frame in the OPEN
+  // document. Never saves, exports, or closes it; the user keeps undo.
+  try {
+    var tf = doc.textFrames.pointText([xPt, yPt]);
+    tf.contents = contents;
+    var attrs = tf.textRange.characterAttributes;
+    attrs.size = sizePt;
+
+    if (fontName) {
+      var resolvedFont = null;
+      try { resolvedFont = doc.textFonts.getByName(fontName); } catch (_) { resolvedFont = null; }
+      if (resolvedFont) {
+        try { attrs.textFont = resolvedFont; } catch (_) {}
+      } else {
+        result.fontWarning = "font_not_found";
+      }
+    }
+    try { result.appliedFont = String(attrs.textFont.name || ""); } catch (_) {}
+
+    if (fillColor) {
+      try {
+        var fillObj;
+        var isCmyk = false;
+        try { isCmyk = (doc.documentColorSpace == DocumentColorSpace.CMYK); } catch (_) { isCmyk = false; }
+        if (isCmyk) {
+          fillObj = hexToCmykColor(fillColor);
+        } else {
+          fillObj = hexToRgbColor(fillColor);
+        }
+        attrs.fillColor = fillObj;
+        result.fillApplied = true;
+      } catch (_) {
+        result.fillApplied = false;
+      }
+    }
+
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  return stringifyAddTextResult(result);
+`;
+}
+
+export function buildIllustratorAddTextJsx(params: IllustratorAddTextParams): IllustratorExtendScriptBuild {
+  const validated = validateIllustratorAddTextParams(params);
+  if (!validated.ok) return { jsx: '', errors: validated.errors };
+  const normalized = validated.params;
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: normalized.expectedDocumentName })}
+${illustratorAddTextJsxBody({
+    contents: normalized.contents,
+    xPt: normalized.xPt,
+    yPt: normalized.yPt,
+    sizePt: normalized.sizePt,
+    fillColor: normalized.fillColor,
+    fontName: normalized.fontName,
+  })}
+}());
+`;
+  return { jsx, errors: [] };
+}
+
+// ─── 6) Add shape (additive rectangle/ellipse/line in the OPEN document) ─────
+//
+// "Draw a 200x100 box / a circle / a line." Creates a NEW path item via the
+// typed DOM (doc.pathItems.rectangle/ellipse, or doc.pathItems.add +
+// setEntirePath for a line) in the OPEN target document. Additive and
+// non-destructive: it only adds an object, mutates the OPEN document in place,
+// NEVER saves/exports/closes it (the user keeps undo), and stays entirely on
+// the typed DOM (no executeAction/executeMenuCommand). Fails closed with
+// 'no_document'/'document_mismatch'. fillColor/strokeColor are optional and
+// built as an RGBColor or CMYKColor to match the document color space.
+//
+// Illustrator uses a Y-UP axis and pathItems.rectangle/ellipse take
+// (top, left, width, height) — so the top-left anchor is (yPt as top, xPt as
+// left). The arg order is noted inline in the JSX body.
+
+export const ILLUSTRATOR_ADD_SHAPE_KINDS = ['rectangle', 'ellipse', 'line'] as const;
+export type IllustratorAddShapeKind = (typeof ILLUSTRATOR_ADD_SHAPE_KINDS)[number];
+
+export const ILLUSTRATOR_ADD_SHAPE_MAX_COORD_PT = 100000;
+export const ILLUSTRATOR_ADD_SHAPE_MAX_DIM_PT = 100000;
+export const ILLUSTRATOR_ADD_SHAPE_MAX_STROKE_WIDTH_PT = 1000;
+
+/** rectangle|ellipse|line (case-insensitive). Fail-closed on anything else. */
+function normalizeIllustratorAddShapeKind(value: unknown): IllustratorParamCheck<IllustratorAddShapeKind> {
+  if (value === undefined || value === null || value === '') {
+    return { ok: false, error: `kind must be one of: ${ILLUSTRATOR_ADD_SHAPE_KINDS.join(', ')}.` };
+  }
+  const kind = String(value).trim().toLowerCase();
+  if (!(ILLUSTRATOR_ADD_SHAPE_KINDS as readonly string[]).includes(kind)) {
+    return { ok: false, error: `kind must be one of: ${ILLUSTRATOR_ADD_SHAPE_KINDS.join(', ')}.` };
+  }
+  return { ok: true, value: kind as IllustratorAddShapeKind };
+}
+
+/** Finite point coordinate within a sane bound (fractions allowed). */
+function normalizeIllustratorAddShapeCoord(value: unknown, label: string): IllustratorParamCheck<number> {
+  if (typeof value !== 'number' || !Number.isFinite(value) || Math.abs(value) > ILLUSTRATOR_ADD_SHAPE_MAX_COORD_PT) {
+    return { ok: false, error: `${label} must be a finite number between -${ILLUSTRATOR_ADD_SHAPE_MAX_COORD_PT} and ${ILLUSTRATOR_ADD_SHAPE_MAX_COORD_PT}.` };
+  }
+  return { ok: true, value };
+}
+
+/** Positive finite dimension (width/height) within a sane bound. */
+function normalizeIllustratorAddShapeDimension(value: unknown, label: string): IllustratorParamCheck<number> {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > ILLUSTRATOR_ADD_SHAPE_MAX_DIM_PT) {
+    return { ok: false, error: `${label} must be a positive finite number up to ${ILLUSTRATOR_ADD_SHAPE_MAX_DIM_PT}.` };
+  }
+  return { ok: true, value };
+}
+
+/** Optional #RRGGBB hex color: undefined/null/'' -> null. Strict format. */
+function normalizeIllustratorAddShapeHexColor(value: unknown, label: string): IllustratorParamCheck<string | null> {
+  if (value === undefined || value === null || value === '') return { ok: true, value: null };
+  if (typeof value !== 'string' || !ILLUSTRATOR_HEX_COLOR_PATTERN.test(value.trim())) {
+    return { ok: false, error: `${label} must be a hex color in #RRGGBB format.` };
+  }
+  return { ok: true, value: value.trim() };
+}
+
+/** Optional stroke width in points: undefined/null -> null. Finite 0..1000. */
+function normalizeIllustratorAddShapeStrokeWidth(value: unknown): IllustratorParamCheck<number | null> {
+  if (value === undefined || value === null) return { ok: true, value: null };
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > ILLUSTRATOR_ADD_SHAPE_MAX_STROKE_WIDTH_PT) {
+    return { ok: false, error: `strokeWidthPt must be a finite number between 0 and ${ILLUSTRATOR_ADD_SHAPE_MAX_STROKE_WIDTH_PT}.` };
+  }
+  return { ok: true, value };
+}
+
+export type IllustratorAddShapeParams = {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  /** rectangle | ellipse | line (case-insensitive). */
+  kind: IllustratorAddShapeKind | string;
+  /** rectangle/ellipse: top-left X in points. */
+  xPt?: number;
+  /** rectangle/ellipse: top-left Y in points (y-up). */
+  yPt?: number;
+  /** rectangle/ellipse: positive width in points. */
+  widthPt?: number;
+  /** rectangle/ellipse: positive height in points. */
+  heightPt?: number;
+  /** line: start X in points. */
+  x1Pt?: number;
+  /** line: start Y in points. */
+  y1Pt?: number;
+  /** line: end X in points. */
+  x2Pt?: number;
+  /** line: end Y in points. */
+  y2Pt?: number;
+  /** Optional #RRGGBB fill. */
+  fillColor?: string | null;
+  /** Optional #RRGGBB stroke. */
+  strokeColor?: string | null;
+  /** Optional stroke width in points (0..1000). */
+  strokeWidthPt?: number | null;
+};
+
+export type NormalizedIllustratorAddShapeParams = {
+  appName: string;
+  expectedDocumentName: string;
+  kind: IllustratorAddShapeKind;
+  xPt: number;
+  yPt: number;
+  widthPt: number;
+  heightPt: number;
+  x1Pt: number;
+  y1Pt: number;
+  x2Pt: number;
+  y2Pt: number;
+  fillColor: string | null;
+  strokeColor: string | null;
+  strokeWidthPt: number | null;
+};
+
+export function validateIllustratorAddShapeParams(
+  params: IllustratorAddShapeParams,
+): { ok: true; params: NormalizedIllustratorAddShapeParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizeIllustratorBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+  const expectedDocumentName = normalizeIllustratorExpectedDocumentName(params?.expectedDocumentName);
+  if (!expectedDocumentName.ok) errors.push(expectedDocumentName.error);
+  const kindCheck = normalizeIllustratorAddShapeKind(params?.kind);
+  if (!kindCheck.ok) errors.push(kindCheck.error);
+  const kind = kindCheck.ok ? kindCheck.value : null;
+
+  // Geometry depends on the kind: rectangle/ellipse use xPt,yPt (top-left) +
+  // widthPt,heightPt; line uses x1Pt,y1Pt,x2Pt,y2Pt. Validate only the geometry
+  // the resolved kind needs (an invalid kind already failed above).
+  let xPt = 0;
+  let yPt = 0;
+  let widthPt = 0;
+  let heightPt = 0;
+  let x1Pt = 0;
+  let y1Pt = 0;
+  let x2Pt = 0;
+  let y2Pt = 0;
+  if (kind === 'rectangle' || kind === 'ellipse') {
+    const x = normalizeIllustratorAddShapeCoord(params?.xPt, 'xPt');
+    if (!x.ok) errors.push(x.error); else xPt = x.value;
+    const y = normalizeIllustratorAddShapeCoord(params?.yPt, 'yPt');
+    if (!y.ok) errors.push(y.error); else yPt = y.value;
+    const w = normalizeIllustratorAddShapeDimension(params?.widthPt, 'widthPt');
+    if (!w.ok) errors.push(w.error); else widthPt = w.value;
+    const h = normalizeIllustratorAddShapeDimension(params?.heightPt, 'heightPt');
+    if (!h.ok) errors.push(h.error); else heightPt = h.value;
+  } else if (kind === 'line') {
+    const a = normalizeIllustratorAddShapeCoord(params?.x1Pt, 'x1Pt');
+    if (!a.ok) errors.push(a.error); else x1Pt = a.value;
+    const b = normalizeIllustratorAddShapeCoord(params?.y1Pt, 'y1Pt');
+    if (!b.ok) errors.push(b.error); else y1Pt = b.value;
+    const c = normalizeIllustratorAddShapeCoord(params?.x2Pt, 'x2Pt');
+    if (!c.ok) errors.push(c.error); else x2Pt = c.value;
+    const d = normalizeIllustratorAddShapeCoord(params?.y2Pt, 'y2Pt');
+    if (!d.ok) errors.push(d.error); else y2Pt = d.value;
+  }
+
+  const fillColor = normalizeIllustratorAddShapeHexColor(params?.fillColor, 'fillColor');
+  if (!fillColor.ok) errors.push(fillColor.error);
+  const strokeColor = normalizeIllustratorAddShapeHexColor(params?.strokeColor, 'strokeColor');
+  if (!strokeColor.ok) errors.push(strokeColor.error);
+  const strokeWidthPt = normalizeIllustratorAddShapeStrokeWidth(params?.strokeWidthPt);
+  if (!strokeWidthPt.ok) errors.push(strokeWidthPt.error);
+
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Illustrator',
+      expectedDocumentName: expectedDocumentName.ok ? expectedDocumentName.value : '',
+      kind: kind as IllustratorAddShapeKind,
+      xPt,
+      yPt,
+      widthPt,
+      heightPt,
+      x1Pt,
+      y1Pt,
+      x2Pt,
+      y2Pt,
+      fillColor: fillColor.ok ? fillColor.value : null,
+      strokeColor: strokeColor.ok ? strokeColor.value : null,
+      strokeWidthPt: strokeWidthPt.ok ? strokeWidthPt.value : null,
+    },
+  };
+}
+
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): illustratorAddShapeJsxBody — keep this JSX
+ * body byte-identical with the bridge duplicate. It adds a NEW path item
+ * (rectangle/ellipse/line) to the OPEN document and NEVER saves, exports, or
+ * closes it; the user keeps undo. Illustrator's Y-UP axis + the
+ * pathItems.rectangle/ellipse (top, left, width, height) arg order are noted
+ * inline. fillColor/strokeColor build an RGBColor or CMYKColor to match the
+ * document color space; both are optional.
+ */
+function illustratorAddShapeJsxBody(
+  { kind, xPt, yPt, widthPt, heightPt, x1Pt, y1Pt, x2Pt, y2Pt, fillColor, strokeColor, strokeWidthPt }:
+  { kind: IllustratorAddShapeKind; xPt: number; yPt: number; widthPt: number; heightPt: number; x1Pt: number; y1Pt: number; x2Pt: number; y2Pt: number; fillColor: string | null; strokeColor: string | null; strokeWidthPt: number | null },
+): string {
+  const fillColorLiteral = fillColor == null ? 'null' : jsxLiteral(String(fillColor));
+  const strokeColorLiteral = strokeColor == null ? 'null' : jsxLiteral(String(strokeColor));
+  const strokeWidthLiteral = strokeWidthPt == null ? 'null' : jsxLiteral(strokeWidthPt);
+  return `
+  var kind = ${jsxLiteral(String(kind ?? ''))};
+  var xPt = ${jsxLiteral(xPt)};
+  var yPt = ${jsxLiteral(yPt)};
+  var widthPt = ${jsxLiteral(widthPt)};
+  var heightPt = ${jsxLiteral(heightPt)};
+  var x1Pt = ${jsxLiteral(x1Pt)};
+  var y1Pt = ${jsxLiteral(y1Pt)};
+  var x2Pt = ${jsxLiteral(x2Pt)};
+  var y2Pt = ${jsxLiteral(y2Pt)};
+  var fillColor = ${fillColorLiteral};
+  var strokeColor = ${strokeColorLiteral};
+  var strokeWidthPt = ${strokeWidthLiteral};
+
+  function normalizeHex(hex) {
+    var h = String(hex == null ? "" : hex);
+    if (h.charAt(0) === "#") h = h.substring(1);
+    return h;
+  }
+
+  function hexToRgbColor(hex) {
+    var h = normalizeHex(hex);
+    var color = new RGBColor();
+    color.red = parseInt(h.substring(0, 2), 16);
+    color.green = parseInt(h.substring(2, 4), 16);
+    color.blue = parseInt(h.substring(4, 6), 16);
+    return color;
+  }
+
+  function hexToCmykColor(hex) {
+    var h = normalizeHex(hex);
+    var r = parseInt(h.substring(0, 2), 16) / 255;
+    var g = parseInt(h.substring(2, 4), 16) / 255;
+    var b = parseInt(h.substring(4, 6), 16) / 255;
+    var k = 1 - Math.max(r, Math.max(g, b));
+    var c = 0, m = 0, y = 0;
+    if (k < 1) {
+      c = (1 - r - k) / (1 - k);
+      m = (1 - g - k) / (1 - k);
+      y = (1 - b - k) / (1 - k);
+    }
+    var color = new CMYKColor();
+    color.cyan = c * 100;
+    color.magenta = m * 100;
+    color.yellow = y * 100;
+    color.black = k * 100;
+    return color;
+  }
+
+  function makeColor(doc, hex) {
+    var isCmyk = false;
+    try { isCmyk = (doc.documentColorSpace == DocumentColorSpace.CMYK); } catch (_) { isCmyk = false; }
+    return isCmyk ? hexToCmykColor(hex) : hexToRgbColor(hex);
+  }
+
+  function stringifyAddShapeResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"kind\\":" + jsonString(value.kind),
+      "\\"fillApplied\\":" + jsonBoolean(value.fillApplied),
+      "\\"strokeApplied\\":" + jsonBoolean(value.strokeApplied),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    documentName: null,
+    kind: kind,
+    fillApplied: false,
+    strokeApplied: false,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyAddShapeResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyAddShapeResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  // Additive/non-destructive: create a NEW path item in the OPEN document.
+  // Never saves, exports, or closes it; the user keeps undo. Illustrator uses a
+  // Y-UP axis and pathItems.rectangle/ellipse take (top, left, width, height),
+  // so yPt is the TOP and xPt is the LEFT of the top-left anchor.
+  try {
+    var shape = null;
+    if (kind === "rectangle") {
+      shape = doc.pathItems.rectangle(yPt, xPt, widthPt, heightPt);
+    } else if (kind === "ellipse") {
+      shape = doc.pathItems.ellipse(yPt, xPt, widthPt, heightPt);
+    } else {
+      shape = doc.pathItems.add();
+      shape.setEntirePath([[x1Pt, y1Pt], [x2Pt, y2Pt]]);
+      shape.filled = false;
+    }
+
+    if (fillColor) {
+      try {
+        shape.filled = true;
+        shape.fillColor = makeColor(doc, fillColor);
+        result.fillApplied = true;
+      } catch (_) {
+        result.fillApplied = false;
+      }
+    }
+
+    if (strokeColor) {
+      try {
+        shape.stroked = true;
+        shape.strokeColor = makeColor(doc, strokeColor);
+        result.strokeApplied = true;
+      } catch (_) {
+        result.strokeApplied = false;
+      }
+    }
+
+    if (strokeWidthPt !== null) {
+      try { shape.strokeWidth = strokeWidthPt; } catch (_) {}
+    }
+
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  return stringifyAddShapeResult(result);
+`;
+}
+
+export function buildIllustratorAddShapeJsx(params: IllustratorAddShapeParams): IllustratorExtendScriptBuild {
+  const validated = validateIllustratorAddShapeParams(params);
+  if (!validated.ok) return { jsx: '', errors: validated.errors };
+  const normalized = validated.params;
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: normalized.expectedDocumentName })}
+${illustratorAddShapeJsxBody({
+    kind: normalized.kind,
+    xPt: normalized.xPt,
+    yPt: normalized.yPt,
+    widthPt: normalized.widthPt,
+    heightPt: normalized.heightPt,
+    x1Pt: normalized.x1Pt,
+    y1Pt: normalized.y1Pt,
+    x2Pt: normalized.x2Pt,
+    y2Pt: normalized.y2Pt,
+    fillColor: normalized.fillColor,
+    strokeColor: normalized.strokeColor,
+    strokeWidthPt: normalized.strokeWidthPt,
+  })}
+}());
+`;
+  return { jsx, errors: [] };
+}
+
+// ─── 7) Set appearance (recolor/re-stroke the current selection in place) ────
+//
+// "Make the selection red / give it a 3pt black stroke / apply swatch X."
+// Recolors and/or re-strokes the CURRENTLY SELECTED objects in the OPEN target
+// document via the typed DOM (item.fillColor/strokeColor/strokeWidth), recursing
+// into GroupItem.pageItems. It mutates the OPEN document in place, NEVER
+// saves/exports/closes it (the user keeps undo), and stays entirely on the typed
+// DOM (no executeAction/executeMenuCommand). Fails closed with
+// 'no_document'/'document_mismatch'/'no_selection', and — when a swatch is
+// named — 'swatch_not_found'/'swatch_not_solid'. fillColor/strokeColor are
+// #RRGGBB hex built as an RGBColor or CMYKColor to match the document color
+// space; swatchName resolves at runtime to a named swatch's SOLID color (no
+// gradient/pattern) and is the FILL source (mutually exclusive with fillColor).
+// At least one of fillColor/strokeColor/strokeWidthPt/swatchName is required.
+
+export const ILLUSTRATOR_SET_APPEARANCE_MAX_STROKE_WIDTH_PT = 1000;
+export const ILLUSTRATOR_SET_APPEARANCE_MAX_SWATCH_NAME = 200;
+
+/** Optional #RRGGBB hex color: undefined/null/'' -> null. Strict format. */
+function normalizeIllustratorSetAppearanceHexColor(value: unknown, label: string): IllustratorParamCheck<string | null> {
+  if (value === undefined || value === null || value === '') return { ok: true, value: null };
+  if (typeof value !== 'string' || !ILLUSTRATOR_HEX_COLOR_PATTERN.test(value.trim())) {
+    return { ok: false, error: `${label} must be a hex color in #RRGGBB format.` };
+  }
+  return { ok: true, value: value.trim() };
+}
+
+/** Optional stroke width in points: undefined/null -> null. Finite 0..1000. */
+function normalizeIllustratorSetAppearanceStrokeWidth(value: unknown): IllustratorParamCheck<number | null> {
+  if (value === undefined || value === null) return { ok: true, value: null };
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > ILLUSTRATOR_SET_APPEARANCE_MAX_STROKE_WIDTH_PT) {
+    return { ok: false, error: `strokeWidthPt must be a finite number between 0 and ${ILLUSTRATOR_SET_APPEARANCE_MAX_STROKE_WIDTH_PT}.` };
+  }
+  return { ok: true, value };
+}
+
+/** Optional swatch name: undefined/null/'' -> null. Bounded, no control chars. */
+function normalizeIllustratorSetAppearanceSwatchName(value: unknown): IllustratorParamCheck<string | null> {
+  if (value === undefined || value === null || value === '') return { ok: true, value: null };
+  if (typeof value !== 'string') return { ok: false, error: 'swatchName must be a string.' };
+  const name = value.trim();
+  if (!name) return { ok: true, value: null };
+  if (name.length > ILLUSTRATOR_SET_APPEARANCE_MAX_SWATCH_NAME) {
+    return { ok: false, error: `swatchName must be <= ${ILLUSTRATOR_SET_APPEARANCE_MAX_SWATCH_NAME} characters.` };
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f]/.test(name)) return { ok: false, error: 'swatchName contains control characters.' };
+  return { ok: true, value: name };
+}
+
+export type IllustratorSetAppearanceParams = {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  /** Optional #RRGGBB fill color (mutually exclusive with swatchName). */
+  fillColor?: string | null;
+  /** Optional #RRGGBB stroke color. */
+  strokeColor?: string | null;
+  /** Optional stroke width in points (0..1000). */
+  strokeWidthPt?: number | null;
+  /** Optional named swatch; its SOLID color becomes the fill. */
+  swatchName?: string | null;
+};
+
+export type NormalizedIllustratorSetAppearanceParams = {
+  appName: string;
+  expectedDocumentName: string;
+  fillColor: string | null;
+  strokeColor: string | null;
+  strokeWidthPt: number | null;
+  swatchName: string | null;
+};
+
+export function validateIllustratorSetAppearanceParams(
+  params: IllustratorSetAppearanceParams,
+): { ok: true; params: NormalizedIllustratorSetAppearanceParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizeIllustratorBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+  const expectedDocumentName = normalizeIllustratorExpectedDocumentName(params?.expectedDocumentName);
+  if (!expectedDocumentName.ok) errors.push(expectedDocumentName.error);
+  const fillColor = normalizeIllustratorSetAppearanceHexColor(params?.fillColor, 'fillColor');
+  if (!fillColor.ok) errors.push(fillColor.error);
+  const strokeColor = normalizeIllustratorSetAppearanceHexColor(params?.strokeColor, 'strokeColor');
+  if (!strokeColor.ok) errors.push(strokeColor.error);
+  const strokeWidthPt = normalizeIllustratorSetAppearanceStrokeWidth(params?.strokeWidthPt);
+  if (!strokeWidthPt.ok) errors.push(strokeWidthPt.error);
+  const swatchName = normalizeIllustratorSetAppearanceSwatchName(params?.swatchName);
+  if (!swatchName.ok) errors.push(swatchName.error);
+
+  const resolvedFill = fillColor.ok ? fillColor.value : null;
+  const resolvedStroke = strokeColor.ok ? strokeColor.value : null;
+  const resolvedWidth = strokeWidthPt.ok ? strokeWidthPt.value : null;
+  const resolvedSwatch = swatchName.ok ? swatchName.value : null;
+
+  // fillColor and swatchName both set the fill — a contradiction. Fail closed.
+  if (resolvedFill && resolvedSwatch) {
+    errors.push('Provide either fillColor or swatchName for the fill, not both.');
+  }
+  // At least one appearance change must be requested (only when nothing else is
+  // already invalid, so a bad-format error is not drowned by this one).
+  if (errors.length === 0 && !resolvedFill && !resolvedStroke && resolvedWidth === null && !resolvedSwatch) {
+    errors.push('At least one of fillColor, strokeColor, strokeWidthPt, or swatchName is required.');
+  }
+
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Illustrator',
+      expectedDocumentName: expectedDocumentName.ok ? expectedDocumentName.value : '',
+      fillColor: resolvedFill,
+      strokeColor: resolvedStroke,
+      strokeWidthPt: resolvedWidth,
+      swatchName: resolvedSwatch,
+    },
+  };
+}
+
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): illustratorSetAppearanceJsxBody — keep
+ * this JSX body byte-identical with the bridge duplicate. It recolors/re-strokes
+ * the OPEN document's current selection in place (recursing into groups) and
+ * NEVER saves, exports, or closes it; the user keeps undo. fillColor/strokeColor
+ * build an RGBColor or CMYKColor to match the document color space; swatchName
+ * resolves at runtime to a named swatch's SOLID color (the fill source). Solid
+ * color only — a gradient/pattern swatch fails closed with 'swatch_not_solid'.
+ */
+function illustratorSetAppearanceJsxBody(
+  { fillColor, strokeColor, strokeWidthPt, swatchName }:
+  { fillColor: string | null; strokeColor: string | null; strokeWidthPt: number | null; swatchName: string | null },
+): string {
+  const fillColorLiteral = fillColor == null ? 'null' : jsxLiteral(String(fillColor));
+  const strokeColorLiteral = strokeColor == null ? 'null' : jsxLiteral(String(strokeColor));
+  const strokeWidthLiteral = strokeWidthPt == null ? 'null' : jsxLiteral(strokeWidthPt);
+  const swatchNameLiteral = swatchName == null ? 'null' : jsxLiteral(String(swatchName));
+  return `
+  var fillColor = ${fillColorLiteral};
+  var strokeColor = ${strokeColorLiteral};
+  var strokeWidthPt = ${strokeWidthLiteral};
+  var swatchName = ${swatchNameLiteral};
+
+  function normalizeHex(hex) {
+    var h = String(hex == null ? "" : hex);
+    if (h.charAt(0) === "#") h = h.substring(1);
+    return h;
+  }
+
+  function hexToRgbColor(hex) {
+    var h = normalizeHex(hex);
+    var color = new RGBColor();
+    color.red = parseInt(h.substring(0, 2), 16);
+    color.green = parseInt(h.substring(2, 4), 16);
+    color.blue = parseInt(h.substring(4, 6), 16);
+    return color;
+  }
+
+  function hexToCmykColor(hex) {
+    var h = normalizeHex(hex);
+    var r = parseInt(h.substring(0, 2), 16) / 255;
+    var g = parseInt(h.substring(2, 4), 16) / 255;
+    var b = parseInt(h.substring(4, 6), 16) / 255;
+    var k = 1 - Math.max(r, Math.max(g, b));
+    var c = 0, m = 0, y = 0;
+    if (k < 1) {
+      c = (1 - r - k) / (1 - k);
+      m = (1 - g - k) / (1 - k);
+      y = (1 - b - k) / (1 - k);
+    }
+    var color = new CMYKColor();
+    color.cyan = c * 100;
+    color.magenta = m * 100;
+    color.yellow = y * 100;
+    color.black = k * 100;
+    return color;
+  }
+
+  function makeColor(doc, hex) {
+    var isCmyk = false;
+    try { isCmyk = (doc.documentColorSpace == DocumentColorSpace.CMYK); } catch (_) { isCmyk = false; }
+    return isCmyk ? hexToCmykColor(hex) : hexToRgbColor(hex);
+  }
+
+  function stringifySetAppearanceResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"appliedToCount\\":" + jsonNumber(value.appliedToCount),
+      "\\"fillApplied\\":" + jsonBoolean(value.fillApplied),
+      "\\"strokeApplied\\":" + jsonBoolean(value.strokeApplied),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    documentName: null,
+    appliedToCount: 0,
+    fillApplied: false,
+    strokeApplied: false,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifySetAppearanceResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifySetAppearanceResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  // Snapshot the live selection into a stable array BEFORE mutating, mirroring
+  // arrange: doc.selection returns a fresh array, so capture references first.
+  var selection = null;
+  try { selection = doc.selection; } catch (_) { selection = null; }
+  var selectionCount = 0;
+  try { selectionCount = selection ? Number(selection.length) || 0 : 0; } catch (_) { selectionCount = 0; }
+  if (selectionCount < 1) {
+    result.error = "no_selection";
+    return stringifySetAppearanceResult(result);
+  }
+  var items = [];
+  for (var s = 0; s < selectionCount; s += 1) {
+    try { if (selection[s]) items.push(selection[s]); } catch (_) {}
+  }
+
+  // Resolve the FILL color: an explicit hex wins; otherwise a named swatch's
+  // SOLID color. getByName throws when the swatch is missing (fail closed), and
+  // a gradient/pattern swatch is rejected (solid color only).
+  var fillColorObj = null;
+  if (fillColor) {
+    try { fillColorObj = makeColor(doc, fillColor); } catch (_) { fillColorObj = null; }
+  } else if (swatchName) {
+    var swatch = null;
+    try { swatch = doc.swatches.getByName(swatchName); } catch (_) { swatch = null; }
+    if (!swatch) {
+      result.error = "swatch_not_found";
+      return stringifySetAppearanceResult(result);
+    }
+    var swatchColor = null;
+    try { swatchColor = swatch.color; } catch (_) { swatchColor = null; }
+    if (swatchColor === null) {
+      result.error = "swatch_not_found";
+      return stringifySetAppearanceResult(result);
+    }
+    var swatchColorType = "";
+    try { swatchColorType = String(swatchColor.typename || ""); } catch (_) { swatchColorType = ""; }
+    if (swatchColorType === "GradientColor" || swatchColorType === "PatternColor") {
+      result.error = "swatch_not_solid";
+      return stringifySetAppearanceResult(result);
+    }
+    fillColorObj = swatchColor;
+  }
+
+  // Resolve the STROKE color from an explicit hex only.
+  var strokeColorObj = null;
+  if (strokeColor) {
+    try { strokeColorObj = makeColor(doc, strokeColor); } catch (_) { strokeColorObj = null; }
+  }
+
+  // Apply the appearance in place, recursing into groups. Solid color only (no
+  // gradient). Never saves, exports, or closes the document; the user keeps undo.
+  var applied = 0;
+  function applyAppearance(item) {
+    if (!item) return;
+    var typeName = "";
+    try { typeName = String(item.typename || ""); } catch (_) { typeName = ""; }
+    if (typeName === "GroupItem") {
+      var kids = null;
+      try { kids = item.pageItems; } catch (_) { kids = null; }
+      var kidCount = 0;
+      try { kidCount = kids ? Number(kids.length) || 0 : 0; } catch (_) { kidCount = 0; }
+      for (var k = 0; k < kidCount; k += 1) {
+        try { applyAppearance(kids[k]); } catch (_) {}
+      }
+      return;
+    }
+    var touched = false;
+    if (fillColorObj !== null) {
+      try {
+        item.filled = true;
+        item.fillColor = fillColorObj;
+        result.fillApplied = true;
+        touched = true;
+      } catch (_) {}
+    }
+    if (strokeColorObj !== null) {
+      try {
+        item.stroked = true;
+        item.strokeColor = strokeColorObj;
+        result.strokeApplied = true;
+        touched = true;
+      } catch (_) {}
+    }
+    if (strokeWidthPt !== null) {
+      try {
+        item.strokeWidth = strokeWidthPt;
+        touched = true;
+      } catch (_) {}
+    }
+    if (touched) applied += 1;
+  }
+
+  try {
+    for (var i = 0; i < items.length; i += 1) {
+      try { applyAppearance(items[i]); } catch (_) {}
+    }
+    result.appliedToCount = applied;
+    result.ok = applied > 0;
+    if (applied < 1 && !result.error) result.error = "set_appearance_failed";
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  return stringifySetAppearanceResult(result);
+`;
+}
+
+export function buildIllustratorSetAppearanceJsx(params: IllustratorSetAppearanceParams): IllustratorExtendScriptBuild {
+  const validated = validateIllustratorSetAppearanceParams(params);
+  if (!validated.ok) return { jsx: '', errors: validated.errors };
+  const normalized = validated.params;
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: normalized.expectedDocumentName })}
+${illustratorSetAppearanceJsxBody({
+    fillColor: normalized.fillColor,
+    strokeColor: normalized.strokeColor,
+    strokeWidthPt: normalized.strokeWidthPt,
+    swatchName: normalized.swatchName,
+  })}
+}());
+`;
+  return { jsx, errors: [] };
+}
+
 // ─── Receipt types + guards ─────────────────────────────────────────────────
 
 export type IllustratorDocumentSummary = {
@@ -1028,5 +2203,112 @@ export function isIllustratorVectorizeReceipt(value: unknown): value is Illustra
     && isFiniteNumber(v.pathCount)
     && typeof v.fileExists === 'boolean'
     && isFiniteNumber(v.sizeBytes)
+    && isNullableString(v.error);
+}
+
+export type IllustratorArrangeReceipt = {
+  ok: boolean;
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  direction: IllustratorArrangeDirection;
+  /** Selected objects whose z-order was changed (0 on failure). */
+  movedCount: number;
+  error: string | null;
+};
+
+export function isIllustratorArrangeReceipt(value: unknown): value is IllustratorArrangeReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.ok === 'boolean'
+    && isNullableString(v.appName)
+    && typeof v.appRunning === 'boolean'
+    && isNullableString(v.documentName)
+    && (ILLUSTRATOR_ARRANGE_DIRECTIONS as readonly string[]).includes(String(v.direction))
+    && isFiniteNumber(v.movedCount)
+    && isNullableString(v.error);
+}
+
+export type IllustratorAddTextReceipt = {
+  ok: boolean;
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  /** Text that was added (truncated for the receipt). */
+  contents: string;
+  xPt: number;
+  yPt: number;
+  sizePt: number;
+  /** Font actually applied (requested if resolved, else the inherited default). */
+  appliedFont: string | null;
+  fillApplied: boolean;
+  /** 'font_not_found' when a requested font could not be resolved (text still created). */
+  fontWarning: string | null;
+  error: string | null;
+};
+
+export function isIllustratorAddTextReceipt(value: unknown): value is IllustratorAddTextReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.ok === 'boolean'
+    && isNullableString(v.appName)
+    && typeof v.appRunning === 'boolean'
+    && isNullableString(v.documentName)
+    && typeof v.contents === 'string'
+    && isFiniteNumber(v.xPt)
+    && isFiniteNumber(v.yPt)
+    && isFiniteNumber(v.sizePt)
+    && isNullableString(v.appliedFont)
+    && typeof v.fillApplied === 'boolean'
+    && isNullableString(v.fontWarning)
+    && isNullableString(v.error);
+}
+
+export type IllustratorAddShapeReceipt = {
+  ok: boolean;
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  kind: IllustratorAddShapeKind;
+  fillApplied: boolean;
+  strokeApplied: boolean;
+  error: string | null;
+};
+
+export function isIllustratorAddShapeReceipt(value: unknown): value is IllustratorAddShapeReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.ok === 'boolean'
+    && isNullableString(v.appName)
+    && typeof v.appRunning === 'boolean'
+    && isNullableString(v.documentName)
+    && (ILLUSTRATOR_ADD_SHAPE_KINDS as readonly string[]).includes(String(v.kind))
+    && typeof v.fillApplied === 'boolean'
+    && typeof v.strokeApplied === 'boolean'
+    && isNullableString(v.error);
+}
+
+export type IllustratorSetAppearanceReceipt = {
+  ok: boolean;
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  /** Leaf items (recursing into groups) whose appearance was changed (0 on failure). */
+  appliedToCount: number;
+  fillApplied: boolean;
+  strokeApplied: boolean;
+  error: string | null;
+};
+
+export function isIllustratorSetAppearanceReceipt(value: unknown): value is IllustratorSetAppearanceReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.ok === 'boolean'
+    && isNullableString(v.appName)
+    && typeof v.appRunning === 'boolean'
+    && isNullableString(v.documentName)
+    && isFiniteNumber(v.appliedToCount)
+    && typeof v.fillApplied === 'boolean'
+    && typeof v.strokeApplied === 'boolean'
     && isNullableString(v.error);
 }

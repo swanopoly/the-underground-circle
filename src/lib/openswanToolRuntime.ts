@@ -194,9 +194,15 @@ export type OpenSwanRuntimeToolName =
   | 'desktop.photoshop_manage_layers'
   | 'desktop.photoshop_transform_layer'
   | 'desktop.photoshop_convert_color_mode'
+  | 'desktop.photoshop_set_layer_appearance'
+  | 'desktop.photoshop_create_text_layer'
   | 'desktop.illustrator_document_status'
   | 'desktop.illustrator_export_proof'
   | 'desktop.illustrator_vectorize'
+  | 'desktop.illustrator_arrange'
+  | 'desktop.illustrator_add_text'
+  | 'desktop.illustrator_add_shape'
+  | 'desktop.illustrator_set_appearance'
   | 'desktop.cad_compile'
   | 'desktop.cad_inspect_file'
   | 'desktop.design_export'
@@ -570,9 +576,15 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.photoshop_manage_layers': { appName?: string; targetDocumentName?: string; action: 'rename' | 'duplicate' | 'reorder' | 'group'; layerName: string; newName?: string; position?: 'top' | 'bottom' | 'above' | 'below'; referenceLayerName?: string };
   'desktop.photoshop_transform_layer': { appName?: string; targetDocumentName?: string; layerName: string; op: 'move' | 'scale' | 'rotate'; deltaX?: number; deltaY?: number; scalePercent?: number; rotateDegrees?: number };
   'desktop.photoshop_convert_color_mode': { appName?: string; targetDocumentName?: string; mode: 'rgb' | 'cmyk' | 'grayscale' };
+  'desktop.photoshop_set_layer_appearance': { appName?: string; targetDocumentName?: string; layerName: string; opacity?: number; fillOpacity?: number; blendMode?: 'normal' | 'multiply' | 'screen' | 'overlay' | 'darken' | 'lighten' | 'soft_light' | 'hard_light' | 'color_dodge' | 'color_burn' | 'difference' };
+  'desktop.photoshop_create_text_layer': { appName?: string; targetDocumentName?: string; text: string; xPx: number; yPx: number; sizePt?: number; hexColor?: string; justification?: 'left' | 'center' | 'right'; layerName?: string };
   'desktop.illustrator_document_status': { appName?: string; expectedDocumentName?: string };
   'desktop.illustrator_export_proof': { appName?: string; outputPath: string; format?: 'png' | 'svg'; scalePercent?: number; expectedDocumentName?: string };
   'desktop.illustrator_vectorize': { appName?: string; imagePath?: string; outputPath: string; mode?: 'color' | 'gray' | 'blackwhite'; maxColors?: number; threshold?: number; ignoreWhite?: boolean; preset?: string; expectedDocumentName?: string };
+  'desktop.illustrator_arrange': { appName?: string; expectedDocumentName?: string; direction: 'bringToFront' | 'sendToBack' | 'bringForward' | 'sendBackward' };
+  'desktop.illustrator_add_text': { appName?: string; expectedDocumentName?: string; contents: string; xPt: number; yPt: number; sizePt?: number; fillColor?: string; fontName?: string };
+  'desktop.illustrator_add_shape': { appName?: string; expectedDocumentName?: string; kind: 'rectangle' | 'ellipse' | 'line'; xPt?: number; yPt?: number; widthPt?: number; heightPt?: number; x1Pt?: number; y1Pt?: number; x2Pt?: number; y2Pt?: number; fillColor?: string; strokeColor?: string; strokeWidthPt?: number };
+  'desktop.illustrator_set_appearance': { appName?: string; expectedDocumentName?: string; fillColor?: string; strokeColor?: string; strokeWidthPt?: number; swatchName?: string };
   'desktop.cad_compile': { engine: 'openscad' | 'freecadcmd' | 'blender'; sourcePath: string; outputPath: string; extraArgs?: string[]; timeoutMs?: number };
   'desktop.cad_inspect_file': { path: string; maxBytes?: number };
   'desktop.design_export': { engine: 'inkscape' | 'sketchtool'; sourcePath: string; outputPath: string; options?: { widthPx?: number; heightPx?: number; pdfVersion?: string; format?: string; scale?: number }; timeoutMs?: number };
@@ -863,9 +875,15 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.photoshop_manage_layers': { ok: boolean; resultsText: string };
   'desktop.photoshop_transform_layer': { ok: boolean; resultsText: string };
   'desktop.photoshop_convert_color_mode': { ok: boolean; resultsText: string };
+  'desktop.photoshop_set_layer_appearance': { ok: boolean; resultsText: string };
+  'desktop.photoshop_create_text_layer': { ok: boolean; resultsText: string };
   'desktop.illustrator_document_status': { ok: boolean; resultsText: string };
   'desktop.illustrator_export_proof': { ok: boolean; resultsText: string };
   'desktop.illustrator_vectorize': { ok: boolean; resultsText: string };
+  'desktop.illustrator_arrange': { ok: boolean; resultsText: string };
+  'desktop.illustrator_add_text': { ok: boolean; resultsText: string };
+  'desktop.illustrator_add_shape': { ok: boolean; resultsText: string };
+  'desktop.illustrator_set_appearance': { ok: boolean; resultsText: string };
   'desktop.cad_compile': { ok: boolean; resultsText: string };
   'desktop.cad_inspect_file': { ok: boolean; resultsText: string };
   'desktop.design_export': { ok: boolean; resultsText: string };
@@ -3204,6 +3222,47 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     },
   },
   {
+    name: 'desktop.photoshop_set_layer_appearance',
+    label: 'Set Photoshop Layer Appearance',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed appearance change on ONE named Photoshop layer: opacity (0-100), fillOpacity (0-100), and/or blend mode (normal, multiply, screen, overlay, darken, lighten, soft_light, hard_light, color_dodge, color_burn, difference). The SAFEST layer edit — appearance-only, zero pixel loss, fully reversible via undo. Provide at least one of opacity/fillOpacity/blendMode. Mutates the active document and is approval-gated; it NEVER saves. Fails closed on missing/ambiguous layer (layer_not_found / layer_ambiguous) and on document mismatch.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        targetDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        layerName: { type: 'string', description: 'Exact layer name (must match exactly one layer).' },
+        opacity: { type: 'number', description: 'Layer opacity, integer 0-100.' },
+        fillOpacity: { type: 'number', description: 'Fill opacity, integer 0-100.' },
+        blendMode: { type: 'string', enum: ['normal', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'soft_light', 'hard_light', 'color_dodge', 'color_burn', 'difference'], description: 'Layer blend mode.' },
+      },
+      required: ['layerName'],
+    },
+  },
+  {
+    name: 'desktop.photoshop_create_text_layer',
+    label: 'Create Photoshop Text Layer',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed additive text layer: adds ONE new point-text art layer (a headline or a name) to the active Photoshop document at xPx/yPx via the typed DOM. Optional sizePt (default 24), hexColor (#RRGGBB fill), justification (left/center/right), and layerName. Additive and non-destructive — mutates the active document, approval-gated, and NEVER saves; fully reversible via undo. Fails closed on no_document / document_mismatch. Font-by-name is intentionally out of scope (uses the default font).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        targetDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        text: { type: 'string', description: 'The text to add (non-empty, up to 2000 chars).' },
+        xPx: { type: 'number', description: 'X anchor position in pixels.' },
+        yPx: { type: 'number', description: 'Y anchor position in pixels.' },
+        sizePt: { type: 'number', description: 'Font size in points (1-1400). Defaults to 24.' },
+        hexColor: { type: 'string', description: 'Optional text fill color as #RRGGBB hex.' },
+        justification: { type: 'string', enum: ['left', 'center', 'right'], description: 'Optional paragraph justification.' },
+        layerName: { type: 'string', description: 'Optional name for the created layer.' },
+      },
+      required: ['text', 'xPx', 'yPx'],
+    },
+  },
+  {
     name: 'desktop.illustrator_document_status',
     label: 'Illustrator Document Status',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
@@ -3255,6 +3314,88 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
         expectedDocumentName: { type: 'string', description: 'Optional; accepted for parity. Vectorize always traces in a throwaway document, so this guard does not affect the open document.' },
       },
       required: ['outputPath'],
+    },
+  },
+  {
+    name: 'desktop.illustrator_arrange',
+    label: 'Arrange Illustrator Selection (z-order)',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed z-order change for the currently selected Illustrator objects: bring to front, send to back, bring forward, or send backward via pageItem.zOrder (typed DOM). Mutates the active document in place, approval-gated, and NEVER saves/exports/closes it — the user keeps undo. The receipt carries movedCount as proof. Fails closed on no_document, document_mismatch, or no_selection (nothing selected). Select the objects first (in Illustrator), then call this; use illustrator_document_status to confirm a selection exists.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Illustrator app name. Defaults to Illustrator.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        direction: { type: 'string', enum: ['bringToFront', 'sendToBack', 'bringForward', 'sendBackward'], description: 'Z-order move to apply to every selected object.' },
+      },
+      required: ['direction'],
+    },
+  },
+  {
+    name: 'desktop.illustrator_add_text',
+    label: 'Add Text to Illustrator Document',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Adds a new point-text frame (e.g. a headline) to the active Illustrator document at [xPt, yPt] with the given contents and size, via the typed DOM (doc.textFrames.pointText). Additive/non-destructive: it only creates a new text object, mutates the active document, approval-gated, and NEVER saves/exports/closes it — the user keeps undo. fillColor is an optional #RRGGBB hex (built as an RGBColor or CMYKColor to match the document color space). fontName is optional; if the font cannot be resolved the text is still created with the default font and the receipt reports fontWarning=font_not_found (honest appliedFont). Fails closed on no_document or document_mismatch.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Illustrator app name. Defaults to Illustrator.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        contents: { type: 'string', description: 'The text to add (non-empty, up to 2000 characters).' },
+        xPt: { type: 'number', description: 'X position of the text anchor in points.' },
+        yPt: { type: 'number', description: 'Y position of the text anchor in points.' },
+        sizePt: { type: 'number', description: 'Font size in points (1-1400). Defaults to 24.' },
+        fillColor: { type: 'string', description: 'Optional fill color as #RRGGBB hex.' },
+        fontName: { type: 'string', description: 'Optional font name; falls back to the default font if unavailable (reported as fontWarning).' },
+      },
+      required: ['contents', 'xPt', 'yPt'],
+    },
+  },
+  {
+    name: 'desktop.illustrator_add_shape',
+    label: 'Add Shape to Illustrator Document',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Draws a new shape (rectangle, ellipse, or line) in the active Illustrator document via the typed DOM (doc.pathItems.rectangle/ellipse, or pathItems.add + setEntirePath for a line). Additive/non-destructive: it only creates a new path item, mutates the active document, approval-gated, and NEVER saves/exports/closes it — the user keeps undo. Illustrator uses a y-up axis; rectangle/ellipse take a top-left anchor (xPt,yPt) plus positive widthPt,heightPt, while a line takes endpoints (x1Pt,y1Pt) to (x2Pt,y2Pt). fillColor/strokeColor are optional #RRGGBB hex (built as an RGBColor or CMYKColor to match the document color space); strokeWidthPt is in points. Fails closed on no_document or document_mismatch.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Illustrator app name. Defaults to Illustrator.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        kind: { type: 'string', enum: ['rectangle', 'ellipse', 'line'], description: 'Shape to draw: rectangle, ellipse, or line.' },
+        xPt: { type: 'number', description: 'rectangle/ellipse: top-left X in points.' },
+        yPt: { type: 'number', description: 'rectangle/ellipse: top-left Y in points (y-up).' },
+        widthPt: { type: 'number', description: 'rectangle/ellipse: positive width in points.' },
+        heightPt: { type: 'number', description: 'rectangle/ellipse: positive height in points.' },
+        x1Pt: { type: 'number', description: 'line: start X in points.' },
+        y1Pt: { type: 'number', description: 'line: start Y in points.' },
+        x2Pt: { type: 'number', description: 'line: end X in points.' },
+        y2Pt: { type: 'number', description: 'line: end Y in points.' },
+        fillColor: { type: 'string', description: 'Optional fill color as #RRGGBB hex.' },
+        strokeColor: { type: 'string', description: 'Optional stroke color as #RRGGBB hex.' },
+        strokeWidthPt: { type: 'number', description: 'Optional stroke width in points (0-1000).' },
+      },
+      required: ['kind'],
+    },
+  },
+  {
+    name: 'desktop.illustrator_set_appearance',
+    label: 'Set Illustrator Selection Appearance (fill/stroke/swatch)',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Recolors and/or re-strokes the CURRENTLY SELECTED objects in the active Illustrator document via the typed DOM (item.fillColor/strokeColor/strokeWidth), recursing into groups. Use for "make the selection red", "give it a 3pt black stroke", or "apply swatch X". Mutates the active document in place, approval-gated, and NEVER saves/exports/closes it — the user keeps undo. fillColor/strokeColor are optional #RRGGBB hex (built as an RGBColor or CMYKColor to match the document color space); strokeWidthPt is in points (0-1000); swatchName applies a named swatch\'s SOLID color as the fill (mutually exclusive with fillColor). At least one of fillColor, strokeColor, strokeWidthPt, or swatchName is required. Solid color only (no gradient). The receipt carries appliedToCount as proof. Select the objects first (in Illustrator), then call this; fails closed on no_document, document_mismatch, no_selection, swatch_not_found (named swatch missing), or swatch_not_solid (swatch is a gradient/pattern).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Illustrator app name. Defaults to Illustrator.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        fillColor: { type: 'string', description: 'Optional fill color as #RRGGBB hex (mutually exclusive with swatchName).' },
+        strokeColor: { type: 'string', description: 'Optional stroke color as #RRGGBB hex.' },
+        strokeWidthPt: { type: 'number', description: 'Optional stroke width in points (0-1000).' },
+        swatchName: { type: 'string', description: 'Optional named swatch whose solid color becomes the fill.' },
+      },
     },
   },
   {
@@ -4715,9 +4856,15 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'desktop.photoshop_manage_layers': ['execute'],
   'desktop.photoshop_transform_layer': ['execute'],
   'desktop.photoshop_convert_color_mode': ['execute'],
+  'desktop.photoshop_set_layer_appearance': ['execute'],
+  'desktop.photoshop_create_text_layer': ['execute'],
   'desktop.illustrator_document_status': ['execute'],
   'desktop.illustrator_export_proof': ['execute'],
   'desktop.illustrator_vectorize': ['execute'],
+  'desktop.illustrator_arrange': ['execute'],
+  'desktop.illustrator_add_text': ['execute'],
+  'desktop.illustrator_add_shape': ['execute'],
+  'desktop.illustrator_set_appearance': ['execute'],
   'desktop.cad_compile': ['execute'],
   'desktop.cad_inspect_file': ['execute'],
   'desktop.design_export': ['execute'],
@@ -4948,9 +5095,15 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'desktop.photoshop_manage_layers',
   'desktop.photoshop_transform_layer',
   'desktop.photoshop_convert_color_mode',
+  'desktop.photoshop_set_layer_appearance',
+  'desktop.photoshop_create_text_layer',
   'desktop.illustrator_document_status',
   'desktop.illustrator_export_proof',
   'desktop.illustrator_vectorize',
+  'desktop.illustrator_arrange',
+  'desktop.illustrator_add_text',
+  'desktop.illustrator_add_shape',
+  'desktop.illustrator_set_appearance',
   'desktop.cad_compile',
   'desktop.cad_inspect_file',
   'desktop.design_export',
@@ -5884,9 +6037,15 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'desktop.photoshop_manage_layers':
     case 'desktop.photoshop_transform_layer':
     case 'desktop.photoshop_convert_color_mode':
+    case 'desktop.photoshop_set_layer_appearance':
+    case 'desktop.photoshop_create_text_layer':
     case 'desktop.illustrator_document_status':
     case 'desktop.illustrator_export_proof':
     case 'desktop.illustrator_vectorize':
+    case 'desktop.illustrator_arrange':
+    case 'desktop.illustrator_add_text':
+    case 'desktop.illustrator_add_shape':
+    case 'desktop.illustrator_set_appearance':
     case 'desktop.cad_compile':
     case 'desktop.cad_inspect_file':
     case 'desktop.design_export':
@@ -9656,6 +9815,81 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
+    case 'desktop.photoshop_set_layer_appearance': {
+      try {
+        const { photoshopSetLayerAppearance, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const layerName = typeof a.layerName === 'string' ? a.layerName.trim() : '';
+        if (!layerName) return { ok: false, resultsText: 'layerName is required.' } as any;
+        const opacity = Number.isFinite(Number(a.opacity)) ? Number(a.opacity) : undefined;
+        const fillOpacity = Number.isFinite(Number(a.fillOpacity)) ? Number(a.fillOpacity) : undefined;
+        const blendMode = typeof a.blendMode === 'string' && a.blendMode.trim() ? a.blendMode.trim().toLowerCase() : undefined;
+        if (opacity === undefined && fillOpacity === undefined && !blendMode) {
+          return { ok: false, resultsText: 'Provide at least one of opacity, fillOpacity, or blendMode.' } as any;
+        }
+        const r = await photoshopSetLayerAppearance({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          targetDocumentName: typeof a.targetDocumentName === 'string' ? a.targetDocumentName : undefined,
+          layerName,
+          opacity,
+          fillOpacity,
+          blendMode: blendMode as any,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Photoshop'} is not running.` } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Photoshop set layer appearance failed: ${d.error}.` } as any;
+        const parts: string[] = [];
+        if (d.opacity !== null) parts.push(`opacity ${d.opacity}%`);
+        if (d.fillOpacity !== null) parts.push(`fill ${d.fillOpacity}%`);
+        if (d.blendMode) parts.push(`blend ${d.blendMode}`);
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Photoshop layer "${d.layerName || layerName}"${d.documentName ? ` in ${d.documentName}` : ''} — now ${parts.join(', ') || 'requested appearance'}. Document not saved (reversible via undo).`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.photoshop_create_text_layer': {
+      try {
+        const { photoshopCreateTextLayer, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const text = typeof a.text === 'string' ? a.text : '';
+        if (text.trim().length < 1) return { ok: false, resultsText: 'text must be a non-empty string.' } as any;
+        if (typeof a.xPx !== 'number' || !Number.isFinite(a.xPx) || typeof a.yPx !== 'number' || !Number.isFinite(a.yPx)) {
+          return { ok: false, resultsText: 'xPx and yPx must be finite numbers.' } as any;
+        }
+        const justification = typeof a.justification === 'string' && a.justification.trim() ? a.justification.trim().toLowerCase() : undefined;
+        if (justification && !['left', 'center', 'right'].includes(justification)) {
+          return { ok: false, resultsText: 'justification must be left, center, or right.' } as any;
+        }
+        const r = await photoshopCreateTextLayer({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          targetDocumentName: typeof a.targetDocumentName === 'string' ? a.targetDocumentName : undefined,
+          text,
+          xPx: a.xPx,
+          yPx: a.yPx,
+          sizePt: Number.isFinite(Number(a.sizePt)) ? Number(a.sizePt) : undefined,
+          hexColor: typeof a.hexColor === 'string' && a.hexColor.trim() ? a.hexColor.trim() : undefined,
+          justification: justification as any,
+          layerName: typeof a.layerName === 'string' && a.layerName.trim() ? a.layerName.trim() : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Photoshop'} is not running.` } as any;
+        if (d.error === 'no_document') return { ok: false, ...d, resultsText: 'Photoshop is running but no document is open.' } as any;
+        if (d.error === 'document_mismatch') return { ok: false, ...d, resultsText: `Active Photoshop document is ${d.documentName || 'unknown'}, not the expected ${a.targetDocumentName}.` } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Photoshop create text layer failed: ${d.error}.` } as any;
+        const colorNote = d.colorApplied ? ' with fill color' : '';
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Added text layer "${d.layerName || d.text}"${d.documentName ? ` in ${d.documentName}` : ''} at [${a.xPx}, ${a.yPx}] (${d.sizePt}pt${colorNote}). Document not saved — the change is undoable.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
     case 'desktop.illustrator_document_status': {
       try {
         const { illustratorDocumentStatus, isDesktopBridgeAvailable } = await import('./desktopBridge');
@@ -9734,6 +9968,157 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           ok: true,
           ...d,
           resultsText: `Vectorized ${sourceLabel} → ${d.outputFileName} (${d.mode}, ${d.pathCount} paths, ${d.sizeBytes} bytes). Traced in a throwaway document; the open document was not touched.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.illustrator_arrange': {
+      try {
+        const { illustratorArrange, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        // Case-sensitive enum (ZOrderMethod names are camelCase) — do not lowercase.
+        const direction = typeof a.direction === 'string' ? a.direction.trim() : '';
+        if (!['bringToFront', 'sendToBack', 'bringForward', 'sendBackward'].includes(direction)) {
+          return { ok: false, resultsText: 'direction must be bringToFront, sendToBack, bringForward, or sendBackward.' } as any;
+        }
+        const r = await illustratorArrange({
+          appName: typeof a.appName === 'string' ? a.appName : 'Illustrator',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          direction: direction as any,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Illustrator'} is not running.` } as any;
+        if (d.error === 'no_document') return { ok: false, ...d, resultsText: 'Illustrator is running but no document is open.' } as any;
+        if (d.error === 'document_mismatch') return { ok: false, ...d, resultsText: `Active Illustrator document is ${d.documentName || 'unknown'}, not the expected ${a.expectedDocumentName}.` } as any;
+        if (d.error === 'no_selection') return { ok: false, ...d, resultsText: 'No objects are selected in Illustrator — select the objects to reorder first.' } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Illustrator arrange failed: ${d.error}.` } as any;
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Reordered ${d.movedCount} selected object(s) (${d.direction})${d.documentName ? ` in ${d.documentName}` : ''}. Document not saved — the change is undoable.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.illustrator_add_text': {
+      try {
+        const { illustratorAddText, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const contents = typeof a.contents === 'string' ? a.contents : '';
+        if (contents.trim().length < 1) return { ok: false, resultsText: 'contents must be a non-empty string.' } as any;
+        if (typeof a.xPt !== 'number' || !Number.isFinite(a.xPt) || typeof a.yPt !== 'number' || !Number.isFinite(a.yPt)) {
+          return { ok: false, resultsText: 'xPt and yPt must be finite numbers.' } as any;
+        }
+        const r = await illustratorAddText({
+          appName: typeof a.appName === 'string' ? a.appName : 'Illustrator',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          contents,
+          xPt: a.xPt,
+          yPt: a.yPt,
+          sizePt: Number.isFinite(Number(a.sizePt)) ? Number(a.sizePt) : undefined,
+          fillColor: typeof a.fillColor === 'string' && a.fillColor.trim() ? a.fillColor.trim() : undefined,
+          fontName: typeof a.fontName === 'string' && a.fontName.trim() ? a.fontName.trim() : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Illustrator'} is not running.` } as any;
+        if (d.error === 'no_document') return { ok: false, ...d, resultsText: 'Illustrator is running but no document is open.' } as any;
+        if (d.error === 'document_mismatch') return { ok: false, ...d, resultsText: `Active Illustrator document is ${d.documentName || 'unknown'}, not the expected ${a.expectedDocumentName}.` } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Illustrator add text failed: ${d.error}.` } as any;
+        const fontNote = d.fontWarning === 'font_not_found'
+          ? ` Requested font not found; used ${d.appliedFont || 'the default font'} instead.`
+          : '';
+        const fillNote = d.fillApplied ? ' with fill color' : '';
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Added text "${d.contents}" at [${d.xPt}, ${d.yPt}] (${d.sizePt}pt${fillNote})${d.documentName ? ` in ${d.documentName}` : ''}.${fontNote} Document not saved — the change is undoable.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.illustrator_add_shape': {
+      try {
+        const { illustratorAddShape, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const kind = typeof a.kind === 'string' ? a.kind.trim().toLowerCase() : '';
+        if (!['rectangle', 'ellipse', 'line'].includes(kind)) {
+          return { ok: false, resultsText: 'kind must be rectangle, ellipse, or line.' } as any;
+        }
+        const r = await illustratorAddShape({
+          appName: typeof a.appName === 'string' ? a.appName : 'Illustrator',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          kind: kind as any,
+          xPt: Number.isFinite(Number(a.xPt)) ? Number(a.xPt) : undefined,
+          yPt: Number.isFinite(Number(a.yPt)) ? Number(a.yPt) : undefined,
+          widthPt: Number.isFinite(Number(a.widthPt)) ? Number(a.widthPt) : undefined,
+          heightPt: Number.isFinite(Number(a.heightPt)) ? Number(a.heightPt) : undefined,
+          x1Pt: Number.isFinite(Number(a.x1Pt)) ? Number(a.x1Pt) : undefined,
+          y1Pt: Number.isFinite(Number(a.y1Pt)) ? Number(a.y1Pt) : undefined,
+          x2Pt: Number.isFinite(Number(a.x2Pt)) ? Number(a.x2Pt) : undefined,
+          y2Pt: Number.isFinite(Number(a.y2Pt)) ? Number(a.y2Pt) : undefined,
+          fillColor: typeof a.fillColor === 'string' && a.fillColor.trim() ? a.fillColor.trim() : undefined,
+          strokeColor: typeof a.strokeColor === 'string' && a.strokeColor.trim() ? a.strokeColor.trim() : undefined,
+          strokeWidthPt: Number.isFinite(Number(a.strokeWidthPt)) ? Number(a.strokeWidthPt) : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Illustrator'} is not running.` } as any;
+        if (d.error === 'no_document') return { ok: false, ...d, resultsText: 'Illustrator is running but no document is open.' } as any;
+        if (d.error === 'document_mismatch') return { ok: false, ...d, resultsText: `Active Illustrator document is ${d.documentName || 'unknown'}, not the expected ${a.expectedDocumentName}.` } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Illustrator add shape failed: ${d.error}.` } as any;
+        const paints: string[] = [];
+        if (d.fillApplied) paints.push('fill');
+        if (d.strokeApplied) paints.push('stroke');
+        const paintNote = paints.length > 0 ? ` with ${paints.join(' + ')}` : '';
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Added a ${d.kind}${paintNote}${d.documentName ? ` in ${d.documentName}` : ''}. Document not saved — the change is undoable.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.illustrator_set_appearance': {
+      try {
+        const { illustratorSetAppearance, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const fillColor = typeof a.fillColor === 'string' && a.fillColor.trim() ? a.fillColor.trim() : undefined;
+        const strokeColor = typeof a.strokeColor === 'string' && a.strokeColor.trim() ? a.strokeColor.trim() : undefined;
+        const strokeWidthPt = Number.isFinite(Number(a.strokeWidthPt)) ? Number(a.strokeWidthPt) : undefined;
+        const swatchName = typeof a.swatchName === 'string' && a.swatchName.trim() ? a.swatchName.trim() : undefined;
+        if (!fillColor && !strokeColor && strokeWidthPt === undefined && !swatchName) {
+          return { ok: false, resultsText: 'At least one of fillColor, strokeColor, strokeWidthPt, or swatchName is required.' } as any;
+        }
+        if (fillColor && swatchName) {
+          return { ok: false, resultsText: 'Provide either fillColor or swatchName for the fill, not both.' } as any;
+        }
+        const r = await illustratorSetAppearance({
+          appName: typeof a.appName === 'string' ? a.appName : 'Illustrator',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          fillColor,
+          strokeColor,
+          strokeWidthPt,
+          swatchName,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Illustrator'} is not running.` } as any;
+        if (d.error === 'no_document') return { ok: false, ...d, resultsText: 'Illustrator is running but no document is open.' } as any;
+        if (d.error === 'document_mismatch') return { ok: false, ...d, resultsText: `Active Illustrator document is ${d.documentName || 'unknown'}, not the expected ${a.expectedDocumentName}.` } as any;
+        if (d.error === 'no_selection') return { ok: false, ...d, resultsText: 'No objects are selected in Illustrator — select the objects to recolor first.' } as any;
+        if (d.error === 'swatch_not_found') return { ok: false, ...d, resultsText: `No swatch named "${a.swatchName}" exists in the document.` } as any;
+        if (d.error === 'swatch_not_solid') return { ok: false, ...d, resultsText: `Swatch "${a.swatchName}" is a gradient/pattern; only solid-color swatches are supported.` } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Illustrator set appearance failed: ${d.error}.` } as any;
+        const paints: string[] = [];
+        if (d.fillApplied) paints.push('fill');
+        if (d.strokeApplied) paints.push('stroke');
+        const paintNote = paints.length > 0 ? ` (${paints.join(' + ')})` : '';
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Updated appearance on ${d.appliedToCount} object(s)${paintNote}${d.documentName ? ` in ${d.documentName}` : ''}. Document not saved — the change is undoable.`,
         } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
