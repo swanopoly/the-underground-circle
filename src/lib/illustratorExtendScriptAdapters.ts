@@ -2065,6 +2065,703 @@ ${illustratorSetAppearanceJsxBody({
   return { jsx, errors: [] };
 }
 
+// ─── 8) Group (combine the current selection into one new group) ─────────────
+//
+// "Group these." Combines the currently selected objects (>= 2) into a single
+// new GroupItem via the typed DOM (doc.groupItems.add() + item.move(group,
+// ElementPlacement.PLACEATEND)). It mutates the OPEN target document in place,
+// NEVER saves/exports/closes it (the user keeps undo, so the group is
+// reversible), and stays entirely on the typed DOM (no
+// executeAction/executeMenuCommand). Group-only: Illustrator's scripting DOM
+// has no reliable ungroup method, so this op only ever groups. Fails closed
+// with 'no_document'/'document_mismatch'/'need_two_selected'.
+
+export type IllustratorGroupParams = {
+  appName?: string;
+  expectedDocumentName?: string | null;
+};
+
+export type NormalizedIllustratorGroupParams = {
+  appName: string;
+  expectedDocumentName: string;
+};
+
+export function validateIllustratorGroupParams(
+  params: IllustratorGroupParams,
+): { ok: true; params: NormalizedIllustratorGroupParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizeIllustratorBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+  const expectedDocumentName = normalizeIllustratorExpectedDocumentName(params?.expectedDocumentName);
+  if (!expectedDocumentName.ok) errors.push(expectedDocumentName.error);
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Illustrator',
+      expectedDocumentName: expectedDocumentName.ok ? expectedDocumentName.value : '',
+    },
+  };
+}
+
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): illustratorGroupJsxBody — keep this JSX
+ * body byte-identical with the bridge duplicate. It combines the OPEN
+ * document's current selection into ONE new group in place and NEVER saves,
+ * exports, or closes it; the user keeps undo. Group-only (no reliable DOM
+ * ungroup). Takes no runtime args — the whole op is driven by the selection.
+ */
+function illustratorGroupJsxBody(): string {
+  return `
+  function stringifyGroupResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"groupedCount\\":" + jsonNumber(value.groupedCount),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    documentName: null,
+    groupedCount: 0,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyGroupResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyGroupResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  // Snapshot the live selection into a stable array BEFORE grouping: moving an
+  // item into the new group reindexes doc.selection mid-loop, so we capture
+  // references first and move each in place. The user keeps undo. Group-only:
+  // Illustrator's DOM has no reliable ungroup, so this op never ungroups.
+  var selection = null;
+  try { selection = doc.selection; } catch (_) { selection = null; }
+  var selectionCount = 0;
+  try { selectionCount = selection ? Number(selection.length) || 0 : 0; } catch (_) { selectionCount = 0; }
+  if (selectionCount < 2) {
+    result.error = "need_two_selected";
+    return stringifyGroupResult(result);
+  }
+  var items = [];
+  for (var s = 0; s < selectionCount; s += 1) {
+    try { if (selection[s]) items.push(selection[s]); } catch (_) {}
+  }
+  if (items.length < 2) {
+    result.error = "need_two_selected";
+    return stringifyGroupResult(result);
+  }
+
+  // Create ONE new empty group, then move each snapshotted item into it via
+  // move(group, ElementPlacement.PLACEATEND). move() never saves, exports, or
+  // closes the document; per-item failures are counted out and the first
+  // message is surfaced.
+  var group = null;
+  try {
+    group = doc.groupItems.add();
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+    return stringifyGroupResult(result);
+  }
+  var grouped = 0;
+  for (var i = 0; i < items.length; i += 1) {
+    try {
+      items[i].move(group, ElementPlacement.PLACEATEND);
+      grouped += 1;
+    } catch (err2) {
+      if (!result.error) result.error = String(err2 && err2.message ? err2.message : err2);
+    }
+  }
+  result.groupedCount = grouped;
+  result.ok = grouped > 1;
+  if (grouped < 2 && !result.error) result.error = "group_failed";
+  return stringifyGroupResult(result);
+`;
+}
+
+export function buildIllustratorGroupJsx(params: IllustratorGroupParams): IllustratorExtendScriptBuild {
+  const validated = validateIllustratorGroupParams(params);
+  if (!validated.ok) return { jsx: '', errors: validated.errors };
+  const normalized = validated.params;
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: normalized.expectedDocumentName })}
+${illustratorGroupJsxBody()}
+}());
+`;
+  return { jsx, errors: [] };
+}
+
+// ─── 9) Add/resize artboard (additive/reversible artboard geometry) ──────────
+//
+// "Add another artboard" / "resize this artboard." Adds a NEW artboard
+// (doc.artboards.add) or resizes an existing one (artboards[i].artboardRect =)
+// in the OPEN target document via the typed DOM. Additive/reversible: it only
+// adds or reshapes an artboard, mutates the OPEN document in place, NEVER
+// saves/exports/closes it (the user keeps undo), and stays entirely on the
+// typed DOM (no executeAction/executeMenuCommand). Fails closed with
+// 'no_document'/'document_mismatch', and (resize) 'artboard_index_out_of_range'
+// when the index is past the last artboard.
+//
+// Illustrator's artboardRect is [left, top, right, bottom] on a y-up axis, so a
+// top-left anchor (left, top) with a width/height becomes
+// [left, top, left + widthPt, top - heightPt]. add defaults its placement to
+// the RIGHT of the existing artboards (max existing right edge + a gap, at the
+// last artboard's top); resize preserves the existing top-left.
+
+export const ILLUSTRATOR_ADD_ARTBOARD_ACTIONS = ['add', 'resize'] as const;
+export type IllustratorAddArtboardAction = (typeof ILLUSTRATOR_ADD_ARTBOARD_ACTIONS)[number];
+
+export const ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT = 16000;
+export const ILLUSTRATOR_ADD_ARTBOARD_MAX_COORD_PT = 100000;
+export const ILLUSTRATOR_ADD_ARTBOARD_MAX_INDEX = 1000;
+
+/** add|resize (case-insensitive). Fail-closed on anything else. */
+function normalizeIllustratorAddArtboardAction(value: unknown): IllustratorParamCheck<IllustratorAddArtboardAction> {
+  if (value === undefined || value === null || value === '') {
+    return { ok: false, error: `action must be one of: ${ILLUSTRATOR_ADD_ARTBOARD_ACTIONS.join(', ')}.` };
+  }
+  const action = String(value).trim().toLowerCase();
+  if (!(ILLUSTRATOR_ADD_ARTBOARD_ACTIONS as readonly string[]).includes(action)) {
+    return { ok: false, error: `action must be one of: ${ILLUSTRATOR_ADD_ARTBOARD_ACTIONS.join(', ')}.` };
+  }
+  return { ok: true, value: action as IllustratorAddArtboardAction };
+}
+
+/** Positive finite artboard dimension (width/height) within a sane bound. */
+function normalizeIllustratorAddArtboardDim(value: unknown, label: string): IllustratorParamCheck<number> {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT) {
+    return { ok: false, error: `${label} must be a finite number greater than 0 and <= ${ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT}.` };
+  }
+  return { ok: true, value };
+}
+
+/** Optional artboard index (resize target): undefined/null -> 0. Integer 0..1000. */
+function normalizeIllustratorAddArtboardIndex(value: unknown): IllustratorParamCheck<number> {
+  if (value === undefined || value === null) return { ok: true, value: 0 };
+  if (
+    typeof value !== 'number'
+    || !Number.isFinite(value)
+    || !Number.isInteger(value)
+    || value < 0
+    || value > ILLUSTRATOR_ADD_ARTBOARD_MAX_INDEX
+  ) {
+    return { ok: false, error: `artboardIndex must be an integer between 0 and ${ILLUSTRATOR_ADD_ARTBOARD_MAX_INDEX}.` };
+  }
+  return { ok: true, value };
+}
+
+/** Optional placement coordinate (add): undefined/null -> null (auto-place). Finite, fractions allowed. */
+function normalizeIllustratorAddArtboardCoord(value: unknown, label: string): IllustratorParamCheck<number | null> {
+  if (value === undefined || value === null) return { ok: true, value: null };
+  if (typeof value !== 'number' || !Number.isFinite(value) || Math.abs(value) > ILLUSTRATOR_ADD_ARTBOARD_MAX_COORD_PT) {
+    return { ok: false, error: `${label} must be a finite number between -${ILLUSTRATOR_ADD_ARTBOARD_MAX_COORD_PT} and ${ILLUSTRATOR_ADD_ARTBOARD_MAX_COORD_PT}.` };
+  }
+  return { ok: true, value };
+}
+
+export type IllustratorAddArtboardParams = {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  /** add (new artboard) | resize (reshape an existing artboard). */
+  action: IllustratorAddArtboardAction | string;
+  /** Artboard width in points (> 0, <= 16000). */
+  widthPt: number;
+  /** Artboard height in points (> 0, <= 16000). */
+  heightPt: number;
+  /** resize target index (default 0); range-checked against the document at runtime. */
+  artboardIndex?: number | null;
+  /** add: optional top-left X placement (default: right of the last artboard). */
+  xPt?: number | null;
+  /** add: optional top-left Y placement (default: the last artboard's top). */
+  yPt?: number | null;
+};
+
+export type NormalizedIllustratorAddArtboardParams = {
+  appName: string;
+  expectedDocumentName: string;
+  action: IllustratorAddArtboardAction;
+  widthPt: number;
+  heightPt: number;
+  artboardIndex: number;
+  xPt: number | null;
+  yPt: number | null;
+};
+
+export function validateIllustratorAddArtboardParams(
+  params: IllustratorAddArtboardParams,
+): { ok: true; params: NormalizedIllustratorAddArtboardParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizeIllustratorBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+  const expectedDocumentName = normalizeIllustratorExpectedDocumentName(params?.expectedDocumentName);
+  if (!expectedDocumentName.ok) errors.push(expectedDocumentName.error);
+  const action = normalizeIllustratorAddArtboardAction(params?.action);
+  if (!action.ok) errors.push(action.error);
+  const widthPt = normalizeIllustratorAddArtboardDim(params?.widthPt, 'widthPt');
+  if (!widthPt.ok) errors.push(widthPt.error);
+  const heightPt = normalizeIllustratorAddArtboardDim(params?.heightPt, 'heightPt');
+  if (!heightPt.ok) errors.push(heightPt.error);
+  const artboardIndex = normalizeIllustratorAddArtboardIndex(params?.artboardIndex);
+  if (!artboardIndex.ok) errors.push(artboardIndex.error);
+  const xPt = normalizeIllustratorAddArtboardCoord(params?.xPt, 'xPt');
+  if (!xPt.ok) errors.push(xPt.error);
+  const yPt = normalizeIllustratorAddArtboardCoord(params?.yPt, 'yPt');
+  if (!yPt.ok) errors.push(yPt.error);
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Illustrator',
+      expectedDocumentName: expectedDocumentName.ok ? expectedDocumentName.value : '',
+      action: action.ok ? action.value : 'add',
+      widthPt: widthPt.ok ? widthPt.value : 0,
+      heightPt: heightPt.ok ? heightPt.value : 0,
+      artboardIndex: artboardIndex.ok ? artboardIndex.value : 0,
+      xPt: xPt.ok ? xPt.value : null,
+      yPt: yPt.ok ? yPt.value : null,
+    },
+  };
+}
+
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): illustratorAddArtboardJsxBody — keep this
+ * JSX body byte-identical with the bridge duplicate. It adds a NEW artboard or
+ * resizes an existing one in the OPEN document in place and NEVER saves,
+ * exports, or closes it; the user keeps undo. Fails closed with
+ * 'artboard_index_out_of_range' when a resize index is past the last artboard.
+ */
+function illustratorAddArtboardJsxBody(
+  { action, widthPt, heightPt, artboardIndex, xPt, yPt }:
+  { action: IllustratorAddArtboardAction; widthPt: number; heightPt: number; artboardIndex: number; xPt: number | null; yPt: number | null },
+): string {
+  const xPtLiteral = xPt == null ? 'null' : jsxLiteral(xPt);
+  const yPtLiteral = yPt == null ? 'null' : jsxLiteral(yPt);
+  return `
+  var action = ${jsxLiteral(String(action ?? ''))};
+  var widthPt = ${jsxLiteral(widthPt)};
+  var heightPt = ${jsxLiteral(heightPt)};
+  var artboardIndex = ${jsxLiteral(artboardIndex)};
+  var xPt = ${xPtLiteral};
+  var yPt = ${yPtLiteral};
+
+  function stringifyAddArtboardResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"action\\":" + jsonString(value.action),
+      "\\"artboardCount\\":" + jsonNumber(value.artboardCount),
+      "\\"widthPt\\":" + jsonNumber(value.widthPt),
+      "\\"heightPt\\":" + jsonNumber(value.heightPt),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    documentName: null,
+    action: action,
+    artboardCount: 0,
+    widthPt: widthPt,
+    heightPt: heightPt,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyAddArtboardResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyAddArtboardResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  // Additive/reversible: add a NEW artboard or resize an existing one in place.
+  // Never saves, exports, or closes the document; the user keeps undo.
+  // artboardRect is [left, top, right, bottom] on a y-up axis, so a top-left
+  // anchor (left, top) with width/height is [left, top, left + widthPt,
+  // top - heightPt].
+  try {
+    var count = collectionLength(doc.artboards);
+    if (action == "resize") {
+      if (artboardIndex >= count) {
+        result.artboardCount = count;
+        result.error = "artboard_index_out_of_range";
+        return stringifyAddArtboardResult(result);
+      }
+      var existingRect = doc.artboards[artboardIndex].artboardRect;
+      var keepLeft = Number(existingRect[0]);
+      var keepTop = Number(existingRect[1]);
+      doc.artboards[artboardIndex].artboardRect = [keepLeft, keepTop, keepLeft + widthPt, keepTop - heightPt];
+      result.artboardCount = collectionLength(doc.artboards);
+      result.ok = true;
+    } else {
+      // add: default placement is to the RIGHT of the existing artboards — left
+      // is the max existing right edge + a gap, top is the last artboard's top.
+      var gap = 20;
+      var placeLeft;
+      var placeTop;
+      if (xPt !== null) {
+        placeLeft = Number(xPt);
+      } else {
+        var maxRight = 0;
+        var hasRight = false;
+        for (var i = 0; i < count; i += 1) {
+          try {
+            var right = Number(doc.artboards[i].artboardRect[2]);
+            if (!hasRight || right > maxRight) { maxRight = right; hasRight = true; }
+          } catch (_) {}
+        }
+        placeLeft = hasRight ? (maxRight + gap) : 0;
+      }
+      if (yPt !== null) {
+        placeTop = Number(yPt);
+      } else {
+        var keepTopAdd = 0;
+        if (count > 0) {
+          try { keepTopAdd = Number(doc.artboards[count - 1].artboardRect[1]); } catch (_) { keepTopAdd = 0; }
+        }
+        placeTop = keepTopAdd;
+      }
+      doc.artboards.add([placeLeft, placeTop, placeLeft + widthPt, placeTop - heightPt]);
+      result.artboardCount = collectionLength(doc.artboards);
+      result.ok = true;
+    }
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  return stringifyAddArtboardResult(result);
+`;
+}
+
+export function buildIllustratorAddArtboardJsx(params: IllustratorAddArtboardParams): IllustratorExtendScriptBuild {
+  const validated = validateIllustratorAddArtboardParams(params);
+  if (!validated.ok) return { jsx: '', errors: validated.errors };
+  const normalized = validated.params;
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: normalized.expectedDocumentName })}
+${illustratorAddArtboardJsxBody({
+    action: normalized.action,
+    widthPt: normalized.widthPt,
+    heightPt: normalized.heightPt,
+    artboardIndex: normalized.artboardIndex,
+    xPt: normalized.xPt,
+    yPt: normalized.yPt,
+  })}
+}());
+`;
+  return { jsx, errors: [] };
+}
+
+// ─── 10) Align/distribute (reposition the current selection in place) ────────
+//
+// "Align these left / center / distribute evenly." Repositions the currently
+// selected objects (>= 2) via the typed DOM: it reads each item's visibleBounds
+// and writes item.position (top-left) — no menu command, no ActionManager. It
+// mutates the OPEN target document in place, NEVER saves/exports/closes it (the
+// user keeps undo, so every move is reversible), and stays entirely on the
+// typed DOM (no executeAction/executeMenuCommand). alignment snaps one axis to
+// the selection bounding box (left|centerH|right on X; top|centerV|bottom on Y);
+// distribute keeps the two extreme items fixed and evenly spaces the left-edges
+// (horizontal) or top-edges (vertical) of the rest — edge-even spacing. At least
+// one of alignment (not none) or distribute (not none) must be requested; the
+// two act on independent axes and compose. Fails closed with
+// 'no_document'/'document_mismatch'/'need_two_selected'.
+//
+// Illustrator DOM geometry: visibleBounds is [left, top, right, bottom] on a
+// y-up axis, so width = right - left, height = top - bottom, and position =
+// [left, top] sets the top-left corner in the same coordinate space.
+
+export const ILLUSTRATOR_ALIGN_ALIGNMENTS = ['left', 'centerH', 'right', 'top', 'centerV', 'bottom', 'none'] as const;
+export type IllustratorAlignAlignment = (typeof ILLUSTRATOR_ALIGN_ALIGNMENTS)[number];
+
+export const ILLUSTRATOR_ALIGN_DISTRIBUTIONS = ['none', 'horizontal', 'vertical'] as const;
+export type IllustratorAlignDistribute = (typeof ILLUSTRATOR_ALIGN_DISTRIBUTIONS)[number];
+
+export type IllustratorAlignParams = {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  /** left|centerH|right (X axis) | top|centerV|bottom (Y axis) | none (case-sensitive). */
+  alignment: IllustratorAlignAlignment | string;
+  /** none | horizontal (space left-edges) | vertical (space top-edges) (case-sensitive). */
+  distribute: IllustratorAlignDistribute | string;
+};
+
+export type NormalizedIllustratorAlignParams = {
+  appName: string;
+  expectedDocumentName: string;
+  alignment: IllustratorAlignAlignment;
+  distribute: IllustratorAlignDistribute;
+};
+
+export function validateIllustratorAlignParams(
+  params: IllustratorAlignParams,
+): { ok: true; params: NormalizedIllustratorAlignParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizeIllustratorBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+  const expectedDocumentName = normalizeIllustratorExpectedDocumentName(params?.expectedDocumentName);
+  if (!expectedDocumentName.ok) errors.push(expectedDocumentName.error);
+  // Case-sensitive enums (centerH/centerV are camelCase) — do NOT lowercase.
+  const alignment = String(params?.alignment ?? '').trim();
+  if (!(ILLUSTRATOR_ALIGN_ALIGNMENTS as readonly string[]).includes(alignment)) {
+    errors.push('alignment must be left, centerH, right, top, centerV, bottom, or none.');
+  }
+  const distribute = String(params?.distribute ?? '').trim();
+  if (!(ILLUSTRATOR_ALIGN_DISTRIBUTIONS as readonly string[]).includes(distribute)) {
+    errors.push('distribute must be none, horizontal, or vertical.');
+  }
+  // At least one action must be requested (only when both enums are otherwise
+  // valid, so a bad-enum error is not drowned by this one).
+  if (errors.length === 0 && alignment === 'none' && distribute === 'none') {
+    errors.push('At least one of alignment (not none) or distribute (not none) is required.');
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Illustrator',
+      expectedDocumentName: expectedDocumentName.ok ? expectedDocumentName.value : '',
+      alignment: alignment as IllustratorAlignAlignment,
+      distribute: distribute as IllustratorAlignDistribute,
+    },
+  };
+}
+
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): illustratorAlignJsxBody — keep this JSX
+ * body byte-identical with the bridge duplicate. It repositions the OPEN
+ * document's current selection (>= 2) in place via item.position (top-left)
+ * measured from visibleBounds, and NEVER saves, exports, or closes it; the user
+ * keeps undo. alignment snaps one axis to the selection bounding box; distribute
+ * evenly spaces left-edges (horizontal) or top-edges (vertical) between the two
+ * extreme items. The two act on independent axes and compose. Typed DOM only —
+ * no menu command, no raw action dispatch.
+ */
+function illustratorAlignJsxBody(
+  { alignment, distribute }:
+  { alignment: IllustratorAlignAlignment; distribute: IllustratorAlignDistribute },
+): string {
+  return `
+  var alignment = ${jsxLiteral(String(alignment ?? ''))};
+  var distribute = ${jsxLiteral(String(distribute ?? ''))};
+
+  function stringifyAlignResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"alignment\\":" + jsonString(value.alignment),
+      "\\"distribute\\":" + jsonString(value.distribute),
+      "\\"alignedCount\\":" + jsonNumber(value.alignedCount),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    documentName: null,
+    alignment: alignment,
+    distribute: distribute,
+    alignedCount: 0,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyAlignResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyAlignResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  // Snapshot the live selection into a stable array BEFORE moving anything:
+  // doc.selection returns a fresh array, so capture references first. Align and
+  // distribute both need at least two objects to have any meaning.
+  var selection = null;
+  try { selection = doc.selection; } catch (_) { selection = null; }
+  var selectionCount = 0;
+  try { selectionCount = selection ? Number(selection.length) || 0 : 0; } catch (_) { selectionCount = 0; }
+  if (selectionCount < 2) {
+    result.error = "need_two_selected";
+    return stringifyAlignResult(result);
+  }
+  var items = [];
+  for (var s = 0; s < selectionCount; s += 1) {
+    try { if (selection[s]) items.push(selection[s]); } catch (_) {}
+  }
+  if (items.length < 2) {
+    result.error = "need_two_selected";
+    return stringifyAlignResult(result);
+  }
+
+  // Read every selected item's visibleBounds up front ([left, top, right,
+  // bottom] on the y-up axis, so width = right - left and height = top -
+  // bottom). Fail closed if any item exposes no bounds.
+  var bounds = [];
+  for (var b = 0; b < items.length; b += 1) {
+    var vb = null;
+    try { vb = items[b].visibleBounds; } catch (_) { vb = null; }
+    if (!vb) {
+      result.error = "bounds_unavailable";
+      return stringifyAlignResult(result);
+    }
+    var vLeft = Number(vb[0]);
+    var vTop = Number(vb[1]);
+    var vRight = Number(vb[2]);
+    var vBottom = Number(vb[3]);
+    bounds.push({
+      left: vLeft,
+      top: vTop,
+      right: vRight,
+      bottom: vBottom,
+      width: vRight - vLeft,
+      height: vTop - vBottom
+    });
+  }
+
+  // The target top-left of each item starts at its current position; the align
+  // and distribute passes below each adjust one axis, then a single apply pass
+  // writes the result (so combining an align on one axis with a distribute on
+  // the other composes cleanly, and each item is moved at most once).
+  var targetLeft = [];
+  var targetTop = [];
+  for (var t = 0; t < items.length; t += 1) {
+    targetLeft.push(bounds[t].left);
+    targetTop.push(bounds[t].top);
+  }
+
+  try {
+    // ALIGN: snap one axis to the selection bounding box. left|centerH|right
+    // move the X (left) edge; top|centerV|bottom move the Y (top) edge. position
+    // sets the top-left, so bottom-align puts the item's TOP at bboxBottom +
+    // height and centerV puts it at bboxCenterY + height/2 (y-up).
+    if (alignment !== "none") {
+      var boxLeft = bounds[0].left;
+      var boxTop = bounds[0].top;
+      var boxRight = bounds[0].right;
+      var boxBottom = bounds[0].bottom;
+      for (var m = 1; m < bounds.length; m += 1) {
+        if (bounds[m].left < boxLeft) boxLeft = bounds[m].left;
+        if (bounds[m].top > boxTop) boxTop = bounds[m].top;
+        if (bounds[m].right > boxRight) boxRight = bounds[m].right;
+        if (bounds[m].bottom < boxBottom) boxBottom = bounds[m].bottom;
+      }
+      var centerX = (boxLeft + boxRight) / 2;
+      var centerY = (boxTop + boxBottom) / 2;
+      for (var a = 0; a < items.length; a += 1) {
+        if (alignment === "left") {
+          targetLeft[a] = boxLeft;
+        } else if (alignment === "right") {
+          targetLeft[a] = boxRight - bounds[a].width;
+        } else if (alignment === "centerH") {
+          targetLeft[a] = centerX - bounds[a].width / 2;
+        } else if (alignment === "top") {
+          targetTop[a] = boxTop;
+        } else if (alignment === "bottom") {
+          targetTop[a] = boxBottom + bounds[a].height;
+        } else if (alignment === "centerV") {
+          targetTop[a] = centerY + bounds[a].height / 2;
+        }
+      }
+    }
+
+    // DISTRIBUTE: keep the two extreme items fixed and evenly space the
+    // left-edges (horizontal) or top-edges (vertical) of the rest across the
+    // span — edge-even spacing (an equal step between successive edges). Sort a
+    // copy of the index list so the snapshot order is preserved for the apply.
+    if (distribute === "horizontal") {
+      var orderH = [];
+      for (var oh = 0; oh < items.length; oh += 1) orderH.push(oh);
+      orderH.sort(function (p, q) { return bounds[p].left - bounds[q].left; });
+      var firstLeft = bounds[orderH[0]].left;
+      var lastLeft = bounds[orderH[orderH.length - 1]].left;
+      var stepH = (lastLeft - firstLeft) / (orderH.length - 1);
+      for (var rh = 0; rh < orderH.length; rh += 1) {
+        targetLeft[orderH[rh]] = firstLeft + stepH * rh;
+      }
+    } else if (distribute === "vertical") {
+      var orderV = [];
+      for (var ov = 0; ov < items.length; ov += 1) orderV.push(ov);
+      orderV.sort(function (p, q) { return bounds[p].top - bounds[q].top; });
+      var firstTop = bounds[orderV[0]].top;
+      var lastTop = bounds[orderV[orderV.length - 1]].top;
+      var stepV = (lastTop - firstTop) / (orderV.length - 1);
+      for (var rv = 0; rv < orderV.length; rv += 1) {
+        targetTop[orderV[rv]] = firstTop + stepV * rv;
+      }
+    }
+
+    // Apply the computed top-left to each item in place. position never saves,
+    // exports, or closes the document; the user keeps undo. Per-item failures
+    // are counted out and the first message is surfaced.
+    var aligned = 0;
+    for (var i = 0; i < items.length; i += 1) {
+      try {
+        items[i].position = [targetLeft[i], targetTop[i]];
+        aligned += 1;
+      } catch (errItem) {
+        if (!result.error) result.error = String(errItem && errItem.message ? errItem.message : errItem);
+      }
+    }
+    result.alignedCount = aligned;
+    result.ok = aligned > 0;
+    if (aligned < 1 && !result.error) result.error = "align_failed";
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  return stringifyAlignResult(result);
+`;
+}
+
+export function buildIllustratorAlignJsx(params: IllustratorAlignParams): IllustratorExtendScriptBuild {
+  const validated = validateIllustratorAlignParams(params);
+  if (!validated.ok) return { jsx: '', errors: validated.errors };
+  const normalized = validated.params;
+  const jsx = `
+(function () {
+${illustratorExtendScriptJsxPrelude({ expectedDocumentName: normalized.expectedDocumentName })}
+${illustratorAlignJsxBody({
+    alignment: normalized.alignment,
+    distribute: normalized.distribute,
+  })}
+}());
+`;
+  return { jsx, errors: [] };
+}
+
 // ─── Receipt types + guards ─────────────────────────────────────────────────
 
 export type IllustratorDocumentSummary = {
@@ -2310,5 +3007,78 @@ export function isIllustratorSetAppearanceReceipt(value: unknown): value is Illu
     && isFiniteNumber(v.appliedToCount)
     && typeof v.fillApplied === 'boolean'
     && typeof v.strokeApplied === 'boolean'
+    && isNullableString(v.error);
+}
+
+export type IllustratorGroupReceipt = {
+  ok: boolean;
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  /** Selected objects moved into the new group (0 on failure; >= 2 on success). */
+  groupedCount: number;
+  error: string | null;
+};
+
+export function isIllustratorGroupReceipt(value: unknown): value is IllustratorGroupReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.ok === 'boolean'
+    && isNullableString(v.appName)
+    && typeof v.appRunning === 'boolean'
+    && isNullableString(v.documentName)
+    && isFiniteNumber(v.groupedCount)
+    && isNullableString(v.error);
+}
+
+export type IllustratorAddArtboardReceipt = {
+  ok: boolean;
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  action: IllustratorAddArtboardAction;
+  /** Total artboards in the document AFTER the op (+1 on add; unchanged on resize). */
+  artboardCount: number;
+  widthPt: number;
+  heightPt: number;
+  error: string | null;
+};
+
+export function isIllustratorAddArtboardReceipt(value: unknown): value is IllustratorAddArtboardReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.ok === 'boolean'
+    && isNullableString(v.appName)
+    && typeof v.appRunning === 'boolean'
+    && isNullableString(v.documentName)
+    && (ILLUSTRATOR_ADD_ARTBOARD_ACTIONS as readonly string[]).includes(String(v.action))
+    && isFiniteNumber(v.artboardCount)
+    && isFiniteNumber(v.widthPt)
+    && isFiniteNumber(v.heightPt)
+    && isNullableString(v.error);
+}
+
+export type IllustratorAlignReceipt = {
+  ok: boolean;
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  alignment: IllustratorAlignAlignment;
+  distribute: IllustratorAlignDistribute;
+  /** Selected objects repositioned (0 on failure; >= 2 on success). */
+  alignedCount: number;
+  error: string | null;
+};
+
+export function isIllustratorAlignReceipt(value: unknown): value is IllustratorAlignReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.ok === 'boolean'
+    && isNullableString(v.appName)
+    && typeof v.appRunning === 'boolean'
+    && isNullableString(v.documentName)
+    && (ILLUSTRATOR_ALIGN_ALIGNMENTS as readonly string[]).includes(String(v.alignment))
+    && (ILLUSTRATOR_ALIGN_DISTRIBUTIONS as readonly string[]).includes(String(v.distribute))
+    && isFiniteNumber(v.alignedCount)
     && isNullableString(v.error);
 }

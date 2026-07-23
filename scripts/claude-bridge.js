@@ -2317,8 +2317,8 @@ const server = http.createServer(async (req, res) => {
            'menu_click', 'indesign_find_change', 'indesign_batch_find_change', 'indesign_document_status', 'indesign_text_inventory', 'indesign_set_layer_state', 'indesign_update_text_layer', 'indesign_batch_update_text_layers', 'indesign_relink_asset', 'indesign_export_proof', 'indesign_package_document',
            'photoshop_document_status', 'photoshop_layer_inventory', 'photoshop_set_layer_state', 'photoshop_update_text_layer', 'photoshop_place_asset', 'photoshop_export_proof',
            'photoshop_apply_adjustment_layer', 'photoshop_apply_selection_or_mask', 'photoshop_resize_canvas_or_image',
-           'photoshop_manage_layers', 'photoshop_transform_layer', 'photoshop_convert_color_mode', 'photoshop_set_layer_appearance', 'photoshop_create_text_layer',
-           'illustrator_document_status', 'illustrator_export_proof', 'illustrator_vectorize', 'illustrator_arrange', 'illustrator_add_text', 'illustrator_add_shape', 'illustrator_set_appearance',
+           'photoshop_manage_layers', 'photoshop_transform_layer', 'photoshop_convert_color_mode', 'photoshop_set_layer_appearance', 'photoshop_create_text_layer', 'photoshop_add_fill_layer',
+           'illustrator_document_status', 'illustrator_export_proof', 'illustrator_vectorize', 'illustrator_arrange', 'illustrator_add_text', 'illustrator_add_shape', 'illustrator_set_appearance', 'illustrator_group', 'illustrator_add_artboard', 'illustrator_align',
            'screenshot', 'wait_for_app', 'open_url', 'open_path', 'stage_attachment', 'stage_attachment_manifest', 'click_at', 'screen_size',
            ...(fs.existsSync(path.join(__dirname, 'bin', 'uc-ax-helper')) ? ['a11y_tree', 'click_element', 'set_element_value'] : [])]
         : [],
@@ -5092,6 +5092,65 @@ end tell`;
       return;
     }
 
+    if (url === '/desktop/photoshop_add_fill_layer' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Photoshop').trim() || 'Photoshop';
+        const targetDocumentName = String(parsed?.targetDocumentName || parsed?.expectedDocumentName || '').trim();
+        const hexColor = String(parsed?.hexColor || '').trim();
+        const layerName = String(parsed?.layerName || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (targetDocumentName.length > 260 || /[\x00]/.test(targetDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'targetDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        if (!/^#[0-9a-fA-F]{6}$/.test(hexColor)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'hexColor must be a hex color in #RRGGBB format.' }));
+          return;
+        }
+        if (layerName.length > 160 || /[\x00-\x1f\u2028\u2029]/.test(layerName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'layerName must be <= 160 chars and cannot contain control chars.' }));
+          return;
+        }
+        const built = buildPhotoshopAddFillLayerScript({ appName, targetDocumentName, hexColor, layerName });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Photoshop app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Photoshop fill layer failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: result?.ok === true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            targetDocumentName: targetDocumentName || null,
+            hexColor,
+            layerName: result?.layerName ? String(result.layerName).slice(0, 260) : (layerName || null),
+            layerCountBefore: Number.isFinite(Number(result?.layerCountBefore)) ? Number(result.layerCountBefore) : 0,
+            layerCountAfter: Number.isFinite(Number(result?.layerCountAfter)) ? Number(result.layerCountAfter) : 0,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
     if (url === '/desktop/photoshop_apply_selection_or_mask' && req.method === 'POST') {
       readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
         if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
@@ -6602,6 +6661,61 @@ end tell`;
       return;
     }
 
+    // ── Illustrator group (combine the current selection into one group) ─
+    //
+    // LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): validation
+    // (app-name pattern, name bounds, error strings) and the JSX builder are
+    // duplicated from the pure module. This MUTATES the OPEN document in place
+    // (groups the selection) but NEVER saves/exports/closes it — the user
+    // keeps undo. Group-only: there is no reliable DOM ungroup. No output
+    // file, so (like illustrator_arrange) there is NO local-file grant and NO
+    // stat: the receipt is the JSX result. Approval is enforced at the tool
+    // layer. Fails closed on no_document/document_mismatch/need_two_selected.
+    if (url === '/desktop/illustrator_group' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Illustrator').trim() || 'Illustrator';
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        const built = buildIllustratorGroupScript({ appName, expectedDocumentName });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Illustrator app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator group failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const toNumber = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: result?.ok === true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            groupedCount: toNumber(result?.groupedCount),
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
     // ── Illustrator add text (additive point-text frame) ─────────────
     //
     // LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): validation
@@ -6981,6 +7095,185 @@ end tell`;
             appliedToCount: toNumber(result?.appliedToCount),
             fillApplied: result?.fillApplied === true,
             strokeApplied: result?.strokeApplied === true,
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    // ── Illustrator add/resize artboard (artboard geometry) ──────────
+    //
+    // LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): validation
+    // (app-name pattern, name bounds, action enum, dim/index/coord checks,
+    // error strings) and the JSX builder are duplicated from the pure
+    // module. This ADDS a new artboard or resizes an existing one in the
+    // OPEN document but NEVER saves/exports/closes it — the user keeps undo.
+    // No output file, so (like illustrator_add_text) there is NO local-file
+    // grant and NO stat: the receipt is the JSX result. Approval is enforced
+    // at the tool layer. Fails closed on no_document/document_mismatch and
+    // (resize) artboard_index_out_of_range.
+    if (url === '/desktop/illustrator_add_artboard' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Illustrator').trim() || 'Illustrator';
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        const action = String(parsed?.action || '').trim().toLowerCase();
+        if (!ILLUSTRATOR_ADD_ARTBOARD_ACTIONS.includes(action)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `action must be one of: ${ILLUSTRATOR_ADD_ARTBOARD_ACTIONS.join(', ')}.` }));
+          return;
+        }
+        const validDim = (value) => (typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT);
+        if (!validDim(parsed?.widthPt)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `widthPt must be a finite number greater than 0 and <= ${ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT}.` }));
+          return;
+        }
+        if (!validDim(parsed?.heightPt)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: `heightPt must be a finite number greater than 0 and <= ${ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT}.` }));
+          return;
+        }
+        let artboardIndex = 0;
+        if (parsed?.artboardIndex !== undefined && parsed?.artboardIndex !== null) {
+          if (typeof parsed.artboardIndex !== 'number' || !Number.isFinite(parsed.artboardIndex) || !Number.isInteger(parsed.artboardIndex) || parsed.artboardIndex < 0 || parsed.artboardIndex > ILLUSTRATOR_ADD_ARTBOARD_MAX_INDEX) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `artboardIndex must be an integer between 0 and ${ILLUSTRATOR_ADD_ARTBOARD_MAX_INDEX}.` }));
+            return;
+          }
+          artboardIndex = parsed.artboardIndex;
+        }
+        const validCoord = (value) => (typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= ILLUSTRATOR_ADD_ARTBOARD_MAX_COORD_PT);
+        let xPt = null;
+        if (parsed?.xPt !== undefined && parsed?.xPt !== null) {
+          if (!validCoord(parsed.xPt)) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `xPt must be a finite number between -${ILLUSTRATOR_ADD_ARTBOARD_MAX_COORD_PT} and ${ILLUSTRATOR_ADD_ARTBOARD_MAX_COORD_PT}.` }));
+            return;
+          }
+          xPt = parsed.xPt;
+        }
+        let yPt = null;
+        if (parsed?.yPt !== undefined && parsed?.yPt !== null) {
+          if (!validCoord(parsed.yPt)) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: `yPt must be a finite number between -${ILLUSTRATOR_ADD_ARTBOARD_MAX_COORD_PT} and ${ILLUSTRATOR_ADD_ARTBOARD_MAX_COORD_PT}.` }));
+            return;
+          }
+          yPt = parsed.yPt;
+        }
+        const built = buildIllustratorAddArtboardScript({ appName, expectedDocumentName, action, widthPt: parsed.widthPt, heightPt: parsed.heightPt, artboardIndex, xPt, yPt });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Illustrator app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator add artboard failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const toNumber = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: result?.ok === true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            action: result?.action ? String(result.action).slice(0, 40) : action,
+            artboardCount: toNumber(result?.artboardCount),
+            widthPt: toNumber(result?.widthPt),
+            heightPt: toNumber(result?.heightPt),
+            error: result?.error ? String(result.error).slice(0, 500) : null,
+          }));
+        });
+      });
+      return;
+    }
+
+    // ── Illustrator align/distribute (reposition the selection) ──────
+    //
+    // LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): validation
+    // (app-name pattern, name bounds, alignment/distribute enums, the
+    // at-least-one-action check, error strings) and the JSX builder are
+    // duplicated from the pure module. This MUTATES the OPEN document in
+    // place (repositions the selection via item.position) but NEVER
+    // saves/exports/closes it — the user keeps undo. No output file, so
+    // (like illustrator_arrange) there is NO local-file grant and NO stat:
+    // the receipt is the JSX result. Approval is enforced at the tool layer.
+    // Fails closed on no_document/document_mismatch/need_two_selected.
+    if (url === '/desktop/illustrator_align' && req.method === 'POST') {
+      readJsonBody(req, 8 * 1024, (parsed, bodyErr) => {
+        if (bodyErr) { res.writeHead(400, CORS); res.end(JSON.stringify({ ok: false, error: bodyErr })); return; }
+        const appName = String(parsed?.appName || 'Illustrator').trim() || 'Illustrator';
+        const expectedDocumentName = String(parsed?.expectedDocumentName || '').trim();
+        if (!/^[A-Za-z0-9 .\-_()]+$/.test(appName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Invalid appName.' }));
+          return;
+        }
+        if (expectedDocumentName.length > 260 || /[\x00]/.test(expectedDocumentName)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'expectedDocumentName must be <= 260 chars and cannot contain NUL.' }));
+          return;
+        }
+        const alignment = String(parsed?.alignment || '').trim();
+        if (!ILLUSTRATOR_ALIGN_ALIGNMENTS.includes(alignment)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'alignment must be left, centerH, right, top, centerV, bottom, or none.' }));
+          return;
+        }
+        const distribute = String(parsed?.distribute || '').trim();
+        if (!ILLUSTRATOR_ALIGN_DISTRIBUTIONS.includes(distribute)) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'distribute must be none, horizontal, or vertical.' }));
+          return;
+        }
+        if (alignment === 'none' && distribute === 'none') {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'At least one of alignment (not none) or distribute (not none) is required.' }));
+          return;
+        }
+        const built = buildIllustratorAlignScript({ appName, expectedDocumentName, alignment, distribute });
+        if (!built) {
+          res.writeHead(400, CORS);
+          res.end(JSON.stringify({ ok: false, error: 'Could not resolve Illustrator app.' }));
+          return;
+        }
+        exec(`osascript -e ${shellSingleQuote(built.script)}`, { timeout: 20000, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+          if (err) {
+            res.writeHead(400, CORS);
+            res.end(JSON.stringify({ ok: false, error: (stderr || err.message || 'Illustrator align failed').toString().slice(0, 1000) }));
+            return;
+          }
+          let result = null;
+          try { result = JSON.parse(String(stdout || '').trim()); } catch {}
+          const toNumber = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
+          res.writeHead(200, CORS);
+          res.end(JSON.stringify({
+            ok: result?.ok === true,
+            appName: built.appName,
+            appRunning: result?.appRunning === true,
+            documentName: result?.documentName ? String(result.documentName).slice(0, 260) : null,
+            expectedDocumentName: expectedDocumentName || null,
+            alignment: result?.alignment ? String(result.alignment).slice(0, 40) : alignment,
+            distribute: result?.distribute ? String(result.distribute).slice(0, 40) : distribute,
+            alignedCount: toNumber(result?.alignedCount),
             error: result?.error ? String(result.error).slice(0, 500) : null,
           }));
         });
@@ -12451,6 +12744,19 @@ function photoshopNotRunningJson(targetName, kind) {
       error: 'Photoshop is not running.',
     });
   }
+  if (kind === 'fill_layer') {
+    return JSON.stringify({
+      ok: false,
+      appRunning: false,
+      appName: targetName,
+      documentName: null,
+      hexColor: '',
+      layerName: null,
+      layerCountBefore: 0,
+      layerCountAfter: 0,
+      error: 'Photoshop is not running.',
+    });
+  }
   return JSON.stringify(base);
 }
 
@@ -14207,6 +14513,114 @@ ${photoshopCreateTextLayerJsxBody({
   return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'create_text_layer'));
 }
 
+// LOCKSTEP(src/lib/photoshopExtendScriptAdapters.ts): photoshopAddFillLayerJsxBody —
+// keep this JSX body byte-identical with the pure module's copy. It adds ONE new
+// solid-color fill (content) layer via the ActionManager `make` descriptor (the
+// sanctioned content-layer scripting API), reading the RGB channels from #RRGGBB
+// (green's key is literally "grain"). Additive/reversible; NEVER saves or closes.
+function photoshopAddFillLayerJsxBody({ hexColor, layerName }) {
+  return `
+  var hexColor = ${jsxLiteral(String(hexColor ?? ''))};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+
+  function stringifyFillLayerResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"hexColor\\":" + jsonString(value.hexColor),
+      "\\"layerName\\":" + jsonNullableString(value.layerName),
+      "\\"layerCountBefore\\":" + jsonNumber(value.layerCountBefore),
+      "\\"layerCountAfter\\":" + jsonNumber(value.layerCountAfter),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Photoshop"),
+    documentName: null,
+    hexColor: hexColor,
+    layerName: null,
+    layerCountBefore: 0,
+    layerCountAfter: 0,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyFillLayerResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyFillLayerResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+  result.layerCountBefore = getLayerStats(doc).layerCount;
+
+  var h = String(hexColor).charAt(0) === "#" ? String(hexColor).substring(1) : String(hexColor);
+  var redChannel = parseInt(h.substring(0, 2), 16);
+  var greenChannel = parseInt(h.substring(2, 4), 16);
+  var blueChannel = parseInt(h.substring(4, 6), 16);
+  if (isNaN(redChannel) || isNaN(greenChannel) || isNaN(blueChannel)) {
+    result.error = "invalid_hex_color";
+    return stringifyFillLayerResult(result);
+  }
+
+  // Additive-only: create ONE new solid-color content layer (its own layer,
+  // fully reversible) via the ActionManager make descriptor. Never edits,
+  // moves, combines, or removes any existing layer or pixel on any path.
+  try {
+    var makeDescriptor = new ActionDescriptor();
+    var contentReference = new ActionReference();
+    contentReference.putClass(stringIDToTypeID("contentLayer"));
+    makeDescriptor.putReference(stringIDToTypeID("null"), contentReference);
+    var colorDescriptor = new ActionDescriptor();
+    colorDescriptor.putDouble(stringIDToTypeID("red"), redChannel);
+    colorDescriptor.putDouble(stringIDToTypeID("grain"), greenChannel);
+    colorDescriptor.putDouble(stringIDToTypeID("blue"), blueChannel);
+    var solidDescriptor = new ActionDescriptor();
+    solidDescriptor.putObject(stringIDToTypeID("color"), stringIDToTypeID("RGBColor"), colorDescriptor);
+    var usingDescriptor = new ActionDescriptor();
+    usingDescriptor.putObject(stringIDToTypeID("type"), stringIDToTypeID("solidColorLayer"), solidDescriptor);
+    makeDescriptor.putObject(stringIDToTypeID("using"), stringIDToTypeID("contentLayer"), usingDescriptor);
+    executeAction(stringIDToTypeID("make"), makeDescriptor, DialogModes.NO);
+    if (layerName) {
+      try { doc.activeLayer.name = layerName; } catch (_) {}
+    }
+    try { result.layerName = String(doc.activeLayer.name || ""); } catch (_) {}
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  result.layerCountAfter = getLayerStats(doc).layerCount;
+  if (result.ok && result.layerCountAfter <= result.layerCountBefore) {
+    result.ok = false;
+    result.error = "fill_layer_not_created";
+  }
+  return stringifyFillLayerResult(result);
+`;
+}
+
+function buildPhotoshopAddFillLayerScript({ appName, targetDocumentName, hexColor, layerName }) {
+  const targetName = resolvePhotoshopScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${photoshopJsxPrelude({ expectedDocumentName: targetDocumentName, sourceDocumentPath: '' })}
+${photoshopAddFillLayerJsxBody({
+    hexColor,
+    layerName,
+  })}
+}());
+`;
+  return buildPhotoshopAppleScript(targetName, jsx, photoshopNotRunningJson(targetName, 'fill_layer'));
+}
+
 // ── Illustrator ExtendScript base pair (script builders) ─────────────────
 //
 // Same mechanism as the Photoshop tools above: ExtendScript delivered via
@@ -14252,6 +14666,16 @@ const ILLUSTRATOR_ADD_SHAPE_MAX_STROKE_WIDTH_PT = 1000;
 // LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): set_appearance consts
 const ILLUSTRATOR_SET_APPEARANCE_MAX_STROKE_WIDTH_PT = 1000;
 const ILLUSTRATOR_SET_APPEARANCE_MAX_SWATCH_NAME = 200;
+
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): add_artboard consts
+const ILLUSTRATOR_ADD_ARTBOARD_ACTIONS = ['add', 'resize'];
+const ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT = 16000;
+const ILLUSTRATOR_ADD_ARTBOARD_MAX_COORD_PT = 100000;
+const ILLUSTRATOR_ADD_ARTBOARD_MAX_INDEX = 1000;
+
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts): align consts
+const ILLUSTRATOR_ALIGN_ALIGNMENTS = ['left', 'centerH', 'right', 'top', 'centerV', 'bottom', 'none'];
+const ILLUSTRATOR_ALIGN_DISTRIBUTIONS = ['none', 'horizontal', 'vertical'];
 
 const runningIllustratorResolveCache = new Map();
 
@@ -14441,6 +14865,41 @@ function illustratorNotRunningJson(targetName, kind) {
       appliedToCount: 0,
       fillApplied: false,
       strokeApplied: false,
+      error: 'Illustrator is not running.',
+    });
+  }
+  if (kind === 'group') {
+    return JSON.stringify({
+      ok: false,
+      appRunning: false,
+      appName: targetName,
+      documentName: null,
+      groupedCount: 0,
+      error: 'Illustrator is not running.',
+    });
+  }
+  if (kind === 'add_artboard') {
+    return JSON.stringify({
+      ok: false,
+      appRunning: false,
+      appName: targetName,
+      documentName: null,
+      action: '',
+      artboardCount: 0,
+      widthPt: 0,
+      heightPt: 0,
+      error: 'Illustrator is not running.',
+    });
+  }
+  if (kind === 'align') {
+    return JSON.stringify({
+      ok: false,
+      appRunning: false,
+      appName: targetName,
+      documentName: null,
+      alignment: '',
+      distribute: '',
+      alignedCount: 0,
       error: 'Illustrator is not running.',
     });
   }
@@ -14968,6 +15427,93 @@ function illustratorArrangeJsxBody({ direction }) {
 }
 
 // LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts):
+// illustratorGroupJsxBody — keep byte-identical. Combines the OPEN document's
+// current selection (>= 2) into ONE new group via groupItems.add() + move;
+// never saves, exports, or closes it (the user keeps undo). Group-only.
+function illustratorGroupJsxBody() {
+  return `
+  function stringifyGroupResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"groupedCount\\":" + jsonNumber(value.groupedCount),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    documentName: null,
+    groupedCount: 0,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyGroupResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyGroupResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  // Snapshot the live selection into a stable array BEFORE grouping: moving an
+  // item into the new group reindexes doc.selection mid-loop, so we capture
+  // references first and move each in place. The user keeps undo. Group-only:
+  // Illustrator's DOM has no reliable ungroup, so this op never ungroups.
+  var selection = null;
+  try { selection = doc.selection; } catch (_) { selection = null; }
+  var selectionCount = 0;
+  try { selectionCount = selection ? Number(selection.length) || 0 : 0; } catch (_) { selectionCount = 0; }
+  if (selectionCount < 2) {
+    result.error = "need_two_selected";
+    return stringifyGroupResult(result);
+  }
+  var items = [];
+  for (var s = 0; s < selectionCount; s += 1) {
+    try { if (selection[s]) items.push(selection[s]); } catch (_) {}
+  }
+  if (items.length < 2) {
+    result.error = "need_two_selected";
+    return stringifyGroupResult(result);
+  }
+
+  // Create ONE new empty group, then move each snapshotted item into it via
+  // move(group, ElementPlacement.PLACEATEND). move() never saves, exports, or
+  // closes the document; per-item failures are counted out and the first
+  // message is surfaced.
+  var group = null;
+  try {
+    group = doc.groupItems.add();
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+    return stringifyGroupResult(result);
+  }
+  var grouped = 0;
+  for (var i = 0; i < items.length; i += 1) {
+    try {
+      items[i].move(group, ElementPlacement.PLACEATEND);
+      grouped += 1;
+    } catch (err2) {
+      if (!result.error) result.error = String(err2 && err2.message ? err2.message : err2);
+    }
+  }
+  result.groupedCount = grouped;
+  result.ok = grouped > 1;
+  if (grouped < 2 && !result.error) result.error = "group_failed";
+  return stringifyGroupResult(result);
+`;
+}
+
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts):
 // illustratorAddTextJsxBody — keep byte-identical. Adds a NEW point-text frame
 // to the OPEN document; never saves, exports, or closes it (the user keeps
 // undo). A requested font that cannot be resolved is reported as fontWarning
@@ -15460,6 +16006,309 @@ function illustratorSetAppearanceJsxBody({ fillColor, strokeColor, strokeWidthPt
 `;
 }
 
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts):
+// illustratorAddArtboardJsxBody — keep byte-identical. Adds a NEW artboard or
+// resizes an existing one in the OPEN document; never saves, exports, or closes
+// it (the user keeps undo). artboardRect is [left, top, right, bottom] on a
+// y-up axis. Fails closed with artboard_index_out_of_range when a resize index
+// is past the last artboard.
+function illustratorAddArtboardJsxBody({ action, widthPt, heightPt, artboardIndex, xPt, yPt }) {
+  const xPtLiteral = xPt == null ? 'null' : jsxLiteral(xPt);
+  const yPtLiteral = yPt == null ? 'null' : jsxLiteral(yPt);
+  return `
+  var action = ${jsxLiteral(String(action ?? ''))};
+  var widthPt = ${jsxLiteral(widthPt)};
+  var heightPt = ${jsxLiteral(heightPt)};
+  var artboardIndex = ${jsxLiteral(artboardIndex)};
+  var xPt = ${xPtLiteral};
+  var yPt = ${yPtLiteral};
+
+  function stringifyAddArtboardResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"action\\":" + jsonString(value.action),
+      "\\"artboardCount\\":" + jsonNumber(value.artboardCount),
+      "\\"widthPt\\":" + jsonNumber(value.widthPt),
+      "\\"heightPt\\":" + jsonNumber(value.heightPt),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    documentName: null,
+    action: action,
+    artboardCount: 0,
+    widthPt: widthPt,
+    heightPt: heightPt,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyAddArtboardResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyAddArtboardResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  // Additive/reversible: add a NEW artboard or resize an existing one in place.
+  // Never saves, exports, or closes the document; the user keeps undo.
+  // artboardRect is [left, top, right, bottom] on a y-up axis, so a top-left
+  // anchor (left, top) with width/height is [left, top, left + widthPt,
+  // top - heightPt].
+  try {
+    var count = collectionLength(doc.artboards);
+    if (action == "resize") {
+      if (artboardIndex >= count) {
+        result.artboardCount = count;
+        result.error = "artboard_index_out_of_range";
+        return stringifyAddArtboardResult(result);
+      }
+      var existingRect = doc.artboards[artboardIndex].artboardRect;
+      var keepLeft = Number(existingRect[0]);
+      var keepTop = Number(existingRect[1]);
+      doc.artboards[artboardIndex].artboardRect = [keepLeft, keepTop, keepLeft + widthPt, keepTop - heightPt];
+      result.artboardCount = collectionLength(doc.artboards);
+      result.ok = true;
+    } else {
+      // add: default placement is to the RIGHT of the existing artboards — left
+      // is the max existing right edge + a gap, top is the last artboard's top.
+      var gap = 20;
+      var placeLeft;
+      var placeTop;
+      if (xPt !== null) {
+        placeLeft = Number(xPt);
+      } else {
+        var maxRight = 0;
+        var hasRight = false;
+        for (var i = 0; i < count; i += 1) {
+          try {
+            var right = Number(doc.artboards[i].artboardRect[2]);
+            if (!hasRight || right > maxRight) { maxRight = right; hasRight = true; }
+          } catch (_) {}
+        }
+        placeLeft = hasRight ? (maxRight + gap) : 0;
+      }
+      if (yPt !== null) {
+        placeTop = Number(yPt);
+      } else {
+        var keepTopAdd = 0;
+        if (count > 0) {
+          try { keepTopAdd = Number(doc.artboards[count - 1].artboardRect[1]); } catch (_) { keepTopAdd = 0; }
+        }
+        placeTop = keepTopAdd;
+      }
+      doc.artboards.add([placeLeft, placeTop, placeLeft + widthPt, placeTop - heightPt]);
+      result.artboardCount = collectionLength(doc.artboards);
+      result.ok = true;
+    }
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  return stringifyAddArtboardResult(result);
+`;
+}
+
+// LOCKSTEP(src/lib/illustratorExtendScriptAdapters.ts):
+// illustratorAlignJsxBody — keep byte-identical. Repositions the OPEN
+// document's current selection (>= 2) in place via item.position (top-left)
+// measured from visibleBounds; never saves, exports, or closes it (the user
+// keeps undo). alignment snaps one axis to the selection bounding box;
+// distribute evenly spaces left-edges (horizontal) or top-edges (vertical)
+// between the two extreme items. Typed DOM only. Fails closed with
+// need_two_selected.
+function illustratorAlignJsxBody({ alignment, distribute }) {
+  return `
+  var alignment = ${jsxLiteral(String(alignment ?? ''))};
+  var distribute = ${jsxLiteral(String(distribute ?? ''))};
+
+  function stringifyAlignResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"alignment\\":" + jsonString(value.alignment),
+      "\\"distribute\\":" + jsonString(value.distribute),
+      "\\"alignedCount\\":" + jsonNumber(value.alignedCount),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Adobe Illustrator"),
+    documentName: null,
+    alignment: alignment,
+    distribute: distribute,
+    alignedCount: 0,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyAlignResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyAlignResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+
+  // Snapshot the live selection into a stable array BEFORE moving anything:
+  // doc.selection returns a fresh array, so capture references first. Align and
+  // distribute both need at least two objects to have any meaning.
+  var selection = null;
+  try { selection = doc.selection; } catch (_) { selection = null; }
+  var selectionCount = 0;
+  try { selectionCount = selection ? Number(selection.length) || 0 : 0; } catch (_) { selectionCount = 0; }
+  if (selectionCount < 2) {
+    result.error = "need_two_selected";
+    return stringifyAlignResult(result);
+  }
+  var items = [];
+  for (var s = 0; s < selectionCount; s += 1) {
+    try { if (selection[s]) items.push(selection[s]); } catch (_) {}
+  }
+  if (items.length < 2) {
+    result.error = "need_two_selected";
+    return stringifyAlignResult(result);
+  }
+
+  // Read every selected item's visibleBounds up front ([left, top, right,
+  // bottom] on the y-up axis, so width = right - left and height = top -
+  // bottom). Fail closed if any item exposes no bounds.
+  var bounds = [];
+  for (var b = 0; b < items.length; b += 1) {
+    var vb = null;
+    try { vb = items[b].visibleBounds; } catch (_) { vb = null; }
+    if (!vb) {
+      result.error = "bounds_unavailable";
+      return stringifyAlignResult(result);
+    }
+    var vLeft = Number(vb[0]);
+    var vTop = Number(vb[1]);
+    var vRight = Number(vb[2]);
+    var vBottom = Number(vb[3]);
+    bounds.push({
+      left: vLeft,
+      top: vTop,
+      right: vRight,
+      bottom: vBottom,
+      width: vRight - vLeft,
+      height: vTop - vBottom
+    });
+  }
+
+  // The target top-left of each item starts at its current position; the align
+  // and distribute passes below each adjust one axis, then a single apply pass
+  // writes the result (so combining an align on one axis with a distribute on
+  // the other composes cleanly, and each item is moved at most once).
+  var targetLeft = [];
+  var targetTop = [];
+  for (var t = 0; t < items.length; t += 1) {
+    targetLeft.push(bounds[t].left);
+    targetTop.push(bounds[t].top);
+  }
+
+  try {
+    // ALIGN: snap one axis to the selection bounding box. left|centerH|right
+    // move the X (left) edge; top|centerV|bottom move the Y (top) edge. position
+    // sets the top-left, so bottom-align puts the item's TOP at bboxBottom +
+    // height and centerV puts it at bboxCenterY + height/2 (y-up).
+    if (alignment !== "none") {
+      var boxLeft = bounds[0].left;
+      var boxTop = bounds[0].top;
+      var boxRight = bounds[0].right;
+      var boxBottom = bounds[0].bottom;
+      for (var m = 1; m < bounds.length; m += 1) {
+        if (bounds[m].left < boxLeft) boxLeft = bounds[m].left;
+        if (bounds[m].top > boxTop) boxTop = bounds[m].top;
+        if (bounds[m].right > boxRight) boxRight = bounds[m].right;
+        if (bounds[m].bottom < boxBottom) boxBottom = bounds[m].bottom;
+      }
+      var centerX = (boxLeft + boxRight) / 2;
+      var centerY = (boxTop + boxBottom) / 2;
+      for (var a = 0; a < items.length; a += 1) {
+        if (alignment === "left") {
+          targetLeft[a] = boxLeft;
+        } else if (alignment === "right") {
+          targetLeft[a] = boxRight - bounds[a].width;
+        } else if (alignment === "centerH") {
+          targetLeft[a] = centerX - bounds[a].width / 2;
+        } else if (alignment === "top") {
+          targetTop[a] = boxTop;
+        } else if (alignment === "bottom") {
+          targetTop[a] = boxBottom + bounds[a].height;
+        } else if (alignment === "centerV") {
+          targetTop[a] = centerY + bounds[a].height / 2;
+        }
+      }
+    }
+
+    // DISTRIBUTE: keep the two extreme items fixed and evenly space the
+    // left-edges (horizontal) or top-edges (vertical) of the rest across the
+    // span — edge-even spacing (an equal step between successive edges). Sort a
+    // copy of the index list so the snapshot order is preserved for the apply.
+    if (distribute === "horizontal") {
+      var orderH = [];
+      for (var oh = 0; oh < items.length; oh += 1) orderH.push(oh);
+      orderH.sort(function (p, q) { return bounds[p].left - bounds[q].left; });
+      var firstLeft = bounds[orderH[0]].left;
+      var lastLeft = bounds[orderH[orderH.length - 1]].left;
+      var stepH = (lastLeft - firstLeft) / (orderH.length - 1);
+      for (var rh = 0; rh < orderH.length; rh += 1) {
+        targetLeft[orderH[rh]] = firstLeft + stepH * rh;
+      }
+    } else if (distribute === "vertical") {
+      var orderV = [];
+      for (var ov = 0; ov < items.length; ov += 1) orderV.push(ov);
+      orderV.sort(function (p, q) { return bounds[p].top - bounds[q].top; });
+      var firstTop = bounds[orderV[0]].top;
+      var lastTop = bounds[orderV[orderV.length - 1]].top;
+      var stepV = (lastTop - firstTop) / (orderV.length - 1);
+      for (var rv = 0; rv < orderV.length; rv += 1) {
+        targetTop[orderV[rv]] = firstTop + stepV * rv;
+      }
+    }
+
+    // Apply the computed top-left to each item in place. position never saves,
+    // exports, or closes the document; the user keeps undo. Per-item failures
+    // are counted out and the first message is surfaced.
+    var aligned = 0;
+    for (var i = 0; i < items.length; i += 1) {
+      try {
+        items[i].position = [targetLeft[i], targetTop[i]];
+        aligned += 1;
+      } catch (errItem) {
+        if (!result.error) result.error = String(errItem && errItem.message ? errItem.message : errItem);
+      }
+    }
+    result.alignedCount = aligned;
+    result.ok = aligned > 0;
+    if (aligned < 1 && !result.error) result.error = "align_failed";
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  return stringifyAlignResult(result);
+`;
+}
+
 function buildIllustratorDocumentStatusScript({ appName, expectedDocumentName }) {
   const targetName = resolveIllustratorScriptTarget(appName);
   if (!targetName) return null;
@@ -15511,6 +16360,18 @@ ${illustratorArrangeJsxBody({ direction })}
   return buildIllustratorAppleScript(targetName, jsx, illustratorNotRunningJson(targetName, 'arrange'));
 }
 
+function buildIllustratorGroupScript({ appName, expectedDocumentName }) {
+  const targetName = resolveIllustratorScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${illustratorJsxPrelude({ expectedDocumentName })}
+${illustratorGroupJsxBody()}
+}());
+`;
+  return buildIllustratorAppleScript(targetName, jsx, illustratorNotRunningJson(targetName, 'group'));
+}
+
 function buildIllustratorAddTextScript({ appName, expectedDocumentName, contents, xPt, yPt, sizePt, fillColor, fontName }) {
   const targetName = resolveIllustratorScriptTarget(appName);
   if (!targetName) return null;
@@ -15545,6 +16406,30 @@ ${illustratorSetAppearanceJsxBody({ fillColor, strokeColor, strokeWidthPt, swatc
 }());
 `;
   return buildIllustratorAppleScript(targetName, jsx, illustratorNotRunningJson(targetName, 'set_appearance'));
+}
+
+function buildIllustratorAddArtboardScript({ appName, expectedDocumentName, action, widthPt, heightPt, artboardIndex, xPt, yPt }) {
+  const targetName = resolveIllustratorScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${illustratorJsxPrelude({ expectedDocumentName })}
+${illustratorAddArtboardJsxBody({ action, widthPt, heightPt, artboardIndex, xPt, yPt })}
+}());
+`;
+  return buildIllustratorAppleScript(targetName, jsx, illustratorNotRunningJson(targetName, 'add_artboard'));
+}
+
+function buildIllustratorAlignScript({ appName, expectedDocumentName, alignment, distribute }) {
+  const targetName = resolveIllustratorScriptTarget(appName);
+  if (!targetName) return null;
+  const jsx = `
+(function () {
+${illustratorJsxPrelude({ expectedDocumentName })}
+${illustratorAlignJsxBody({ alignment, distribute })}
+}());
+`;
+  return buildIllustratorAppleScript(targetName, jsx, illustratorNotRunningJson(targetName, 'align'));
 }
 
 function getOrCreateDesktopToken() {

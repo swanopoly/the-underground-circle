@@ -34,6 +34,7 @@ import {
   buildPhotoshopConvertColorModeJsx,
   buildPhotoshopSetLayerAppearanceJsx,
   buildPhotoshopCreateTextLayerJsx,
+  buildPhotoshopAddFillLayerJsx,
   validatePhotoshopResizeCanvasOrImageParams,
   validatePhotoshopTransformLayerParams,
   validatePhotoshopSetLayerAppearanceParams,
@@ -46,6 +47,7 @@ import {
   isPhotoshopConvertColorModeReceipt,
   isPhotoshopSetLayerAppearanceReceipt,
   isPhotoshopCreateTextLayerReceipt,
+  isPhotoshopAddFillLayerReceipt,
   type PhotoshopAdjustmentLayerKind,
 } from '../src/lib/photoshopExtendScriptAdapters';
 
@@ -751,6 +753,72 @@ assert.ok(
   'boundary coordinates validate',
 );
 
+// ── 9) add_fill_layer (additive solid-color content layer) ───────────────────
+
+const whiteFill = buildPhotoshopAddFillLayerJsx({
+  appName: 'Adobe Photoshop 2025',
+  targetDocumentName: 'hero-banner.psd',
+  hexColor: '#FFFFFF',
+  layerName: 'Background "Base"',
+});
+assert.deepEqual(whiteFill.errors, [], 'add_fill_layer builds with no errors');
+assert.ok(whiteFill.jsx.length > 0, 'add_fill_layer emits jsx');
+assert.ok(whiteFill.jsx.includes('stringIDToTypeID("contentLayer")'), 'fill layer is created via the contentLayer class');
+assert.ok(whiteFill.jsx.includes('stringIDToTypeID("solidColorLayer")'), 'fill layer uses the solidColorLayer type');
+assert.ok(whiteFill.jsx.includes('executeAction(stringIDToTypeID("make")'), 'fill layer uses the make event (sanctioned content-layer API)');
+assert.ok(whiteFill.jsx.includes('colorDescriptor.putDouble(stringIDToTypeID("grain")'), 'green channel uses the Photoshop "grain" key quirk');
+assert.ok(whiteFill.jsx.includes('var hexColor = "#FFFFFF";'), 'hexColor is embedded via JSON.stringify');
+assert.ok(whiteFill.jsx.includes('findTargetDocument()'), 'fill layer jsx reuses the prelude document matcher');
+assert.ok(whiteFill.jsx.includes('"no_document"'), 'fill layer jsx fails closed when no document is present');
+assert.ok(whiteFill.jsx.includes('"document_mismatch"'), 'fill layer jsx fails closed on document mismatch');
+assert.ok(whiteFill.jsx.includes('"fill_layer_not_created"'), 'fill layer jsx verifies the layer-count delta');
+assert.ok(
+  whiteFill.jsx.includes(`var expectedDocumentName = ${JSON.stringify('hero-banner.psd')};`),
+  'expectedDocumentName is embedded via JSON.stringify',
+);
+assert.ok(whiteFill.jsx.includes(JSON.stringify('Background "Base"')), 'layerName quotes are escaped via JSON.stringify');
+assert.equal(whiteFill.jsx.includes('= "Background "Base"'), false, 'raw unescaped layerName never reaches the jsx');
+assertNeverSavesOrDeletes(whiteFill.jsx, 'add_fill_layer white');
+
+// hexColor is required and strictly #RRGGBB.
+assert.equal(buildPhotoshopAddFillLayerJsx({ hexColor: '' }).jsx, '', 'empty hexColor emits no jsx');
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({} as unknown as { hexColor: string }).errors.some((e) => e.includes('hexColor')),
+  'missing hexColor is rejected',
+);
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({ hexColor: 'FFFFFF' }).errors.some((e) => e.includes('hexColor')),
+  'hexColor without # is rejected',
+);
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({ hexColor: '#FFF' }).errors.some((e) => e.includes('hexColor')),
+  'short hexColor is rejected',
+);
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({ hexColor: '#GGGGGG' }).errors.some((e) => e.includes('hexColor')),
+  'non-hex hexColor is rejected',
+);
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({ hexColor: '#FFFFFF', appName: 'Photoshop; rm -rf /' }).errors.includes('Invalid appName.'),
+  'shell-metacharacter appName is rejected',
+);
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({ hexColor: '#FFFFFF', targetDocumentName: 'evil\x00.psd' }).errors.some((e) => e.includes('targetDocumentName')),
+  'NUL in targetDocumentName is rejected',
+);
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({ hexColor: '#FFFFFF', layerName: 'x'.repeat(161) }).errors.some((e) => e.includes('layerName')),
+  'overlong layerName is rejected',
+);
+
+// A minimal build (only the required hexColor, lowercase) succeeds; the hex is
+// embedded as-is and parsed case-insensitively in the jsx.
+const minimalFill = buildPhotoshopAddFillLayerJsx({ hexColor: '#00aa88' });
+assert.deepEqual(minimalFill.errors, [], 'minimal add_fill_layer builds with no errors');
+assert.ok(minimalFill.jsx.includes('var hexColor = "#00aa88";'), 'lowercase hexColor is preserved in the jsx');
+assert.ok(minimalFill.jsx.includes('var layerName = "";'), 'omitted layerName defaults to empty (app default name)');
+assertNeverSavesOrDeletes(minimalFill.jsx, 'add_fill_layer minimal');
+
 // ── Receipt guards ──────────────────────────────────────────────────────────
 
 assert.ok(
@@ -949,6 +1017,33 @@ assert.equal(
 );
 assert.equal(isPhotoshopCreateTextLayerReceipt(null), false, 'null fails the create-text receipt guard');
 
+assert.ok(
+  isPhotoshopAddFillLayerReceipt({
+    ok: true,
+    appName: 'Adobe Photoshop 2025',
+    documentName: 'hero-banner.psd',
+    layerName: 'Color Fill 1',
+    hexColor: '#FFFFFF',
+    error: null,
+  }),
+  'valid add-fill receipt passes the guard',
+);
+assert.ok(
+  isPhotoshopAddFillLayerReceipt({ ok: false, appName: 'Photoshop', documentName: null, layerName: null, hexColor: '#000000', error: 'document_mismatch' }),
+  'fail-closed add-fill receipt with null values passes the guard',
+);
+assert.equal(
+  isPhotoshopAddFillLayerReceipt({ ok: true, appName: null, documentName: null, layerName: null, hexColor: 123, error: null }),
+  false,
+  'non-string hexColor fails the add-fill receipt guard',
+);
+assert.equal(
+  isPhotoshopAddFillLayerReceipt({ ok: 'yes', appName: null, documentName: null, layerName: null, hexColor: '#FFFFFF', error: null }),
+  false,
+  'non-boolean ok fails the add-fill receipt guard',
+);
+assert.equal(isPhotoshopAddFillLayerReceipt(null), false, 'null fails the add-fill receipt guard');
+
 // Every valid build returns a single IIFE that emits one JSON result line.
 for (const [label, jsx] of [
   ['adjustment', levels.jsx],
@@ -1010,6 +1105,7 @@ type BridgeJsxFns = {
   photoshopConvertColorModeJsxBody: (args: { mode: string; changeModeConstant: string }) => string;
   photoshopSetLayerAppearanceJsxBody: (args: { layerName: string; opacity: number | null; fillOpacity: number | null; blendModeConstant: string }) => string;
   photoshopCreateTextLayerJsxBody: (args: { text: string; xPx: number; yPx: number; sizePt: number; hexColor: string | null; justificationConstant: string; layerName: string }) => string;
+  photoshopAddFillLayerJsxBody: (args: { hexColor: string; layerName: string }) => string;
 };
 
 const bridgeFns = new Function(`
@@ -1026,7 +1122,8 @@ ${extractBridgeTopLevel('photoshopTransformLayerJsxBody', 'function')}
 ${extractBridgeTopLevel('photoshopConvertColorModeJsxBody', 'function')}
 ${extractBridgeTopLevel('photoshopSetLayerAppearanceJsxBody', 'function')}
 ${extractBridgeTopLevel('photoshopCreateTextLayerJsxBody', 'function')}
-return { photoshopJsxPrelude, photoshopApplyAdjustmentLayerJsxBody, photoshopApplySelectionOrMaskJsxBody, photoshopResizeCanvasOrImageJsxBody, photoshopManageLayersJsxBody, photoshopTransformLayerJsxBody, photoshopConvertColorModeJsxBody, photoshopSetLayerAppearanceJsxBody, photoshopCreateTextLayerJsxBody };
+${extractBridgeTopLevel('photoshopAddFillLayerJsxBody', 'function')}
+return { photoshopJsxPrelude, photoshopApplyAdjustmentLayerJsxBody, photoshopApplySelectionOrMaskJsxBody, photoshopResizeCanvasOrImageJsxBody, photoshopManageLayersJsxBody, photoshopTransformLayerJsxBody, photoshopConvertColorModeJsxBody, photoshopSetLayerAppearanceJsxBody, photoshopCreateTextLayerJsxBody, photoshopAddFillLayerJsxBody };
 `)() as BridgeJsxFns;
 
 function composeBridgeJsx(targetDocumentName: string, body: string): string {
@@ -1135,6 +1232,16 @@ assert.equal(
   })),
   plainText.jsx,
   'LOCKSTEP: bridge create-text-layer (minimal) jsx is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('hero-banner.psd', bridgeFns.photoshopAddFillLayerJsxBody({ hexColor: '#FFFFFF', layerName: 'Background "Base"' })),
+  whiteFill.jsx,
+  'LOCKSTEP: bridge add-fill-layer jsx is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('', bridgeFns.photoshopAddFillLayerJsxBody({ hexColor: '#00aa88', layerName: '' })),
+  minimalFill.jsx,
+  'LOCKSTEP: bridge add-fill-layer (minimal) jsx is byte-identical with the pure module',
 );
 
 console.log('All Photoshop ExtendScript adapter smoke cases passed.');

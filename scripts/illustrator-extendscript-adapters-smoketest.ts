@@ -31,6 +31,10 @@ import {
   ILLUSTRATOR_ADD_SHAPE_MAX_STROKE_WIDTH_PT,
   ILLUSTRATOR_SET_APPEARANCE_MAX_STROKE_WIDTH_PT,
   ILLUSTRATOR_SET_APPEARANCE_MAX_SWATCH_NAME,
+  ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT,
+  ILLUSTRATOR_ADD_ARTBOARD_MAX_INDEX,
+  ILLUSTRATOR_ALIGN_ALIGNMENTS,
+  ILLUSTRATOR_ALIGN_DISTRIBUTIONS,
   buildIllustratorDocumentStatusJsx,
   buildIllustratorExportProofJsx,
   buildIllustratorVectorizeJsx,
@@ -38,6 +42,9 @@ import {
   buildIllustratorAddTextJsx,
   buildIllustratorAddShapeJsx,
   buildIllustratorSetAppearanceJsx,
+  buildIllustratorGroupJsx,
+  buildIllustratorAddArtboardJsx,
+  buildIllustratorAlignJsx,
   isIllustratorDocumentStatusReceipt,
   isIllustratorExportProofReceipt,
   isIllustratorVectorizeReceipt,
@@ -45,10 +52,15 @@ import {
   isIllustratorAddTextReceipt,
   isIllustratorAddShapeReceipt,
   isIllustratorSetAppearanceReceipt,
+  isIllustratorGroupReceipt,
+  isIllustratorAddArtboardReceipt,
+  isIllustratorAlignReceipt,
   validateIllustratorExportProofParams,
   validateIllustratorAddTextParams,
   validateIllustratorAddShapeParams,
   validateIllustratorSetAppearanceParams,
+  validateIllustratorAddArtboardParams,
+  validateIllustratorAlignParams,
 } from '../src/lib/illustratorExtendScriptAdapters';
 
 // The core Illustrator safety contract: NO built script may ever write the
@@ -610,6 +622,198 @@ const boundarySetAppearance = validateIllustratorSetAppearanceParams({
 });
 assert.ok(boundarySetAppearance.ok, 'boundary max stroke width + max swatch-name length validates');
 
+// ── 8) illustrator_group (combine the current selection into one new group) ──
+
+const group = buildIllustratorGroupJsx({
+  appName: 'Adobe Illustrator',
+  expectedDocumentName: 'brand "kit".ai',
+});
+assert.deepEqual(group.errors, [], 'group builds with no errors');
+assert.ok(group.jsx.includes('(function () {'), 'group jsx is an IIFE');
+assert.ok(group.jsx.includes('}());'), 'group jsx closes its IIFE');
+assert.ok(group.jsx.includes('doc.groupItems.add()'), 'group creates ONE new group via groupItems.add() (typed DOM)');
+assert.ok(group.jsx.includes('items[i].move(group, ElementPlacement.PLACEATEND);'), 'group moves each snapshotted item into the group at the end');
+assert.ok(group.jsx.includes('if (selectionCount < 2)'), 'group requires at least two selected objects');
+assert.ok(group.jsx.includes('"need_two_selected"'), 'group fails closed when fewer than two objects are selected');
+assert.ok(group.jsx.includes('"no_document"'), 'group fails closed with no document');
+assert.ok(group.jsx.includes('"document_mismatch"'), 'group fails closed on document mismatch');
+assert.ok(group.jsx.includes(`var expectedDocumentName = ${JSON.stringify('brand "kit".ai')};`), 'group guard carries the expected document name (quotes escaped)');
+assert.equal(group.jsx.includes('= "brand "kit".ai"'), false, 'raw unescaped document name never reaches the jsx');
+assert.ok(group.jsx.includes('\\"groupedCount\\":'), 'receipt reports groupedCount');
+assert.equal(group.jsx.includes('exportFile'), false, 'group never exports');
+assert.equal(group.jsx.includes('executeMenuCommand'), false, 'group never uses executeMenuCommand (group-only, no ungroup menu path)');
+assertNeverTouchesSource(group.jsx, 'group');
+
+// Rejections (fail closed, no jsx). Group has no op-specific enums/ranges — only
+// the shared appName / expectedDocumentName guards.
+assert.ok(
+  buildIllustratorGroupJsx({ appName: 'Illustrator; rm -rf /' }).errors.includes('Invalid appName.'),
+  'shell-metacharacter appName is rejected',
+);
+assert.equal(buildIllustratorGroupJsx({ appName: 'Illustrator; rm -rf /' }).jsx, '', 'rejected group emits no jsx');
+assert.ok(
+  buildIllustratorGroupJsx({ expectedDocumentName: 'evil\x00.ai' }).errors.some((e) => e.includes('expectedDocumentName')),
+  'NUL in expectedDocumentName is rejected',
+);
+assert.equal(buildIllustratorGroupJsx({ expectedDocumentName: 'evil\x00.ai' }).jsx, '', 'rejected group (bad doc name) emits no jsx');
+
+// ── 9) illustrator_add_artboard (add/resize artboard geometry) ──────────────
+
+assert.equal(ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT, 16000, 'add_artboard max dimension is 16000pt');
+
+// add with explicit top-left placement.
+const addArtboard = buildIllustratorAddArtboardJsx({
+  appName: 'Adobe Illustrator',
+  expectedDocumentName: 'brand "kit".ai',
+  action: 'add',
+  widthPt: 400,
+  heightPt: 300,
+  xPt: 100,
+  yPt: 200,
+});
+assert.deepEqual(addArtboard.errors, [], 'add_artboard (add) builds with no errors');
+assert.ok(addArtboard.jsx.includes('(function () {'), 'add_artboard jsx is an IIFE');
+assert.ok(addArtboard.jsx.includes('}());'), 'add_artboard jsx closes its IIFE');
+assert.ok(addArtboard.jsx.includes('doc.artboards.add([placeLeft, placeTop, placeLeft + widthPt, placeTop - heightPt]);'), 'add creates a new artboard via doc.artboards.add with the computed rect');
+assert.ok(addArtboard.jsx.includes('var action = "add";'), 'action embedded via JSON.stringify');
+assert.ok(addArtboard.jsx.includes('var widthPt = 400;'), 'widthPt embedded as a numeric literal');
+assert.ok(addArtboard.jsx.includes('var heightPt = 300;'), 'heightPt embedded as a numeric literal');
+assert.ok(addArtboard.jsx.includes('var xPt = 100;'), 'explicit xPt embedded as a numeric literal');
+assert.ok(addArtboard.jsx.includes('var yPt = 200;'), 'explicit yPt embedded as a numeric literal');
+assert.ok(addArtboard.jsx.includes('var artboardIndex = 0;'), 'artboardIndex defaults to 0');
+assert.ok(addArtboard.jsx.includes('"no_document"'), 'add_artboard fails closed with no document');
+assert.ok(addArtboard.jsx.includes('"document_mismatch"'), 'add_artboard fails closed on document mismatch');
+assert.ok(addArtboard.jsx.includes('"artboard_index_out_of_range"'), 'add_artboard fails closed on an out-of-range resize index');
+assert.ok(addArtboard.jsx.includes(`var expectedDocumentName = ${JSON.stringify('brand "kit".ai')};`), 'add_artboard guard carries the expected document name (quotes escaped)');
+assert.equal(addArtboard.jsx.includes('= "brand "kit".ai"'), false, 'raw unescaped document name never reaches the jsx');
+assert.ok(addArtboard.jsx.includes('\\"artboardCount\\":'), 'receipt reports artboardCount');
+assert.ok(addArtboard.jsx.includes('\\"action\\":'), 'receipt reports action');
+assert.equal(addArtboard.jsx.includes('exportFile'), false, 'add_artboard never exports');
+assertNeverTouchesSource(addArtboard.jsx, 'add_artboard add');
+
+// resize preserves the target artboard's top-left; omitted placement emits null.
+const resizeArtboard = buildIllustratorAddArtboardJsx({
+  action: 'resize',
+  widthPt: 612,
+  heightPt: 792,
+  artboardIndex: 2,
+});
+assert.deepEqual(resizeArtboard.errors, [], 'add_artboard (resize) builds with no errors');
+assert.ok(resizeArtboard.jsx.includes('var action = "resize";'), 'resize action embedded via JSON.stringify');
+assert.ok(resizeArtboard.jsx.includes('var artboardIndex = 2;'), 'explicit artboardIndex embedded as a numeric literal');
+assert.ok(resizeArtboard.jsx.includes('doc.artboards[artboardIndex].artboardRect = [keepLeft, keepTop, keepLeft + widthPt, keepTop - heightPt];'), 'resize reshapes the target artboard preserving its existing top-left');
+assert.ok(resizeArtboard.jsx.includes('var xPt = null;'), 'omitted xPt emits null (auto-place)');
+assert.ok(resizeArtboard.jsx.includes('var yPt = null;'), 'omitted yPt emits null (auto-place)');
+assertNeverTouchesSource(resizeArtboard.jsx, 'add_artboard resize');
+
+// Rejections (fail closed, no jsx).
+assert.ok(buildIllustratorAddArtboardJsx({ action: 'move', widthPt: 10, heightPt: 10 }).errors.some((e) => e.includes('action must be one of')), 'unknown action rejected');
+assert.equal(buildIllustratorAddArtboardJsx({ action: 'move', widthPt: 10, heightPt: 10 }).jsx, '', 'rejected add_artboard emits no jsx');
+assert.ok(buildIllustratorAddArtboardJsx({ action: '', widthPt: 10, heightPt: 10 }).errors.some((e) => e.includes('action must be one of')), 'empty action rejected');
+assert.ok(buildIllustratorAddArtboardJsx({ action: 'add', widthPt: 0, heightPt: 10 }).errors.some((e) => e.includes('widthPt')), 'non-positive widthPt rejected');
+assert.ok(buildIllustratorAddArtboardJsx({ action: 'add', widthPt: -5, heightPt: 10 }).errors.some((e) => e.includes('widthPt')), 'negative widthPt rejected');
+assert.ok(buildIllustratorAddArtboardJsx({ action: 'add', widthPt: 10, heightPt: ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT + 1 }).errors.some((e) => e.includes('heightPt')), 'above-range heightPt rejected');
+assert.ok(buildIllustratorAddArtboardJsx({ action: 'add', widthPt: '10' as unknown as number, heightPt: 10 }).errors.some((e) => e.includes('widthPt')), 'string widthPt rejected (strict number)');
+assert.ok(buildIllustratorAddArtboardJsx({ action: 'resize', widthPt: 10, heightPt: 10, artboardIndex: -1 }).errors.some((e) => e.includes('artboardIndex')), 'negative artboardIndex rejected');
+assert.ok(buildIllustratorAddArtboardJsx({ action: 'resize', widthPt: 10, heightPt: 10, artboardIndex: 1.5 }).errors.some((e) => e.includes('artboardIndex')), 'fractional artboardIndex rejected');
+assert.ok(buildIllustratorAddArtboardJsx({ action: 'resize', widthPt: 10, heightPt: 10, artboardIndex: ILLUSTRATOR_ADD_ARTBOARD_MAX_INDEX + 1 }).errors.some((e) => e.includes('artboardIndex')), 'above-range artboardIndex rejected');
+assert.ok(buildIllustratorAddArtboardJsx({ action: 'add', widthPt: 10, heightPt: 10, xPt: 1e9 }).errors.some((e) => e.includes('xPt')), 'out-of-range xPt rejected');
+assert.ok(buildIllustratorAddArtboardJsx({ action: 'add', widthPt: 10, heightPt: 10, yPt: Number.NaN }).errors.some((e) => e.includes('yPt')), 'NaN yPt rejected');
+assert.ok(buildIllustratorAddArtboardJsx({ action: 'add', widthPt: 10, heightPt: 10, appName: 'Illustrator; rm -rf /' }).errors.includes('Invalid appName.'), 'shell-metacharacter appName rejected');
+assert.ok(buildIllustratorAddArtboardJsx({ action: 'add', widthPt: 10, heightPt: 10, expectedDocumentName: 'evil\x00.ai' }).errors.some((e) => e.includes('expectedDocumentName')), 'NUL expectedDocumentName rejected');
+
+// Case-insensitive action + boundary values validate.
+const upperAction = validateIllustratorAddArtboardParams({ action: 'ADD', widthPt: 10, heightPt: 10 });
+assert.ok(upperAction.ok && upperAction.params.action === 'add', 'action is normalized case-insensitively to add');
+const boundaryArtboard = validateIllustratorAddArtboardParams({
+  action: 'add',
+  widthPt: ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT,
+  heightPt: ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT,
+  artboardIndex: ILLUSTRATOR_ADD_ARTBOARD_MAX_INDEX,
+});
+assert.ok(boundaryArtboard.ok, 'boundary max dims + max artboardIndex validates');
+
+// ── 10) illustrator_align (align/distribute the selection in place) ──────────
+
+assert.equal(ILLUSTRATOR_ALIGN_ALIGNMENTS.length, 7, 'align alignments are left|centerH|right|top|centerV|bottom|none');
+assert.equal(ILLUSTRATOR_ALIGN_DISTRIBUTIONS.length, 3, 'align distributions are none|horizontal|vertical');
+
+// Align-only (left) with a guarded document.
+const alignLeft = buildIllustratorAlignJsx({
+  appName: 'Adobe Illustrator',
+  expectedDocumentName: 'brand "kit".ai',
+  alignment: 'left',
+  distribute: 'none',
+});
+assert.deepEqual(alignLeft.errors, [], 'align (left) builds with no errors');
+assert.ok(alignLeft.jsx.includes('(function () {'), 'align jsx is an IIFE');
+assert.ok(alignLeft.jsx.includes('}());'), 'align jsx closes its IIFE');
+assert.ok(alignLeft.jsx.includes('var alignment = "left";'), 'alignment embedded via JSON.stringify');
+assert.ok(alignLeft.jsx.includes('var distribute = "none";'), 'distribute embedded via JSON.stringify');
+assert.ok(alignLeft.jsx.includes('items[b].visibleBounds'), 'align measures each item via visibleBounds');
+assert.ok(alignLeft.jsx.includes('items[i].position = [targetLeft[i], targetTop[i]];'), 'align writes each item position (top-left) in one apply pass');
+assert.ok(alignLeft.jsx.includes('width: vRight - vLeft,'), 'width is right - left (y-up visibleBounds)');
+assert.ok(alignLeft.jsx.includes('height: vTop - vBottom'), 'height is top - bottom (y-up visibleBounds)');
+assert.ok(alignLeft.jsx.includes('targetLeft[a] = boxLeft;'), 'left alignment snaps the left edge to the bbox left');
+assert.ok(alignLeft.jsx.includes('targetLeft[a] = boxRight - bounds[a].width;'), 'right alignment snaps the right edge to the bbox right');
+assert.ok(alignLeft.jsx.includes('targetLeft[a] = centerX - bounds[a].width / 2;'), 'centerH alignment centers on the bbox center X');
+assert.ok(alignLeft.jsx.includes('targetTop[a] = boxTop;'), 'top alignment snaps the top edge to the bbox top');
+assert.ok(alignLeft.jsx.includes('targetTop[a] = boxBottom + bounds[a].height;'), 'bottom alignment snaps the bottom edge to the bbox bottom (y-up)');
+assert.ok(alignLeft.jsx.includes('targetTop[a] = centerY + bounds[a].height / 2;'), 'centerV alignment centers on the bbox center Y (y-up)');
+assert.ok(alignLeft.jsx.includes('if (selectionCount < 2)'), 'align requires at least two selected objects');
+assert.ok(alignLeft.jsx.includes('"need_two_selected"'), 'align fails closed when fewer than two objects are selected');
+assert.ok(alignLeft.jsx.includes('"no_document"'), 'align fails closed with no document');
+assert.ok(alignLeft.jsx.includes('"document_mismatch"'), 'align fails closed on document mismatch');
+assert.ok(alignLeft.jsx.includes(`var expectedDocumentName = ${JSON.stringify('brand "kit".ai')};`), 'align guard carries the expected document name (quotes escaped)');
+assert.equal(alignLeft.jsx.includes('= "brand "kit".ai"'), false, 'raw unescaped document name never reaches the jsx');
+assert.ok(alignLeft.jsx.includes('\\"alignedCount\\":'), 'receipt reports alignedCount');
+assert.ok(alignLeft.jsx.includes('\\"alignment\\":'), 'receipt reports alignment');
+assert.ok(alignLeft.jsx.includes('\\"distribute\\":'), 'receipt reports distribute');
+assert.equal(alignLeft.jsx.includes('exportFile'), false, 'align never exports');
+assert.equal(alignLeft.jsx.includes('executeMenuCommand'), false, 'align never uses executeMenuCommand (typed DOM geometry only)');
+assertNeverTouchesSource(alignLeft.jsx, 'align left');
+
+// Distribute-only (horizontal) with a null-guard document.
+const distributeH = buildIllustratorAlignJsx({ alignment: 'none', distribute: 'horizontal' });
+assert.deepEqual(distributeH.errors, [], 'align (distribute horizontal) builds with no errors');
+assert.ok(distributeH.jsx.includes('var alignment = "none";'), 'alignment none embedded');
+assert.ok(distributeH.jsx.includes('var distribute = "horizontal";'), 'distribute horizontal embedded');
+assert.ok(distributeH.jsx.includes('orderH.sort(function (p, q) { return bounds[p].left - bounds[q].left; });'), 'horizontal distribute sorts by left edge');
+assert.ok(distributeH.jsx.includes('targetLeft[orderH[rh]] = firstLeft + stepH * rh;'), 'horizontal distribute evenly spaces left edges between the extremes');
+assertNeverTouchesSource(distributeH.jsx, 'align distribute horizontal');
+
+// Distribute-only (vertical) exercises the top-edge branch.
+const distributeV = buildIllustratorAlignJsx({ alignment: 'none', distribute: 'vertical' });
+assert.deepEqual(distributeV.errors, [], 'align (distribute vertical) builds with no errors');
+assert.ok(distributeV.jsx.includes('orderV.sort(function (p, q) { return bounds[p].top - bounds[q].top; });'), 'vertical distribute sorts by top edge');
+assert.ok(distributeV.jsx.includes('targetTop[orderV[rv]] = firstTop + stepV * rv;'), 'vertical distribute evenly spaces top edges between the extremes');
+assertNeverTouchesSource(distributeV.jsx, 'align distribute vertical');
+
+// Combined align + distribute compose on independent axes.
+const alignAndDistribute = buildIllustratorAlignJsx({ alignment: 'top', distribute: 'horizontal' });
+assert.deepEqual(alignAndDistribute.errors, [], 'align (top) + distribute (horizontal) builds with no errors');
+assert.ok(alignAndDistribute.jsx.includes('var alignment = "top";'), 'alignment top embedded');
+assert.ok(alignAndDistribute.jsx.includes('var distribute = "horizontal";'), 'distribute horizontal embedded');
+assertNeverTouchesSource(alignAndDistribute.jsx, 'align top + distribute horizontal');
+
+// Rejections (fail closed, no jsx).
+assert.ok(buildIllustratorAlignJsx({ alignment: 'middle' as unknown as 'left', distribute: 'none' }).errors.some((e) => e.includes('alignment must be')), 'unknown alignment rejected');
+assert.equal(buildIllustratorAlignJsx({ alignment: 'middle' as unknown as 'left', distribute: 'none' }).jsx, '', 'rejected align emits no jsx');
+assert.ok(buildIllustratorAlignJsx({ alignment: 'CENTERH' as unknown as 'left', distribute: 'none' }).errors.some((e) => e.includes('alignment must be')), 'alignment is case-sensitive (upper-case CENTERH rejected)');
+assert.ok(buildIllustratorAlignJsx({ alignment: '' as unknown as 'left', distribute: 'none' }).errors.some((e) => e.includes('alignment must be')), 'empty alignment rejected');
+assert.ok(buildIllustratorAlignJsx({ alignment: 'left', distribute: 'evenly' as unknown as 'none' }).errors.some((e) => e.includes('distribute must be')), 'unknown distribute rejected');
+assert.ok(buildIllustratorAlignJsx({ alignment: 'left', distribute: '' as unknown as 'none' }).errors.some((e) => e.includes('distribute must be')), 'empty distribute rejected');
+assert.ok(buildIllustratorAlignJsx({ alignment: 'none', distribute: 'none' }).errors.some((e) => e.includes('At least one of')), 'align with both none rejected (no-op)');
+assert.equal(buildIllustratorAlignJsx({ alignment: 'none', distribute: 'none' }).jsx, '', 'no-op align emits no jsx');
+assert.ok(buildIllustratorAlignJsx({ alignment: 'left', distribute: 'none', appName: 'Illustrator; rm -rf /' }).errors.includes('Invalid appName.'), 'shell-metacharacter appName rejected');
+assert.ok(buildIllustratorAlignJsx({ alignment: 'left', distribute: 'none', expectedDocumentName: 'evil\x00.ai' }).errors.some((e) => e.includes('expectedDocumentName')), 'NUL expectedDocumentName rejected');
+
+// Valid combinations validate.
+const alignValid = validateIllustratorAlignParams({ alignment: 'centerV', distribute: 'vertical' });
+assert.ok(alignValid.ok && alignValid.params.alignment === 'centerV' && alignValid.params.distribute === 'vertical', 'centerV + vertical validates');
+const alignBothActions = validateIllustratorAlignParams({ alignment: 'right', distribute: 'horizontal' });
+assert.ok(alignBothActions.ok, 'right + horizontal (both non-none) validates');
+
 // ── Receipt guards ──────────────────────────────────────────────────────────
 
 const validStatusReceipt = {
@@ -854,6 +1058,109 @@ assert.equal(
 );
 assert.equal(isIllustratorSetAppearanceReceipt(null), false, 'null fails the set_appearance guard');
 
+const validGroupReceipt = {
+  ok: true,
+  appName: 'Adobe Illustrator',
+  appRunning: true,
+  documentName: 'brand kit.ai',
+  groupedCount: 3,
+  error: null,
+};
+assert.ok(isIllustratorGroupReceipt(validGroupReceipt), 'valid group receipt passes the guard');
+assert.ok(
+  isIllustratorGroupReceipt({ ...validGroupReceipt, ok: false, groupedCount: 0, error: 'need_two_selected' }),
+  'failed group receipt (need_two_selected, groupedCount 0) passes the guard',
+);
+assert.equal(
+  isIllustratorGroupReceipt({ ...validGroupReceipt, groupedCount: '3' }),
+  false,
+  'string groupedCount fails the group guard',
+);
+assert.equal(
+  isIllustratorGroupReceipt({ ...validGroupReceipt, appRunning: 'true' }),
+  false,
+  'string appRunning fails the group guard',
+);
+assert.equal(isIllustratorGroupReceipt(null), false, 'null fails the group guard');
+
+const validAddArtboardReceipt = {
+  ok: true,
+  appName: 'Adobe Illustrator',
+  appRunning: true,
+  documentName: 'brand kit.ai',
+  action: 'add',
+  artboardCount: 3,
+  widthPt: 400,
+  heightPt: 300,
+  error: null,
+};
+assert.ok(isIllustratorAddArtboardReceipt(validAddArtboardReceipt), 'valid add_artboard receipt passes the guard');
+assert.ok(
+  isIllustratorAddArtboardReceipt({ ...validAddArtboardReceipt, action: 'resize' }),
+  'resize add_artboard receipt passes the guard',
+);
+assert.ok(
+  isIllustratorAddArtboardReceipt({ ...validAddArtboardReceipt, ok: false, error: 'artboard_index_out_of_range' }),
+  'failed add_artboard receipt (index out of range) passes the guard',
+);
+assert.equal(
+  isIllustratorAddArtboardReceipt({ ...validAddArtboardReceipt, action: 'delete' }),
+  false,
+  'add_artboard receipt with an unknown action fails the guard',
+);
+assert.equal(
+  isIllustratorAddArtboardReceipt({ ...validAddArtboardReceipt, artboardCount: '3' }),
+  false,
+  'string artboardCount fails the add_artboard guard',
+);
+assert.equal(
+  isIllustratorAddArtboardReceipt({ ...validAddArtboardReceipt, appRunning: 'true' }),
+  false,
+  'string appRunning fails the add_artboard guard',
+);
+assert.equal(isIllustratorAddArtboardReceipt(null), false, 'null fails the add_artboard guard');
+
+const validAlignReceipt = {
+  ok: true,
+  appName: 'Adobe Illustrator',
+  appRunning: true,
+  documentName: 'brand kit.ai',
+  alignment: 'left',
+  distribute: 'none',
+  alignedCount: 4,
+  error: null,
+};
+assert.ok(isIllustratorAlignReceipt(validAlignReceipt), 'valid align receipt passes the guard');
+assert.ok(
+  isIllustratorAlignReceipt({ ...validAlignReceipt, alignment: 'none', distribute: 'horizontal' }),
+  'distribute-only align receipt passes the guard',
+);
+assert.ok(
+  isIllustratorAlignReceipt({ ...validAlignReceipt, ok: false, alignedCount: 0, error: 'need_two_selected' }),
+  'failed align receipt (need_two_selected, alignedCount 0) passes the guard',
+);
+assert.equal(
+  isIllustratorAlignReceipt({ ...validAlignReceipt, alignment: 'middle' }),
+  false,
+  'align receipt with an unknown alignment fails the guard',
+);
+assert.equal(
+  isIllustratorAlignReceipt({ ...validAlignReceipt, distribute: 'evenly' }),
+  false,
+  'align receipt with an unknown distribute fails the guard',
+);
+assert.equal(
+  isIllustratorAlignReceipt({ ...validAlignReceipt, alignedCount: '4' }),
+  false,
+  'string alignedCount fails the align guard',
+);
+assert.equal(
+  isIllustratorAlignReceipt({ ...validAlignReceipt, appRunning: 'true' }),
+  false,
+  'string appRunning fails the align guard',
+);
+assert.equal(isIllustratorAlignReceipt(null), false, 'null fails the align guard');
+
 assert.equal(ILLUSTRATOR_EXPORT_PROOF_FORMATS.length, 2, 'format enum is exactly png|svg (PDF stays out by design)');
 
 // ── LOCKSTEP drift check against scripts/claude-bridge.js ──────────────────
@@ -956,6 +1263,26 @@ assert.ok(
   extractBridgeConstLine('ILLUSTRATOR_SET_APPEARANCE_MAX_SWATCH_NAME').includes(String(ILLUSTRATOR_SET_APPEARANCE_MAX_SWATCH_NAME)),
   'LOCKSTEP: bridge set_appearance max swatch-name length matches the pure module',
 );
+assert.ok(
+  extractBridgeConstLine('ILLUSTRATOR_ADD_ARTBOARD_ACTIONS').includes("['add', 'resize']"),
+  'LOCKSTEP: bridge add_artboard action enum matches the pure module',
+);
+assert.ok(
+  extractBridgeConstLine('ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT').includes(String(ILLUSTRATOR_ADD_ARTBOARD_MAX_DIM_PT)),
+  'LOCKSTEP: bridge add_artboard max dim matches the pure module',
+);
+assert.ok(
+  extractBridgeConstLine('ILLUSTRATOR_ADD_ARTBOARD_MAX_INDEX').includes(String(ILLUSTRATOR_ADD_ARTBOARD_MAX_INDEX)),
+  'LOCKSTEP: bridge add_artboard max index matches the pure module',
+);
+assert.ok(
+  extractBridgeConstLine('ILLUSTRATOR_ALIGN_ALIGNMENTS').includes("['left', 'centerH', 'right', 'top', 'centerV', 'bottom', 'none']"),
+  'LOCKSTEP: bridge align alignment enum matches the pure module',
+);
+assert.ok(
+  extractBridgeConstLine('ILLUSTRATOR_ALIGN_DISTRIBUTIONS').includes("['none', 'horizontal', 'vertical']"),
+  'LOCKSTEP: bridge align distribute enum matches the pure module',
+);
 
 type BridgeJsxFns = {
   illustratorJsxPrelude: (args: { expectedDocumentName: string }) => string;
@@ -998,6 +1325,16 @@ type BridgeJsxFns = {
     strokeWidthPt: number | null;
     swatchName: string | null;
   }) => string;
+  illustratorGroupJsxBody: () => string;
+  illustratorAddArtboardJsxBody: (args: {
+    action: string;
+    widthPt: number;
+    heightPt: number;
+    artboardIndex: number;
+    xPt: number | null;
+    yPt: number | null;
+  }) => string;
+  illustratorAlignJsxBody: (args: { alignment: string; distribute: string }) => string;
 };
 
 // tracingModeEnumLiteral / zOrderMethodEnumLiteral are dependencies of the
@@ -1016,7 +1353,10 @@ ${extractBridgeTopLevel('illustratorArrangeJsxBody')}
 ${extractBridgeTopLevel('illustratorAddTextJsxBody')}
 ${extractBridgeTopLevel('illustratorAddShapeJsxBody')}
 ${extractBridgeTopLevel('illustratorSetAppearanceJsxBody')}
-return { illustratorJsxPrelude, illustratorDocumentStatusJsxBody, illustratorExportProofJsxBody, illustratorVectorizeJsxBody, illustratorArrangeJsxBody, illustratorAddTextJsxBody, illustratorAddShapeJsxBody, illustratorSetAppearanceJsxBody };
+${extractBridgeTopLevel('illustratorGroupJsxBody')}
+${extractBridgeTopLevel('illustratorAddArtboardJsxBody')}
+${extractBridgeTopLevel('illustratorAlignJsxBody')}
+return { illustratorJsxPrelude, illustratorDocumentStatusJsxBody, illustratorExportProofJsxBody, illustratorVectorizeJsxBody, illustratorArrangeJsxBody, illustratorAddTextJsxBody, illustratorAddShapeJsxBody, illustratorSetAppearanceJsxBody, illustratorGroupJsxBody, illustratorAddArtboardJsxBody, illustratorAlignJsxBody };
 `)() as BridgeJsxFns;
 
 function composeBridgeJsx(expectedDocumentName: string, body: string): string {
@@ -1140,6 +1480,47 @@ assert.equal(
   'LOCKSTEP: bridge set_appearance jsx (swatch-only fill) is byte-identical with the pure module',
 );
 
+// Group mutates the OPEN document's selection, so the bridge check mirrors the
+// exact document name the pure build used. The body takes no runtime args.
+assert.equal(
+  composeBridgeJsx('brand "kit".ai', bridgeFns.illustratorGroupJsxBody()),
+  group.jsx,
+  'LOCKSTEP: bridge group jsx is byte-identical with the pure module',
+);
+
+// Add-artboard mutates the OPEN document, so the bridge check mirrors the exact
+// document name + params the pure build used (add with explicit placement under
+// a guarded document, and the resize path with omitted placement in a null-guard
+// document). artboardIndex defaults to 0 (add) and is explicit (resize).
+assert.equal(
+  composeBridgeJsx('brand "kit".ai', bridgeFns.illustratorAddArtboardJsxBody({
+    action: 'add', widthPt: 400, heightPt: 300, artboardIndex: 0, xPt: 100, yPt: 200,
+  })),
+  addArtboard.jsx,
+  'LOCKSTEP: bridge add_artboard jsx (add + explicit placement) is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('', bridgeFns.illustratorAddArtboardJsxBody({
+    action: 'resize', widthPt: 612, heightPt: 792, artboardIndex: 2, xPt: null, yPt: null,
+  })),
+  resizeArtboard.jsx,
+  'LOCKSTEP: bridge add_artboard jsx (resize, omitted placement) is byte-identical with the pure module',
+);
+
+// Align mutates the OPEN document's selection, so the bridge check mirrors the
+// exact document name + params the pure build used (align-only with a guarded
+// document, and the distribute-only path with a null-guard document).
+assert.equal(
+  composeBridgeJsx('brand "kit".ai', bridgeFns.illustratorAlignJsxBody({ alignment: 'left', distribute: 'none' })),
+  alignLeft.jsx,
+  'LOCKSTEP: bridge align jsx (align left) is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('', bridgeFns.illustratorAlignJsxBody({ alignment: 'none', distribute: 'horizontal' })),
+  distributeH.jsx,
+  'LOCKSTEP: bridge align jsx (distribute horizontal) is byte-identical with the pure module',
+);
+
 // The bridge-composed scripts must satisfy the same source-safety contract.
 assertNeverTouchesSource(composeBridgeJsx('', bridgeFns.illustratorExportProofJsxBody({
   outputPath: '/tmp/x.png', format: 'png', scalePercent: null,
@@ -1159,5 +1540,12 @@ assertNeverTouchesSource(composeBridgeJsx('', bridgeFns.illustratorAddShapeJsxBo
 assertNeverTouchesSource(composeBridgeJsx('', bridgeFns.illustratorSetAppearanceJsxBody({
   fillColor: '#000000', strokeColor: '#ffffff', strokeWidthPt: 1, swatchName: null,
 })), 'bridge-composed set_appearance');
+assertNeverTouchesSource(composeBridgeJsx('', bridgeFns.illustratorGroupJsxBody()), 'bridge-composed group');
+assertNeverTouchesSource(composeBridgeJsx('', bridgeFns.illustratorAddArtboardJsxBody({
+  action: 'add', widthPt: 10, heightPt: 10, artboardIndex: 0, xPt: null, yPt: null,
+})), 'bridge-composed add_artboard');
+assertNeverTouchesSource(composeBridgeJsx('', bridgeFns.illustratorAlignJsxBody({
+  alignment: 'centerV', distribute: 'vertical',
+})), 'bridge-composed align');
 
 console.log('All Illustrator ExtendScript adapter smoke cases passed.');

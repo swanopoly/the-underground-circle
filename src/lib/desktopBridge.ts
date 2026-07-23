@@ -50,6 +50,7 @@ import {
   validatePhotoshopConvertColorModeParams,
   validatePhotoshopSetLayerAppearanceParams,
   validatePhotoshopCreateTextLayerParams,
+  validatePhotoshopAddFillLayerParams,
   type PhotoshopAdjustmentLayerKind,
   type PhotoshopTextJustification,
   type PhotoshopBlendMode,
@@ -78,14 +79,20 @@ export type {
 } from './photoshopExtendScriptAdapters';
 
 import {
+  validateIllustratorAddArtboardParams,
   validateIllustratorAddShapeParams,
   validateIllustratorAddTextParams,
+  validateIllustratorAlignParams,
   validateIllustratorArrangeParams,
   validateIllustratorDocumentStatusParams,
   validateIllustratorExportProofParams,
+  validateIllustratorGroupParams,
   validateIllustratorSetAppearanceParams,
   validateIllustratorVectorizeParams,
+  type IllustratorAddArtboardAction,
   type IllustratorAddShapeKind,
+  type IllustratorAlignAlignment,
+  type IllustratorAlignDistribute,
   type IllustratorArrangeDirection,
   type IllustratorExportProofFormat,
   type IllustratorTracingMode,
@@ -4128,6 +4135,63 @@ export async function photoshopCreateTextLayer(args: {
   };
 }
 
+export type PhotoshopAddFillLayerResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  targetDocumentName: string | null;
+  hexColor: string | null;
+  layerName: string | null;
+  layerCountBefore: number;
+  layerCountAfter: number;
+  error: string | null;
+};
+
+/**
+ * Add ONE new solid-color fill (content) layer — e.g. a white background — to
+ * the guarded Photoshop document via the ActionManager `make` descriptor
+ * (the sanctioned content-layer scripting API). hexColor is a required #RRGGBB
+ * color; layerName optionally renames the new layer. Additive and fully
+ * reversible — approval-gated — but NEVER saves/exports/closes the document, so
+ * the user keeps undo. Fails closed with 'no_document' or 'document_mismatch'.
+ * Like transform_layer there is no output file, so no local-file grant is required.
+ */
+export async function photoshopAddFillLayer(args: {
+  appName?: string;
+  targetDocumentName?: string | null;
+  hexColor: string;
+  layerName?: string | null;
+}): Promise<DesktopResult<PhotoshopAddFillLayerResult>> {
+  const validated = validatePhotoshopAddFillLayerParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/photoshop_add_fill_layer', {
+    appName: params.appName,
+    targetDocumentName: params.targetDocumentName || undefined,
+    hexColor: params.hexColor,
+    layerName: params.layerName || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<PhotoshopAddFillLayerResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      targetDocumentName: d?.targetDocumentName ? String(d.targetDocumentName) : (params.targetDocumentName || null),
+      hexColor: d?.hexColor ? String(d.hexColor) : params.hexColor,
+      layerName: d?.layerName ? String(d.layerName) : (params.layerName || null),
+      layerCountBefore: toNumber(d?.layerCountBefore),
+      layerCountAfter: toNumber(d?.layerCountAfter),
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
 // ─── Illustrator ExtendScript base pair ─────────────────────────────────────
 //
 // Same ExtendScript-via-AppleScript mechanism as the Photoshop tools.
@@ -4425,6 +4489,115 @@ export async function illustratorArrange(args: {
   };
 }
 
+export type IllustratorGroupResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  /** Selected objects moved into the new group (0 on failure; >= 2 on success). */
+  groupedCount: number;
+  error: string | null;
+};
+
+/**
+ * Combine the current selection (>= 2 objects) in the guarded Illustrator
+ * document into ONE new group via doc.groupItems.add() + item.move(group,
+ * PLACEATEND). Mutates the OPEN document in place — approval-gated — but NEVER
+ * saves/exports/closes it, so the user keeps undo. Group-only (no reliable DOM
+ * ungroup). Fails closed with 'no_document', 'document_mismatch', or
+ * 'need_two_selected'. The receipt carries groupedCount as proof. There is no
+ * output file, so no local-file grant is required.
+ */
+export async function illustratorGroup(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+}): Promise<DesktopResult<IllustratorGroupResult>> {
+  const validated = validateIllustratorGroupParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/illustrator_group', {
+    appName: params.appName,
+    expectedDocumentName: params.expectedDocumentName || undefined,
+  });
+  if (!r.ok) return r as DesktopResult<IllustratorGroupResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (params.expectedDocumentName || null),
+      groupedCount: toNumber(d?.groupedCount),
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type IllustratorAlignResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  alignment: IllustratorAlignAlignment;
+  distribute: IllustratorAlignDistribute;
+  /** Selected objects repositioned (0 on failure; >= 2 on success). */
+  alignedCount: number;
+  error: string | null;
+};
+
+/**
+ * Align and/or distribute the current selection (>= 2 objects) in the guarded
+ * Illustrator document by reading each item's visibleBounds and writing
+ * item.position (top-left) via the typed DOM. alignment snaps one axis to the
+ * selection bounding box (left/centerH/right on X, top/centerV/bottom on Y);
+ * distribute evenly spaces the left-edges (horizontal) or top-edges (vertical)
+ * of the middle items between the two extremes. At least one of alignment (not
+ * none) or distribute (not none) is required; the two compose on independent
+ * axes. Mutates the OPEN document in place — approval-gated — but NEVER
+ * saves/exports/closes it, so the user keeps undo. Fails closed with
+ * 'no_document', 'document_mismatch', or 'need_two_selected'. The receipt
+ * carries alignedCount as proof. There is no output file, so no local-file
+ * grant is required.
+ */
+export async function illustratorAlign(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  alignment: IllustratorAlignAlignment;
+  distribute: IllustratorAlignDistribute;
+}): Promise<DesktopResult<IllustratorAlignResult>> {
+  const validated = validateIllustratorAlignParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/illustrator_align', {
+    appName: params.appName,
+    expectedDocumentName: params.expectedDocumentName || undefined,
+    alignment: params.alignment,
+    distribute: params.distribute,
+  });
+  if (!r.ok) return r as DesktopResult<IllustratorAlignResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (params.expectedDocumentName || null),
+      alignment: params.alignment,
+      distribute: params.distribute,
+      alignedCount: toNumber(d?.alignedCount),
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
 export type IllustratorAddTextResult = {
   appName: string | null;
   appRunning: boolean;
@@ -4495,6 +4668,75 @@ export async function illustratorAddText(args: {
       appliedFont: d?.appliedFont ? String(d.appliedFont) : null,
       fillApplied: d?.fillApplied === true,
       fontWarning: d?.fontWarning ? String(d.fontWarning) : null,
+      error: d?.error ? String(d.error) : null,
+    },
+  };
+}
+
+export type IllustratorAddArtboardResult = {
+  appName: string | null;
+  appRunning: boolean;
+  documentName: string | null;
+  expectedDocumentName: string | null;
+  action: IllustratorAddArtboardAction;
+  /** Total artboards in the document AFTER the op (+1 on add; unchanged on resize). */
+  artboardCount: number;
+  widthPt: number;
+  heightPt: number;
+  error: string | null;
+};
+
+/**
+ * Add a NEW artboard to (or resize an existing artboard in) the guarded
+ * Illustrator document via the typed DOM (doc.artboards.add /
+ * artboards[i].artboardRect). Additive and reversible — approval-gated — but
+ * NEVER saves/exports/closes the document, so the user keeps undo. action is
+ * add|resize; widthPt/heightPt are the new artboard size in points; artboardIndex
+ * targets the artboard to resize (default 0); xPt/yPt optionally place a new
+ * artboard's top-left corner (default: to the right of the last artboard). Fails
+ * closed with 'no_document', 'document_mismatch', or (resize)
+ * 'artboard_index_out_of_range'. There is no output file, so no local-file grant
+ * is required.
+ */
+export async function illustratorAddArtboard(args: {
+  appName?: string;
+  expectedDocumentName?: string | null;
+  action: IllustratorAddArtboardAction | string;
+  widthPt: number;
+  heightPt: number;
+  artboardIndex?: number | null;
+  xPt?: number | null;
+  yPt?: number | null;
+}): Promise<DesktopResult<IllustratorAddArtboardResult>> {
+  const validated = validateIllustratorAddArtboardParams(args);
+  if (!validated.ok) {
+    return { ok: false, error: validated.errors.join(' '), errorCode: 'invalid_input' };
+  }
+  const params = validated.params;
+  const r = await callBridge('POST', '/desktop/illustrator_add_artboard', {
+    appName: params.appName,
+    expectedDocumentName: params.expectedDocumentName || undefined,
+    action: params.action,
+    widthPt: params.widthPt,
+    heightPt: params.heightPt,
+    artboardIndex: params.artboardIndex,
+    xPt: params.xPt ?? undefined,
+    yPt: params.yPt ?? undefined,
+  });
+  if (!r.ok) return r as DesktopResult<IllustratorAddArtboardResult>;
+  const d = r.data as any;
+  const toNumber = (value: unknown): number => Number.isFinite(Number(value)) ? Number(value) : 0;
+  return {
+    ok: true,
+    data: {
+      appName: d?.appName ? String(d.appName) : params.appName,
+      appRunning: d?.appRunning === true,
+      documentName: d?.documentName ? String(d.documentName) : null,
+      expectedDocumentName: d?.expectedDocumentName ? String(d.expectedDocumentName) : (params.expectedDocumentName || null),
+      action: (d?.action ? String(d.action) : params.action) as IllustratorAddArtboardAction,
+      artboardCount: toNumber(d?.artboardCount),
+      widthPt: toNumber(d?.widthPt),
+      heightPt: toNumber(d?.heightPt),
       error: d?.error ? String(d.error) : null,
     },
   };

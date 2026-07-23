@@ -196,6 +196,7 @@ export type OpenSwanRuntimeToolName =
   | 'desktop.photoshop_convert_color_mode'
   | 'desktop.photoshop_set_layer_appearance'
   | 'desktop.photoshop_create_text_layer'
+  | 'desktop.photoshop_add_fill_layer'
   | 'desktop.illustrator_document_status'
   | 'desktop.illustrator_export_proof'
   | 'desktop.illustrator_vectorize'
@@ -203,6 +204,9 @@ export type OpenSwanRuntimeToolName =
   | 'desktop.illustrator_add_text'
   | 'desktop.illustrator_add_shape'
   | 'desktop.illustrator_set_appearance'
+  | 'desktop.illustrator_group'
+  | 'desktop.illustrator_add_artboard'
+  | 'desktop.illustrator_align'
   | 'desktop.cad_compile'
   | 'desktop.cad_inspect_file'
   | 'desktop.design_export'
@@ -578,6 +582,7 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.photoshop_convert_color_mode': { appName?: string; targetDocumentName?: string; mode: 'rgb' | 'cmyk' | 'grayscale' };
   'desktop.photoshop_set_layer_appearance': { appName?: string; targetDocumentName?: string; layerName: string; opacity?: number; fillOpacity?: number; blendMode?: 'normal' | 'multiply' | 'screen' | 'overlay' | 'darken' | 'lighten' | 'soft_light' | 'hard_light' | 'color_dodge' | 'color_burn' | 'difference' };
   'desktop.photoshop_create_text_layer': { appName?: string; targetDocumentName?: string; text: string; xPx: number; yPx: number; sizePt?: number; hexColor?: string; justification?: 'left' | 'center' | 'right'; layerName?: string };
+  'desktop.photoshop_add_fill_layer': { appName?: string; targetDocumentName?: string; hexColor: string; layerName?: string };
   'desktop.illustrator_document_status': { appName?: string; expectedDocumentName?: string };
   'desktop.illustrator_export_proof': { appName?: string; outputPath: string; format?: 'png' | 'svg'; scalePercent?: number; expectedDocumentName?: string };
   'desktop.illustrator_vectorize': { appName?: string; imagePath?: string; outputPath: string; mode?: 'color' | 'gray' | 'blackwhite'; maxColors?: number; threshold?: number; ignoreWhite?: boolean; preset?: string; expectedDocumentName?: string };
@@ -585,6 +590,9 @@ export type OpenSwanToolExecutionArgs = {
   'desktop.illustrator_add_text': { appName?: string; expectedDocumentName?: string; contents: string; xPt: number; yPt: number; sizePt?: number; fillColor?: string; fontName?: string };
   'desktop.illustrator_add_shape': { appName?: string; expectedDocumentName?: string; kind: 'rectangle' | 'ellipse' | 'line'; xPt?: number; yPt?: number; widthPt?: number; heightPt?: number; x1Pt?: number; y1Pt?: number; x2Pt?: number; y2Pt?: number; fillColor?: string; strokeColor?: string; strokeWidthPt?: number };
   'desktop.illustrator_set_appearance': { appName?: string; expectedDocumentName?: string; fillColor?: string; strokeColor?: string; strokeWidthPt?: number; swatchName?: string };
+  'desktop.illustrator_group': { appName?: string; expectedDocumentName?: string };
+  'desktop.illustrator_add_artboard': { appName?: string; expectedDocumentName?: string; action: 'add' | 'resize'; widthPt: number; heightPt: number; artboardIndex?: number; xPt?: number; yPt?: number };
+  'desktop.illustrator_align': { appName?: string; expectedDocumentName?: string; alignment: 'left' | 'centerH' | 'right' | 'top' | 'centerV' | 'bottom' | 'none'; distribute: 'none' | 'horizontal' | 'vertical' };
   'desktop.cad_compile': { engine: 'openscad' | 'freecadcmd' | 'blender'; sourcePath: string; outputPath: string; extraArgs?: string[]; timeoutMs?: number };
   'desktop.cad_inspect_file': { path: string; maxBytes?: number };
   'desktop.design_export': { engine: 'inkscape' | 'sketchtool'; sourcePath: string; outputPath: string; options?: { widthPx?: number; heightPx?: number; pdfVersion?: string; format?: string; scale?: number }; timeoutMs?: number };
@@ -877,6 +885,7 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.photoshop_convert_color_mode': { ok: boolean; resultsText: string };
   'desktop.photoshop_set_layer_appearance': { ok: boolean; resultsText: string };
   'desktop.photoshop_create_text_layer': { ok: boolean; resultsText: string };
+  'desktop.photoshop_add_fill_layer': { ok: boolean; resultsText: string };
   'desktop.illustrator_document_status': { ok: boolean; resultsText: string };
   'desktop.illustrator_export_proof': { ok: boolean; resultsText: string };
   'desktop.illustrator_vectorize': { ok: boolean; resultsText: string };
@@ -884,6 +893,9 @@ export type OpenSwanToolExecutionResultMap = {
   'desktop.illustrator_add_text': { ok: boolean; resultsText: string };
   'desktop.illustrator_add_shape': { ok: boolean; resultsText: string };
   'desktop.illustrator_set_appearance': { ok: boolean; resultsText: string };
+  'desktop.illustrator_group': { ok: boolean; resultsText: string };
+  'desktop.illustrator_add_artboard': { ok: boolean; resultsText: string };
+  'desktop.illustrator_align': { ok: boolean; resultsText: string };
   'desktop.cad_compile': { ok: boolean; resultsText: string };
   'desktop.cad_inspect_file': { ok: boolean; resultsText: string };
   'desktop.design_export': { ok: boolean; resultsText: string };
@@ -3263,6 +3275,23 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
     },
   },
   {
+    name: 'desktop.photoshop_add_fill_layer',
+    label: 'Add Photoshop Fill Layer',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Script-backed additive solid-color fill layer: adds ONE new solid color content layer (e.g. a white background) to the active Photoshop document from a required #RRGGBB hexColor via the ActionManager make descriptor, optionally named. Additive and fully reversible — its own layer, mutates the active document, approval-gated, and NEVER saves or touches existing layers/pixels. Use after photoshop_document_status and photoshop_layer_inventory. Fails closed on no_document / document_mismatch.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Photoshop app name. Defaults to Photoshop.' },
+        targetDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        hexColor: { type: 'string', description: 'Required fill color as #RRGGBB hex, e.g. #FFFFFF for white.' },
+        layerName: { type: 'string', description: 'Optional name for the new fill layer.' },
+      },
+      required: ['hexColor'],
+    },
+  },
+  {
     name: 'desktop.illustrator_document_status',
     label: 'Illustrator Document Status',
     surfaces: ['main_chat', 'room_chat', 'task_run'],
@@ -3396,6 +3425,58 @@ const TOOL_DEFINITIONS: OpenSwanToolDefinition[] = [
         strokeWidthPt: { type: 'number', description: 'Optional stroke width in points (0-1000).' },
         swatchName: { type: 'string', description: 'Optional named swatch whose solid color becomes the fill.' },
       },
+    },
+  },
+  {
+    name: 'desktop.illustrator_group',
+    label: 'Group Illustrator Selection',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Combines the CURRENTLY SELECTED objects (2 or more) in the active Illustrator document into ONE new group via the typed DOM (doc.groupItems.add() + item.move(group, PLACEATEND)). Use for "group these" or "group the selection". Mutates the active document in place, approval-gated, and NEVER saves/exports/closes it — the group is reversible with undo. Group-only: Illustrator\'s scripting DOM has no reliable ungroup, so this tool cannot ungroup. The receipt carries groupedCount as proof. Select the objects first (in Illustrator), then call this; use illustrator_document_status to confirm a selection exists. Fails closed on no_document, document_mismatch, or need_two_selected (fewer than 2 objects selected).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Illustrator app name. Defaults to Illustrator.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+      },
+    },
+  },
+  {
+    name: 'desktop.illustrator_add_artboard',
+    label: 'Add or Resize Illustrator Artboard',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Adds a new artboard to, or resizes an existing artboard in, the active Illustrator document via the typed DOM (doc.artboards.add / artboards[i].artboardRect). Use for "add another artboard" or "resize this artboard". action is add|resize; widthPt/heightPt are the new artboard size in points (> 0, up to 16000). For resize, artboardIndex selects the artboard (default 0, 0-based) and its existing top-left corner is preserved. For add, xPt/yPt optionally set the new artboard\'s top-left corner (default: placed to the right of the last artboard). Additive/reversible: it only adds or reshapes an artboard, mutates the active document, approval-gated, and NEVER saves/exports/closes it — the user keeps undo. The receipt carries artboardCount as proof. Fails closed on no_document, document_mismatch, or (resize) artboard_index_out_of_range (index past the last artboard).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Illustrator app name. Defaults to Illustrator.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        action: { type: 'string', enum: ['add', 'resize'], description: 'add a new artboard, or resize an existing one.' },
+        widthPt: { type: 'number', description: 'Artboard width in points (> 0, up to 16000).' },
+        heightPt: { type: 'number', description: 'Artboard height in points (> 0, up to 16000).' },
+        artboardIndex: { type: 'number', description: 'resize: 0-based index of the artboard to resize. Defaults to 0.' },
+        xPt: { type: 'number', description: 'add: optional top-left X of the new artboard in points. Defaults to the right of the last artboard.' },
+        yPt: { type: 'number', description: 'add: optional top-left Y of the new artboard in points (y-up). Defaults to the last artboard\'s top.' },
+      },
+      required: ['action', 'widthPt', 'heightPt'],
+    },
+  },
+  {
+    name: 'desktop.illustrator_align',
+    label: 'Align or Distribute Illustrator Selection',
+    surfaces: ['main_chat', 'room_chat', 'task_run'],
+    description:
+      'Aligns and/or evenly distributes the CURRENTLY SELECTED objects (2 or more) in the active Illustrator document via the typed DOM — it reads each object\'s visibleBounds and writes object.position (top-left); no menu command. Use for "align these left", "center them", or "distribute evenly". alignment snaps one axis to the selection bounding box: left|centerH|right move the horizontal edge, top|centerV|bottom move the vertical edge, none leaves alignment untouched. distribute evenly spaces the objects while keeping the two extreme objects fixed: horizontal spaces their left-edges, vertical spaces their top-edges, none leaves spacing untouched. At least one of alignment (not none) or distribute (not none) is required; the two act on independent axes and compose. Mutates the active document in place, approval-gated, and NEVER saves/exports/closes it — the user keeps undo. The receipt carries alignedCount as proof. Select the objects first (in Illustrator), then call this; use illustrator_document_status to confirm a selection exists. Fails closed on no_document, document_mismatch, or need_two_selected (fewer than 2 objects selected).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        appName: { type: 'string', description: 'Optional Illustrator app name. Defaults to Illustrator.' },
+        expectedDocumentName: { type: 'string', description: 'Optional expected active/open document name guard.' },
+        alignment: { type: 'string', enum: ['left', 'centerH', 'right', 'top', 'centerV', 'bottom', 'none'], description: 'Axis alignment to the selection bounding box: left/centerH/right (X), top/centerV/bottom (Y), or none.' },
+        distribute: { type: 'string', enum: ['none', 'horizontal', 'vertical'], description: 'Even spacing between the extremes: horizontal (left-edges), vertical (top-edges), or none.' },
+      },
+      required: ['alignment', 'distribute'],
     },
   },
   {
@@ -4858,6 +4939,7 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'desktop.photoshop_convert_color_mode': ['execute'],
   'desktop.photoshop_set_layer_appearance': ['execute'],
   'desktop.photoshop_create_text_layer': ['execute'],
+  'desktop.photoshop_add_fill_layer': ['execute'],
   'desktop.illustrator_document_status': ['execute'],
   'desktop.illustrator_export_proof': ['execute'],
   'desktop.illustrator_vectorize': ['execute'],
@@ -4865,6 +4947,9 @@ const TOOL_MODE_TAGS: Partial<Record<OpenSwanRuntimeToolName, string[]>> = {
   'desktop.illustrator_add_text': ['execute'],
   'desktop.illustrator_add_shape': ['execute'],
   'desktop.illustrator_set_appearance': ['execute'],
+  'desktop.illustrator_group': ['execute'],
+  'desktop.illustrator_add_artboard': ['execute'],
+  'desktop.illustrator_align': ['execute'],
   'desktop.cad_compile': ['execute'],
   'desktop.cad_inspect_file': ['execute'],
   'desktop.design_export': ['execute'],
@@ -5097,6 +5182,7 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'desktop.photoshop_convert_color_mode',
   'desktop.photoshop_set_layer_appearance',
   'desktop.photoshop_create_text_layer',
+  'desktop.photoshop_add_fill_layer',
   'desktop.illustrator_document_status',
   'desktop.illustrator_export_proof',
   'desktop.illustrator_vectorize',
@@ -5104,6 +5190,9 @@ const TOOL_LOOP_SAFE_NAMES = new Set<OpenSwanRuntimeToolName>([
   'desktop.illustrator_add_text',
   'desktop.illustrator_add_shape',
   'desktop.illustrator_set_appearance',
+  'desktop.illustrator_group',
+  'desktop.illustrator_add_artboard',
+  'desktop.illustrator_align',
   'desktop.cad_compile',
   'desktop.cad_inspect_file',
   'desktop.design_export',
@@ -6039,6 +6128,7 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'desktop.photoshop_convert_color_mode':
     case 'desktop.photoshop_set_layer_appearance':
     case 'desktop.photoshop_create_text_layer':
+    case 'desktop.photoshop_add_fill_layer':
     case 'desktop.illustrator_document_status':
     case 'desktop.illustrator_export_proof':
     case 'desktop.illustrator_vectorize':
@@ -6046,6 +6136,9 @@ export function formatOpenSwanRuntimeToolResult<T extends OpenSwanRuntimeToolNam
     case 'desktop.illustrator_add_text':
     case 'desktop.illustrator_add_shape':
     case 'desktop.illustrator_set_appearance':
+    case 'desktop.illustrator_group':
+    case 'desktop.illustrator_add_artboard':
+    case 'desktop.illustrator_align':
     case 'desktop.cad_compile':
     case 'desktop.cad_inspect_file':
     case 'desktop.design_export':
@@ -9890,6 +9983,36 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
+    case 'desktop.photoshop_add_fill_layer': {
+      try {
+        const { photoshopAddFillLayer, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const hexColor = typeof a.hexColor === 'string' ? a.hexColor.trim() : '';
+        if (!/^#[0-9a-fA-F]{6}$/.test(hexColor)) {
+          return { ok: false, resultsText: 'hexColor must be a #RRGGBB hex color (e.g. #FFFFFF).' } as any;
+        }
+        const r = await photoshopAddFillLayer({
+          appName: typeof a.appName === 'string' ? a.appName : 'Photoshop',
+          targetDocumentName: typeof a.targetDocumentName === 'string' ? a.targetDocumentName : undefined,
+          hexColor,
+          layerName: typeof a.layerName === 'string' && a.layerName.trim() ? a.layerName.trim() : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Photoshop'} is not running.` } as any;
+        if (d.error === 'no_document') return { ok: false, ...d, resultsText: 'Photoshop is running but no document is open.' } as any;
+        if (d.error === 'document_mismatch') return { ok: false, ...d, resultsText: `Active Photoshop document is ${d.documentName || 'unknown'}, not the expected ${a.targetDocumentName}.` } as any;
+        if (d.error || !d.layerName) {
+          return { ok: false, ...d, resultsText: `Photoshop did not create the ${d.hexColor || hexColor} fill layer: ${d.error || 'no created layer reported'}.` } as any;
+        }
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Added solid ${d.hexColor || hexColor} fill layer "${d.layerName}"${d.documentName ? ` in ${d.documentName}` : ''} (layers ${d.layerCountBefore} → ${d.layerCountAfter}). Document not saved — the change is undoable.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
     case 'desktop.illustrator_document_status': {
       try {
         const { illustratorDocumentStatus, isDesktopBridgeAvailable } = await import('./desktopBridge');
@@ -9997,6 +10120,29 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           ok: true,
           ...d,
           resultsText: `Reordered ${d.movedCount} selected object(s) (${d.direction})${d.documentName ? ` in ${d.documentName}` : ''}. Document not saved — the change is undoable.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.illustrator_group': {
+      try {
+        const { illustratorGroup, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const r = await illustratorGroup({
+          appName: typeof a.appName === 'string' ? a.appName : 'Illustrator',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Illustrator'} is not running.` } as any;
+        if (d.error === 'no_document') return { ok: false, ...d, resultsText: 'Illustrator is running but no document is open.' } as any;
+        if (d.error === 'document_mismatch') return { ok: false, ...d, resultsText: `Active Illustrator document is ${d.documentName || 'unknown'}, not the expected ${a.expectedDocumentName}.` } as any;
+        if (d.error === 'need_two_selected') return { ok: false, ...d, resultsText: 'Select at least two objects in Illustrator to group first.' } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Illustrator group failed: ${d.error}.` } as any;
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Grouped ${d.groupedCount} selected object(s)${d.documentName ? ` in ${d.documentName}` : ''}. Document not saved — the change is undoable.`,
         } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
@@ -10119,6 +10265,84 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
           ok: true,
           ...d,
           resultsText: `Updated appearance on ${d.appliedToCount} object(s)${paintNote}${d.documentName ? ` in ${d.documentName}` : ''}. Document not saved — the change is undoable.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.illustrator_add_artboard': {
+      try {
+        const { illustratorAddArtboard, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        const action = typeof a.action === 'string' ? a.action.trim().toLowerCase() : '';
+        if (!['add', 'resize'].includes(action)) {
+          return { ok: false, resultsText: 'action must be add or resize.' } as any;
+        }
+        if (typeof a.widthPt !== 'number' || !Number.isFinite(a.widthPt) || a.widthPt <= 0 || typeof a.heightPt !== 'number' || !Number.isFinite(a.heightPt) || a.heightPt <= 0) {
+          return { ok: false, resultsText: 'widthPt and heightPt must be positive numbers.' } as any;
+        }
+        const r = await illustratorAddArtboard({
+          appName: typeof a.appName === 'string' ? a.appName : 'Illustrator',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          action: action as any,
+          widthPt: a.widthPt,
+          heightPt: a.heightPt,
+          artboardIndex: Number.isFinite(Number(a.artboardIndex)) ? Number(a.artboardIndex) : undefined,
+          xPt: Number.isFinite(Number(a.xPt)) ? Number(a.xPt) : undefined,
+          yPt: Number.isFinite(Number(a.yPt)) ? Number(a.yPt) : undefined,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Illustrator'} is not running.` } as any;
+        if (d.error === 'no_document') return { ok: false, ...d, resultsText: 'Illustrator is running but no document is open.' } as any;
+        if (d.error === 'document_mismatch') return { ok: false, ...d, resultsText: `Active Illustrator document is ${d.documentName || 'unknown'}, not the expected ${a.expectedDocumentName}.` } as any;
+        if (d.error === 'artboard_index_out_of_range') return { ok: false, ...d, resultsText: `Artboard index ${a.artboardIndex ?? 0} is out of range — the document has ${d.artboardCount} artboard(s).` } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Illustrator add artboard failed: ${d.error}.` } as any;
+        const actionNote = d.action === 'resize' ? `Resized artboard to ${d.widthPt}x${d.heightPt}pt` : `Added a ${d.widthPt}x${d.heightPt}pt artboard`;
+        return {
+          ok: true,
+          ...d,
+          resultsText: `${actionNote}${d.documentName ? ` in ${d.documentName}` : ''} (${d.artboardCount} artboard(s) total). Document not saved — the change is undoable.`,
+        } as any;
+      } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
+    }
+    case 'desktop.illustrator_align': {
+      try {
+        const { illustratorAlign, isDesktopBridgeAvailable } = await import('./desktopBridge');
+        if (!(await isDesktopBridgeAvailable())) return { ok: false, resultsText: 'Desktop bridge offline.' } as any;
+        const a = args as any;
+        // Case-sensitive enums (centerH/centerV are camelCase) — do not lowercase.
+        const alignment = typeof a.alignment === 'string' ? a.alignment.trim() : '';
+        if (!['left', 'centerH', 'right', 'top', 'centerV', 'bottom', 'none'].includes(alignment)) {
+          return { ok: false, resultsText: 'alignment must be left, centerH, right, top, centerV, bottom, or none.' } as any;
+        }
+        const distribute = typeof a.distribute === 'string' ? a.distribute.trim() : '';
+        if (!['none', 'horizontal', 'vertical'].includes(distribute)) {
+          return { ok: false, resultsText: 'distribute must be none, horizontal, or vertical.' } as any;
+        }
+        if (alignment === 'none' && distribute === 'none') {
+          return { ok: false, resultsText: 'Provide an alignment (not none) and/or a distribute (not none).' } as any;
+        }
+        const r = await illustratorAlign({
+          appName: typeof a.appName === 'string' ? a.appName : 'Illustrator',
+          expectedDocumentName: typeof a.expectedDocumentName === 'string' ? a.expectedDocumentName : undefined,
+          alignment: alignment as any,
+          distribute: distribute as any,
+        });
+        if (!r.ok || !r.data) return { ok: false, resultsText: describeDesktopFailure(r.error, r.errorCode) } as any;
+        const d = r.data;
+        if (!d.appRunning) return { ok: false, ...d, resultsText: `${d.appName || 'Illustrator'} is not running.` } as any;
+        if (d.error === 'no_document') return { ok: false, ...d, resultsText: 'Illustrator is running but no document is open.' } as any;
+        if (d.error === 'document_mismatch') return { ok: false, ...d, resultsText: `Active Illustrator document is ${d.documentName || 'unknown'}, not the expected ${a.expectedDocumentName}.` } as any;
+        if (d.error === 'need_two_selected') return { ok: false, ...d, resultsText: 'Select at least two objects in Illustrator to align or distribute first.' } as any;
+        if (d.error) return { ok: false, ...d, resultsText: `Illustrator align failed: ${d.error}.` } as any;
+        const ops: string[] = [];
+        if (d.alignment !== 'none') ops.push(`aligned ${d.alignment}`);
+        if (d.distribute !== 'none') ops.push(`distributed ${d.distribute}`);
+        const opsNote = ops.length > 0 ? ops.join(' and ') : 'repositioned';
+        return {
+          ok: true,
+          ...d,
+          resultsText: `Repositioned ${d.alignedCount} selected object(s) (${opsNote})${d.documentName ? ` in ${d.documentName}` : ''}. Document not saved — the change is undoable.`,
         } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }

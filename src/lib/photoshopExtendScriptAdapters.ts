@@ -20,6 +20,9 @@
  *   - photoshop_create_text_layer       (add ONE new point-text art layer —
  *                                        additive headline/name, typed DOM only,
  *                                        never saves, fully reversible via undo)
+ *   - photoshop_add_fill_layer          (add ONE new solid-color fill/content
+ *                                        layer from a #RRGGBB hex — additive
+ *                                        background, never saves, reversible)
  *
  * LOCKSTEP(scripts/claude-bridge.js): the bridge is a standalone Node script
  * that cannot import TS, so it carries byte-identical duplicates of the JSX
@@ -1994,6 +1997,14 @@ function normalizePhotoshopHexColor(value: unknown): PhotoshopParamCheck<string 
   return { ok: true, value: value.trim() };
 }
 
+/** Required #RRGGBB hex fill: strict format, trimmed, fails closed otherwise. */
+function normalizePhotoshopRequiredHexColor(value: unknown): PhotoshopParamCheck<string> {
+  if (typeof value !== 'string' || !PHOTOSHOP_HEX_COLOR_PATTERN.test(value.trim())) {
+    return { ok: false, error: 'hexColor must be a hex color in #RRGGBB format.' };
+  }
+  return { ok: true, value: value.trim() };
+}
+
 export type PhotoshopCreateTextLayerParams = {
   appName?: string;
   targetDocumentName?: string | null;
@@ -2188,6 +2199,163 @@ ${photoshopCreateTextLayerJsxBody({
     sizePt: normalized.sizePt,
     hexColor: normalized.hexColor,
     justificationConstant: normalized.justification ? PHOTOSHOP_TEXT_JUSTIFICATION_CONSTANTS[normalized.justification] : '',
+    layerName: normalized.layerName,
+  })}
+}());
+`;
+  return { jsx, errors: [] };
+}
+
+// ─── 9) Add solid-color fill layer (additive content layer) ─────────────────
+
+export type PhotoshopAddFillLayerParams = {
+  appName?: string;
+  targetDocumentName?: string | null;
+  /** Required #RRGGBB solid fill color, e.g. #FFFFFF for a white background. */
+  hexColor: string;
+  /** Optional name for the new fill layer; defaults to the app default (e.g. "Color Fill 1"). */
+  layerName?: string | null;
+};
+
+export type NormalizedPhotoshopAddFillLayerParams = {
+  appName: string;
+  targetDocumentName: string;
+  hexColor: string;
+  layerName: string;
+};
+
+export function validatePhotoshopAddFillLayerParams(
+  params: PhotoshopAddFillLayerParams,
+): { ok: true; params: NormalizedPhotoshopAddFillLayerParams } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const appName = normalizePhotoshopBridgeAppName(params?.appName);
+  if (!appName.ok) errors.push(appName.error);
+  const targetDocumentName = normalizePhotoshopTargetDocumentName(params?.targetDocumentName);
+  if (!targetDocumentName.ok) errors.push(targetDocumentName.error);
+  const hexColor = normalizePhotoshopRequiredHexColor(params?.hexColor);
+  if (!hexColor.ok) errors.push(hexColor.error);
+  const layerName = normalizePhotoshopLayerNameParam(params?.layerName);
+  if (!layerName.ok) errors.push(layerName.error);
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    params: {
+      appName: appName.ok ? appName.value : 'Photoshop',
+      targetDocumentName: targetDocumentName.ok ? targetDocumentName.value : '',
+      hexColor: hexColor.ok ? hexColor.value : '',
+      layerName: layerName.ok ? layerName.value : '',
+    },
+  };
+}
+
+/**
+ * LOCKSTEP(scripts/claude-bridge.js): photoshopAddFillLayerJsxBody — keep this
+ * JSX body byte-identical with the bridge duplicate. Adds ONE new solid-color
+ * fill (content) layer via the ActionManager `make` descriptor (the sanctioned
+ * scripting API for content layers): the RGB channels come from #RRGGBB, with
+ * the Photoshop quirk that the GREEN channel key is literally "grain". Its own
+ * layer — additive and fully reversible; never edits existing layers/pixels,
+ * never saves.
+ */
+function photoshopAddFillLayerJsxBody(
+  { hexColor, layerName }: { hexColor: string; layerName: string },
+): string {
+  return `
+  var hexColor = ${jsxLiteral(String(hexColor ?? ''))};
+  var layerName = ${jsxLiteral(String(layerName ?? ''))};
+
+  function stringifyFillLayerResult(value) {
+    return "{" + [
+      "\\"ok\\":" + jsonBoolean(value.ok),
+      "\\"appRunning\\":" + jsonBoolean(value.appRunning),
+      "\\"appName\\":" + jsonString(value.appName),
+      "\\"documentName\\":" + jsonNullableString(value.documentName),
+      "\\"hexColor\\":" + jsonString(value.hexColor),
+      "\\"layerName\\":" + jsonNullableString(value.layerName),
+      "\\"layerCountBefore\\":" + jsonNumber(value.layerCountBefore),
+      "\\"layerCountAfter\\":" + jsonNumber(value.layerCountAfter),
+      "\\"error\\":" + jsonNullableString(value.error)
+    ].join(",") + "}";
+  }
+  var result = {
+    ok: false,
+    appRunning: true,
+    appName: String(app.name || "Photoshop"),
+    documentName: null,
+    hexColor: hexColor,
+    layerName: null,
+    layerCountBefore: 0,
+    layerCountAfter: 0,
+    error: null
+  };
+
+  if (collectionLength(app.documents) < 1) {
+    result.error = "no_document";
+    return stringifyFillLayerResult(result);
+  }
+  var doc = findTargetDocument();
+  if (!doc) {
+    try { result.documentName = String(app.activeDocument.name || ""); } catch (_) {}
+    result.error = "document_mismatch";
+    return stringifyFillLayerResult(result);
+  }
+  try { app.activeDocument = doc; } catch (_) {}
+  result.documentName = String(doc.name || "");
+  result.layerCountBefore = getLayerStats(doc).layerCount;
+
+  var h = String(hexColor).charAt(0) === "#" ? String(hexColor).substring(1) : String(hexColor);
+  var redChannel = parseInt(h.substring(0, 2), 16);
+  var greenChannel = parseInt(h.substring(2, 4), 16);
+  var blueChannel = parseInt(h.substring(4, 6), 16);
+  if (isNaN(redChannel) || isNaN(greenChannel) || isNaN(blueChannel)) {
+    result.error = "invalid_hex_color";
+    return stringifyFillLayerResult(result);
+  }
+
+  // Additive-only: create ONE new solid-color content layer (its own layer,
+  // fully reversible) via the ActionManager make descriptor. Never edits,
+  // moves, combines, or removes any existing layer or pixel on any path.
+  try {
+    var makeDescriptor = new ActionDescriptor();
+    var contentReference = new ActionReference();
+    contentReference.putClass(stringIDToTypeID("contentLayer"));
+    makeDescriptor.putReference(stringIDToTypeID("null"), contentReference);
+    var colorDescriptor = new ActionDescriptor();
+    colorDescriptor.putDouble(stringIDToTypeID("red"), redChannel);
+    colorDescriptor.putDouble(stringIDToTypeID("grain"), greenChannel);
+    colorDescriptor.putDouble(stringIDToTypeID("blue"), blueChannel);
+    var solidDescriptor = new ActionDescriptor();
+    solidDescriptor.putObject(stringIDToTypeID("color"), stringIDToTypeID("RGBColor"), colorDescriptor);
+    var usingDescriptor = new ActionDescriptor();
+    usingDescriptor.putObject(stringIDToTypeID("type"), stringIDToTypeID("solidColorLayer"), solidDescriptor);
+    makeDescriptor.putObject(stringIDToTypeID("using"), stringIDToTypeID("contentLayer"), usingDescriptor);
+    executeAction(stringIDToTypeID("make"), makeDescriptor, DialogModes.NO);
+    if (layerName) {
+      try { doc.activeLayer.name = layerName; } catch (_) {}
+    }
+    try { result.layerName = String(doc.activeLayer.name || ""); } catch (_) {}
+    result.ok = true;
+  } catch (err) {
+    result.error = String(err && err.message ? err.message : err);
+  }
+  result.layerCountAfter = getLayerStats(doc).layerCount;
+  if (result.ok && result.layerCountAfter <= result.layerCountBefore) {
+    result.ok = false;
+    result.error = "fill_layer_not_created";
+  }
+  return stringifyFillLayerResult(result);
+`;
+}
+
+export function buildPhotoshopAddFillLayerJsx(params: PhotoshopAddFillLayerParams): PhotoshopExtendScriptBuild {
+  const validated = validatePhotoshopAddFillLayerParams(params);
+  if (!validated.ok) return { jsx: '', errors: validated.errors };
+  const normalized = validated.params;
+  const jsx = `
+(function () {
+${photoshopExtendScriptJsxPrelude({ expectedDocumentName: normalized.targetDocumentName, sourceDocumentPath: '' })}
+${photoshopAddFillLayerJsxBody({
+    hexColor: normalized.hexColor,
     layerName: normalized.layerName,
   })}
 }());
@@ -2402,5 +2570,27 @@ export function isPhotoshopCreateTextLayerReceipt(value: unknown): value is Phot
     && typeof v.text === 'string'
     && isFiniteNumber(v.sizePt)
     && typeof v.colorApplied === 'boolean'
+    && isNullableString(v.error);
+}
+
+export type PhotoshopAddFillLayerReceipt = {
+  ok: boolean;
+  appName: string | null;
+  documentName: string | null;
+  /** Name of the created solid-color fill layer (read back after creation). */
+  layerName: string | null;
+  /** The #RRGGBB fill color that was applied. */
+  hexColor: string | null;
+  error: string | null;
+};
+
+export function isPhotoshopAddFillLayerReceipt(value: unknown): value is PhotoshopAddFillLayerReceipt {
+  if (!value || typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.ok === 'boolean'
+    && isNullableString(v.appName)
+    && isNullableString(v.documentName)
+    && isNullableString(v.layerName)
+    && isNullableString(v.hexColor)
     && isNullableString(v.error);
 }
