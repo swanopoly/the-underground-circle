@@ -65,6 +65,31 @@ const illustratorPlan = buildAdobeCreativeCloudAutomationPlan('Open Illustrator 
 assert.equal(illustratorPlan?.profile.id, 'adobe_illustrator');
 assert(illustratorPlan?.recommendedTools.includes('agent.build_app_capability'));
 assert(illustratorPlan?.approvalCheckpoints.includes('export deliverable'));
+// Illustrator profile plan surfaces the shipped deterministic ExtendScript ops
+// so a routed vector request is steered to the exact op, not blind UI control.
+for (const tool of [
+  'desktop.illustrator_vectorize',
+  'desktop.illustrator_set_appearance',
+  'desktop.illustrator_align',
+  'desktop.illustrator_arrange',
+  'desktop.illustrator_group',
+  'desktop.illustrator_add_artboard',
+  'desktop.illustrator_add_text',
+  'desktop.illustrator_add_shape',
+]) {
+  assert(illustratorPlan?.recommendedTools.includes(tool), `illustrator profile plan surfaces ${tool}`);
+}
+
+// Photoshop profile plan surfaces the 3 shipped Photoshop ExtendScript ops.
+const photoshopProfilePlan = buildAdobeCreativeCloudAutomationPlan('Open Adobe Photoshop and edit this psd file');
+assert.equal(photoshopProfilePlan?.profile.id, 'adobe_photoshop');
+for (const tool of [
+  'desktop.photoshop_create_text_layer',
+  'desktop.photoshop_set_layer_appearance',
+  'desktop.photoshop_add_fill_layer',
+]) {
+  assert(photoshopProfilePlan?.recommendedTools.includes(tool), `photoshop profile plan surfaces ${tool}`);
+}
 
 const illustratorStrategy = buildComputerAppTaskStrategy('Open Illustrator and update this logo then export SVG');
 assert.equal(illustratorStrategy?.id, 'adobe_cc_control');

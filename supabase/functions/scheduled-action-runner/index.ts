@@ -20,6 +20,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.95.3";
 import { errResponse, isServiceRoleRequest, jsonResponse } from "../_shared/edge.ts";
+import { resolveGoogleWorkspaceAccessToken } from "../_shared/google-workspace-token.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -505,6 +506,15 @@ async function getUserOauthToken(
   provider: string,
 ): Promise<string | null> {
   try {
+    // Gmail prefers the refreshing Workspace store (user_google_credentials),
+    // which holds the refresh_token and silently renews the ~1h access_token;
+    // the legacy `integrations` token below stays only as a backward-compat
+    // fallback for connections that predate that store.
+    if (provider === 'gmail') {
+      const r = await resolveGoogleWorkspaceAccessToken(supabase, userId);
+      if (r.ok) return r.accessToken;
+      /* fall through to legacy integrations token for backward compat */
+    }
     const { data } = await supabase
       .from('integrations')
       .select('access_token, refresh_token, token_expires_at')

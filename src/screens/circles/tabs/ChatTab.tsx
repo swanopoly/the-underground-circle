@@ -224,6 +224,7 @@ import {
 } from '../../../lib/chatAgentIdentity';
 import {
   deriveOutcomeVerdict,
+  browserPlanStatusOutcomeVerdict,
   mapReactionToSignal,
   type ChatOutcomeVerdict,
   type ChatUserSignal,
@@ -356,6 +357,8 @@ import {
 import type { ComputerTaskAppRouteDecisionInput } from '../../../lib/computerTaskEvidenceRecovery';
 import {
   buildChatFailureRecoveryExecutionPlan,
+  formatActiveChatBlockerContextForPrompt,
+  formatCompletedChatTaskContextForPrompt,
   formatChatFailureRecoveryOptionSelection,
   formatChatFailureRecoveryOptionSelectionForPrompt,
   parseChatFailureRecoveryOptionSelection,
@@ -378,6 +381,7 @@ import { executeComputerTaskWithAgent, refreshComputerTaskCapabilityBuildoutFrom
 import { executeDirectImageConversionRequest } from '../../../lib/directImageConversionRuntime';
 import { executeDirectLocalFileRequest, routeHasDirectLocalFileActionItems } from '../../../lib/directLocalFileRuntime';
 import { listApiKeys } from '../../../lib/llmProviders';
+import { filterDynamicModels } from '../../../lib/modelCatalogFilterCore';
 import {
   buildImplicitBusinessModelProfiles,
   loadCircleBusinessModelProfiles,
@@ -677,6 +681,76 @@ function getMemoryFamily(ref: PromptMemoryReference): 'guidance' | 'pattern' {
 
 function getMemoryFamilyLabel(ref: PromptMemoryReference): string {
   return getMemoryFamily(ref) === 'guidance' ? 'Guidance' : 'Pattern';
+}
+
+function formatMemoryKindLabel(memoryKind: string): string {
+  switch (memoryKind) {
+    case 'fact': return 'known fact';
+    case 'instruction': return 'standing instruction';
+    case 'preference': return 'user preference';
+    case 'decision': return 'past decision';
+    case 'finding': return 'investigation finding';
+    case 'policy': return 'house policy';
+    case 'context': return 'background context';
+    default: return memoryKind;
+  }
+}
+
+function formatMemoryScopeLabel(ref: PromptMemoryReference): string {
+  switch (ref.scope) {
+    case 'org': return 'org-wide';
+    case 'circle': return 'circle-wide';
+    case 'room': return 'this room';
+    case 'user': return 'just you';
+    case 'session': return 'this session';
+    case 'agent': return 'this agent only';
+    default: return String(ref.scope);
+  }
+}
+
+function formatMemoryRecommendationTargetLabel(target: OpenSwanMemoryRecommendation['target']): string {
+  switch (target) {
+    case 'agent_private': return 'private to this agent';
+    case 'circle_shared': return 'shared with the circle';
+    case 'user_private': return 'private to you';
+    case 'promote_existing': return 'promoting existing memory';
+    default: return String(target).replace(/_/g, ' ');
+  }
+}
+
+// Shared with the two computer-task launch call sites below (the
+// clarifier's chatHistoryTail and executeComputerTaskWithAgent's
+// chatHistory): same context-threading gap as the conversational reply
+// path — a blocked/completed task's structured state only ever lived on
+// the last bot message's UI render fields, so this lane "re-asks
+// questions the user already answered." Mirrors the field mapping used
+// at the conversational chatHistory construction site; a no-op (returns
+// '') when the last message isn't a bot message or has nothing to report.
+function buildTaskLaunchContextSuffix(messages: ChatMessage[]): string {
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+  if (!lastMessage || !lastMessage.isBot) return '';
+  const activeBlockerContext = formatActiveChatBlockerContextForPrompt({
+    recoveryOptions: lastMessage.recoveryOptions,
+    computerHandoffBlockers: lastMessage.computerHandoff?.blockers,
+    computerHandoffWarnings: lastMessage.computerHandoff?.warnings,
+    preflightSummary: lastMessage.computerHandoff?.preflightSummary,
+    groundingSummary: lastMessage.computerHandoff?.groundingSummary,
+    planPreview: lastMessage.chatAutomationPlanPreview
+      ? {
+        title: lastMessage.chatAutomationPlanPreview.title,
+        routeLabel: lastMessage.chatAutomationPlanPreview.routeLabel,
+        approvalRequired: lastMessage.chatAutomationPlanPreview.approvalRequired,
+        evidenceGaps: lastMessage.chatAutomationPlanPreview.evidencePanel?.freshEvidenceRequired,
+      }
+      : null,
+  });
+  if (activeBlockerContext) return activeBlockerContext;
+  return formatCompletedChatTaskContextForPrompt({
+    outcomeSignal: lastMessage.outcomeSignal,
+    computerFindings: lastMessage.computerFindings,
+    artifacts: lastMessage.artifacts,
+    browserPlans: lastMessage.browserPlans,
+  });
 }
 
 function mapPersistedRowsToChatMessages(
@@ -1103,21 +1177,6 @@ function describeLastTaskModel(messages: ChatMessage[]): string {
   return `I do not have model metadata for the last assistant message. Surface: \`${surface}\`.`;
 }
 
-function getRecoveryOptionActorLabel(actor: ChatFailureRecoveryOption['actor']): string {
-  switch (actor) {
-    case 'openswan':
-      return 'OpenSwan';
-    case 'connected_agent':
-      return 'Connected agent';
-    case 'llm':
-      return 'LLM';
-    case 'user':
-      return 'User';
-    default:
-      return 'Stop';
-  }
-}
-
 function getRecoveryOptionAccent(option: ChatFailureRecoveryOption): string {
   if (option.actor === 'connected_agent') return '#22c55e';
   if (option.actor === 'openswan') return '#38bdf8';
@@ -1348,20 +1407,6 @@ function findPriorUserPromptForMessage(messages: ChatMessage[], botMessageId: st
     return text.slice(0, 4000);
   }
   return null;
-}
-
-function getRecoveryOptionPolicyBadges(option: ChatFailureRecoveryOption): string[] {
-  const plan = buildChatFailureRecoveryExecutionPlan(option);
-  const policy = plan.policy;
-  const badges: string[] = [];
-  if (policy.requiresApproval) badges.push('APPROVAL');
-  if (policy.requiresFreshEvidence) badges.push('FRESH EVIDENCE');
-  if (policy.userActionRequired) badges.push('USER STEP');
-  if (policy.allowConnectedAgent) badges.push('CONNECTED AGENT');
-  if (policy.allowRuntimePatch) badges.push('PATCH');
-  if (policy.maxAttempts > 0) badges.push(`${policy.maxAttempts} TRY`);
-  if (policy.safetyMode === 'stop') badges.push('NO RETRY');
-  return badges.slice(0, 4);
 }
 
 function getRecoveryReliabilityFromArchive(
@@ -1952,6 +1997,42 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     () => resolveChatAgentTarget(chatAgentTargets, selectedChatAgentId),
     [chatAgentTargets, selectedChatAgentId],
   );
+  // "Send to agent" on an already-sent message — a one-off dispatch,
+  // deliberately separate from selectedChatAgentTarget (which persistently
+  // pins a target for future composer turns). Restricted to providers with
+  // a real, session-verified local bridge (claude-code/codex/cursor/gemini
+  // via bridgeTaskDispatcher) rather than the full chatAgentTargets list —
+  // the generic-bridge providers (opencode/aider/cline/...) only have a
+  // fire-once POST with no health/status verification, so surfacing them
+  // here would imply a reliability they don't have.
+  const [sendToAgentFor, setSendToAgentFor] = useState<ChatMessage | null>(null);
+  const SEND_TO_AGENT_PROVIDERS = ['claude-code', 'codex', 'cursor', 'gemini', 'gemini-cli'];
+  const sendToAgentTargets = useMemo(
+    () => chatAgentTargets.filter(
+      (target: ChatAgentTarget<AssignableAgent>) =>
+        target.connected && SEND_TO_AGENT_PROVIDERS.includes((target.provider || '').toLowerCase()),
+    ),
+    [chatAgentTargets],
+  );
+  // Context-pack preview for send-to-agent: what actually gets dispatched
+  // can differ from the raw message text — bridge providers (claude-code/
+  // codex/gemini/cursor) get the agent's terminalConfig.defaultPrompt
+  // prepended (applyTerminalProfileToTask above), which the user has no way
+  // to see today before sending. Selecting an agent now shows exactly what
+  // will be sent instead of dispatching immediately, matching the research
+  // doc's "show what will be shared with each agent" principle — this
+  // preview computation deliberately mirrors dispatchAssignedAgentTask's own
+  // profiling logic for display only; the actual dispatch still recomputes
+  // it itself, this never substitutes for that.
+  const [sendToAgentPreview, setSendToAgentPreview] = useState<{ item: ChatMessage; agent: AssignableAgent; text: string } | null>(null);
+  const openSendToAgentPreview = useCallback((item: ChatMessage, agent: AssignableAgent) => {
+    const normalizedProvider = (agent.provider || '').toLowerCase().replace(/\s+/g, '-');
+    const bridgeProviders = ['claude-code', 'codex', 'gemini', 'gemini-cli', 'cursor'];
+    const text = bridgeProviders.includes(normalizedProvider)
+      ? applyTerminalProfileToTask(item.content, agent.terminalConfig)
+      : item.content;
+    setSendToAgentPreview({ item, agent, text });
+  }, []);
   const [activeSpiritId, setActiveSpiritId] = useState<string | null>(null);
   const [soulLearningRefs, setSoulLearningRefs] = useState<ResearchDocumentReference[]>([]);
   const [soulMemoryRefs, setSoulMemoryRefs] = useState<PromptMemoryReference[]>([]);
@@ -3130,7 +3211,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   // re-asks questions the user already answered in chat.
                   appResolutionName: computerPlan.computerRequestRoute?.appResolution?.best?.displayName || null,
                   hasAttachments: attachments.length > 0,
-                  chatHistoryTail: messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n').slice(-1500),
+                  chatHistoryTail: [
+                    messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n'),
+                    buildTaskLaunchContextSuffix(messages),
+                  ].filter(Boolean).join('\n').slice(-1500),
                   isLaunchOnly: false,
                 });
                 if (clarification) {
@@ -3381,7 +3465,10 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               audit,
               grantedIds,
               businessModelPlan,
-              chatHistory: messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n'),
+              chatHistory: [
+                messages.slice(-10).map((m) => `${m.isBot ? agentName : (m.userName || 'User')}: ${m.content}`).join('\n'),
+                buildTaskLaunchContextSuffix(messages),
+              ].filter(Boolean).join('\n'),
               sessionArchiveContext: await loadSessionArchiveContext() || undefined,
               replyTo: replyTo?.content,
               readyCapabilityBuildout: options?.readyCapabilityBuildout || null,
@@ -5734,6 +5821,55 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     });
   };
 
+  // "Send to agent" on an already-sent message — reuses dispatchAssignedAgentTask
+  // unmodified (same dispatch path the composer's pinned-target flow uses),
+  // just triggered from a specific past message instead of fresh composer
+  // input. Mirrors the composer flow's addBotMessage/error-recovery shape
+  // exactly so receipts and failures look and behave the same either way.
+  // Declared here (after addBotMessage/addRecoverableChatErrorMessage, not
+  // immediately after dispatchAssignedAgentTask above) deliberately — both
+  // are plain consts redefined every render, not memoized, so this callback
+  // must be declared after them to reference them in its own dependency
+  // array; declaring it earlier and listing them as deps would throw
+  // "Cannot access before initialization" on every render (they wouldn't
+  // exist yet at the point this useCallback's deps array is evaluated).
+  const handleSendMessageToAgent = useCallback(async (item: ChatMessage, agent: AssignableAgent) => {
+    setSendToAgentFor(null);
+    setSendToAgentPreview(null);
+    setBotTyping(true);
+    try {
+      const response = await dispatchAssignedAgentTask(agent, item.content);
+      addBotMessage(response, undefined, {
+        source: {
+          actor: agent.name,
+          surface: 'message_send_to_agent',
+          provider: agent.provider,
+          selectedModel: agent.model || selectedModel || null,
+        },
+      });
+    } catch (err: any) {
+      await addRecoverableChatErrorMessage({
+        title: `**${agent.name}** failed`,
+        task: item.content,
+        error: err,
+        executionKind: 'message_send_to_agent',
+        source: 'message_send_to_agent_error',
+        touched: ['surface:main_chat', 'surface:message_send_to_agent', 'src/lib/bridgeTaskDispatcher.ts', 'src/lib/customAgentBridgeDispatcher.ts'],
+        messageSource: {
+          actor: agent.name,
+          surface: 'message_send_to_agent_error',
+          provider: agent.provider,
+          selectedModel: agent.model || selectedModel || null,
+        },
+      });
+    } finally {
+      setBotTyping(false);
+      setTimeout(() => {
+        void refreshAssignableAgentsRef.current?.();
+      }, 1500);
+    }
+  }, [dispatchAssignedAgentTask, selectedModel, addBotMessage, addRecoverableChatErrorMessage]);
+
   const addPendingBotMessage = (content: string, extra?: { taskPlan?: OpenSwanTaskPlan }) => {
     const msgId = `bot-pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const msg: ChatMessage = {
@@ -6422,6 +6558,16 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       },
       session.sourceRunId,
     );
+    // Reconcile the receipt verdict with the run's REAL terminal state. The
+    // launch-time stamp froze this message at 'completed'/'blocked'; on a real
+    // terminal status re-stamp so a FAILED run flips its receipt green→red and
+    // unlocks Retry (verdictNeedsRetry), plus records honest flywheel telemetry.
+    // Returns null on the non-terminal 'launched' call, so a live run is never
+    // overwritten. sourceMessageId is guaranteed non-null past the guard above.
+    const reconciledVerdict = browserPlanStatusOutcomeVerdict(status);
+    if (reconciledVerdict) {
+      stampOutcomeSignalRef.current(session.sourceMessageId, { verdict: reconciledVerdict });
+    }
     appendBrowserPlanEvent(session.sourceMessageId, {
       id: `${session.sourcePlanId}:${status}:${Date.now()}`,
       planId: session.sourcePlanId,
@@ -9247,6 +9393,15 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
     const webDecision = decideWebSearchForTurn(content, webSearchEnabled);
     if (webDecision.attach) {
       setBotTyping(true);
+      // Thread the prior bot message's blocked/completed computer-task context
+      // into the web-search lane too. This lane returns early (below) and never
+      // reaches the conversational path's blocker/completed-task threading, yet
+      // with the web-search toggle on it fires for EVERY turn — so a follow-up
+      // ("what did you find?", "the blocked one — why?") would otherwise see
+      // only raw m.content history. Reuses the shared launch-context wrapper
+      // (same as the two computer-task launch sites); '' (no-op) when the last
+      // message isn't a bot task, so plain web-search Q&A is unchanged.
+      const taskCtx = buildTaskLaunchContextSuffix(messages);
       try {
         const { webSearchViaOpenRouter } = await import('../../../lib/llmProviders');
         const recent = messages.slice(-6).map(m => ({
@@ -9257,7 +9412,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           query: content,
           circleId,
           conversation: recent,
-          systemPrompt: 'You are a helpful assistant in a chat. Use the web_search tool when the question needs current information. Cite sources inline as markdown links when you do.',
+          systemPrompt: 'You are a helpful assistant in a chat. Use the web_search tool when the question needs current information. Cite sources inline as markdown links when you do.'
+            + (taskCtx ? `\n\n${taskCtx}` : ''),
         });
         setBotTyping(false);
         // Auto-detection footer — only surfaced when the heuristic
@@ -9287,7 +9443,8 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           const fallback = await invokeAnyChat({
             modelId: resolveSendModel(content) || 'claude-haiku-4-5',
             messages: [
-              { role: 'system', content: 'Web search is unavailable for this turn. Answer from training knowledge and clearly note when information may be out of date.' },
+              { role: 'system', content: 'Web search is unavailable for this turn. Answer from training knowledge and clearly note when information may be out of date.'
+                + (taskCtx ? `\n\n${taskCtx}` : '') },
               ...recent,
               { role: 'user', content },
             ],
@@ -9382,12 +9539,53 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       for (let mi = recentMessages.length - 1; mi >= 0; mi--) {
         if (recentMessages[mi].isBot) { lastBotMessageIdx = mi; break; }
       }
-      const chatHistory = recentMessages.map((m, mi) => {
+      const chatHistoryText = recentMessages.map((m, mi) => {
         const who = m.isBot ? agentName : (m.userName || 'User');
         const when = m.timestamp ? m.timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '';
         const ago = m.timestamp ? formatTimeAgo(m.timestamp) : '';
         return `[${who} · ${when}${ago ? ` · ${ago}` : ''}] ${m.content.slice(0, mi === lastBotMessageIdx ? 2000 : 300)}`;
       }).join('\n');
+      // Deeper root cause of the recovery-followup-context bug: when the very
+      // last message is a bot message left in a blocked/needs-input state,
+      // its recovery options / plan preview / evidence gaps only ever existed
+      // as UI render fields on that message — never in `m.content` above — so
+      // a natural-language follow-up about that card had no structured
+      // context to answer from. Additive/no-op when the last bot message has
+      // no active blocker.
+      const lastMessage = recentMessages.length > 0 ? recentMessages[recentMessages.length - 1] : null;
+      const activeBlockerContext = (lastMessage && lastMessage.isBot && lastBotMessageIdx === recentMessages.length - 1)
+        ? formatActiveChatBlockerContextForPrompt({
+          recoveryOptions: lastMessage.recoveryOptions,
+          computerHandoffBlockers: lastMessage.computerHandoff?.blockers,
+          computerHandoffWarnings: lastMessage.computerHandoff?.warnings,
+          preflightSummary: lastMessage.computerHandoff?.preflightSummary,
+          groundingSummary: lastMessage.computerHandoff?.groundingSummary,
+          planPreview: lastMessage.chatAutomationPlanPreview
+            ? {
+              title: lastMessage.chatAutomationPlanPreview.title,
+              routeLabel: lastMessage.chatAutomationPlanPreview.routeLabel,
+              approvalRequired: lastMessage.chatAutomationPlanPreview.approvalRequired,
+              evidenceGaps: lastMessage.chatAutomationPlanPreview.evidencePanel?.freshEvidenceRequired,
+            }
+            : null,
+        })
+        : '';
+      // Sibling case: the last bot message did NOT end in a blocker but did
+      // complete (or partially complete) a computer/browser/design task —
+      // its findings/artifacts/browser-plan-outcomes/outcome verdict only
+      // ever existed as UI render fields on that message too, so a natural
+      // follow-up like "what did you find" had nothing structured to answer
+      // from. Mutually exclusive with activeBlockerContext above (a blocked
+      // task already gets its own context) and additive/no-op otherwise.
+      const completedTaskContext = (!activeBlockerContext && lastMessage && lastMessage.isBot && lastBotMessageIdx === recentMessages.length - 1)
+        ? formatCompletedChatTaskContextForPrompt({
+          outcomeSignal: lastMessage.outcomeSignal,
+          computerFindings: lastMessage.computerFindings,
+          artifacts: lastMessage.artifacts,
+          browserPlans: lastMessage.browserPlans,
+        })
+        : '';
+      const chatHistory = [chatHistoryText, activeBlockerContext, completedTaskContext].filter(Boolean).join('\n');
 
       // If replying to a specific message, prepend that context
       const replyContext = replyTo
@@ -11230,7 +11428,6 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
             {item.recoveryOptions.slice(0, 5).map((option) => {
               const color = getRecoveryOptionAccent(option);
               const executionPlan = buildChatFailureRecoveryExecutionPlan(option);
-              const policyBadges = getRecoveryOptionPolicyBadges(option);
               const actionIntent = buildChatRecoveryActionIntent(option, {
                 sourceSurface: item.source?.surface || null,
                 platform: Platform.OS,
@@ -11248,9 +11445,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                       <Text style={[styles.recoveryOptionTitle, { color }]} numberOfLines={2}>
                         {option.label}
                       </Text>
-                      <Text style={styles.recoveryOptionMeta}>
-                        {[getRecoveryOptionActorLabel(option.actor).toUpperCase(), option.recommended ? 'RECOMMENDED' : '', ...policyBadges].filter(Boolean).join(' • ')}
-                      </Text>
+                      {option.recommended ? (
+                        <Text style={styles.recoveryOptionMeta}>Recommended</Text>
+                      ) : null}
                     </View>
                     <Pressable
                       accessibilityRole="button"
@@ -11296,7 +11493,9 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                     </Pressable>
                   </View>
                   <Text style={styles.recoveryOptionDetail} numberOfLines={3}>{option.detail}</Text>
-                  <Text style={styles.recoveryOptionPlan} numberOfLines={2}>{executionPlan.userSummary}</Text>
+                  {executionPlan.policy.action === 'continue_recovery' ? (
+                    <Text style={styles.recoveryOptionPlan} numberOfLines={2}>{executionPlan.userSummary}</Text>
+                  ) : null}
                 </View>
               );
             })}
@@ -11324,7 +11523,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                         >
                           <Text style={styles.memoryInfluenceTitle}>{ref.title}</Text>
                           <Text style={styles.messageSourceMeta}>
-                            {getMemoryFamilyLabel(ref).toUpperCase()} • {formatMemoryStateLabel(ref).toUpperCase()} • {String(ref.scope).toUpperCase()} • {String(ref.memoryKind).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryTrustLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}{formatMemorySourceLabel(ref) ? ` • ${formatMemorySourceLabel(ref)!.toUpperCase()}` : ''}{formatArchiveBiasLabel(ref) ? ` • ${formatArchiveBiasLabel(ref)!.toUpperCase()}` : ''}
+                            {getMemoryFamilyLabel(ref).toUpperCase()} • {formatMemoryStateLabel(ref).toUpperCase()} • {formatMemoryScopeLabel(ref).toUpperCase()} • {formatMemoryKindLabel(String(ref.memoryKind)).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryTrustLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}{formatMemorySourceLabel(ref) ? ` • ${formatMemorySourceLabel(ref)!.toUpperCase()}` : ''}{formatArchiveBiasLabel(ref) ? ` • ${formatArchiveBiasLabel(ref)!.toUpperCase()}` : ''}
                           </Text>
                           <Text style={styles.messageSourceSubtitle}>
                             {ref.matchReason ? `${ref.matchReason}. ` : ''}
@@ -11377,7 +11576,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
               <View key={recommendation.id} style={[styles.messageSourceCard, styles.memoryInfluenceCard]}>
                 <Text style={styles.memoryInfluenceTitle}>{recommendation.title}</Text>
                 <Text style={styles.messageSourceMeta}>
-                  {recommendation.priority.toUpperCase()} • {recommendation.memoryKind.toUpperCase()} • {recommendation.target.replace(/_/g, ' ').toUpperCase()}
+                  {recommendation.priority.toUpperCase()} • {formatMemoryKindLabel(recommendation.memoryKind).toUpperCase()} • {formatMemoryRecommendationTargetLabel(recommendation.target).toUpperCase()}
                 </Text>
                 <Text style={styles.messageSourceSubtitle}>
                   {recommendation.rationale}
@@ -11548,6 +11747,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
           onReply={() => { setReplyTo(item); inputRef.current?.focus(); }}
           onReaction={(emoji: string) => toggleReaction(item.id, emoji)}
           onDelete={(item.isUser || item.isBot) ? () => deleteMessage(item.id, item.dbId) : undefined}
+          onSendToAgent={(item.content && sendToAgentTargets.length > 0) ? () => setSendToAgentFor(item) : undefined}
           renderContent={renderContent}
           accentColor={accentColor}
           messageDensity={messageDensity}
@@ -11958,6 +12158,76 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
       />
 
       <Modal
+        visible={sendToAgentFor != null}
+        animationType="fade"
+        transparent
+        onRequestClose={() => { setSendToAgentFor(null); setSendToAgentPreview(null); }}
+      >
+        <Pressable
+          style={styles.sendToAgentScrim}
+          onPress={() => { setSendToAgentFor(null); setSendToAgentPreview(null); }}
+        >
+          <Pressable style={styles.sendToAgentCard} onPress={() => {}}>
+            {sendToAgentPreview ? (
+              <>
+                <Text style={styles.sendToAgentTitle}>Send to {sendToAgentPreview.agent.name}</Text>
+                <Text style={styles.sendToAgentSubtitle}>This is exactly what will be sent:</Text>
+                <ScrollView style={styles.sendToAgentPreviewBox}>
+                  <Text style={styles.sendToAgentPreviewText}>{sendToAgentPreview.text}</Text>
+                </ScrollView>
+                <View style={styles.sendToAgentPreviewActions}>
+                  <Pressable onPress={() => setSendToAgentPreview(null)} style={styles.sendToAgentCancel}>
+                    <Text style={styles.sendToAgentCancelText}>Back</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => void handleSendMessageToAgent(sendToAgentPreview.item, sendToAgentPreview.agent)}
+                    style={styles.sendToAgentConfirm}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.sendToAgentConfirmText}>Send</Text>
+                  </Pressable>
+                </View>
+              </>
+            ) : (
+              <>
+                <Text style={styles.sendToAgentTitle}>Send to agent</Text>
+                <Text style={styles.sendToAgentSubtitle} numberOfLines={2}>
+                  {sendToAgentFor?.content || ''}
+                </Text>
+                {sendToAgentTargets.map((target: ChatAgentTarget<AssignableAgent>) => (
+                  <Pressable
+                    key={target.id}
+                    onPress={() => {
+                      if (sendToAgentFor && target.agent) {
+                        openSendToAgentPreview(sendToAgentFor, target.agent as AssignableAgent);
+                      }
+                    }}
+                    style={({ hovered, pressed }: any) => [
+                      styles.sendToAgentRow,
+                      { borderColor: `${target.color}30` },
+                      hovered && { backgroundColor: `${target.color}14`, borderColor: `${target.color}70` },
+                      pressed && { transform: [{ scale: 0.99 }] },
+                    ]}
+                    accessibilityRole="button"
+                  >
+                    <View style={[styles.controlAgentIcon, { backgroundColor: `${target.color}22` }]}>
+                      <Text style={[styles.controlAgentIconText, { color: target.color }]} numberOfLines={1}>
+                        {target.icon}
+                      </Text>
+                    </View>
+                    <Text style={styles.sendToAgentRowLabel}>{target.label}</Text>
+                  </Pressable>
+                ))}
+                <Pressable onPress={() => setSendToAgentFor(null)} style={styles.sendToAgentCancel}>
+                  <Text style={styles.sendToAgentCancelText}>Cancel</Text>
+                </Pressable>
+              </>
+            )}
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal
         visible={builderModalOpen}
         animationType="slide"
         transparent
@@ -12153,7 +12423,7 @@ export default function ChatTab({ circleId, accentColor = '#6366f1' }: { circleI
                   >
                     <Text style={styles.soulMemoryCardTitle} numberOfLines={1}>{ref.title}</Text>
                     <Text style={styles.soulLearningCardMeta}>
-                      {String(ref.memoryKind).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}
+                      {formatMemoryKindLabel(String(ref.memoryKind)).toUpperCase()} • {formatMemoryStrengthLabel(ref).toUpperCase()} • {formatMemoryRecencyLabel(ref).toUpperCase()}
                     </Text>
                     <Text style={styles.soulLearningCardSubtitle} numberOfLines={2}>
                       {ref.retrievalMode === 'startup' ? 'Pinned as startup guidance.' : 'Available on demand for matching tasks.'}
@@ -13640,7 +13910,7 @@ function TipCard({ tip, delay, accentColor }: { tip: string; delay: number; acce
 
 function MessageRow({
   item, consecutive, reactionEntries, currentUserId,
-  showReactions, onToggleReactions, onReply, onReaction, onDelete, renderContent, accentColor, messageDensity, agentAvatarSource, agentName,
+  showReactions, onToggleReactions, onReply, onReaction, onDelete, onSendToAgent, renderContent, accentColor, messageDensity, agentAvatarSource, agentName,
 }: any) {
   const [hovered, setHovered] = useState(false);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -13728,7 +13998,7 @@ function MessageRow({
         <View
           style={[
             styles.enhancedMsgBubble,
-            item.isBot && {
+            item.isBot && !item.routing?.blackswan_honest_fallback && {
               borderColor: hovered ? accentColor : accentColor + 'aa',
               backgroundColor: accentColor + '12',
               ...(Platform.OS === 'web'
@@ -13747,7 +14017,12 @@ function MessageRow({
         >
           {renderContent(item)}
         </View>
-        
+        {item.isBot && item.routing?.blackswan_honest_fallback && (
+          <Text style={[styles.msgTime, { marginLeft: 0, marginTop: 2 }]}>
+            couldn't form a full answer this time — try rephrasing
+          </Text>
+        )}
+
         {hovered && (
           <View
             style={[styles.enhancedHoverActions, { backgroundColor: accentColor + '20' }]}
@@ -13766,6 +14041,11 @@ function MessageRow({
             <Pressable onPress={onReply} style={styles.hoverBtn} accessibilityRole="button">
               <Text style={styles.hoverBtnText}>↩</Text>
             </Pressable>
+            {onSendToAgent && (
+              <Pressable onPress={onSendToAgent} style={styles.hoverBtn} accessibilityRole="button" accessibilityLabel="Send this message to a connected agent">
+                <Text style={styles.hoverBtnText}>🤖</Text>
+              </Pressable>
+            )}
             {onDelete && (
               <Pressable onPress={onDelete} style={styles.hoverBtn} accessibilityRole="button">
                 <Text style={[styles.hoverBtnText, { color: '#ef4444' }]}>🗑</Text>
@@ -15378,7 +15658,9 @@ function EnhancedInput({
         if (error) throw error;
         const rankedModels = Array.isArray((data as any)?.models) ? (data as any).models : [];
         if (!cancelled && rankedModels.length > 0) {
-          setPopularModels(rankedModels.map(popularRankingToChatModel));
+          // Filter the live popularity feed through the shared banned-vendor
+          // gate so Grok/xAI can never surface here even when it trends.
+          setPopularModels(filterDynamicModels(rankedModels.map(popularRankingToChatModel)));
         }
       })
       .catch((error) => {
@@ -17167,6 +17449,92 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     letterSpacing: 0.8,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  sendToAgentScrim: {
+    flex: 1,
+    backgroundColor: 'rgba(2, 6, 23, 0.72)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  sendToAgentCard: {
+    width: '100%',
+    maxWidth: 340,
+    borderRadius: 14,
+    backgroundColor: '#0b1220',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    padding: 14,
+    gap: 8,
+  },
+  sendToAgentTitle: {
+    color: '#e2e8f0',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  sendToAgentSubtitle: {
+    color: '#64748b',
+    fontSize: 11,
+    marginBottom: 4,
+  },
+  sendToAgentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  sendToAgentRowLabel: {
+    color: '#e2e8f0',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  sendToAgentCancel: {
+    alignSelf: 'flex-end',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    marginTop: 4,
+  },
+  sendToAgentCancelText: {
+    color: '#64748b',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  sendToAgentPreviewBox: {
+    maxHeight: 220,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    backgroundColor: '#04070d',
+    padding: 10,
+  },
+  sendToAgentPreviewText: {
+    color: '#cbd5e1',
+    fontSize: 12,
+    lineHeight: 17,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  sendToAgentPreviewActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+  },
+  sendToAgentConfirm: {
+    borderWidth: 1,
+    borderColor: '#22c55e70',
+    backgroundColor: '#14532d40',
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+  },
+  sendToAgentConfirmText: {
+    color: '#86efac',
+    fontSize: 11,
+    fontWeight: '800',
   },
   liveMiniDot: {
     width: 6,

@@ -324,15 +324,25 @@ export function shouldUseBlackSwanForAuto(
 export function shouldUseToolExecutorInsteadOfBlackSwan(
   modelId: string | null | undefined,
   runtimeToolNames?: string[] | null,
+  // 2026-07-20: chat/swanbot/openswan integration audit found this swap was
+  // previously blind to Stage-1's computer/app/browser task classification
+  // (src/lib/chatComputerRequestRouter.ts) — it only looked at whether THIS
+  // turn's tool-planner happened to recommend a non-empty tool list, so a
+  // message the router positively classified as a computer task could still
+  // reach BlackSwan directly if the planner's list came back empty for that
+  // turn. Passing true here closes that gap without changing behavior for
+  // any existing caller that omits it (defaults falsy).
+  isRoutedComputerTask?: boolean,
 ): boolean {
-  return isBlackSwanModel(modelId) && !!runtimeToolNames?.length;
+  return isBlackSwanModel(modelId) && (!!runtimeToolNames?.length || !!isRoutedComputerTask);
 }
 
 export function resolveOpenSwanToolLoopModel(
   modelId: string | null | undefined,
   runtimeToolNames?: string[] | null,
+  isRoutedComputerTask?: boolean,
 ): string {
-  if (shouldUseToolExecutorInsteadOfBlackSwan(modelId, runtimeToolNames)) {
+  if (shouldUseToolExecutorInsteadOfBlackSwan(modelId, runtimeToolNames, isRoutedComputerTask)) {
     return BLACKSWAN_TOOL_EXECUTOR_MODEL_ID;
   }
   return modelId || BLACKSWAN_TOOL_EXECUTOR_MODEL_ID;
@@ -517,21 +527,31 @@ export function buildBlackSwanGroundingBlock(opts: {
   const shouldGround = usingBlackSwan || refs.length > 0 || opts.intent === 'status' || opts.intent === 'memory';
   if (!shouldGround) return '';
 
-  const lines = [
-    '## BlackSwan App-Grounding Contract',
-    `Runtime route: ${opts.model || 'auto'}${usingBlackSwan ? ' (BlackSwan)' : ''}. Surface: ${opts.source || 'main_chat'}.`,
+  const rules = [
     'Use Underground Circle app data, memory references, mission state, and tool outputs as the highest-priority facts.',
     'Do not invent app state. If a fact is not present in context or tool output, say what is missing or ask to look it up.',
     'Never expose secrets, API keys, vault values, or integration tokens. Mention only connection status and safe metadata.',
   ];
 
-  if (refs.length > 0) {
-    lines.push('Memory/source references available this turn:');
-    for (const ref of refs) {
-      const score = typeof ref.score === 'number' ? ` score=${ref.score.toFixed(2)}` : '';
-      const confidence = typeof ref.confidence === 'number' ? ` confidence=${ref.confidence.toFixed(2)}` : '';
-      lines.push(`- ${ref.title} [${ref.memoryKind || 'memory'} · ${ref.scope || 'scope'}${score}${confidence}]`);
-    }
+  // No memory/source references this turn: skip the "## ... Contract" header
+  // and the route/surface metadata line. Isolated testing found that bare
+  // shape (header + route line + rules, with no real reference content under
+  // it) can trigger a non-terminating self-referential deliberation loop on
+  // realistic production-length prompts. Both real call sites invoke this
+  // without memoryReferences, so fold just the rule sentences into plain
+  // instruction text instead when there's nothing concrete to ground on.
+  if (refs.length === 0) return rules.join('\n');
+
+  const lines = [
+    '## BlackSwan App-Grounding Contract',
+    `Runtime route: ${opts.model || 'auto'}${usingBlackSwan ? ' (BlackSwan)' : ''}. Surface: ${opts.source || 'main_chat'}.`,
+    ...rules,
+    'Memory/source references available this turn:',
+  ];
+  for (const ref of refs) {
+    const score = typeof ref.score === 'number' ? ` score=${ref.score.toFixed(2)}` : '';
+    const confidence = typeof ref.confidence === 'number' ? ` confidence=${ref.confidence.toFixed(2)}` : '';
+    lines.push(`- ${ref.title} [${ref.memoryKind || 'memory'} · ${ref.scope || 'scope'}${score}${confidence}]`);
   }
 
   return lines.join('\n');

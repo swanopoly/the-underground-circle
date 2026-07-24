@@ -111,6 +111,17 @@ export const PROVIDER_MODELS: Record<LLMProvider, ProviderModel[]> = {
     { id: 'openai/gpt-5.4-mini',                          label: 'GPT-5.4 Mini',        provider: 'openrouter', contextWindow: 1050000, costTier: 'cheap' },
     { id: 'anthropic/claude-fable-5',                     label: 'Claude Fable 5',      provider: 'openrouter', contextWindow: 1000000, costTier: 'expensive' },
     { id: 'anthropic/claude-opus-4-8',                    label: 'Claude Opus 4.8',     provider: 'openrouter', contextWindow: 1000000, costTier: 'expensive' },
+    // Current top open/aggregator models via OpenRouter (all verified against
+    // openrouter.ai/api/v1/models). Moonshot Kimi K3 is the 1M-context
+    // flagship the user asked for; the rest are each provider's newest tier.
+    { id: 'moonshotai/kimi-k3',                           label: 'Kimi K3',             provider: 'openrouter', contextWindow: 1048576, costTier: 'mid' },
+    { id: 'moonshotai/kimi-k2.6',                         label: 'Kimi K2.6',           provider: 'openrouter', contextWindow: 262144,  costTier: 'cheap' },
+    { id: 'moonshotai/kimi-k2.7-code',                    label: 'Kimi K2.7 Code',      provider: 'openrouter', contextWindow: 262144,  costTier: 'cheap' },
+    { id: 'deepseek/deepseek-v4-pro',                     label: 'DeepSeek V4 Pro',     provider: 'openrouter', contextWindow: 1048576, costTier: 'cheap' },
+    { id: 'deepseek/deepseek-v4-flash',                   label: 'DeepSeek V4 Flash',   provider: 'openrouter', contextWindow: 1048576, costTier: 'cheap' },
+    { id: 'z-ai/glm-5.2',                                 label: 'GLM-5.2',             provider: 'openrouter', contextWindow: 1048576, costTier: 'mid' },
+    { id: 'minimax/minimax-m3',                           label: 'MiniMax M3',          provider: 'openrouter', contextWindow: 1048576, costTier: 'cheap' },
+    { id: 'qwen/qwen3.7-max',                             label: 'Qwen3.7 Max',         provider: 'openrouter', contextWindow: 1000000, costTier: 'mid' },
     { id: 'google/gemini-3.5-flash',                      label: 'Gemini 3.5 Flash',    provider: 'openrouter', contextWindow: 1000000, costTier: 'mid' },
     { id: 'google/gemini-3.1-flash-lite',                 label: 'Gemini 3.1 Flash-Lite', provider: 'openrouter', contextWindow: 1000000, costTier: 'cheap' },
     { id: 'meta-llama/llama-3.3-70b-instruct:nitro',     label: 'Llama 3.3 70B (Fast)', provider: 'openrouter', contextWindow: 131072,  costTier: 'cheap' },

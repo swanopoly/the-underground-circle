@@ -4,7 +4,7 @@ import {
   type DesignAppCreativeAiCapabilityId,
 } from './designAppCreativeAi';
 
-export type DesignAppAutomationAppId = 'adobe_indesign' | 'adobe_photoshop';
+export type DesignAppAutomationAppId = 'adobe_indesign' | 'adobe_photoshop' | 'adobe_illustrator';
 
 export type DesignAppAutomationOperation =
   | 'inspect_layers'
@@ -35,7 +35,24 @@ export type DesignAppAutomationOperation =
   | 'build_toc'
   | 'manage_text_flow'
   | 'manage_smart_objects'
-  | 'manage_swatches';
+  | 'manage_swatches'
+  // Photoshop additive/appearance ExtendScript adapters (deterministic,
+  // shipped): add ONE new point-text layer, set opacity/fill/blend on a named
+  // layer, or add ONE new solid-color fill layer. Distinct from
+  // update_text_layers (edits existing copy), apply_layer_effects (styles/FX),
+  // and manage_layers (rename/duplicate/reorder/group).
+  | 'create_text_layer'
+  | 'set_layer_appearance'
+  | 'add_fill_layer'
+  // Illustrator vector operation set (deterministic ExtendScript adapters).
+  | 'vectorize'
+  | 'set_appearance'
+  | 'align'
+  | 'arrange'
+  | 'group'
+  | 'add_artboard'
+  | 'add_text'
+  | 'add_shape';
 
 export interface DesignAppAutomationPlan {
   appId: DesignAppAutomationAppId;
@@ -60,7 +77,17 @@ const PHOTOSHOP_RE = /\b(photoshop|photo\s*shop|\.psd\b|\.psb\b|psd|psb|generati
 const LAYOUT_RE = /\b(layout|banner|ad\b|advert|display ad|marketing|campaign|flyer|brochure|poster|print|spread|page|template|data merge|proof|preflight|package)\b/i;
 const LAYER_RE = /\b(layer|layers|text frame|frame|headline|subhead|cta|button|disclaimer|legal|fine print|offer|price|apr|dealer|link|asset|image|logo|swatch|bleed|margin)\b/i;
 const IMAGE_EDIT_RE = /\b(image|photo|picture|psd|psb|composite|retouch|remove background|replace background|generative fill|content-aware|mask|selection|select subject|adjustment layer|curves|levels|crop|resize|export|save for web)\b/i;
-const PHOTOSHOP_TASK_RE = /\b(open|launch|focus|edit|change|update|replace|remove|erase|delete|clean up|retouch|crop|resize|convert|rotate|flip|transform|warp|create|artboard|export|save|place|insert|add|generate|generative|content-aware|firefly|select|mask|background|proof|preview|\.psd\b|\.psb\b)\b/i;
+const PHOTOSHOP_TASK_RE = /\b(open|launch|focus|edit|change|update|replace|remove|erase|delete|clean up|retouch|crop|resize|convert|rotate|flip|transform|warp|create|artboard|export|save|place|insert|add|generate|generative|content-aware|firefly|select|mask|background|proof|preview|set|opacity|blend(?:ing)?|fill|colou?r|recolou?r|\.psd\b|\.psb\b)\b/i;
+// Single Photoshop-op requests that qualify on their own — no layout+layer noun
+// pair required. Covers layer opacity/blend mode, add a fill/adjustment/solid-
+// colour layer, add a text/type layer, colour a selection, or add a solid/white
+// background. Anchored to Photoshop-specific compounds (and a colour word for
+// the selection case) so plain writing ("make your selection", "a solid
+// background in economics", "add a note") never trips it.
+const PHOTOSHOP_SINGLE_OP_RE = /\b(?:set|change|lower|raise|reduce|increase|drop|adjust|make)\b[^.!?]{0,24}\b(?:layer\s+)?opacity\b|\b(?:layer\s+)?opacity\b[^.!?]{0,16}\b(?:to|=|%|percent|\d)|\b\d{1,3}\s*%[^.!?]{0,16}\bopacity\b|\bblend(?:ing)?\s+modes?\b|\b(?:add|create|new|insert|apply)\b[^.!?]{0,16}\b(?:fill|adjustment|solid[\s-]?colou?r)\s+layers?\b|\b(?:add|create|insert|place|new)\b[^.!?]{0,16}\b(?:text|type)\s+layers?\b|\b(?:make|set|fill|paint|colou?r|recolou?r|change|turn)\b[^.!?]{0,20}\bselection\b[^.!?]{0,16}\b(?:red|orange|yellow|green|blue|purple|pink|black|white|gray|grey|cyan|magenta|transparent|colou?r|gradient|#[0-9a-fA-F]{3,6})\b|\b(?:add|create|insert|place|fill)\b[^.!?]{0,20}\b(?:white|black|solid|transparent|colou?red?|gradient)\s+backgrounds?\b|\bbackgrounds?\s+(?:fill|layer)\b/i;
+// Illustrator vector work: app name, .ai/.eps/.svg files, or vector-specific verbs.
+const ILLUSTRATOR_RE = /\b(illustrator|adobe\s+illustrator|\.ai\b|\.eps\b|\.svg\b|vector art|artboard|image trace|live trace|vectori[sz]e)\b/i;
+const ILLUSTRATOR_TASK_RE = /\b(open|launch|focus|edit|change|update|recolou?r|re-?colou?r|vectori[sz]e|image trace|live trace|trace|align|distribute|arrange|reorder|group|ungroup|artboard|stroke|swatch|add|create|draw|insert|export|save|convert|\.ai\b|\.eps\b|\.svg\b)\b/i;
 
 function unique<T>(items: T[]): T[] {
   return Array.from(new Set(items));
@@ -87,6 +114,12 @@ function hasExplicitPhotoshopTarget(text: string): boolean {
   return /\.(psd|psb)\b/i.test(text)
     || /\bopen\s+with\s+adobe\s+photoshop\b/i.test(text)
     || /^User requested changes:[\s\S]{0,500}\b(photoshop|photo\s*shop|generative\s+fill|content-aware|firefly)\b/im.test(text);
+}
+
+function hasExplicitIllustratorTarget(text: string): boolean {
+  return /\.(ai|eps|svg)\b/i.test(text)
+    || /\bopen\s+with\s+adobe\s+illustrator\b/i.test(text)
+    || /^User requested changes:[\s\S]{0,500}\b(illustrator|vector art|image trace|live trace|vectori[sz]e)\b/im.test(text);
 }
 
 function detectInDesignOperations(text: string): DesignAppAutomationOperation[] {
@@ -150,10 +183,36 @@ function detectInDesignOperations(text: string): DesignAppAutomationOperation[] 
 
 function detectPhotoshopOperations(text: string): DesignAppAutomationOperation[] {
   const operations: DesignAppAutomationOperation[] = ['inspect_image_document', 'inspect_layers'];
+  // ── First-class additive/appearance ops (shipped ExtendScript adapters). ──
+  // These are detected BEFORE the overlapping generic arms and then suppress the
+  // wrong generics below, so the runbook names the exact deterministic tool
+  // (photoshop_create_text_layer / _set_layer_appearance / _add_fill_layer)
+  // instead of misrouting "add a headline" -> resize_layout, "50% opacity" ->
+  // apply_layer_effects, or "add a fill layer" -> replace_linked_asset.
+  // create_text_layer: ADD a new text/type layer (add/create/insert/place +
+  // headline/title/subhead/text/type). NOT change/update/replace ... text
+  // (that stays update_text_layers, which uses a disjoint verb set).
+  const wantsCreateTextLayer = /\b(?:add|create|insert|place)\b[^.!?]{0,24}\b(?:headline|title|sub-?head(?:ing|line)?|text|type\s+layers?)\b/i.test(text);
+  // set_layer_appearance: opacity / fill opacity / blend mode changes. Requires
+  // a set-intent verb OR a percent value bound to opacity, so a bare "opacity"
+  // reference never falsely fires.
+  const wantsSetLayerAppearance = /\b(?:set|change|lower|raise|reduce|increase|drop|adjust|make)\b[^.!?]{0,24}\b(?:fill[\s-]?)?opacity\b/i.test(text)
+    || /\bopacity\b[^.!?]{0,8}\d{1,3}\s*%/i.test(text)
+    || /\b\d{1,3}\s*%[^.!?]{0,12}\bopacity\b/i.test(text)
+    || /\bblend(?:ing)?\s+modes?\b/i.test(text);
+  // add_fill_layer: ADD a new solid-color fill/content layer (add/create/insert
+  // + fill / solid[-]color / content layer). Anchored to the "... layer" noun so
+  // "merge the background layers" (existing layers) never fires.
+  const wantsAddFillLayer = /\b(?:add|create|insert|new|apply)\b[^.!?]{0,24}\b(?:fill|solid[\s-]?colou?r|content)\s+layers?\b/i.test(text);
+  if (wantsCreateTextLayer) operations.push('create_text_layer');
+  if (wantsSetLayerAppearance) operations.push('set_layer_appearance');
+  if (wantsAddFillLayer) operations.push('add_fill_layer');
   if (/\b(change|update|replace|edit|write|set)\b[\s\S]{0,120}\b(text|copy|headline|subhead|cta|disclaimer|legal|price|apr|offer|dealer|phone|url)\b/i.test(text)) {
     operations.push('update_text_layers');
   }
-  if (/\b(place|insert|add|replace|swap|relink|import)\b[\s\S]{0,120}\b(image|photo|logo|asset|link|graphic|background|smart object)\b/i.test(text)) {
+  // Guard: an add-a-fill/text-layer request is not a placed-asset relink, even
+  // though "add ... background" and "add ... layer" would otherwise match here.
+  if (!wantsAddFillLayer && !wantsCreateTextLayer && /\b(place|insert|add|replace|swap|relink|import)\b[\s\S]{0,120}\b(image|photo|logo|asset|link|graphic|background|smart object)\b/i.test(text)) {
     operations.push('replace_linked_asset');
   }
   if (/\b(resize|size|dimension|dimensions|resolution|dpi|ppi|crop|canvas|scale|instagram|story|post|thumbnail|hero|banner)\b/i.test(text)) {
@@ -162,7 +221,7 @@ function detectPhotoshopOperations(text: string): DesignAppAutomationOperation[]
   if (/\b(show|hide|lock|unlock|toggle)\b[\s\S]{0,80}\blayers?\b/i.test(text)) {
     operations.push('toggle_layer_visibility');
   }
-  if (/\b(mask|selection|select subject|select and mask|background|clipping mask|marquee|lasso|highlight|selected area)\b/i.test(text)) {
+  if (!wantsAddFillLayer && /\b(mask|selection|select subject|select and mask|background|clipping mask|marquee|lasso|highlight|selected area)\b/i.test(text)) {
     operations.push('apply_selection_or_mask');
   }
   if (/\b(generative fill|content-aware|remove|erase|delete|clean up|replace background|ai edit|inpaint)\b/i.test(text)) {
@@ -177,13 +236,18 @@ function detectPhotoshopOperations(text: string): DesignAppAutomationOperation[]
   if (/\b(variations?|options?|versions?|colorways?|style variations?|brand variations?|localized|personalized|batch)\b/i.test(text)) {
     operations.push('create_creative_variants');
   }
-  if (/\b(adjust|retouch|curves|levels|color|tone|contrast|brightness|exposure|filter|blur|sharpen|neural filter|camera raw|harmonize)\b/i.test(text)) {
+  if (!wantsAddFillLayer && /\b(adjust|retouch|curves|levels|color|tone|contrast|brightness|exposure|filter|blur|sharpen|neural filter|camera raw|harmonize)\b/i.test(text)) {
     operations.push('edit_adjustment_layers');
   }
-  if (/\b(drop shadow|layer style|layer effect|layer fx|stroke|bevel|emboss|inner shadow|outer glow|inner glow|gradient overlay|color overlay|pattern overlay|satin|blend mode|blending mode|opacity)\b/i.test(text)) {
+  // apply_layer_effects = layer STYLES/FX only. Opacity + blend mode moved to
+  // set_layer_appearance (deterministic adapter) so an opacity/blend request
+  // routes to the exact tool instead of an apply_layer_effects buildout gap.
+  if (/\b(drop shadow|layer style|layer effect|layer fx|stroke|bevel|emboss|inner shadow|outer glow|inner glow|gradient overlay|color overlay|pattern overlay|satin)\b/i.test(text)) {
     operations.push('apply_layer_effects');
   }
-  if (/\b(create|add|new|duplicate|copy|delete|remove|merge|flatten|group|ungroup|rasterize|rename)\b[\s\S]{0,40}\b(layers?|groups?)\b/i.test(text)) {
+  // Guard: adding a text/fill layer is handled by create_text_layer /
+  // add_fill_layer above; manage_layers only does rename/duplicate/reorder/group.
+  if (!wantsCreateTextLayer && !wantsAddFillLayer && /\b(create|add|new|duplicate|copy|delete|remove|merge|flatten|group|ungroup|rasterize|rename)\b[\s\S]{0,40}\b(layers?|groups?)\b/i.test(text)) {
     operations.push('manage_layers');
   }
   if (/\b(rotate|flip|mirror|free transform|free-transform|skew|distort|warp|perspective|straighten|transform the layer|transform layer)\b/i.test(text)) {
@@ -203,6 +267,38 @@ function detectPhotoshopOperations(text: string): DesignAppAutomationOperation[]
   }
   if (operations.length === 2 && /\b(make|create|build|finish|fix|revise|edit)\b/i.test(text)) {
     operations.push('edit_adjustment_layers', 'export_raster_proof');
+  }
+  return unique(operations);
+}
+
+function detectIllustratorOperations(text: string): DesignAppAutomationOperation[] {
+  const operations: DesignAppAutomationOperation[] = ['inspect_layers'];
+  if (/\b(vectori[sz]e|image trace|live trace|trace (?:the )?(?:image|logo|bitmap|artwork|photo)|(?:logo|image|raster|bitmap|jpe?g|png|sketch)\b[^.!?]{0,24}\bto (?:svg|vector|outlines?)|raster to vector|convert (?:the )?(?:logo|image)\b[^.!?]{0,24}\bto (?:svg|vector))\b/i.test(text)) {
+    operations.push('vectorize');
+  }
+  if (/\b(recolou?r|re-?colou?r|stroke|swatch|appearance|fill colou?r|change (?:the )?colou?r|make it (?:red|orange|yellow|green|blue|purple|pink|black|white|gray|grey|cyan|magenta)|paint it|colou?r it)\b/i.test(text)) {
+    operations.push('set_appearance');
+  }
+  if (/\b(align|alignment|distribute|distribution)\b/i.test(text)) {
+    operations.push('align');
+  }
+  if (/\b(bring (?:to |it )?(?:the )?front|send (?:to |it )?(?:the )?back|bring forward|send backward|z-?order|stacking order|arrange|reorder|re-?order)\b/i.test(text)) {
+    operations.push('arrange');
+  }
+  if (/\b(group|ungroup)\b/i.test(text)) {
+    operations.push('group');
+  }
+  if (/\b(new artboard|add (?:an? |another )?artboard|create (?:an? )?artboard|resize (?:the )?artboard|add (?:an? )?board|artboards?)\b/i.test(text)) {
+    operations.push('add_artboard');
+  }
+  if (/\b(add (?:a |some )?text|add (?:a )?headline|add (?:a )?(?:type|text)\b|place (?:a )?headline|type out|write (?:a )?headline|add (?:a )?label)\b/i.test(text)) {
+    operations.push('add_text');
+  }
+  if (/\b(add (?:a )?shape|draw (?:a )?(?:shape|rectangle|rounded rectangle|ellipse|circle|line|polygon)|rectangle|ellipse|circle|line|polygon)\b/i.test(text)) {
+    operations.push('add_shape');
+  }
+  if (operations.length === 1 && /\b(make|create|build|finish|fix|revise|edit|design)\b/i.test(text)) {
+    operations.push('set_appearance');
   }
   return unique(operations);
 }
@@ -227,6 +323,16 @@ function detectPhotoshopDocumentSignals(text: string): string[] {
   return signals.length ? signals : ['Photoshop image edit'];
 }
 
+function detectIllustratorDocumentSignals(text: string): string[] {
+  const signals: string[] = [];
+  if (/\bmarketing|campaign|ad\b|advert|dealer|offer|promo|promotion|banner|social|story|post|hero|flyer|poster\b/i.test(text)) signals.push('marketing vector creative');
+  if (/\b\.ai\b|\.eps\b|\.svg\b|artboards?|vector art|paths?|anchor points?|beziers?\b/i.test(text)) signals.push('Illustrator vector document');
+  if (/\blogo|icon|badge|wordmark|monogram|brand mark|vectori[sz]e|image trace|live trace\b/i.test(text)) signals.push('logo/vectorize work');
+  if (/\brecolou?r|stroke|swatch|appearance|fill colou?r|gradient|pantone|spot colou?r\b/i.test(text)) signals.push('vector appearance/recolor');
+  if (/\bexport|svg|pdf|png|eps|proof|preview|rendition|outline\b/i.test(text)) signals.push('vector proof/export');
+  return signals.length ? signals : ['Illustrator vector edit'];
+}
+
 export function shouldUseDesignAppAutomation(task: string): boolean {
   const text = planningTextForTask(task);
   const explicitInDesign = INDESIGN_RE.test(text);
@@ -238,6 +344,8 @@ export function shouldUseDesignAppAutomation(task: string): boolean {
   ) {
     return false;
   }
+  if (ILLUSTRATOR_RE.test(text) && ILLUSTRATOR_TASK_RE.test(text)) return true;
+  if (PHOTOSHOP_SINGLE_OP_RE.test(text)) return true;
   return (LAYOUT_RE.test(text) && LAYER_RE.test(text))
     || (IMAGE_EDIT_RE.test(text) && LAYER_RE.test(text) && LAYOUT_RE.test(text));
 }
@@ -390,9 +498,97 @@ function buildPhotoshopPlan(text: string): DesignAppAutomationPlan {
       'desktop.photoshop_document_status',
       'desktop.photoshop_layer_inventory',
       'desktop.photoshop_set_layer_state',
+      'desktop.photoshop_set_layer_appearance',
       'desktop.photoshop_update_text_layer',
+      'desktop.photoshop_create_text_layer',
+      'desktop.photoshop_add_fill_layer',
       'desktop.photoshop_place_asset',
       'desktop.photoshop_export_proof',
+      ...(creativeAiPlan ? ['research.search', 'agent.build_app_capability'] : []),
+      'desktop.read_a11y_tree',
+      'desktop.menu_click',
+      'desktop.screenshot',
+      'approvals.request',
+    ],
+    controlSurfaceOrder: surfacePlan.candidates.map((surface) => surface.label),
+    controlSurfaceSourceRefs: [
+      ...surfacePlan.sourceRefs.map((ref) => `${ref.label}: ${ref.url}`),
+      ...(creativeAiPlan?.sourceRefs.map((ref) => `${ref.label}: ${ref.url}`) || []),
+    ],
+    failSafeRules: surfacePlan.failSafeRules,
+    creativeAiCapabilities: creativeAiPlan?.capabilities.map((capability) => capability.id),
+  };
+}
+
+function buildIllustratorPlan(text: string): DesignAppAutomationPlan {
+  const operations = detectIllustratorOperations(text);
+  const wantsMarketingCreative = /\bbanner|display ad|leaderboard|social|story|post|hero|marketing|campaign|dealer|offer|promo|thumbnail|flyer|poster|logo|icon|badge\b/i.test(text);
+  const surfacePlan = buildAppAutomationControlSurfacePlan(text, {
+    targetId: 'adobe_illustrator',
+    targetName: 'Adobe Illustrator',
+  });
+  const creativeAiPlan = buildDesignAppCreativeAiPlan(text);
+  return {
+    appId: 'adobe_illustrator',
+    appName: 'Adobe Illustrator',
+    taskKind: wantsMarketingCreative ? 'marketing_image_composite' : 'raster_image_edit',
+    documentSignals: detectIllustratorDocumentSignals(text),
+    operations,
+    controlOrder: [
+      'Resolve the exact .ai/.eps/.svg file or staged asset folder and verify source/destination paths.',
+      'Open or focus Adobe Illustrator, then run script-backed document status before any mutation.',
+      'Capture active document/artboard identity, selected objects, layers, swatches, and saved/modified state.',
+      'Prefer script-backed Illustrator ExtendScript/DOM tools for vectorize, appearance, arrange, group, align, artboard, text, and shape changes.',
+      'Use accessibility/menu actions only for gaps the script-backed bridge does not cover.',
+      'Use screenshots and exported SVG/PDF/PNG proofs to verify the visible vector state before save/export handoff.',
+    ],
+    requiredInventory: [
+      'active document name/path, saved/modified state, artboard count/size, and color mode',
+      'selected objects/paths, target layer, and current appearance (fill/stroke/swatch)',
+      'existing swatches/spot colors before recolor or appearance changes',
+      'source raster asset path and identity before vectorize/image trace',
+      ...(creativeAiPlan ? ['creative AI prompt, brand/style constraints, target object/artboard, generated asset receipts, and output proof destination'] : []),
+    ],
+    approvalGates: [
+      'mutating vector objects, appearance, arrangement, grouping, or alignment',
+      'vectorizing/image-tracing a placed raster asset',
+      'adding artboards, text objects, or shapes',
+      ...(creativeAiPlan ? ['Firefly/Illustrator API generation, generative recolor, batch variants, or cloud processing'] : []),
+      'saving over the source Illustrator file',
+      'exporting SVG/PDF/PNG deliverables',
+    ],
+    verificationSignals: [
+      'post-change Illustrator document status shows requested vector/appearance/arrangement updates',
+      'document status reports expected artboard count/size and no unexpected missing swatches',
+      'fresh screenshot or exported SVG/PDF/PNG proof shows the visible vector state',
+      'file_stat confirms exported proof or deliverable output path when requested',
+      ...(creativeAiPlan ? ['AI generation or variation outputs have receipts plus before/after object/proof evidence'] : []),
+    ],
+    recoveryRules: [
+      'If the expected document is not active/open, stop and open the exact staged file instead of editing another document.',
+      'If no object/path is selected for a scoped edit, ask for target-selection clarification before mutating appearance or arrangement.',
+      'If vectorize has no source raster or the trace preset is ambiguous, stop and confirm the source asset and trace mode.',
+      'If swatches/spot colors are missing for a recolor, resolve or confirm the target color before appearance changes.',
+      'If script-backed tools cannot express the requested Illustrator operation, delegate a bounded app-capability buildout before using blind coordinates.',
+      ...(creativeAiPlan ? creativeAiPlan.failClosedRules : []),
+      ...surfacePlan.failSafeRules,
+    ],
+    recommendedTools: [
+      'desktop.file_search',
+      'desktop.file_stat',
+      'desktop.open_path',
+      'desktop.launch_app',
+      'desktop.focus_app',
+      'desktop.illustrator_document_status',
+      'desktop.illustrator_vectorize',
+      'desktop.illustrator_set_appearance',
+      'desktop.illustrator_align',
+      'desktop.illustrator_arrange',
+      'desktop.illustrator_group',
+      'desktop.illustrator_add_artboard',
+      'desktop.illustrator_add_text',
+      'desktop.illustrator_add_shape',
+      'desktop.illustrator_export_proof',
       ...(creativeAiPlan ? ['research.search', 'agent.build_app_capability'] : []),
       'desktop.read_a11y_tree',
       'desktop.menu_click',
@@ -414,8 +610,15 @@ export function buildDesignAppAutomationPlan(task: string): DesignAppAutomationP
   if (!shouldUseDesignAppAutomation(text)) return null;
   const explicitPhotoshop = hasExplicitPhotoshopTarget(text);
   const explicitInDesign = hasExplicitInDesignTarget(text);
+  const explicitIllustrator = hasExplicitIllustratorTarget(text);
+  if (explicitIllustrator && !explicitPhotoshop && !explicitInDesign) return buildIllustratorPlan(text);
   if (explicitPhotoshop && !explicitInDesign) return buildPhotoshopPlan(text);
-  if (PHOTOSHOP_RE.test(text) && !INDESIGN_RE.test(text)) return buildPhotoshopPlan(text);
+  // An explicit Illustrator app mention beats the AMBIGUOUS single-op signals
+  // (selection/text/fill/opacity apply to both apps), so "in Illustrator make
+  // the selection red" builds an Illustrator plan instead of being claimed by
+  // PHOTOSHOP_SINGLE_OP_RE below. Requires no Photoshop/InDesign app word.
+  if (ILLUSTRATOR_RE.test(text) && !PHOTOSHOP_RE.test(text) && !INDESIGN_RE.test(text)) return buildIllustratorPlan(text);
+  if ((PHOTOSHOP_RE.test(text) || PHOTOSHOP_SINGLE_OP_RE.test(text)) && !INDESIGN_RE.test(text)) return buildPhotoshopPlan(text);
   return buildInDesignPlan(text);
 }
 

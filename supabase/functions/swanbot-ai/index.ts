@@ -20,6 +20,28 @@ import {
   shouldAttachContextManagement,
   stripUnsupportedCompactionEdits,
 } from "../../../src/lib/anthropicContextManagement.ts";
+// Bot-authored `messages.content` rows carry a `[[UC_CHAT_META]]`-prefixed
+// JSON metadata blob (recovery options, plan, findings, etc.) appended after
+// the visible text, and (for legacy rows) a leading display-name prefix like
+// "🦢 **BlackSwan:** " baked directly into content — see BOT_META_MARKER /
+// BOT_PREFIX / LEGACY_CROWN_PREFIX in src/lib/persistedChatMetadata.ts's
+// stripPersistedChatBotPrefix(), the single source of truth for this shape.
+// Deliberately NOT importing that module here: it has no Deno-runtime
+// dependencies (all its imports are `import type`), but pulling its full
+// type surface into `deno check` surfaces ~120 pre-existing type errors
+// never exercised before nothing imported it into a Deno context.
+// Duplicating just the marker/prefix patterns keeps this fix isolated and
+// Deno-clean, while matching stripPersistedChatBotPrefix()'s actual
+// behavior — mirrored from a code-review finding that this function
+// previously stripped only the trailing marker, leaving the leading
+// prefix (when present) in the history sent to the model.
+const BOT_META_MARKER = "\n[[UC_CHAT_META]]";
+const BOT_META_LEGACY_PREFIX_RE = /^(?:👑 \*\*OpenSwan:\*\* |(?:🦢|🤖) \*\*[^*]{1,80}:\*\* )/u;
+function stripBotMetaMarker(content: string): string {
+  const withoutPrefix = content.replace(BOT_META_LEGACY_PREFIX_RE, "");
+  const index = withoutPrefix.indexOf(BOT_META_MARKER);
+  return index >= 0 ? withoutPrefix.slice(0, index) : withoutPrefix;
+}
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -885,6 +907,58 @@ ${ctx.wikiContext}`;
 
   return { frozen, volatile };
 }
+
+// ─── BlackSwan-specific system prompt (shortened) ────────────────────────────
+// 2026-07-16 fleet A/B test found BlackSwan-v5 reliably breaks down on the
+// full production system prompt above (~875-1400+ tokens once volatile
+// state is included): a 5-question realistic baseline run came back 4/5
+// fully garbled (leaked `<think>` tags, unbounded meta-reasoning, or a
+// hallucinated dump of raw context) and 0/5 good. Three shortened variants
+// were tested; only the most aggressive one — short frozen persona, no
+// "Expanded Knowledge", no personality bullet list, no full tool catalog,
+// no soul-wisdom/guardrails, and a small hand-picked facts block instead of
+// the full per-request state dump — eliminated garbling entirely (0/5
+// garbled vs. 4/5 on the full prompt) and produced BlackSwan's first
+// coherent-and-good answer in this testing. It is NOT a complete fix (the
+// model still sometimes burns its token budget on unterminated reasoning
+// instead of answering, and some answers stayed thin/generic) —
+// looksLikeGarbledBlackSwanOutput()/stripBlackSwanReasoningText() defined later in this file
+// remain the safety net for whatever still slips through — but it is a
+// clear, measured improvement over the full prompt for this one model
+// family. Every call site MUST gate this behind isBlackSwanTextModel() so
+// Claude's prompt (and every other model's prompt) is byte-identical to
+// before.
+/* UC_SMOKE_EXTRACT_START buildBlackSwanSystemPrompt */
+function buildBlackSwanSystemPrompt(ctx: any): string {
+  let prompt = `You are Agent 🦢, an AI accountability partner inside The Underground Circle, a small-team accountability app. You're direct, warm, and sharp — you help people plan work, stay on track, and follow through, without fluff or hype. Keep replies concise and prefix them with 🦢.
+
+Only use the real facts given below — never invent names, streaks, numbers, or tasks. If you don't have the information, say so plainly.
+
+You can't create tasks or take other actions directly in this reply — tell the user to use the task board, or describe the plan clearly so they can add it.`;
+
+  // Small, hand-picked facts block — deliberately NOT the full volatile
+  // dump (Circle Info/Members/XP/achievements/challenges/goals/agent
+  // activity/knowledge entries/GitHub/rooms/automations/skills/memories/
+  // wiki) that the full prompt sends. Keeping this short is the point.
+  const facts: string[] = [];
+  facts.push(`Circle: ${ctx.circle?.name || "Unknown"} — ${ctx.checkedInCount ?? 0}/${ctx.memberCount ?? 0} checked in today.`);
+  if (ctx.currentUser) {
+    facts.push(`You're talking to ${ctx.currentUser.display_name || ctx.currentUser.username || "the user"} — current streak ${ctx.currentUser.current_streak || 0} days, longest ${ctx.currentUser.longest_streak || 0} days.`);
+  }
+  if (ctx.userTasks?.length > 0) {
+    facts.push(`Their open tasks: ${ctx.userTasks.slice(0, 3).map((t: any) => `[${t.status}] ${t.title}`).join("; ")}.`);
+  }
+  if (ctx.notCheckedIn?.length > 0) {
+    facts.push(`Haven't checked in today: ${ctx.notCheckedIn.slice(0, 5).map((m: any) => m.display_name || m.username).join(", ")}.`);
+  }
+
+  if (facts.length > 0) {
+    prompt += `\n\n${facts.join("\n")}`;
+  }
+
+  return prompt;
+}
+/* UC_SMOKE_EXTRACT_END buildBlackSwanSystemPrompt */
 
 // ─── Call BlackSwan LLM (local/self-hosted, zero cost) ───────────────────────
 
@@ -2392,10 +2466,406 @@ function isBlackSwanTextModel(modelId: string | null | undefined): boolean {
   return /(?:^|\/)(?:blackswan|cswan801\/blackswan)/i.test((modelId || "").trim());
 }
 
+// 2026-07-20: chat/swanbot/openswan integration audit confirmed the two
+// isBlackSwanTextModel() branches below (huggingface_endpoint marketplace
+// routing, hosted huggingface routing) are single-shot text completions with
+// no tools array and no computer-task routing/contract context attached —
+// unlike ChatTab's main surface, which always sends BlackSwan turns through
+// runOpenSwanSessionTurn's typed tool loop (src/lib/openswanSessionRuntime.ts,
+// the "P8 BlackSwan collaboration split" that swaps execution to the real
+// tool-executor model while BlackSwan stays app-grounding context). This
+// getSwanBotResponse → swanbot-ai path is still reachable with BlackSwan
+// selected from RoomsTab, SwanBotScreen, FloatingChat, AgentTerminalPanels,
+// and kanban FocusChainPanel, none of which have that guard. Without this
+// check, a request like "open Photoshop and crop this image" would get a
+// plausible-sounding but entirely hallucinated "done!" reply, since nothing
+// on this path can actually act. Deliberately conservative (requires an
+// action verb AND an app/browser/file-surface noun) so it only fires on
+// genuine action requests, not ordinary conversation that happens to use a
+// word like "open" or "launch" figuratively (e.g. "should we launch this
+// feature this week?").
+/* UC_SMOKE_EXTRACT_START looksLikeUnsupportedActionRequestForBlackSwan */
+/* UC_SMOKE_EXTRACT_START buildBlackSwanActionGuardMessage */
+const BLACKSWAN_ACTION_REQUEST_RE =
+  /\b(?:open|launch|start|quit|close|click|double[- ]click|type|fill\s*(?:out|in)|navigate\s+to|go\s+to|visit|screenshot|take\s+a\s+screenshot|crop|resize|export|upload|download|drag|scroll|press|tap|switch\s+to|focus\s+on|log\s*in\s+to|sign\s+in\s+to)\b[\s\S]{0,40}\b(?:app|application|website|web\s*site|page|browser|tab|window|photoshop|illustrator|indesign|figma|chrome|safari|firefox|edge|finder|terminal|excel|word|powerpoint|wordpress|admin\s+panel|file|folder|button|form|field|link|url|dialog|screen)\b/i;
+const BLACKSWAN_ACTION_REQUEST_URL_RE = /\b(?:go\s+to|open|visit|navigate\s+to)\b[\s\S]{0,20}(?:https?:\/\/|www\.)/i;
+function looksLikeUnsupportedActionRequestForBlackSwan(message: string | null | undefined): boolean {
+  const text = (message || "").trim();
+  if (!text) return false;
+  return BLACKSWAN_ACTION_REQUEST_RE.test(text) || BLACKSWAN_ACTION_REQUEST_URL_RE.test(text);
+}
+/* UC_SMOKE_EXTRACT_END looksLikeUnsupportedActionRequestForBlackSwan */
+function buildBlackSwanActionGuardMessage(): string {
+  return (
+    "🦢 I can talk this through, but I can't actually open apps, click things, or browse the web from here — " +
+    "this chat surface doesn't have those tools attached to me. Send this in the main Chat tab instead " +
+    "(it runs through OpenSwan, which can execute real actions), or tell me what you'd like to know and " +
+    "I'll help with what I already have."
+  );
+}
+/* UC_SMOKE_EXTRACT_END buildBlackSwanActionGuardMessage */
+
+// 2026-07-16: live fleet testing found BlackSwan-v5 reliably breaks down on
+// production-shaped system prompts (long, multi-section, grounding/tool
+// blocks the model was never trained on) — 11/12 realistic test questions
+// across categories came back garbled, via a handful of recurring failure
+// signatures: unclosed/leaked `<think>` tags, foreign-script word-salad,
+// verbatim sentence/phrase repetition loops, and echoed `##`-header prompt
+// structure instead of an answer. This is a training-distribution gap, not
+// fixable in this function — but a real user should never SEE the garbage.
+// This is a deliberately conservative pattern match (multiple repeats /
+// real percentage thresholds) so it only fires on the severe breakdown
+// cases actually observed, not on a normal answer that happens to use a
+// non-English word or a bullet list.
+/* UC_SMOKE_EXTRACT_START looksLikeGarbledBlackSwanOutput */
+/* UC_SMOKE_EXTRACT_START stripBlackSwanReasoningText */
+const BLACKSWAN_GARBLE_THINK_TAG_RE = /<\/?think>/i;
+const BLACKSWAN_GARBLE_HEADER_RE = /##\s*(?:BlackSwan App-Grounding Contract|Tools\s*&\s*Actions|Your Personality|Expanded Knowledge)/i;
+const BLACKSWAN_GARBLE_NON_LATIN_RE = /[぀-ヿ㐀-鿿가-힯Ѐ-ӿ]/g;
+// Two more signatures found in real captured fleet-test output that the
+// checks above miss: a "fake structured document" pattern (repeated `---`
+// dividers with no real paragraph structure) and a scatter of short,
+// meaningless backtick-quoted tokens (`cw`, `p`, `app_tools`, ...) — both
+// rare in genuine prose or even genuine technical answers (which use at
+// most one or two real code/command backticks), common in the hallucinated
+// fake-table/fake-config garbling failure mode.
+const BLACKSWAN_GARBLE_HRULE_RE = /^---\s*$/gm;
+const BLACKSWAN_GARBLE_SHORT_BACKTICK_RE = /`[a-zA-Z_]{1,14}`/g;
+// 2026-07-16, found via live end-to-end testing of the shortened
+// BlackSwan-only prompt: a response can leak raw, unresolved step-by-step
+// reasoning as if it WERE the final answer — no <think> tags, no headers,
+// no repetition, no foreign script, so none of the checks above catch it
+// (e.g. "Thinking about the answer: ... Step 1: ... Step 2: ... No direct
+// task or action; instead, provide a clear plan to add." with no real
+// answer ever stated). stripBlackSwanReasoningTextRaw's own reasoning-prefix
+// regex only recognizes "Thinking Process:"/"Thought Process:" style
+// prefixes, not this "Thinking about..."/"Step 1:" shape, so it passes
+// through unmodified. Narrow, high-precision match on how the response
+// OPENS — a genuine final answer essentially never starts this way.
+// "first,? (let's|I'll|I need to) <verb>" only counts as a leaked-reasoning
+// opener when <verb> is itself reasoning-flavored (check/determine/analyze/
+// ...) — found via code review that the earlier, unqualified version also
+// matched a perfectly good answer opener like "First, let's celebrate your
+// streak!", which is not reasoning leakage at all.
+// 2026-07-17, found via live fleet QA against a repetition-flood adversarial
+// prompt ("help help help ..."): BlackSwan can open with a casual "Okay,"/
+// "Alright,"/"Hmm," filler and then immediately lapse into narrating its own
+// planning in the third person ("Okay, the user is ... so I need to figure
+// out ..."), which the narrower opener list above didn't match. "let me"
+// only counts when followed by a reasoning verb (think/figure/check/...) —
+// plain "let me know" is a completely normal, non-leaking closer.
+const BLACKSWAN_GARBLE_CASUAL_PREAMBLE_RE = /^\s*(?:okay|alright|hmm)[,.]?\s+(?:so\s+)?(?:the\s+user\b|i\s+need\s+to\b|let\s+me\s+(?:think|figure|check|determine|analyze|verify|consider|prepare|make\s+sure|look)\b)/i;
+const BLACKSWAN_GARBLE_REASONING_PREAMBLE_RE = /^\s*(?:thinking about|thinking:|step\s*1[:.]\s|let me think|first,?\s+(?:let'?s|i'?ll|i\s+need\s+to)\s+(?:check|determine|figure|analyze|verify|think|consider|look\s+at|review)|i\s+need\s+to\s+(?:check|determine|figure|analyze|verify)|my\s+plan\s*:)/i;
+
+function looksLikeGarbledBlackSwanOutput(text: string): boolean {
+  if (!text) return false;
+  // A single punctuation mark or a couple of stray characters is never a
+  // real answer — found live: a raw response of just "." slipped through
+  // every other check (not empty, no tags/headers/repetition/foreign
+  // script). A genuine BlackSwan reply is never this short.
+  if (text.trim().length > 0 && text.trim().length < 5) return true;
+  // 2026-07-17, round-5 live fleet QA: a bare label like "length:" (a short
+  // fragment ending in a colon/semicolon instead of real punctuation)
+  // slipped past the <5-char check above. A genuine reply is never a 1-2
+  // word colon-terminated label. (An earlier version of this check also
+  // flagged ANY response opening on a single lowercase letter, meant to
+  // catch a mid-sentence truncation like "s to one or two sentences." — an
+  // independent review fleet found and verified that this also flagged
+  // ordinary casual replies like "k, got it!"/"u ready for standup?" and
+  // lettered lists like "a) do the dishes", so it was removed rather than
+  // narrowed, since no safe narrowing covers real single-letter words like
+  // "a"/"i" while still catching arbitrary other stray-letter truncations.)
+  {
+    const trimmed = text.trim();
+    if (trimmed.length > 0 && trimmed.length < 40) {
+      const words = trimmed.split(/\s+/).filter(Boolean);
+      if (words.length <= 2 && /[:;]$/.test(trimmed)) return true;
+    }
+  }
+  if (BLACKSWAN_GARBLE_THINK_TAG_RE.test(text)) return true;
+  if (BLACKSWAN_GARBLE_HEADER_RE.test(text)) return true;
+  if (BLACKSWAN_GARBLE_REASONING_PREAMBLE_RE.test(text)) return true;
+  if (BLACKSWAN_GARBLE_CASUAL_PREAMBLE_RE.test(text)) return true;
+  // A reply addressed to the person chatting always says "you", never talks
+  // about them in the third person — 2+ occurrences of "the user" directly
+  // followed by a state/planning verb is leaked internal planning narration,
+  // not a real answer (found live: "the user is ... the user would need
+  // ..."). Requires an immediate verb, not just the bare bigram "the user"
+  // — an independent review fleet found and verified that the unqualified
+  // version also flagged ordinary text discussing product documentation
+  // ("the user manual is ... the user guide covers ...").
+  if ((text.match(/\bthe user\s+(?:is|was|are|were|would|wants?|needs?|has|have|had|should|must|can|could|will)\b/gi) || []).length >= 2) return true;
+
+  // This app's genuine replies are English/French/Spanish (accented Latin
+  // script). A density-ratio threshold for true non-Latin script
+  // (CJK/Hangul/Cyrillic) is a reasonable garbling signature, but an
+  // earlier attempt to hard-trigger on ANY single non-Latin character
+  // (regardless of density) was reverted after an independent review fleet
+  // found and verified it discards otherwise-correct replies that
+  // legitimately name a teammate in Cyrillic or quote a room-chat message
+  // in Korean — a hard trigger flags those unconditionally, on top of the
+  // pre-existing density-ratio limitation below.
+  // Known, pre-existing, still-open limitation (predates this diff, not
+  // something this revert fixes): a short reply genuinely built around
+  // quoting ONE foreign word (e.g. "'hello' in Japanese is こんにちは.")
+  // still trips this ratio, since a single quoted word can dominate a short
+  // reply's character count just as much as sparse garbling would. Properly
+  // distinguishing "an intentional foreign-word quote" from "stray garbled
+  // characters" would need real language-boundary detection, not a bare
+  // character-class ratio — out of scope for this fix.
+  const nonLatinCount = (text.match(BLACKSWAN_GARBLE_NON_LATIN_RE) || []).length;
+  const nonWhitespaceLen = text.replace(/\s+/g, "").length || 1;
+  if (nonLatinCount / nonWhitespaceLen > 0.05) return true;
+
+  if ((text.match(BLACKSWAN_GARBLE_HRULE_RE) || []).length >= 3) return true;
+  if ((text.match(BLACKSWAN_GARBLE_SHORT_BACKTICK_RE) || []).length >= 6) return true;
+  // 2026-07-17, round-5: a live garbled response used excessive short
+  // markdown-bold spans ("**word**: **word**" repeated dozens of times) as
+  // its dominant symptom — sparser non-Latin characters within the same
+  // response (only 3 stray CJK characters in ~1600 chars) were too sparse to
+  // trip the density check above, so this catches that response via a much
+  // safer signal.
+  //
+  // Originally a bare count (>=8 short bold spans), then a "3+ distinct
+  // content words each shared across 2+ spans" check. A second independent
+  // review found and verified the word-sharing version STILL false-
+  // positives on a realistic genuine shape: a structured status grid where
+  // distinct labels legitimately share a CATEGORY word (e.g. "**Task
+  // Status:**"/"**Task Owner:**"/"**Deploy Status:**"/"**Deploy Owner:**")
+  // — single shared words like "task"/"deploy"/"status"/"owner" are common
+  // in genuine structured summaries, not just in the garbled evidence.
+  // Now requires shared 2-WORD phrases (bigrams), not single words: at
+  // least 2 distinct bigrams (e.g. "specific task", "task details") each
+  // appearing inside 2+ different spans. Verified this still catches the
+  // original evidence ("specific task details" recurs verbatim across 2
+  // spans) while a digest/step-list/status-grid sharing only single
+  // category words across otherwise-distinct labels does not.
+  const boldSpans = text.match(/\*\*[^*]{1,60}\*\*/g) || [];
+  if (boldSpans.length >= 8) {
+    const spanStopwords = new Set(["a", "an", "the", "and", "or", "but", "is", "was", "are", "were", "has", "have", "had", "not", "no", "it", "this", "that", "to", "of", "in", "on", "at", "for", "with", "as", "if", "they"]);
+    const bigramSpanCounts = new Map<string, number>();
+    for (const span of boldSpans) {
+      const spanWords = (span.toLowerCase().match(/[a-z]+/g) || []).filter((w) => w.length >= 3 && !spanStopwords.has(w));
+      const bigramsInSpan = new Set<string>();
+      for (let i = 0; i + 2 <= spanWords.length; i++) {
+        bigramsInSpan.add(spanWords.slice(i, i + 2).join(" "));
+      }
+      for (const bigram of bigramsInSpan) {
+        bigramSpanCounts.set(bigram, (bigramSpanCounts.get(bigram) || 0) + 1);
+      }
+    }
+    let bigramsSharedAcrossSpans = 0;
+    for (const count of bigramSpanCounts.values()) {
+      if (count >= 2) bigramsSharedAcrossSpans++;
+    }
+    if (bigramsSharedAcrossSpans >= 2) return true;
+  }
+
+  // Repetition-loop detector: any 20+ char sliding window that recurs 3+
+  // times verbatim is the hallmark of the non-terminating loop failure mode
+  // observed in fleet testing (the same clause repeated near-verbatim
+  // dozens of times until the token budget runs out).
+  const normalized = text.toLowerCase().replace(/\s+/g, " ");
+  if (normalized.length >= 60) {
+    const seen = new Map<string, number>();
+    const windowSize = 24;
+    for (let i = 0; i + windowSize <= normalized.length; i += 8) {
+      const window = normalized.slice(i, i + windowSize);
+      const count = (seen.get(window) || 0) + 1;
+      seen.set(window, count);
+      if (count >= 3) return true;
+    }
+  }
+
+  // 2026-07-17, round-5: the sliding-window check above only catches EXACT
+  // 24-char verbatim recurrence, so a loop where the wording drifts slightly
+  // between repeats (e.g. "...which means at least two days..." vs "...which
+  // is a product status.") never realigns into a matching window — found
+  // live in a response that repeated 3 distinct full sentences verbatim
+  // (each 50+ chars) without ever having an identical 24-char window recur
+  // 3 times. A genuine answer essentially never repeats a full clause this
+  // long verbatim even twice, so this checks sentence-level duplication
+  // independently of the character-window check above. Floor is 50 chars,
+  // not 30 — an independent review fleet found and verified that a 30-char
+  // floor also flags a genuine multi-person digest reusing the same short
+  // congratulatory template sentence for two different people (e.g. "Great
+  // job, keep up that streak of yours!" said once per person), which is
+  // ~40 chars and a real, non-garbled shape for this product.
+  const sentenceCounts = new Map<string, number>();
+  for (const rawSentence of text.split(/[.!?\n]+/)) {
+    const sentence = rawSentence.trim().toLowerCase().replace(/\s+/g, " ");
+    if (sentence.length < 50) continue;
+    const count = (sentenceCounts.get(sentence) || 0) + 1;
+    sentenceCounts.set(sentence, count);
+    if (count >= 2) return true;
+  }
+
+  // 2026-07-17: found via live direct-endpoint testing (not routed through
+  // the app) — a different shape of degenerate loop than either repetition
+  // check above: many short, fragmentary, grammatically incomplete lines
+  // ("QA", "blac got QA", "the car was      ", trailing whitespace-only
+  // lines), word-salad rather than exact repeated text, so neither the
+  // 24-char verbatim window nor the 50-char sentence-repeat check fires.
+  // Distinctive symptom here isn't repeated TEXT, it's the LINE STRUCTURE:
+  // mostly very short (<25 char), unpunctuated fragments.
+  //
+  // The line-shortness ratio alone isn't enough, though — an independent
+  // review fleet found and verified it false-positives on completely
+  // ordinary short-line answers this app produces routinely: a 12-item
+  // numbered task list, a 10-step walkthrough, a 10-person team roster.
+  // Those are ALSO >=10 lines that are mostly short and unpunctuated, but
+  // each line carries real, distinguishing content (a name, a number, a
+  // task title) — genuine garbling instead draws from a tiny, constantly-
+  // recombined vocabulary ("QA"/"blac"/"got"/"swan"/"car" account for most
+  // of the words in the live evidence). Requires BOTH the line-shortness
+  // ratio above 0.6 AND low lexical diversity among the words used across
+  // those short lines (unique-word-or-number ratio below 0.35) — verified
+  // this distinguishes all 4 genuine cases above (ratios 0.36-1.0) from the
+  // live garbled evidence (ratio 0.19).
+  const nonEmptyLines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (nonEmptyLines.length >= 10) {
+    const degenerateLines = nonEmptyLines.filter((l) => l.length < 25 && !/[.!?:]$/.test(l));
+    if (degenerateLines.length / nonEmptyLines.length >= 0.6) {
+      const lineStopwords = new Set(["a", "an", "the", "and", "or", "but", "is", "was", "are", "were", "to", "of", "in", "on", "at", "for", "with", "as"]);
+      const tokens: string[] = [];
+      for (const line of degenerateLines) {
+        const lineTokens = (line.toLowerCase().match(/[a-z']+|\d+/g) || []).filter((t) => !lineStopwords.has(t));
+        tokens.push(...lineTokens);
+      }
+      const uniqueTokens = new Set(tokens);
+      if (tokens.length > 0 && uniqueTokens.size / tokens.length < 0.35) return true;
+    }
+  }
+
+  // 2026-07-17: a third distinct loop shape found live in the same testing
+  // session — a repeated short PHRASE ("can't create plan", "can't check
+  // in") embedded inside otherwise-varying, individually-punctuated lines
+  // (e.g. "You can't create the (can't create plan)" / "You love you
+  // (can't create plan)" / "You watch Chris (can't create plan)"), so
+  // neither the sentence-repeat check (the surrounding sentences differ) nor
+  // the line-structure check above (these lines aren't short/unpunctuated)
+  // fires. Flags any exact 4-word phrase (12+ chars, to skip trivial
+  // stopword n-grams) that recurs 4+ times anywhere in the response.
+  //
+  // A "skip windows at the start of their sentence" exclusion was tried
+  // here, to spare a genuine templated/parallel answer (4 reminders/FAQ
+  // entries intentionally opening the same way) from being flagged just
+  // because the shared opener also produces several "shifted" overlapping
+  // windows that incidentally repeat too. A follow-up review found and
+  // verified that exclusion was a net-negative straight regression: a
+  // short sentence repeated verbatim ("I can't create plan." x4) — a very
+  // plausible, common degenerate-loop shape, since every occurrence sits
+  // at its sentence's start — stopped being detected at all once excluded,
+  // and the sentence/word tokenizers used slightly different splitting
+  // logic, so the position lookup could silently desync on any input
+  // containing period-bearing tokens (abbreviations, "e.g.", decimals),
+  // exempting phrases that were never near a real sentence start. Reverted
+  // to the plain count-only version. This means a genuine, intentionally
+  // templated 4-item reminders/FAQ list can still trip this check — a
+  // known, accepted trade-off (documented rather than silently left
+  // unverified): reliably catching real degenerate loops matters more for
+  // this function's fail-closed purpose than avoiding a rare templated-
+  // answer false positive.
+  const words = text.toLowerCase().replace(/\s+/g, " ").trim().split(" ");
+  const phraseCounts = new Map<string, number>();
+  for (let i = 0; i + 4 <= words.length; i++) {
+    const phrase = words.slice(i, i + 4).join(" ");
+    if (phrase.length < 12) continue;
+    const count = (phraseCounts.get(phrase) || 0) + 1;
+    phraseCounts.set(phrase, count);
+    if (count >= 4) return true;
+  }
+
+  return false;
+}
+/* UC_SMOKE_EXTRACT_END looksLikeGarbledBlackSwanOutput */
+
+const BLACKSWAN_GARBLE_FALLBACK_MESSAGE =
+  "I couldn't form a clear answer to that just now — BlackSwan sometimes struggles with longer conversations (a known issue being worked on). Could you try asking again in a shorter, more direct way, or switch to a different model for this one?";
+
+// Public entry point: strips reasoning-trace artifacts, then — regardless
+// of which internal path produced the result (including the early-return
+// "no reasoning prefix" case below, which a plain repetition-loop or a
+// leaked `<think>` tag would also hit, since neither necessarily starts
+// with a "Thinking Process:" prose prefix) — checks the FINAL text for the
+// known garbling signatures and substitutes an honest fallback message
+// instead of ever surfacing garbage to a real user.
 function stripBlackSwanReasoningText(text: string | null): string | null {
+  const result = stripBlackSwanReasoningTextRaw(text);
+  if (result && looksLikeGarbledBlackSwanOutput(result)) {
+    return BLACKSWAN_GARBLE_FALLBACK_MESSAGE;
+  }
+  // The salvage logic above can strip a fully-looping response down to ""
+  // (every paragraph matched the reasoning-block pattern, nothing left to
+  // salvage) — that's the SAME garbling failure, just surfacing as a blank
+  // reply instead of visible garbage, which is worse UX, not better. Only
+  // treat this as garbling when there was real input text to begin with;
+  // a null/empty `text` (e.g. a failed upstream call) is a different,
+  // legitimate case this function should keep passing through unchanged.
+  if (text && text.trim() && (!result || !result.trim())) {
+    return BLACKSWAN_GARBLE_FALLBACK_MESSAGE;
+  }
+  return result;
+}
+
+function stripBlackSwanReasoningTextRaw(text: string | null): string | null {
   if (!text) return text;
-  const trimmed = text.trim();
+  let trimmed = text.trim();
   if (!trimmed) return trimmed;
+
+  // 2026-07-17: a <think>...</think> block (the raw model wrapping its
+  // reasoning in these XML-style tags, as opposed to the "Thinking
+  // Process:" prose prefix this function otherwise expects) used to be
+  // handled nowhere in this function — the untouched text, tags and all,
+  // would fall straight through to looksLikeGarbledBlackSwanOutput(), whose
+  // BLACKSWAN_GARBLE_THINK_TAG_RE check discards the ENTIRE response
+  // (including a genuinely good answer written after the closing tag) just
+  // for containing the tag. Extract the content after the closing tag
+  // first, so a real answer underneath survives.
+  //
+  // Step 1: strip ALL well-formed <think>...</think> pairs (there may be
+  // more than one reasoning segment). An independent review fleet found
+  // and verified that an earlier version of this fix only matched the
+  // FIRST closing tag, so a second <think>...</think> pair left in the
+  // "salvaged" remainder would re-trip BLACKSWAN_GARBLE_THINK_TAG_RE and
+  // discard an otherwise-good final answer written after it.
+  const pairsStripped = trimmed.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  if (pairsStripped && pairsStripped !== trimmed) trimmed = pairsStripped;
+
+  // Step 2: a LONE closing tag with no matching opener (chat template
+  // evidently auto-opens the block before generation starts, so the raw
+  // completion routinely begins mid-reasoning — "Thinking about the
+  // user's request..." — and only the closing tag itself appears in the
+  // text) — take content after the LAST such occurrence.
+  //
+  // A word-allowlist guard was tried here ("tag"/"marker"/...) to avoid
+  // tripping on genuine prose that merely mentions/quotes the literal tag
+  // (e.g. "...a stray </think> tag before the real answer..."). A
+  // follow-up review found and verified that approach is an unwinnable
+  // whack-a-mole: any other ordinary noun after the mention ("element",
+  // "sequence", ...) still slips past the allowlist and gets truncated,
+  // and — since only the LAST occurrence's guard result was applied — an
+  // earlier, properly-guarded mention didn't protect the text either once
+  // a second, unguarded mention appeared later. Removed the guard entirely
+  // rather than keep chasing individual words. This means genuine prose
+  // that mentions the tag as a topic can get truncated into a mangled
+  // fragment — a known, accepted trade-off (documented rather than
+  // silently left unverified): this is an exceedingly rare scenario for
+  // this app's actual question domain (an accountability tool has little
+  // reason to discuss LLM reasoning-tag internals), while a lone closing
+  // tag with a real answer after it (the case this step exists for) is a
+  // routine, observed-live shape worth reliably salvaging.
+  const closeTagRe = /<\/think>\s*/gi;
+  let lastCloseEnd = -1;
+  let closeMatch: RegExpExecArray | null;
+  while ((closeMatch = closeTagRe.exec(trimmed)) !== null) {
+    lastCloseEnd = closeMatch.index + closeMatch[0].length;
+  }
+  if (lastCloseEnd >= 0) {
+    const afterClose = trimmed.slice(lastCloseEnd).trim();
+    if (afterClose) trimmed = afterClose;
+  }
+
   const reasoningPrefix = /^\s*(?:Thinking Process|Thought Process|Reasoning|Chain[- ]of[- ]Thought)\s*:\s*/i;
   if (!reasoningPrefix.test(trimmed)) return trimmed;
 
@@ -2449,6 +2919,7 @@ function stripBlackSwanReasoningText(text: string | null): string | null {
   if (answerBlock) return answerBlock.trim();
   return "";
 }
+/* UC_SMOKE_EXTRACT_END stripBlackSwanReasoningText */
 
 async function loadMarketplaceProviderCredential(
   supabase: any,
@@ -4417,7 +4888,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       for (const m of context.recentMessages.slice(-10)) {
         conversationMessages.push({
           role: m.is_bot ? "assistant" : "user",
-          content: m.is_bot ? m.content : `[${m.user?.display_name || m.user?.username || "User"}]: ${m.content}`,
+          content: m.is_bot ? stripBotMetaMarker(m.content) : `[${m.user?.display_name || m.user?.username || "User"}]: ${m.content}`,
         });
       }
     }
@@ -4535,6 +5006,12 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       : frozenPrompt
     ).replace(TOOL_USE_PROMPT_BLOCK, TEXT_ONLY_ACTIONS_PROMPT_BLOCK);
 
+    // BlackSwan-only shortened prompt (see buildBlackSwanSystemPrompt for
+    // the fleet-test rationale). Built once here and selected per call site
+    // below via isBlackSwanTextModel() — every other model keeps using
+    // `combinedSystemPrompt` above, completely unchanged.
+    const blackSwanSystemPrompt = buildBlackSwanSystemPrompt(context);
+
     // ── Marketplace integration routing ───────────────────────────────────
     // The chat picker prefixes provider-routed model ids with the
     // integration's provider key. We strip the prefix, look up the
@@ -4546,6 +5023,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       provider_routed?: string;
       provider_model?: string;
       routing_fallback?: { provider: string; reason: string };
+      blackswan_ghost_retry?: boolean;
     } = {};
     if (!aiResponse && isMarketplacePrefix && circleId && effectiveModel) {
       const slashIdx = effectiveModel.indexOf("/");
@@ -4637,32 +5115,42 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
           ? openAiCompatibleCredential.apiKey
           : await loadMarketplaceProviderApiKey(supabase, circleId, userId, providerKey);
         if (providerApiKey) {
-          const provResult = await callMarketplaceProvider({
-            provider: providerKey,
-            modelId: tail,
-            systemPrompt: combinedSystemPrompt,
-            userMessage: message,
-            apiKey: providerApiKey,
-            maxTokens: maxTokens || 2048,
-            endpointOverride,
-          });
-          if (provResult.text) {
-            aiResponse = provResult.text;
-            tokenBreakdown = provResult.usage;
+          if (isBlackSwanTextModel(tail) && looksLikeUnsupportedActionRequestForBlackSwan(message)) {
+            // This path has no tools attached — see
+            // looksLikeUnsupportedActionRequestForBlackSwan above. Skip the
+            // model call entirely rather than let BlackSwan hallucinate
+            // having performed the action.
+            aiResponse = buildBlackSwanActionGuardMessage();
             nonRelayRouting.provider_routed = providerKey;
             nonRelayRouting.provider_model = tail;
-            logMarketplaceUsage(supabase, {
-              circleId: circleId ?? null,
-              userId: userId ?? null,
+          } else {
+            const provResult = await callMarketplaceProvider({
               provider: providerKey,
               modelId: tail,
-              inputTokens: provResult.usage?.input_tokens || 0,
-              outputTokens: provResult.usage?.output_tokens || 0,
-              metadata: { surface: "non_relay" },
+              systemPrompt: isBlackSwanTextModel(tail) ? blackSwanSystemPrompt : combinedSystemPrompt,
+              userMessage: message,
+              apiKey: providerApiKey,
+              maxTokens: maxTokens || 2048,
+              endpointOverride,
             });
-          } else if (provResult.error) {
-            nonRelayRouting.routing_fallback = { provider: providerKey, reason: provResult.error };
-            console.warn(`[swanbot-ai] marketplace ${providerKey} call failed:`, provResult.error);
+            if (provResult.text) {
+              aiResponse = provResult.text;
+              tokenBreakdown = provResult.usage;
+              nonRelayRouting.provider_routed = providerKey;
+              nonRelayRouting.provider_model = tail;
+              logMarketplaceUsage(supabase, {
+                circleId: circleId ?? null,
+                userId: userId ?? null,
+                provider: providerKey,
+                modelId: tail,
+                inputTokens: provResult.usage?.input_tokens || 0,
+                outputTokens: provResult.usage?.output_tokens || 0,
+                metadata: { surface: "non_relay" },
+              });
+            } else if (provResult.error) {
+              nonRelayRouting.routing_fallback = { provider: providerKey, reason: provResult.error };
+              console.warn(`[swanbot-ai] marketplace ${providerKey} call failed:`, provResult.error);
+            }
           }
         } else {
           nonRelayRouting.routing_fallback = { provider: providerKey, reason: "integration_not_connected" };
@@ -4686,36 +5174,52 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
 
     // Route to HuggingFace if user selected an open model
     if (!aiResponse && hfModelId && !isClaudeModel) {
-      const hfResult = await callHfProxy("chat", {
-        messages: [
-          { role: "system", content: combinedSystemPrompt },
-          { role: "user", content: message },
-        ],
-      }, hfModelId, undefined, userId);
-
-      if (!hfResult.error && hfResult.result) {
-        const rawHfResponse = hfResult.result?.choices?.[0]?.message?.content || JSON.stringify(hfResult.result);
-        aiResponse = isBlackSwanTextModel(hfModelId) ? stripBlackSwanReasoningText(rawHfResponse) : rawHfResponse;
-        const est = Math.ceil((combinedSystemPrompt.length + message.length + (aiResponse?.length || 0)) / 4);
+      if (isBlackSwanTextModel(hfModelId) && looksLikeUnsupportedActionRequestForBlackSwan(message)) {
+        // Same no-tools gap as the marketplace branch above — skip the call.
+        aiResponse = buildBlackSwanActionGuardMessage();
         tokenBreakdown = {
           model: hfModelId,
-          input_tokens: Math.ceil((combinedSystemPrompt.length + message.length) / 4),
-          output_tokens: Math.ceil((aiResponse?.length || 0) / 4),
+          input_tokens: 0,
+          output_tokens: 0,
           cache_creation_tokens: 0,
           cache_read_tokens: 0,
-          total_tokens: est,
+          total_tokens: 0,
         };
+      } else {
+        const hfSystemPrompt = isBlackSwanTextModel(hfModelId) ? blackSwanSystemPrompt : combinedSystemPrompt;
+        const hfResult = await callHfProxy("chat", {
+          messages: [
+            { role: "system", content: hfSystemPrompt },
+            { role: "user", content: message },
+          ],
+        }, hfModelId, undefined, userId);
+
+        if (!hfResult.error && hfResult.result) {
+          const rawHfResponse = hfResult.result?.choices?.[0]?.message?.content || JSON.stringify(hfResult.result);
+          aiResponse = isBlackSwanTextModel(hfModelId) ? stripBlackSwanReasoningText(rawHfResponse) : rawHfResponse;
+          const est = Math.ceil((hfSystemPrompt.length + message.length + (aiResponse?.length || 0)) / 4);
+          tokenBreakdown = {
+            model: hfModelId,
+            input_tokens: Math.ceil((hfSystemPrompt.length + message.length) / 4),
+            output_tokens: Math.ceil((aiResponse?.length || 0) / 4),
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            total_tokens: est,
+          };
+        }
       }
     }
 
     if (!aiResponse && !isClaudeModel && !hfModelId) {
-      // Try BlackSwan LLM first (zero cost)
-      aiResponse = await callBlackSwanLLM(combinedSystemPrompt, message);
+      // Try BlackSwan LLM first (zero cost) — this path is always BlackSwan
+      // (hardcoded `model: "blackswan"` inside callBlackSwanLLM), so it
+      // always gets the shortened prompt.
+      aiResponse = await callBlackSwanLLM(blackSwanSystemPrompt, message);
       if (aiResponse) {
-        const est = Math.ceil((combinedSystemPrompt.length + message.length + aiResponse.length) / 4);
+        const est = Math.ceil((blackSwanSystemPrompt.length + message.length + aiResponse.length) / 4);
         tokenBreakdown = {
           model: "blackswan",
-          input_tokens: Math.ceil((combinedSystemPrompt.length + message.length) / 4),
+          input_tokens: Math.ceil((blackSwanSystemPrompt.length + message.length) / 4),
           output_tokens: Math.ceil(aiResponse.length / 4),
           cache_creation_tokens: 0,
           cache_read_tokens: 0,
@@ -4724,61 +5228,138 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
       }
     }
 
-    if (!aiResponse) {
-      if (marketplaceRequested) {
+    // 2026-07-20: "ghost retry" \u2014 when BlackSwan's own response was caught
+    // as garbled (aiResponse is the static BLACKSWAN_GARBLE_FALLBACK_MESSAGE
+    // set by stripBlackSwanReasoningText above), that string is truthy, so
+    // it used to skip this whole Claude-fallback block entirely and reach
+    // the user as-is: an apology instead of a real answer, on what live
+    // testing this session found is 60-80% of realistic BlackSwan turns.
+    // Since buildBlackSwanSystemPrompt()'s output is a plain, model-agnostic
+    // string with no BlackSwan-model dependency, Claude can answer "as
+    // BlackSwan" here with zero persona refactor \u2014 same mechanism already
+    // shipped for tool-heavy BlackSwan turns via BLACKSWAN_TOOL_EXECUTOR_
+    // MODEL_ID, just triggered by a garbled reply instead of tool intent.
+    const wasBlackSwanGarbled = aiResponse === BLACKSWAN_GARBLE_FALLBACK_MESSAGE;
+    if (!aiResponse || wasBlackSwanGarbled) {
+      // For a garbled-BlackSwan ghost retry, a missing key or exhausted
+      // budget must NOT turn into a hard error \u2014 aiResponse already holds a
+      // valid (if unhelpful) honest fallback message the user can still
+      // see. Only the genuine "produced nothing at all" case (!aiResponse)
+      // has nothing to lose by hard-failing here, so it keeps that behavior.
+      let skipGhostRetry = false;
+      if (marketplaceRequested || wasBlackSwanGarbled) {
         const budgetResponse = await maybeCircleClaudeBudgetExceededResponse(supabase, circleId);
         if (budgetResponse) {
-          await failSwanBotV1Run(supabase, swanBotV1RunId, "Claude budget cap blocked Anthropic fallback.");
-          return budgetResponse;
+          if (wasBlackSwanGarbled) {
+            skipGhostRetry = true;
+          } else {
+            await failSwanBotV1Run(supabase, swanBotV1RunId, "Claude budget cap blocked Anthropic fallback.");
+            return budgetResponse;
+          }
         }
       }
-      if (!anthropicKey) {
-        await failSwanBotV1Run(supabase, swanBotV1RunId, byokMissingMessage("anthropic"));
-        return errResponse(400, "key_missing", byokMissingMessage("anthropic"));
-      }
-      // Fall back to Claude (using requested model or default Haiku)
-      const claudeModelKey = effectiveModel?.startsWith("claude-opus")
-        ? "claude-opus"
-        : effectiveModel?.startsWith("claude-sonnet")
-          ? "claude-sonnet"
-          : effectiveModel?.startsWith("claude-haiku")
-            ? "claude-haiku"
-            : null;
-      const result = await callClaude(frozenPrompt, volatilePrompt, message, {
-        modelKey: claudeModelKey,
-        conversationMessages,
-        thinkingLevel: thinkingLevel || "balanced",
-        maxTokens,
-        apiKey: anthropicKey.apiKey,
-        supabase,
-        circleId,
-        userId,
-        enableTools: true,
-      });
-      aiResponse = result.text;
-      structuredToolActions = result.toolActions || [];
-      finalStopReason = result.stopReason;
-      finalIterationCount = result.iterations;
-
-      // If tools were used, append a summary of actions taken
-      if (result.toolActions && result.toolActions.length > 0) {
-        const actionSummary = result.toolActions.map(a => {
-          const status = a.result?.success ? '\u2705' : '\u274C';
-          return `${status} **${a.tool}**: ${JSON.stringify(a.input).slice(0, 100)}`;
-        }).join('\n');
-        if (aiResponse && !aiResponse.includes('create_task') && !aiResponse.includes('update_task')) {
-          aiResponse += `\n\n---\n*Actions taken:*\n${actionSummary}`;
+      if (!skipGhostRetry && !anthropicKey) {
+        if (wasBlackSwanGarbled) {
+          skipGhostRetry = true;
+        } else {
+          await failSwanBotV1Run(supabase, swanBotV1RunId, byokMissingMessage("anthropic"));
+          return errResponse(400, "key_missing", byokMissingMessage("anthropic"));
         }
       }
+      if (!skipGhostRetry) {
+        // Fall back to Claude (using requested model or default Haiku) \u2014 a
+        // garbled-BlackSwan ghost retry always uses Haiku (BlackSwan's own
+        // "cheap tier" spirit) and BlackSwan's short persona prompt instead
+        // of the full Claude-shaped combinedSystemPrompt/frozenPrompt, and
+        // never enables direct tool execution \u2014 matching BlackSwan's own
+        // persona contract ("You can't create tasks or take other actions
+        // directly in this reply").
+        const claudeModelKey = wasBlackSwanGarbled
+          ? "claude-haiku"
+          : effectiveModel?.startsWith("claude-opus")
+            ? "claude-opus"
+            : effectiveModel?.startsWith("claude-sonnet")
+              ? "claude-sonnet"
+              : effectiveModel?.startsWith("claude-haiku")
+                ? "claude-haiku"
+                : null;
+        // A garbled-BlackSwan ghost retry is an OPTIONAL upgrade attempt on
+        // top of a BlackSwan call that already succeeded (just garbled) —
+        // if callClaude itself throws (transient network/API error), that
+        // must not turn an already-available honest fallback message into
+        // a raw 500; catch it and keep aiResponse as-is. The genuine
+        // (non-BlackSwan) fallback path had no local try/catch before this
+        // feature existed either, so it deliberately keeps re-throwing on
+        // failure here — unchanged, pre-existing behavior.
+        try {
+        const result = await callClaude(
+          wasBlackSwanGarbled ? blackSwanSystemPrompt : frozenPrompt,
+          wasBlackSwanGarbled ? "" : volatilePrompt,
+          message,
+          {
+            modelKey: claudeModelKey,
+            conversationMessages,
+            thinkingLevel: thinkingLevel || "balanced",
+            maxTokens,
+            apiKey: anthropicKey!.apiKey,
+            supabase,
+            circleId,
+            userId,
+            enableTools: !wasBlackSwanGarbled,
+          },
+        );
+        aiResponse = result.text;
+        structuredToolActions = result.toolActions || [];
+        finalStopReason = result.stopReason;
+        finalIterationCount = result.iterations;
+        // Only flag the ghost retry as having fired when it actually
+        // produced real content — if Claude's own call also comes back
+        // empty, aiResponse falls through to the defensive reset below and
+        // the response the user sees is the plain honest fallback message
+        // again, not a Claude-answered one, so this should stay false then.
+        if (wasBlackSwanGarbled && result.text) nonRelayRouting.blackswan_ghost_retry = true;
 
-      tokenBreakdown = {
-        model: result.model,
-        input_tokens: result.inputTokens,
-        output_tokens: result.outputTokens,
-        cache_creation_tokens: result.cacheCreationTokens,
-        cache_read_tokens: result.cacheReadTokens,
-        total_tokens: result.inputTokens + result.outputTokens,
-      };
+        // If tools were used, append a summary of actions taken
+        if (result.toolActions && result.toolActions.length > 0) {
+          const actionSummary = result.toolActions.map(a => {
+            const status = a.result?.success ? '\u2705' : '\u274C';
+            return `${status} **${a.tool}**: ${JSON.stringify(a.input).slice(0, 100)}`;
+          }).join('\n');
+          if (aiResponse && !aiResponse.includes('create_task') && !aiResponse.includes('update_task')) {
+            aiResponse += `\n\n---\n*Actions taken:*\n${actionSummary}`;
+          }
+        }
+
+        tokenBreakdown = {
+          model: result.model,
+          input_tokens: result.inputTokens,
+          output_tokens: result.outputTokens,
+          cache_creation_tokens: result.cacheCreationTokens,
+          cache_read_tokens: result.cacheReadTokens,
+          total_tokens: result.inputTokens + result.outputTokens,
+        };
+        } catch (ghostRetryError: any) {
+          if (wasBlackSwanGarbled) {
+            console.warn("[swanbot-ai] BlackSwan ghost retry via Claude failed, keeping honest fallback message:", ghostRetryError?.message || ghostRetryError);
+          } else {
+            throw ghostRetryError;
+          }
+        }
+      }
+    }
+    // Genuinely reachable, not just a type-checker formality: skipGhostRetry
+    // (no key/budget) and the try/catch above both already leave the
+    // existing message untouched, but a ghost retry that runs successfully
+    // and still comes back with empty text needs a landing message. Uses
+    // the BlackSwan-flavored text only for an actual BlackSwan garble — the
+    // generic (non-BlackSwan) fallback path gets its own generic message
+    // instead, since it was never a BlackSwan turn and previously could
+    // reach this point with aiResponse left empty/falsy (no message at
+    // all); either way this must never be null for the calls below.
+    if (!aiResponse) {
+      aiResponse = wasBlackSwanGarbled
+        ? BLACKSWAN_GARBLE_FALLBACK_MESSAGE
+        : "I couldn't generate a response just now — please try again.";
     }
 
     // Image-only model UX: exactly one notice line, prepended to the visible
@@ -4803,6 +5384,7 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
           provider_model: nonRelayRouting.provider_model,
         } : {}),
         ...(nonRelayRouting.routing_fallback ? { routing_fallback: nonRelayRouting.routing_fallback } : {}),
+        ...(nonRelayRouting.blackswan_ghost_retry ? { blackswan_ghost_retry: true } : {}),
       },
     });
 
@@ -4842,6 +5424,14 @@ CODE QUALITY: No premature abstractions, no over-engineering, secure by default,
         artifacts: mapToolActionsToArtifacts(structuredToolActions),
         ...(nonRelayRouting.provider_routed ? { provider_routed: nonRelayRouting.provider_routed, provider_model: nonRelayRouting.provider_model } : {}),
         ...(nonRelayRouting.routing_fallback ? { routing_fallback: nonRelayRouting.routing_fallback } : {}),
+        ...(nonRelayRouting.blackswan_ghost_retry ? { blackswan_ghost_retry: true } : {}),
+        // True dead end: aiResponse is still the static honest-apology text
+        // — either the ghost retry above never ran (no key/budget) or it
+        // ran and failed. Distinct from blackswan_ghost_retry (which means
+        // the retry succeeded) so the client can render this small residual
+        // case differently from a normal reply, instead of showing an
+        // unexplained unhelpful answer with zero visual signal.
+        ...(aiResponse === BLACKSWAN_GARBLE_FALLBACK_MESSAGE ? { blackswan_honest_fallback: true } : {}),
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );

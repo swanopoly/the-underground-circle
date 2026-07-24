@@ -1390,7 +1390,10 @@ function buildChatComputerRequestActionItems(route: ChatComputerRequestRoute): C
     const actionTool = firstTool(tools, [
       'desktop.run_applescript',
       'desktop.photoshop_update_text_layer',
+      'desktop.photoshop_create_text_layer',
       'desktop.photoshop_set_layer_state',
+      'desktop.photoshop_set_layer_appearance',
+      'desktop.photoshop_add_fill_layer',
       'desktop.photoshop_place_asset',
       'desktop.photoshop_export_proof',
       'desktop.indesign_batch_update_text_layers',
@@ -1399,6 +1402,14 @@ function buildChatComputerRequestActionItems(route: ChatComputerRequestRoute): C
       'desktop.indesign_relink_asset',
       'desktop.indesign_export_proof',
       'desktop.indesign_package_document',
+      'desktop.illustrator_vectorize',
+      'desktop.illustrator_set_appearance',
+      'desktop.illustrator_align',
+      'desktop.illustrator_arrange',
+      'desktop.illustrator_group',
+      'desktop.illustrator_add_artboard',
+      'desktop.illustrator_add_text',
+      'desktop.illustrator_add_shape',
       'desktop.set_element_value',
       'desktop.click_element',
       'desktop.menu_click',
@@ -1857,6 +1868,17 @@ function routeNeedsDataTransferPrecisionRules(kind: ChatComputerRequestRouteKind
 export function buildChatComputerRequestRoutePromptBlock(message: string): string | null {
   const route = buildChatComputerRequestRoute(message);
   if (!route) return null;
+  return formatChatComputerRequestRoutePromptBlock(route);
+}
+
+/**
+ * Format an already-computed route into its prompt block. Split out from
+ * buildChatComputerRequestRoutePromptBlock so a caller that already holds the
+ * route (e.g. openswanSessionRuntime, which also needs the boolean `!!route`
+ * to decide the BlackSwan tool-executor swap) can format it without
+ * classifying the message a second time on a hot per-turn path.
+ */
+export function formatChatComputerRequestRoutePromptBlock(route: ChatComputerRequestRoute): string {
   return [
     '## Chat Computer Request Route',
     `Best path: ${route.bestPath}`,

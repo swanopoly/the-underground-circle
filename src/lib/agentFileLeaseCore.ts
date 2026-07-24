@@ -213,23 +213,47 @@ export function renewLease(
   return { ok: true, outcome: 'renewed', registry: cloneWith(registry, path, lease), lease };
 }
 
-export type ReleaseOutcome = 'released' | 'not_holder' | 'gone';
-/** Release a lease the caller owns (idempotent-ish; a non-owner cannot release). */
+export type ReleaseOutcome = 'released' | 'released_expired' | 'not_holder' | 'gone';
+export interface ReleaseResult {
+  ok: boolean;
+  outcome: ReleaseOutcome;
+  registry: LeaseRegistry;
+  /** The current holder, when denied (not_holder). */
+  holder?: FileLease;
+  reason: string;
+}
+/** Release a lease the caller owns (idempotent-ish). Decision table is
+ *  unchanged from day one: the owner may always release; anyone may clear a
+ *  genuinely EXPIRED lease (now labeled `released_expired`); a non-owner can
+ *  never release another agent's ACTIVE lease (`not_holder`, with the real
+ *  holder + remaining time in `reason`). */
 export function releaseLease(
   registryRaw: unknown,
   reqRaw: { path: string; ownerId: string },
   now: number,
-): { ok: boolean; outcome: ReleaseOutcome; registry: LeaseRegistry } {
+): ReleaseResult {
   const registry = normalizeRegistry(registryRaw);
   const req = (reqRaw ?? {}) as { path: string; ownerId: string };
   const path = normalizeLeasePath(req.path);
   const existing = registry.leases[path];
-  if (!existing) return { ok: true, outcome: 'gone', registry };
-  // A non-owner may reclaim a STALE lease by releasing it; otherwise not_holder.
-  if (existing.ownerId !== req.ownerId && !isExpired(existing, now)) {
-    return { ok: false, outcome: 'not_holder', registry };
+  if (!existing) {
+    return { ok: true, outcome: 'gone', registry, reason: 'no lease found for this path (nothing to release)' };
   }
-  return { ok: true, outcome: 'released', registry: cloneWith(registry, path, null) };
+  if (existing.ownerId === req.ownerId) {
+    return { ok: true, outcome: 'released', registry: cloneWith(registry, path, null), reason: 'lease released' };
+  }
+  // A non-owner may clear a STALE lease (same rule as reclaim-on-acquire)…
+  if (isExpired(existing, now)) {
+    return { ok: true, outcome: 'released_expired', registry: cloneWith(registry, path, null), reason: `released an expired lease from ${existing.ownerLabel}` };
+  }
+  // …but never another agent's ACTIVE claim.
+  return {
+    ok: false,
+    outcome: 'not_holder',
+    registry,
+    holder: existing,
+    reason: `held by ${existing.ownerLabel} for ${Math.max(0, Math.round((existing.expiresAt - now) / 1000))}s more`,
+  };
 }
 
 // ── Content-hash CAS (the universal, cooperation-free guarantee) ──────────────

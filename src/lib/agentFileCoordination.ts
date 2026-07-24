@@ -187,12 +187,31 @@ export async function heartbeatFile(path: string, opts?: { ttlMs?: number; conte
   return writeRegistry(res.registry, opts?.repoRoot);
 }
 
-/** Release this agent's lease (call on completion / error / handoff). */
-export async function releaseFile(path: string, opts?: { repoRoot?: string }): Promise<boolean> {
+export interface ReleaseResult {
+  ok: boolean;
+  outcome: 'released' | 'released_expired' | 'not_holder' | 'gone' | 'no_registry';
+  /** The current holder, when refused (not_holder). */
+  holder?: FileLease;
+  reason: string;
+}
+
+/** Release this agent's lease (call on completion / error / handoff). Only this
+ *  session's own lease — or a genuinely expired one — is released; another
+ *  agent's ACTIVE claim is refused (`not_holder`) with the real holder and
+ *  remaining time, never force-released. `no_registry` = the release decision
+ *  was valid but could not be persisted (bridge offline / write failed), so
+ *  other agents will still see the lease until it expires. */
+export async function releaseFile(path: string, opts?: { repoRoot?: string }): Promise<ReleaseResult> {
   const registry = await readRegistry(opts?.repoRoot);
   const res = releaseLease(registry, { path, ownerId: getOwnerId() }, nowMs());
-  if (!res.ok) return false;
-  return writeRegistry(res.registry, opts?.repoRoot);
+  if (!res.ok) {
+    return { ok: false, outcome: res.outcome, holder: res.holder, reason: res.reason };
+  }
+  const persisted = await writeRegistry(res.registry, opts?.repoRoot);
+  if (!persisted) {
+    return { ok: false, outcome: 'no_registry', reason: 'release not persisted (desktop bridge offline or registry write failed) — the claim stays visible until its lease expires' };
+  }
+  return { ok: true, outcome: res.outcome, reason: res.reason };
 }
 
 // ── Awareness ────────────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@ import type { LocalComputerAwarenessIntent } from './localComputerAwarenessInten
 export type AppAutomationTargetId =
   | 'adobe_indesign'
   | 'adobe_photoshop'
+  | 'adobe_illustrator'
   | 'adobe_creative_cloud'
   | 'engineering_cad_app'
   | 'browser_app'
@@ -724,6 +725,13 @@ function taskFamilyFor(task: string, targetId: AppAutomationTargetId): string {
     if (/\b(export|proof|png|jpg|jpeg|webp|rendition)\b/i.test(text)) return 'raster proof/export';
     return 'layered raster mutation';
   }
+  if (targetId === 'adobe_illustrator') {
+    if (/\b(vectori[sz]e|image trace|live trace|trace|raster to vector|to svg)\b/i.test(text)) return 'vector trace/vectorize';
+    if (/\b(recolou?r|stroke|swatch|appearance|fill colou?r)\b/i.test(text)) return 'vector appearance/recolor';
+    if (/\b(align|distribute|arrange|z-?order|group)\b/i.test(text)) return 'vector arrangement/alignment';
+    if (/\b(export|proof|svg|pdf|png|rendition)\b/i.test(text)) return 'vector proof/export';
+    return 'vector illustration mutation';
+  }
   if (targetId === 'browser_app') return 'browser semantic workflow';
   if (targetId === 'adobe_creative_cloud') return 'Adobe app capability buildout';
   if (targetId === 'engineering_cad_app') {
@@ -1244,6 +1252,8 @@ function candidatesForTarget(targetId: AppAutomationTargetId, task: string): App
       return indesignCandidates();
     case 'adobe_photoshop':
       return photoshopCandidates(task);
+    case 'adobe_illustrator':
+      return broadAdobeCandidates();
     case 'adobe_creative_cloud':
       return broadAdobeCandidates();
     case 'engineering_cad_app':

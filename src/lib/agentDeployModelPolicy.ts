@@ -24,6 +24,10 @@
 
 import { resolveModelForSoul } from './serviceProfileSouls';
 import { findAliasKey } from './crossProviderRouter';
+// Single source of truth for the "NO Grok / xAI" gate — shared with every
+// dynamic model feed via modelCatalogFilterCore so the invariant holds
+// uniformly (deploy path AND picker feeds), not just here.
+import { isBannedVendorModelId } from './modelCatalogFilterCore';
 
 export interface ResolvedDeployModel {
   model: string;
@@ -148,22 +152,8 @@ function normalizeProviderPrefix(id: string): string {
   return id;
 }
 
-/** Banned-vendor gate (house invariant: NO Grok / xAI anywhere). Matches
- *  xAI's provider tokens and the Grok model family in ANY `/`-delimited
- *  segment of the id, so passthrough forms like `openrouter/x-ai/grok-2`,
- *  `openrouter/grok`, `xai/...`, and bare `grok-...` all fail closed. Kept
- *  segment-scoped (not a raw substring scan) so an unrelated model whose
- *  name merely contains these letters is not false-flagged. */
-function isBannedVendorModelId(id: string): boolean {
-  const lower = (id || '').toLowerCase();
-  if (!lower) return false;
-  // Split on both '/' and ':' (OpenRouter variant suffixes) to inspect each token.
-  const segments = lower.split(/[/:]/).map((s) => s.trim()).filter(Boolean);
-  const BANNED_VENDOR_TOKENS = new Set(['xai', 'x-ai', 'x_ai']);
-  return segments.some(
-    (seg) => BANNED_VENDOR_TOKENS.has(seg) || seg === 'grok' || seg.startsWith('grok-'),
-  );
-}
+// isBannedVendorModelId now lives in modelCatalogFilterCore (imported above)
+// as the single source shared with the picker's dynamic feeds.
 
 /** True when the id is a recognized canonical (bare) catalog id OR a
  *  structurally valid provider-prefixed id (`<knownProvider>/<non-empty

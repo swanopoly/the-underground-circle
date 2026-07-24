@@ -26,8 +26,10 @@
  */
 
 const https = require('https');
+const http = require('http');
 const os = require('os');
 const path = require('path');
+const fs = require('fs');
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -41,6 +43,10 @@ if (!CONNECT_TOKEN) {
   process.stderr.write('[uc-mcp] ERROR: UC_CONNECT_TOKEN not set\n');
   process.exit(1);
 }
+
+// http vs https picked from UC_SUPABASE_URL so tests/dev can point at a local
+// mock server. Production URLs are https, so behavior there is unchanged.
+const TRANSPORT = AGENT_CONNECT_URL.startsWith('http://') ? http : https;
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -59,8 +65,9 @@ function sendHeartbeat(event = 'heartbeat', extra = {}) {
   });
 
   const url = new URL(AGENT_CONNECT_URL);
-  const req = https.request({
+  const req = TRANSPORT.request({
     hostname: url.hostname,
+    port: url.port || undefined,
     path: url.pathname,
     method: 'POST',
     headers: {
@@ -98,6 +105,132 @@ function stopHeartbeat() {
   sendHeartbeat('session_end');
 }
 
+// ── Server read/write ops (MCP v2 tools) ────────────────────────────────────
+// Unlike heartbeats (fire-and-forget), these tools need the response body.
+// POSTs { event, op, ... } to the same agent-connect edge function with the
+// same Bearer token; the server validates token + circle membership before
+// answering, returns only bounded/allowlisted fields for reads, and for writes
+// performs a single append-only INSERT scoped to the caller's circle.
+//
+// `postServerOp` is the shared transport; `postReadOp`/`postWriteOp` are thin
+// wrappers that set the event. Read behavior is unchanged from before.
+
+function postServerOp(bodyFields) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify({
+      agent_type: AGENT_TYPE,
+      cwd: process.cwd(),
+      ...bodyFields,
+    });
+
+    const url = new URL(AGENT_CONNECT_URL);
+    const req = TRANSPORT.request({
+      hostname: url.hostname,
+      port: url.port || undefined,
+      path: url.pathname,
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${CONNECT_TOKEN}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => {
+        let data = null;
+        try { data = JSON.parse(body); } catch { /* non-JSON body */ }
+        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300 && data) {
+          if (data.circle_id && !circleData) circleData = { circleId: data.circle_id };
+          resolve(data);
+        } else {
+          const msg = (data && (data.error || data.code)) || `HTTP ${res.statusCode}`;
+          reject(new Error(String(msg)));
+        }
+      });
+    });
+    req.on('error', (err) => reject(new Error(err && err.message ? err.message : 'network error')));
+    req.setTimeout(10_000, () => { req.destroy(new Error('request timed out')); });
+    req.write(payload);
+    req.end();
+  });
+}
+
+function postReadOp(op) {
+  return postServerOp({ event: 'read_op', op });
+}
+
+function postWriteOp(op, fields) {
+  return postServerOp({ event: 'write_op', op, ...(fields || {}) });
+}
+
+function truncateText(value, max) {
+  const s = value == null ? '' : String(value);
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+function agoText(iso) {
+  const t = Date.parse(String(iso || ''));
+  if (!Number.isFinite(t)) return 'unknown age';
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
+}
+
+function toolTextResult(id, text, isError) {
+  const result = { content: [{ type: 'text', text }] };
+  if (isError) result.isError = true;
+  return { jsonrpc: '2.0', id, result };
+}
+
+// ── Local file-lease registry (multi-agent coordination awareness) ──────────
+// Reads the SAME registry the coordination runtime writes:
+// `<repoRoot>/.uc/agent-locks.json` (see src/lib/agentFileCoordination.ts and
+// scripts/agent-coordination.ts). Shape: { version: 1, leases: { [path]: {
+// path, ownerId, ownerLabel, acquiredAt, renewedAt, expiresAt, contentHash,
+// intent } } }. Read-only here — never writes, never invents a new format.
+
+function findLeaseRegistryPath() {
+  let dir = process.cwd();
+  for (let i = 0; i < 12; i += 1) {
+    const candidate = path.join(dir, '.uc', 'agent-locks.json');
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch { /* unreadable dir */ }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+function listActiveFileLeases() {
+  const registryPath = findLeaseRegistryPath();
+  if (!registryPath) {
+    return { registryPath: path.join(process.cwd(), '.uc', 'agent-locks.json'), leases: [], missing: true };
+  }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  } catch {
+    return { registryPath, leases: [], missing: false };
+  }
+  const now = Date.now();
+  const all = parsed && parsed.leases && typeof parsed.leases === 'object' ? Object.values(parsed.leases) : [];
+  const live = all
+    .filter((l) => l && typeof l === 'object' && Number(l.expiresAt) >= now)
+    .sort((a, b) => Number(b.renewedAt || 0) - Number(a.renewedAt || 0))
+    .slice(0, 20)
+    .map((l) => ({
+      path: truncateText(l.path, 300),
+      ownerLabel: truncateText(l.ownerLabel, 80),
+      intent: truncateText(l.intent, 200),
+      expiresInSeconds: Math.max(0, Math.round((Number(l.expiresAt) - now) / 1000)),
+    }));
+  return { registryPath, leases: live, missing: false };
+}
+
 // ── MCP Protocol (stdio JSON-RPC) ──────────────────────────────────────────
 
 const TOOLS = [
@@ -133,6 +266,60 @@ const TOOLS = [
       required: ['message'],
     },
   },
+  {
+    name: 'uc_list_file_leases',
+    description: 'List files currently claimed by other agents working in this repo (advisory lease registry at .uc/agent-locks.json). Check before editing shared files so concurrent agents do not clobber each other.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'uc_list_pending_approvals',
+    description: 'List pending human-approval requests in your circle (agent actions waiting on a yes/no). Returns id, kind, title, requester, and age — never the action payload.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'uc_list_skills',
+    description: 'List reusable skills in your circle\'s skill library (metadata only: name, description, version, tags, usage counts).',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'uc_get_circle_live_info',
+    description: 'Fetch live info about your circle from the server: circle name, member count, today\'s check-ins and messages, and which agents are online with their current tasks.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'uc_list_tasks',
+    description: 'List OPEN tasks on your circle\'s kanban board (everything not done/approved). Returns id, title, status, priority, due date, assignee, and assigned agent — use it to see what to work on. Read-only; never returns task descriptions or raw owner ids.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'uc_report_receipt',
+    description: 'Record an append-only proof-of-work receipt to your circle (e.g. "Opened PR #42", "Deployed staging"). Writes ONE immutable proof_of_work row — it cannot edit or delete anything, and cannot touch memory, skills, or approvals. Provide a short title; optionally a pow_type, a small JSON detail object, and a mission id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Short receipt title — what you did (e.g. "Opened PR #42")' },
+        pow_type: { type: 'string', enum: ['commit', 'pr', 'deploy', 'agent_run', 'checkin', 'manual'], description: 'Kind of proof (default: agent_run)' },
+        detail: { type: 'object', description: 'Optional small JSON object with extra context (links, ids). Capped at ~4KB.' },
+        mission_id: { type: 'string', description: 'Optional mission id to attach the receipt to (ignored unless it belongs to your circle).' },
+      },
+      required: ['title'],
+    },
+  },
 ];
 
 // Handle a single JSON-RPC request
@@ -149,7 +336,7 @@ function handleRequest(req) {
           capabilities: { tools: {} },
           serverInfo: {
             name: 'underground-circle-agent-connect',
-            version: '1.0.0',
+            version: '1.1.0',
           },
         },
       };
@@ -245,6 +432,94 @@ function handleToolCall(id, params) {
       };
     }
 
+    case 'uc_list_file_leases': {
+      const { registryPath, leases, missing } = listActiveFileLeases();
+      if (missing) {
+        return toolTextResult(id, `No file-lease registry found (looked for .uc/agent-locks.json from ${process.cwd()} upward). No agents have claimed files here.`);
+      }
+      if (leases.length === 0) {
+        return toolTextResult(id, `No active file leases in ${registryPath} — no other agent has claimed a file right now.`);
+      }
+      const lines = leases.map((l) => `- ${l.path} — held by ${l.ownerLabel || 'unknown agent'}${l.intent ? ` (${l.intent})` : ''}, expires in ${l.expiresInSeconds}s`);
+      return toolTextResult(id, `${leases.length} active file lease(s) in ${registryPath}:\n${lines.join('\n')}\nAvoid editing these files until the lease expires or is released.`);
+    }
+
+    case 'uc_list_pending_approvals': {
+      return postReadOp('list_pending_approvals').then((data) => {
+        const rows = Array.isArray(data.approvals) ? data.approvals.slice(0, 20) : [];
+        if (rows.length === 0) return toolTextResult(id, 'No pending approvals in your circle.');
+        const lines = rows.map((a) => `- [${truncateText(a.kind, 40) || 'action'}] ${truncateText(a.title, 300) || '(untitled)'} — requested by ${truncateText(a.requester, 80) || 'unknown'}, ${agoText(a.requested_at)} (id: ${a.id})`);
+        return toolTextResult(id, `${rows.length} pending approval(s) waiting on a human:\n${lines.join('\n')}`);
+      }).catch((err) => toolTextResult(id, `Could not fetch pending approvals: ${err.message}`, true));
+    }
+
+    case 'uc_list_skills': {
+      return postReadOp('list_skills').then((data) => {
+        const rows = Array.isArray(data.skills) ? data.skills.slice(0, 20) : [];
+        if (rows.length === 0) return toolTextResult(id, 'No skills in your circle\'s skill library yet.');
+        const lines = rows.map((s) => {
+          const tags = Array.isArray(s.tags) && s.tags.length ? ` [${s.tags.slice(0, 10).join(', ')}]` : '';
+          return `- ${truncateText(s.name, 120)} v${truncateText(s.version, 20) || '?'}${tags} — ${truncateText(s.description, 300) || 'no description'} (used ${Number(s.usage_count) || 0}x)`;
+        });
+        return toolTextResult(id, `${rows.length} skill(s) in the circle library:\n${lines.join('\n')}`);
+      }).catch((err) => toolTextResult(id, `Could not fetch skills: ${err.message}`, true));
+    }
+
+    case 'uc_get_circle_live_info': {
+      return postReadOp('circle_live_info').then((data) => {
+        const circle = data.circle || {};
+        const agents = Array.isArray(data.agents) ? data.agents.slice(0, 10) : [];
+        const lines = [
+          `Circle: ${truncateText(circle.name, 120) || 'unknown'} (${circle.id || 'no id'})`,
+          `Members: ${Number(data.total_members) || 0}`,
+          `Today: ${Number(data.today_check_ins) || 0} check-in(s), ${Number(data.today_messages) || 0} message(s)`,
+        ];
+        if (agents.length === 0) {
+          lines.push('Agents: none seen recently');
+        } else {
+          lines.push('Recently active agents:');
+          for (const a of agents) {
+            lines.push(`- ${truncateText(a.name, 80) || 'agent'} (${truncateText(a.status, 20) || 'unknown'}) — ${truncateText(a.current_task, 160) || 'no task reported'}, last active ${agoText(a.last_active_at)}`);
+          }
+        }
+        return toolTextResult(id, lines.join('\n'));
+      }).catch((err) => toolTextResult(id, `Could not fetch circle info: ${err.message}`, true));
+    }
+
+    case 'uc_list_tasks': {
+      return postReadOp('list_tasks').then((data) => {
+        const rows = Array.isArray(data.tasks) ? data.tasks.slice(0, 20) : [];
+        if (rows.length === 0) return toolTextResult(id, 'No open tasks in your circle right now.');
+        const lines = rows.map((t) => {
+          const meta = [];
+          if (t.priority) meta.push(`priority ${truncateText(t.priority, 20)}`);
+          if (t.assignee) meta.push(`assignee ${truncateText(t.assignee, 80)}`);
+          if (t.due_date) meta.push(`due ${truncateText(t.due_date, 40)}`);
+          const suffix = meta.length ? ` — ${meta.join(', ')}` : '';
+          return `- [${truncateText(t.status, 40) || 'status'}] ${truncateText(t.title, 300) || '(untitled)'}${suffix} (id: ${t.id})`;
+        });
+        return toolTextResult(id, `${rows.length} open task(s) in your circle:\n${lines.join('\n')}`);
+      }).catch((err) => toolTextResult(id, `Could not fetch tasks: ${err.message}`, true));
+    }
+
+    case 'uc_report_receipt': {
+      const title = typeof args?.title === 'string' ? args.title.trim() : '';
+      if (!title) {
+        return toolTextResult(id, 'uc_report_receipt requires a non-empty "title".', true);
+      }
+      // Forward only allowlisted fields. circle_id/user_id are intentionally
+      // NOT sent — the server forces those from the connect token.
+      const fields = { title };
+      if (typeof args?.pow_type === 'string' && args.pow_type) fields.pow_type = args.pow_type;
+      if (args?.detail != null && typeof args.detail === 'object' && !Array.isArray(args.detail)) fields.detail = args.detail;
+      if (typeof args?.mission_id === 'string' && args.mission_id) fields.mission_id = args.mission_id;
+      return postWriteOp('report_receipt', fields).then((data) => {
+        const r = data.receipt || {};
+        const mission = r.mission_id ? ` (mission ${r.mission_id})` : '';
+        return toolTextResult(id, `Recorded proof-of-work receipt: "${truncateText(r.title || title, 300)}" [${truncateText(r.pow_type, 40) || 'agent_run'}]${mission} (id: ${r.id || 'unknown'}).`);
+      }).catch((err) => toolTextResult(id, `Could not record receipt: ${err.message}`, true));
+    }
+
     default:
       return {
         jsonrpc: '2.0',
@@ -270,14 +545,37 @@ process.stdin.on('data', (chunk) => {
 
     if (!line) continue;
 
+    let req = null;
     try {
-      const req = JSON.parse(line);
-      const res = handleRequest(req);
-      if (res) {
-        process.stdout.write(JSON.stringify(res) + '\n');
-      }
+      req = JSON.parse(line);
     } catch (err) {
       process.stderr.write(`[uc-mcp] Parse error: ${err.message}\n`);
+      continue;
+    }
+
+    // Handlers may return a response object (sync tools) or a Promise of one
+    // (server-backed read tools). Responses are correlated by JSON-RPC id, so
+    // async completions may write out of arrival order — that is legal.
+    try {
+      Promise.resolve(handleRequest(req)).then((res) => {
+        if (res) process.stdout.write(JSON.stringify(res) + '\n');
+      }).catch((err) => {
+        if (req && req.id !== undefined) {
+          process.stdout.write(JSON.stringify({
+            jsonrpc: '2.0',
+            id: req.id,
+            error: { code: -32603, message: `Internal error: ${err && err.message ? err.message : String(err)}` },
+          }) + '\n');
+        }
+      });
+    } catch (err) {
+      if (req && req.id !== undefined) {
+        process.stdout.write(JSON.stringify({
+          jsonrpc: '2.0',
+          id: req.id,
+          error: { code: -32603, message: `Internal error: ${err.message}` },
+        }) + '\n');
+      }
     }
   }
 });

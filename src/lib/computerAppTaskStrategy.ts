@@ -86,12 +86,35 @@ const PIPELINE_STRATEGY: Partial<Record<UserTaskPipelineId, ComputerAppStrategyI
 };
 
 function textMatchesCanvasApp(message: string): boolean {
-  return /\b(photoshop|figma|canva|illustrator|lightroom|premiere|after effects|blender|canvas|image editor|photo editor|retouch|crop|mask|layers?)\b/i.test(message);
+  const text = String(message || '');
+  return /\b(photoshop|figma|canva|illustrator|lightroom|premiere|after effects|blender|canvas|image editor|photo editor|retouch|crop|mask|layers?|selection|opacity|blend ?modes?|fill ?layers?|text ?layers?|adjustment ?layers?)\b/i.test(text)
+    || /\b(?:white|black|solid|transparent|gradient|colou?red?|remove|replace|new)\s+(?:the\s+)?backgrounds?\b/i.test(text)
+    || /\bbackgrounds?\s+(?:layer|fill)\b/i.test(text);
+}
+
+// Bare vector-design ops ("vectorize this logo", "align these objects", "group
+// these paths", "bring to front") that never name an Adobe app but are clearly
+// Illustrator-shaped work. Unambiguous vector terms match on their own;
+// ambiguous verbs (align/distribute/arrange/group/outline/expand) must sit next
+// to a vector object/canvas noun so plain conversation ("align our goals",
+// "group the tasks") never routes here.
+function textMatchesVectorDesignApp(message: string): boolean {
+  const text = String(message || '');
+  if (/\b(?:vectori[sz]e|image ?trace|vector ?trace|artboards?)\b/i.test(text)) return true;
+  if (/\b(?:bring (?:to (?:the )?front|forward)|send (?:to (?:the )?back|backward))\b/i.test(text)) return true;
+  return /\b(?:align|distribute|arrange|group|outline|expand)\b[^.!?]{0,40}\b(?:objects?|paths?|layers?|shapes?|anchor ?points?|artboards?|these|selection|strokes?|vector|svg|logo)\b/i.test(text);
 }
 
 function textMatchesCreativeLayoutApp(message: string): boolean {
   const text = String(message || '');
-  return Boolean(buildDesignAppAutomationPlan(text)) || (
+  // Illustrator now has its own design-automation plan/runbook/pipeline, but the
+  // creative_layout_control strategy is hardcoded for the InDesign/Photoshop tool
+  // set. Illustrator vector work stays on adobe_cc_control (its deterministic
+  // runbook still reaches the model through the design prompt blocks, which are
+  // keyed on the task message independent of this strategy id).
+  const designPlan = buildDesignAppAutomationPlan(text);
+  const isLayoutOrRasterPlan = Boolean(designPlan) && designPlan?.appId !== 'adobe_illustrator';
+  return isLayoutOrRasterPlan || (
     /\b(indesign|in\s*design|\.indd\b|\.idml\b|\.indt\b|idml|indd|text frames?|parent pages?|master pages?|preflight|package links?|data merge)\b/i.test(text) ||
     (
       /\b(marketing|campaign|dealer|display|social|print|web|email)?\s*(banner|ad\b|advert|flyer|brochure|poster|layout|spread|page|template)\b/i.test(text) &&
@@ -588,7 +611,7 @@ function baseStrategy(id: ComputerAppStrategyId): ComputerAppTaskStrategy {
         recoveryPolicy: ['If the expected document is not active/open, open the exact staged file before editing.', 'If layers are locked/hidden or the selection/mask target is ambiguous, report the exact blocker before mutation.', 'If text becomes overset or a Photoshop localized edit lacks a selection/mask, stop and ask for the smallest user decision.', 'If links, fonts, or placed assets are missing, resolve package sidecars before export.', 'If no script-backed tool covers the operation, delegate a bounded app-capability buildout before blind UI coordinates.'],
         approvalCheckpoints: ['editing text frames/layers, layer visibility, object state, selections, masks, or adjustment layers', 'relinking or replacing placed/smart-object assets', 'generative fill, content-aware fill, destructive pixel edits, flattening, or rasterizing', 'saving over source InDesign/Photoshop/image files', 'exporting, packaging, or overwriting deliverables', 'running new scripts/macros/adapters beyond existing bridge tools'],
         stopConditions: ['requested creative change is verified by inventory and visual/proof evidence', 'target document is unavailable or mismatched', 'missing fonts/links/assets block proof/export', 'overset text, ambiguous layer target, or missing selection/mask requires user choice', 'approval required before save/export/overwrite/relink/destructive edit/script'],
-        recommendedTools: ['desktop.file_search', 'desktop.file_stat', 'desktop.open_path', 'desktop.launch_app', 'desktop.focus_app', 'desktop.indesign_document_status', 'desktop.indesign_text_inventory', 'desktop.indesign_set_layer_state', 'desktop.indesign_batch_update_text_layers', 'desktop.indesign_batch_find_change', 'desktop.indesign_update_text_layer', 'desktop.indesign_relink_asset', 'desktop.indesign_package_document', 'desktop.indesign_export_proof', 'desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory', 'desktop.photoshop_set_layer_state', 'desktop.photoshop_update_text_layer', 'desktop.photoshop_place_asset', 'desktop.photoshop_export_proof', 'desktop.observe_app', 'desktop.read_a11y_tree', 'desktop.menu_click', 'desktop.screenshot', 'desktop.screen_size', 'approvals.request'],
+        recommendedTools: ['desktop.file_search', 'desktop.file_stat', 'desktop.open_path', 'desktop.launch_app', 'desktop.focus_app', 'desktop.indesign_document_status', 'desktop.indesign_text_inventory', 'desktop.indesign_set_layer_state', 'desktop.indesign_batch_update_text_layers', 'desktop.indesign_batch_find_change', 'desktop.indesign_update_text_layer', 'desktop.indesign_relink_asset', 'desktop.indesign_package_document', 'desktop.indesign_export_proof', 'desktop.photoshop_document_status', 'desktop.photoshop_layer_inventory', 'desktop.photoshop_set_layer_state', 'desktop.photoshop_set_layer_appearance', 'desktop.photoshop_update_text_layer', 'desktop.photoshop_create_text_layer', 'desktop.photoshop_add_fill_layer', 'desktop.photoshop_place_asset', 'desktop.photoshop_export_proof', 'desktop.observe_app', 'desktop.read_a11y_tree', 'desktop.menu_click', 'desktop.screenshot', 'desktop.screen_size', 'approvals.request'],
         bridgeRequirements: ['local desktop bridge', 'macOS Accessibility permission for app focus/menu/input', 'Screen Recording permission for visual proof', 'file read/write grant for the staged design package or output folder', 'Adobe InDesign or Adobe Photoshop installed with scripting/actions available'],
         maxBlindActions: 0,
       };
@@ -603,7 +626,7 @@ function baseStrategy(id: ComputerAppStrategyId): ComputerAppTaskStrategy {
         recoveryPolicy: ['If the active Adobe app/document is mismatched, stop and open the exact staged file before editing.', 'If a semantic target is missing twice, re-observe app state and request app-capability buildout instead of blind coordinates.', 'If the requested Adobe app lacks a bridge adapter, build the smallest reusable adapter/recipe and smoke it before retrying.', 'If license/login/plugins/media/assets/fonts block work, return the exact blocker and user action required.'],
         approvalCheckpoints: ['desktop mutation in an Adobe app', 'editing source documents, media, layers, artboards, timelines, pages, forms, metadata, or 3D/material assets', 'running new scripts/actions/plugins', 'generative AI or paid actions', 'saving over sources', 'exporting/rendering/encoding/batch processing/packaging deliverables', 'connected-agent runtime patch or adapter buildout'],
         stopConditions: ['requested Adobe app task is completed and verified', 'task is staged and waiting for approval', 'target Adobe app/source file/license/login is unavailable', 'missing fonts/assets/media/plugins block safe completion', 'safe generic controls are insufficient and connected-agent buildout is required', 'OS/bridge/file permission is missing'],
-        recommendedTools: ['desktop.file_search', 'desktop.file_stat', 'desktop.open_path', 'desktop.launch_app', 'desktop.focus_app', 'desktop.window_state', 'desktop.read_a11y_tree', 'desktop.screenshot', 'desktop.screen_size', 'desktop.menu_click', 'desktop.click_element', 'desktop.set_element_value', 'desktop.press_keys', 'desktop.type_text', 'desktop.paste_text', 'office.list_agents', 'research.search', 'agent.build_app_capability', 'approvals.request'],
+        recommendedTools: ['desktop.file_search', 'desktop.file_stat', 'desktop.open_path', 'desktop.launch_app', 'desktop.focus_app', 'desktop.illustrator_vectorize', 'desktop.illustrator_set_appearance', 'desktop.illustrator_align', 'desktop.illustrator_arrange', 'desktop.illustrator_group', 'desktop.illustrator_add_artboard', 'desktop.illustrator_add_text', 'desktop.illustrator_add_shape', 'desktop.window_state', 'desktop.read_a11y_tree', 'desktop.screenshot', 'desktop.screen_size', 'desktop.menu_click', 'desktop.click_element', 'desktop.set_element_value', 'desktop.press_keys', 'desktop.type_text', 'desktop.paste_text', 'office.list_agents', 'research.search', 'agent.build_app_capability', 'approvals.request'],
         bridgeRequirements: ['local desktop bridge', 'macOS Accessibility permission for app focus/menu/input', 'Screen Recording permission for visual proof', 'file read/write grant for source packages and output folders', 'managed Codex/connected agent session for missing Adobe app capability buildout'],
         maxBlindActions: 0,
       };
@@ -751,6 +774,7 @@ export function buildComputerAppTaskStrategy(
     const strategy = baseStrategy('browser_file_transfer');
     return textMatchesWordPressWorkflow(text) ? withWordPressAdminWorkflow(strategy, text) : strategy;
   }
+  if (textMatchesVectorDesignApp(text)) return withAdobeCreativeCloudProfile(baseStrategy('adobe_cc_control'), text);
   if (textMatchesCreativeLayoutApp(text)) return withDesignAppAutomationPlan(baseStrategy('creative_layout_control'), text);
   if (textMatchesAdobeCreativeCloudApp(text)) return withAdobeCreativeCloudProfile(baseStrategy('adobe_cc_control'), text);
   if (textMatchesCanvasApp(text)) return baseStrategy('desktop_canvas_vision');

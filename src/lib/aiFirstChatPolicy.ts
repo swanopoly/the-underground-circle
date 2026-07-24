@@ -110,7 +110,7 @@ const CAPABILITY_RULES: CapabilityRule[] = [
   // Creative / design AI (Photoshop, InDesign, Firefly, image/layout work).
   {
     capability: 'design',
-    test: /\b(photoshop|indesign|illustrator|firefly|adobe|generative fill|generative expand|generate (?:an? )?image|design|logo|banner|poster|mockup|render|export (?:a |an )?(?:png|jpe?g|pdf|svg|psd)|data ?merge|contact sheet)\b/i,
+    test: /\b(photoshop|indesign|illustrator|firefly|adobe|generative fill|generative expand|generate (?:an? )?image|design|logo|banner|poster|mockup|render|export (?:a |an )?(?:png|jpe?g|pdf|svg|psd)|data ?merge|contact sheet|vectori[sz]e|recolou?r|image ?trace|align\s+(?:the\s+|these\s+|those\s+|all\s+|my\s+)?(?:objects?|paths?|layers?|shapes?|elements?|artboards?|anchor\s?points?|selection))\b/i,
   },
   // Project rooms / files / services (rooms.* family).
   {

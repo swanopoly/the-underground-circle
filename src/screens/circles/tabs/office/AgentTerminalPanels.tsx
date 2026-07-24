@@ -477,13 +477,32 @@ export function AgentQuickTerminal({
         if (!result.ok) throw new Error(result.error || 'Terminal send failed');
         setHistory(prev => [...prev, { role: 'agent', text: result.response || 'Message sent to managed terminal session.' }]);
       } else {
-        const { getSwanBotResponse } = await import('../../../../lib/swanbot');
-        const response = await getSwanBotResponse(`@${agentName}: ${message}`, {
-          userId: (await supabase.auth.getUser()).data.user?.id || '',
-          circleId,
-          agentId,
-          agentName,
-        });
+        const userId = (await supabase.auth.getUser()).data.user?.id || '';
+        const context = { userId, circleId, agentId, agentName };
+        // Surface-parity (app-task reliability): a command that classifies as a
+        // computer/app/browser/desktop task runs through the guarded
+        // route→contract→hardened-loop→verify pipeline (runOpenSwanSessionTurn),
+        // the same path the main Chat tab uses — not the plain getSwanBotResponse
+        // edge path, whose Tier-2 edge sends no tool catalog and can only
+        // text-draft a computer task (false-success risk). Plain talk
+        // (route === null) stays on the cheap path unchanged.
+        const { buildChatComputerRequestRoute } = await import('../../../../lib/chatComputerRequestRouter');
+        const computerRoute = buildChatComputerRequestRoute(message);
+        let response: string;
+        if (computerRoute) {
+          const { runOpenSwanSessionTurn } = await import('../../../../lib/openswanSessionRuntime');
+          const structured = await runOpenSwanSessionTurn({
+            message,
+            context,
+            surface: 'main_chat',
+            mode: 'talk',
+          });
+          response = structured.response?.trim()
+            || 'Ran that as a computer task but got no text summary — open the main Chat tab for the full run, approvals, or proof.';
+        } else {
+          const { getSwanBotResponse } = await import('../../../../lib/swanbot');
+          response = await getSwanBotResponse(`@${agentName}: ${message}`, context);
+        }
         setHistory(prev => [...prev, { role: 'agent', text: response }]);
       }
     } catch (e: any) {

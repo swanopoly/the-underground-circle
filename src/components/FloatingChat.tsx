@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { getSwanBotResponse, SwanBotContext } from '../lib/swanbot';
+import { buildChatComputerRequestRoute } from '../lib/chatComputerRequestRouter';
 import {
   getMatchingChatSlashCommands,
   type ChatSlashCommand,
@@ -437,7 +438,30 @@ export default function FloatingChat({ circleId, circleName, accentColor, onClos
           userName: currentUserName,
         };
         context.chatHistory = chatHistory;
-        const botResponse = await getSwanBotResponse(cleanContent, context);
+        // Surface-parity (app-task reliability): a free-form message that
+        // classifies as a computer/app/browser/desktop task must run through the
+        // guarded route→contract→hardened-loop→verify pipeline
+        // (runOpenSwanSessionTurn) — the same path the main Chat tab uses — not
+        // the plain getSwanBotResponse edge path, whose Tier-2 edge sends no
+        // tool catalog and so can only text-draft a computer task (false-success
+        // risk). Plain chat (route === null) stays on the cheap path unchanged,
+        // honoring precision-before-recall.
+        let botResponse: string;
+        const computerRoute = buildChatComputerRequestRoute(cleanContent);
+        if (computerRoute) {
+          const { runOpenSwanSessionTurn } = await import('../lib/openswanSessionRuntime');
+          const structured = await runOpenSwanSessionTurn({
+            message: cleanContent,
+            context,
+            surface: 'main_chat',
+            chatSessionId: messageThreadId,
+            mode: 'talk',
+          });
+          botResponse = structured.response?.trim()
+            || 'I ran that as a computer task but did not get a text summary back — open the main Chat tab for the full run, approvals, or proof.';
+        } else {
+          botResponse = await getSwanBotResponse(cleanContent, context);
+        }
 
         // Add bot message locally
         const botId = `bot-${Date.now()}-${Math.random().toString(36).slice(2)}`;

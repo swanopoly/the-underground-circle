@@ -24,6 +24,7 @@ import {
   resolveComputerTaskPlannerModel,
   resolveOpenSwanToolLoopModel,
   shouldEscalateBlackSwanToFrontier,
+  shouldUseToolExecutorInsteadOfBlackSwan,
 } from '../src/lib/blackswanRouting';
 import { getModelCapabilityFlags } from '../src/lib/modelCapabilities';
 
@@ -151,8 +152,52 @@ const WITHOUT_BLACKSWAN = new Set(['anthropic']);
     resolveOpenSwanToolLoopModel('claude-sonnet-4-6', ['memory.search']) === 'claude-sonnet-4-6',
     'non-BlackSwan models pass through the swap untouched',
   );
-  const grounding = buildBlackSwanGroundingBlock({ model: BLACKSWAN_ENDPOINT_MODEL_ID, source: 'openswan' });
-  expect(grounding.includes('BlackSwan App-Grounding Contract'), 'grounding contract emits for BlackSwan routes');
+  // 2026-07-20 fix: the swap used to depend ONLY on this turn's tool-planner
+  // recommendation list, so a message the router positively classified as a
+  // computer/app/browser task could still miss the swap if that list came
+  // back empty. isRoutedComputerTask closes that gap independent of tools.
+  expect(
+    resolveOpenSwanToolLoopModel(BLACKSWAN_ENDPOINT_MODEL_ID, [], true) === 'claude-haiku-4-5',
+    'a routed computer task swaps BlackSwan for the executor even with an empty tool list',
+  );
+  expect(
+    resolveOpenSwanToolLoopModel(BLACKSWAN_ENDPOINT_MODEL_ID, [], false) === BLACKSWAN_ENDPOINT_MODEL_ID,
+    'a non-routed turn with an empty tool list still leaves BlackSwan untouched (no regression)',
+  );
+  expect(
+    resolveOpenSwanToolLoopModel(BLACKSWAN_ENDPOINT_MODEL_ID) === BLACKSWAN_ENDPOINT_MODEL_ID,
+    'omitting isRoutedComputerTask entirely defaults falsy — fully backward compatible',
+  );
+  expect(
+    shouldUseToolExecutorInsteadOfBlackSwan(BLACKSWAN_ENDPOINT_MODEL_ID, null, true) === true,
+    'shouldUseToolExecutorInsteadOfBlackSwan itself also honors isRoutedComputerTask with a null tool list',
+  );
+  expect(
+    shouldUseToolExecutorInsteadOfBlackSwan('claude-sonnet-4-6', [], true) === false,
+    'isRoutedComputerTask never swaps a non-BlackSwan model (the swap is BlackSwan-only by design)',
+  );
+  // No memoryReferences (both real call sites — swanbot.ts and
+  // openswanSessionRuntime.ts — invoke this without any): the bare
+  // "## ... Contract" header + route/surface line must NOT appear. Isolated
+  // testing found that exact bare shape triggers a non-terminating
+  // self-referential loop on realistic production prompts, so grounding with
+  // no real reference content folds into plain rule sentences instead.
+  const groundingNoRefs = buildBlackSwanGroundingBlock({ model: BLACKSWAN_ENDPOINT_MODEL_ID, source: 'openswan' });
+  expect(!groundingNoRefs.includes('BlackSwan App-Grounding Contract'), 'no bare contract header when memoryReferences is empty');
+  expect(!groundingNoRefs.includes('Runtime route:'), 'no route/surface metadata line when memoryReferences is empty');
+  expect(groundingNoRefs.includes('Do not invent app state'), 'grounding rules still emit for BlackSwan routes without references');
+
+  // With memoryReferences present, the full contract header + route line +
+  // reference list still emits (real content backs the header this time).
+  const groundingWithRefs = buildBlackSwanGroundingBlock({
+    model: BLACKSWAN_ENDPOINT_MODEL_ID,
+    source: 'openswan',
+    memoryReferences: [{ title: 'circle streak note', memoryKind: 'fact', scope: 'circle' } as any],
+  });
+  expect(groundingWithRefs.includes('BlackSwan App-Grounding Contract'), 'grounding contract emits when memoryReferences are present');
+  expect(groundingWithRefs.includes('Runtime route:'), 'route/surface metadata line emits when memoryReferences are present');
+  expect(groundingWithRefs.includes('circle streak note'), 'reference list is included when memoryReferences are present');
+
   expect(buildBlackSwanGroundingBlock({ model: 'claude-sonnet-4-6', source: 'main_chat' }) === '', 'no grounding block for plain frontier turns');
   pass('executor swap + grounding contract');
 }

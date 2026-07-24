@@ -7,6 +7,31 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.95.3';
 import { getAuthenticatedUser } from '../_shared/edge.ts';
 
+// Bot-authored `messages.content` rows carry a `[[UC_CHAT_META]]`-prefixed
+// JSON metadata blob (recovery options, plan, findings, etc.) appended after
+// the visible text, and (for legacy rows) a leading display-name prefix like
+// "🦢 **BlackSwan:** " baked directly into content — see BOT_META_MARKER /
+// BOT_PREFIX / LEGACY_CROWN_PREFIX in src/lib/persistedChatMetadata.ts's
+// stripPersistedChatBotPrefix(), the single source of truth for this shape.
+// This MCP resource is read directly by MCP clients (LLM apps) as
+// conversation context, so an unstripped marker or prefix would leak into a
+// model prompt. Deliberately NOT importing that module here: it has no
+// Deno-runtime dependencies (all its imports are `import type`), but
+// pulling its full type surface into `deno check` surfaces pre-existing
+// type errors never exercised before nothing imported it into a Deno
+// context. Duplicating just the marker/prefix patterns keeps this fix
+// isolated and Deno-clean, while matching stripPersistedChatBotPrefix()'s
+// actual behavior — mirrored from a code-review finding that this function
+// previously stripped only the trailing marker, leaving the leading prefix
+// (when present) in the resource content returned to MCP clients.
+const BOT_META_MARKER = '\n[[UC_CHAT_META]]';
+const BOT_META_LEGACY_PREFIX_RE = /^(?:👑 \*\*OpenSwan:\*\* |(?:🦢|🤖) \*\*[^*]{1,80}:\*\* )/u;
+function stripBotMetaMarker(content: string): string {
+  const withoutPrefix = content.replace(BOT_META_LEGACY_PREFIX_RE, '');
+  const index = withoutPrefix.indexOf(BOT_META_MARKER);
+  return index >= 0 ? withoutPrefix.slice(0, index) : withoutPrefix;
+}
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-circle-invite-code',
@@ -130,11 +155,17 @@ Deno.serve(async (req: Request) => {
             .order('created_at', { ascending: false })
             .limit(50);
           
+          const cleanedMessages = (messages || []).map((m: any) =>
+            m.is_bot && typeof m.content === 'string'
+              ? { ...m, content: stripBotMetaMarker(m.content) }
+              : m
+          );
+
           result = {
             contents: [{
               uri,
               mimeType: 'application/json',
-              text: JSON.stringify(messages, null, 2)
+              text: JSON.stringify(cleanedMessages, null, 2)
             }]
           };
         }

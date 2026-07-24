@@ -400,6 +400,7 @@ function ActiveRunsWidget({ circleId }: { circleId: string }) {
 
   const MONO = Platform.OS === 'ios' ? 'Menlo' : 'monospace';
   const statusColors: Record<string, string> = { running: '#22c55e', planning: '#6366f1', queued: '#606075', waiting_approval: '#f59e0b', paused: '#f59e0b' };
+  const statusLabels: Record<string, string> = { queued: 'Queued', running: 'Running', planning: 'Planning', waiting_approval: 'Awaiting Approval', paused: 'Paused', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled' };
 
   return (
     <View style={{ marginBottom: 12 }}>
@@ -409,7 +410,7 @@ function ActiveRunsWidget({ circleId }: { circleId: string }) {
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
             <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: statusColors[run.status] || '#606075' }} />
             <Text style={{ color: '#f0f0f5', fontSize: 10, fontWeight: '600', fontFamily: MONO, flex: 1 }} numberOfLines={1}>{run.title || 'Untitled'}</Text>
-            <Text style={{ color: statusColors[run.status] || '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{run.status.toUpperCase()}</Text>
+            <Text style={{ color: statusColors[run.status] || '#606075', fontSize: 8, fontWeight: '700', fontFamily: MONO }}>{(statusLabels[run.status] || run.status.replace(/_/g, ' ')).toUpperCase()}</Text>
           </View>
           <View style={{ flexDirection: 'row', gap: 6, marginTop: 2 }}>
             <Text style={{ color: '#3a3a4e', fontSize: 8, fontFamily: MONO }}>{run.surface}</Text>

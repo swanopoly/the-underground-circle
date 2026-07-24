@@ -126,24 +126,30 @@ function isMutationOperation(operation: DesignAppAutomationOperation): boolean {
 }
 
 function appStatusTool(appId: DesignAppAutomationAppId): string {
+  if (appId === 'adobe_illustrator') return 'desktop.illustrator_document_status';
   return appId === 'adobe_photoshop'
     ? 'desktop.photoshop_document_status'
     : 'desktop.indesign_document_status';
 }
 
 function appInventoryTool(appId: DesignAppAutomationAppId): string {
+  // Illustrator has no separate layer/text inventory tool; document status
+  // carries artboard/object/layer/swatch state, so reuse it as the inventory read.
+  if (appId === 'adobe_illustrator') return 'desktop.illustrator_document_status';
   return appId === 'adobe_photoshop'
     ? 'desktop.photoshop_layer_inventory'
     : 'desktop.indesign_text_inventory';
 }
 
 function appProofTool(appId: DesignAppAutomationAppId): string {
+  if (appId === 'adobe_illustrator') return 'desktop.illustrator_export_proof';
   return appId === 'adobe_photoshop'
     ? 'desktop.photoshop_export_proof'
     : 'desktop.indesign_export_proof';
 }
 
 function sourceFileDescription(appId: DesignAppAutomationAppId): string {
+  if (appId === 'adobe_illustrator') return 'Resolve the exact AI/EPS/SVG file or source asset before touching Illustrator.';
   return appId === 'adobe_photoshop'
     ? 'Resolve the exact PSD/PSB/image file or staged package folder before touching Photoshop.'
     : 'Resolve the exact INDD/IDML/INDT file or staged package folder before touching InDesign.';

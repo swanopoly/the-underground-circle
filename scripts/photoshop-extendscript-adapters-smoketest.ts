@@ -20,20 +20,34 @@ import {
   PHOTOSHOP_MANAGE_LAYER_ACTIONS,
   PHOTOSHOP_MAX_PIXEL_DIMENSION,
   PHOTOSHOP_MAX_TRANSLATE_PX,
+  PHOTOSHOP_BLEND_MODES,
+  PHOTOSHOP_BLEND_MODE_CONSTANTS,
+  PHOTOSHOP_MAX_LAYER_OPACITY,
+  PHOTOSHOP_CREATE_TEXT_MAX_LENGTH,
+  PHOTOSHOP_CREATE_TEXT_MAX_SIZE_PT,
+  PHOTOSHOP_CREATE_TEXT_MAX_COORD_PX,
   buildPhotoshopApplyAdjustmentLayerJsx,
   buildPhotoshopApplySelectionOrMaskJsx,
   buildPhotoshopResizeCanvasOrImageJsx,
   buildPhotoshopManageLayersJsx,
   buildPhotoshopTransformLayerJsx,
   buildPhotoshopConvertColorModeJsx,
+  buildPhotoshopSetLayerAppearanceJsx,
+  buildPhotoshopCreateTextLayerJsx,
+  buildPhotoshopAddFillLayerJsx,
   validatePhotoshopResizeCanvasOrImageParams,
   validatePhotoshopTransformLayerParams,
+  validatePhotoshopSetLayerAppearanceParams,
+  validatePhotoshopCreateTextLayerParams,
   isPhotoshopAdjustmentLayerReceipt,
   isPhotoshopSelectionMaskReceipt,
   isPhotoshopResizeReceipt,
   isPhotoshopManageLayersReceipt,
   isPhotoshopTransformLayerReceipt,
   isPhotoshopConvertColorModeReceipt,
+  isPhotoshopSetLayerAppearanceReceipt,
+  isPhotoshopCreateTextLayerReceipt,
+  isPhotoshopAddFillLayerReceipt,
   type PhotoshopAdjustmentLayerKind,
 } from '../src/lib/photoshopExtendScriptAdapters';
 
@@ -522,6 +536,289 @@ const badColorMode = buildPhotoshopConvertColorModeJsx({ mode: 'lab' });
 assert.equal(badColorMode.jsx, '', 'invalid color mode emits no jsx');
 assert.ok(badColorMode.errors.includes('mode must be rgb, cmyk, or grayscale.'), 'invalid color mode is rejected');
 
+// ── 7) set_layer_appearance (opacity / fillOpacity / blendMode) ─────────────
+
+assert.equal(PHOTOSHOP_BLEND_MODES.length, 11, 'blend mode allowlist is the expected 11-entry subset');
+
+const opacityOnly = buildPhotoshopSetLayerAppearanceJsx({
+  targetDocumentName: 'ad.psd',
+  layerName: 'Logo',
+  opacity: 50,
+});
+assert.deepEqual(opacityOnly.errors, [], 'opacity-only appearance builds with no errors');
+assert.ok(opacityOnly.jsx.includes('var hasOpacity = true;'), 'opacity provided sets hasOpacity true');
+assert.ok(opacityOnly.jsx.includes('var opacityParam = 50;'), 'opacity literal is embedded as a validated number');
+assert.ok(opacityOnly.jsx.includes('var hasFillOpacity = false;'), 'absent fillOpacity sets hasFillOpacity false');
+assert.ok(opacityOnly.jsx.includes('var blendModeValue = null;'), 'absent blendMode embeds a null blend value (no BlendMode. syntax hole)');
+assert.ok(opacityOnly.jsx.includes('if (hasOpacity) target.opacity = opacityParam;'), 'opacity is applied only when provided');
+assert.ok(opacityOnly.jsx.includes('if (hasFillOpacity) target.fillOpacity = fillOpacityParam;'), 'fillOpacity is applied only when provided');
+assert.ok(opacityOnly.jsx.includes('if (blendModeValue !== null) target.blendMode = blendModeValue;'), 'blendMode is applied only when provided');
+assert.ok(
+  opacityOnly.jsx.includes('findUniqueLayerByExactName(doc, layerName, result, "layer_not_found", "layer_ambiguous")'),
+  'appearance jsx resolves the target through the unique-match helper',
+);
+assert.ok(opacityOnly.jsx.includes('"layer_not_found"'), 'missing exact-name layer fails closed');
+assert.ok(opacityOnly.jsx.includes('"layer_ambiguous"'), 'ambiguous exact-name layer fails closed');
+assert.ok(opacityOnly.jsx.includes('"document_mismatch"'), 'appearance jsx fails closed on document mismatch');
+assert.ok(opacityOnly.jsx.includes('\\"opacity\\":'), 'appearance receipt reports opacity');
+assert.ok(opacityOnly.jsx.includes('\\"fillOpacity\\":'), 'appearance receipt reports fillOpacity');
+assert.ok(opacityOnly.jsx.includes('\\"blendMode\\":'), 'appearance receipt reports blendMode');
+assert.ok(opacityOnly.jsx.includes(`var expectedDocumentName = ${JSON.stringify('ad.psd')};`), 'appearance document name is embedded via JSON.stringify');
+assertNeverSavesOrDeletes(opacityOnly.jsx, 'set_layer_appearance opacity');
+
+// opacity 0 is a real value (fully transparent), NOT "not provided".
+const zeroOpacity = buildPhotoshopSetLayerAppearanceJsx({ layerName: 'Logo', opacity: 0 });
+assert.deepEqual(zeroOpacity.errors, [], 'opacity 0 builds with no errors');
+assert.ok(zeroOpacity.jsx.includes('var hasOpacity = true;'), 'opacity 0 still counts as provided');
+assert.ok(zeroOpacity.jsx.includes('var opacityParam = 0;'), 'opacity 0 literal is embedded, not treated as a default');
+
+const blendOnly = buildPhotoshopSetLayerAppearanceJsx({ layerName: 'Logo "v2"', blendMode: 'multiply' });
+assert.deepEqual(blendOnly.errors, [], 'blend-only appearance builds with no errors');
+assert.ok(blendOnly.jsx.includes('var blendModeValue = BlendMode.MULTIPLY;'), 'multiply maps to BlendMode.MULTIPLY');
+assert.ok(blendOnly.jsx.includes('var hasOpacity = false;'), 'blend-only leaves opacity untouched');
+assert.ok(blendOnly.jsx.includes('var hasFillOpacity = false;'), 'blend-only leaves fillOpacity untouched');
+assert.ok(blendOnly.jsx.includes(JSON.stringify('Logo "v2"')), 'appearance layerName quotes are escaped');
+assertNeverSavesOrDeletes(blendOnly.jsx, 'set_layer_appearance blend');
+
+const combined = buildPhotoshopSetLayerAppearanceJsx({ layerName: 'Hero', opacity: 50, fillOpacity: 80, blendMode: 'overlay' });
+assert.deepEqual(combined.errors, [], 'combined appearance builds with no errors');
+assert.ok(combined.jsx.includes('var hasOpacity = true;') && combined.jsx.includes('var opacityParam = 50;'), 'combined embeds opacity');
+assert.ok(combined.jsx.includes('var hasFillOpacity = true;') && combined.jsx.includes('var fillOpacityParam = 80;'), 'combined embeds fillOpacity');
+assert.ok(combined.jsx.includes('var blendModeValue = BlendMode.OVERLAY;'), 'combined embeds the blend constant');
+assertNeverSavesOrDeletes(combined.jsx, 'set_layer_appearance combined');
+
+// Every allowlisted blend mode maps to its DOM BlendMode enumerator.
+for (const blendMode of PHOTOSHOP_BLEND_MODES) {
+  const built = buildPhotoshopSetLayerAppearanceJsx({ layerName: 'L', blendMode });
+  assert.deepEqual(built.errors, [], `blendMode ${blendMode} builds with no errors`);
+  assert.ok(
+    built.jsx.includes(`var blendModeValue = BlendMode.${PHOTOSHOP_BLEND_MODE_CONSTANTS[blendMode]};`),
+    `blendMode ${blendMode} maps to BlendMode.${PHOTOSHOP_BLEND_MODE_CONSTANTS[blendMode]}`,
+  );
+}
+
+const badBlend = buildPhotoshopSetLayerAppearanceJsx({ layerName: 'Logo', blendMode: 'plaid' });
+assert.equal(badBlend.jsx, '', 'invalid blend mode emits no jsx');
+assert.ok(badBlend.errors.some((e) => e.includes('blendMode must be one of')), 'invalid blend mode is rejected');
+
+assert.ok(
+  buildPhotoshopSetLayerAppearanceJsx({ layerName: '', opacity: 50 }).errors.some((e) => e.includes('layerName is required')),
+  'appearance without layerName is rejected',
+);
+assert.ok(
+  buildPhotoshopSetLayerAppearanceJsx({ layerName: 'Logo' }).errors.some((e) => e.includes('At least one of opacity, fillOpacity, or blendMode')),
+  'appearance with no opacity/fillOpacity/blendMode is rejected',
+);
+assert.ok(
+  buildPhotoshopSetLayerAppearanceJsx({ layerName: 'Logo', opacity: PHOTOSHOP_MAX_LAYER_OPACITY + 1 }).errors.some((e) => e.includes('opacity')),
+  'opacity above 100 is rejected',
+);
+assert.ok(
+  buildPhotoshopSetLayerAppearanceJsx({ layerName: 'Logo', opacity: -1 }).errors.some((e) => e.includes('opacity')),
+  'opacity below 0 is rejected',
+);
+assert.ok(
+  buildPhotoshopSetLayerAppearanceJsx({ layerName: 'Logo', opacity: 50.5 }).errors.some((e) => e.includes('opacity')),
+  'fractional opacity is rejected (integer only)',
+);
+assert.ok(
+  buildPhotoshopSetLayerAppearanceJsx({ layerName: 'Logo', opacity: '50' as unknown as number }).errors.some((e) => e.includes('opacity')),
+  'numeric-string opacity is rejected (strict number)',
+);
+assert.ok(
+  buildPhotoshopSetLayerAppearanceJsx({ layerName: 'Logo', fillOpacity: 200 }).errors.some((e) => e.includes('fillOpacity')),
+  'fillOpacity above 100 is rejected',
+);
+assert.ok(validatePhotoshopSetLayerAppearanceParams({ layerName: 'L', opacity: 0, fillOpacity: 100 }).ok, 'opacity/fillOpacity boundaries 0 and 100 validate');
+assert.ok(validatePhotoshopSetLayerAppearanceParams({ layerName: 'L', blendMode: 'soft_light' }).ok, 'blend-only params validate');
+
+// ── 8) create_text_layer (additive point-text art layer) ────────────────────
+
+const headline = buildPhotoshopCreateTextLayerJsx({
+  appName: 'Adobe Photoshop 2025',
+  targetDocumentName: 'hero "banner".psd',
+  text: 'My "Name" Here',
+  xPx: 120,
+  yPx: 60,
+  sizePt: 48,
+  hexColor: '#FF8800',
+  justification: 'center',
+  layerName: 'Headline',
+});
+assert.deepEqual(headline.errors, [], 'create_text_layer builds with no errors');
+assert.ok(headline.jsx.length > 0, 'create_text_layer emits jsx');
+assert.ok(headline.jsx.includes('doc.artLayers.add()'), 'create_text_layer adds a new art layer');
+assert.ok(headline.jsx.includes('textLayer.kind = LayerKind.TEXT;'), 'the new layer is converted to a text layer');
+assert.ok(headline.jsx.includes('t.contents = text;'), 'the text contents are set on the text item');
+assert.ok(headline.jsx.includes('t.position = [xPx, yPx];'), 'the text is positioned at xPx/yPx');
+assert.ok(headline.jsx.includes('var justificationValue = Justification.CENTER;'), 'center justification resolves to Justification.CENTER at build time');
+assert.ok(headline.jsx.includes('new SolidColor()'), 'hexColor builds a SolidColor for the text fill');
+assert.ok(headline.jsx.includes('var hexColor = "#FF8800";'), 'hexColor is embedded via JSON.stringify');
+assert.ok(headline.jsx.includes('findTargetDocument()'), 'create_text jsx reuses the prelude document matcher');
+assert.ok(headline.jsx.includes('"no_document"'), 'create_text jsx fails closed when no document is open');
+assert.ok(headline.jsx.includes('"document_mismatch"'), 'create_text jsx fails closed on document mismatch');
+assert.ok(
+  headline.jsx.includes(`var expectedDocumentName = ${JSON.stringify('hero "banner".psd')};`),
+  'expectedDocumentName is embedded via JSON.stringify',
+);
+assert.ok(headline.jsx.includes(JSON.stringify('My "Name" Here')), 'text quotes are escaped via JSON.stringify');
+assert.equal(headline.jsx.includes('= "My "Name" Here"'), false, 'raw unescaped text never reaches the jsx');
+assert.ok(headline.jsx.includes('\\"colorApplied\\":'), 'receipt reports colorApplied');
+// Typed DOM only — an OPEN-doc mutation must never touch the action manager or menus.
+assert.equal(headline.jsx.includes('executeAction('), false, 'create_text_layer stays on the typed DOM (no executeAction)');
+assert.equal(headline.jsx.includes('executeMenuCommand'), false, 'create_text_layer never runs a menu command');
+assertNeverSavesOrDeletes(headline.jsx, 'create_text_layer headline');
+
+// No color / no justification / no layerName — exercise the null-embed paths.
+const plainText = buildPhotoshopCreateTextLayerJsx({ text: 'Hello', xPx: 0, yPx: 0 });
+assert.deepEqual(plainText.errors, [], 'minimal create_text_layer builds with no errors');
+assert.ok(plainText.jsx.includes('var hexColor = null;'), 'absent hexColor embeds a null (no SolidColor syntax hole)');
+assert.ok(plainText.jsx.includes('var justificationValue = null;'), 'absent justification embeds a null value');
+assert.ok(plainText.jsx.includes('var sizePt = 24;'), 'sizePt defaults to 24');
+assertNeverSavesOrDeletes(plainText.jsx, 'create_text_layer plain');
+
+for (const justification of ['left', 'center', 'right'] as const) {
+  const built = buildPhotoshopCreateTextLayerJsx({ text: 'X', xPx: 1, yPx: 1, justification });
+  assert.deepEqual(built.errors, [], `justification ${justification} builds with no errors`);
+  assert.ok(
+    built.jsx.includes(`var justificationValue = Justification.${justification.toUpperCase()};`),
+    `justification ${justification} maps to Justification.${justification.toUpperCase()}`,
+  );
+}
+
+// Rejections (fail closed, no jsx).
+assert.equal(buildPhotoshopCreateTextLayerJsx({ text: '', xPx: 0, yPx: 0 }).jsx, '', 'rejected create_text emits no jsx');
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ text: '', xPx: 0, yPx: 0 }).errors.some((e) => e.includes('text must be a non-empty string')),
+  'empty text is rejected',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ text: '   ', xPx: 0, yPx: 0 }).errors.some((e) => e.includes('text must be a non-empty string')),
+  'whitespace-only text is rejected',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ text: 'x'.repeat(PHOTOSHOP_CREATE_TEXT_MAX_LENGTH + 1), xPx: 0, yPx: 0 }).errors.some((e) => e.includes('text must be <=')),
+  'overlong text is rejected',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ text: 'a\x00b', xPx: 0, yPx: 0 }).errors.some((e) => e.includes('NUL')),
+  'NUL in text is rejected',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ text: 'X', xPx: '10' as unknown as number, yPx: 0 }).errors.some((e) => e.includes('xPx')),
+  'numeric-string xPx is rejected (strict number)',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ text: 'X', xPx: 0, yPx: Number.POSITIVE_INFINITY }).errors.some((e) => e.includes('yPx')),
+  'non-finite yPx is rejected',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ text: 'X', xPx: PHOTOSHOP_CREATE_TEXT_MAX_COORD_PX + 1, yPx: 0 }).errors.some((e) => e.includes('xPx')),
+  'out-of-range xPx is rejected',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ text: 'X', xPx: 0, yPx: 0, sizePt: 0 }).errors.some((e) => e.includes('sizePt')),
+  'sizePt below 1 is rejected',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ text: 'X', xPx: 0, yPx: 0, sizePt: PHOTOSHOP_CREATE_TEXT_MAX_SIZE_PT + 1 }).errors.some((e) => e.includes('sizePt')),
+  'sizePt above the max is rejected',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ text: 'X', xPx: 0, yPx: 0, hexColor: 'FF8800' }).errors.some((e) => e.includes('hexColor')),
+  'hexColor without # is rejected',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ text: 'X', xPx: 0, yPx: 0, hexColor: '#FFF' }).errors.some((e) => e.includes('hexColor')),
+  'short hex is rejected',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ text: 'X', xPx: 0, yPx: 0, justification: 'justified' }).errors.some((e) => e.includes('justification')),
+  'unknown justification is rejected',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ text: 'X', xPx: 0, yPx: 0, layerName: 'y'.repeat(161) }).errors.some((e) => e.includes('layerName')),
+  'overlong layerName is rejected',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ appName: 'Photoshop; rm -rf /', text: 'X', xPx: 0, yPx: 0 }).errors.includes('Invalid appName.'),
+  'appName regex rejects shell metacharacters',
+);
+assert.ok(
+  buildPhotoshopCreateTextLayerJsx({ targetDocumentName: 'evil\x00.psd', text: 'X', xPx: 0, yPx: 0 }).errors.some((e) => e.includes('targetDocumentName')),
+  'NUL in targetDocumentName is rejected',
+);
+assert.ok(
+  validatePhotoshopCreateTextLayerParams({ text: 'X', xPx: -PHOTOSHOP_CREATE_TEXT_MAX_COORD_PX, yPx: PHOTOSHOP_CREATE_TEXT_MAX_COORD_PX }).ok,
+  'boundary coordinates validate',
+);
+
+// ── 9) add_fill_layer (additive solid-color content layer) ───────────────────
+
+const whiteFill = buildPhotoshopAddFillLayerJsx({
+  appName: 'Adobe Photoshop 2025',
+  targetDocumentName: 'hero-banner.psd',
+  hexColor: '#FFFFFF',
+  layerName: 'Background "Base"',
+});
+assert.deepEqual(whiteFill.errors, [], 'add_fill_layer builds with no errors');
+assert.ok(whiteFill.jsx.length > 0, 'add_fill_layer emits jsx');
+assert.ok(whiteFill.jsx.includes('stringIDToTypeID("contentLayer")'), 'fill layer is created via the contentLayer class');
+assert.ok(whiteFill.jsx.includes('stringIDToTypeID("solidColorLayer")'), 'fill layer uses the solidColorLayer type');
+assert.ok(whiteFill.jsx.includes('executeAction(stringIDToTypeID("make")'), 'fill layer uses the make event (sanctioned content-layer API)');
+assert.ok(whiteFill.jsx.includes('colorDescriptor.putDouble(stringIDToTypeID("grain")'), 'green channel uses the Photoshop "grain" key quirk');
+assert.ok(whiteFill.jsx.includes('var hexColor = "#FFFFFF";'), 'hexColor is embedded via JSON.stringify');
+assert.ok(whiteFill.jsx.includes('findTargetDocument()'), 'fill layer jsx reuses the prelude document matcher');
+assert.ok(whiteFill.jsx.includes('"no_document"'), 'fill layer jsx fails closed when no document is present');
+assert.ok(whiteFill.jsx.includes('"document_mismatch"'), 'fill layer jsx fails closed on document mismatch');
+assert.ok(whiteFill.jsx.includes('"fill_layer_not_created"'), 'fill layer jsx verifies the layer-count delta');
+assert.ok(
+  whiteFill.jsx.includes(`var expectedDocumentName = ${JSON.stringify('hero-banner.psd')};`),
+  'expectedDocumentName is embedded via JSON.stringify',
+);
+assert.ok(whiteFill.jsx.includes(JSON.stringify('Background "Base"')), 'layerName quotes are escaped via JSON.stringify');
+assert.equal(whiteFill.jsx.includes('= "Background "Base"'), false, 'raw unescaped layerName never reaches the jsx');
+assertNeverSavesOrDeletes(whiteFill.jsx, 'add_fill_layer white');
+
+// hexColor is required and strictly #RRGGBB.
+assert.equal(buildPhotoshopAddFillLayerJsx({ hexColor: '' }).jsx, '', 'empty hexColor emits no jsx');
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({} as unknown as { hexColor: string }).errors.some((e) => e.includes('hexColor')),
+  'missing hexColor is rejected',
+);
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({ hexColor: 'FFFFFF' }).errors.some((e) => e.includes('hexColor')),
+  'hexColor without # is rejected',
+);
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({ hexColor: '#FFF' }).errors.some((e) => e.includes('hexColor')),
+  'short hexColor is rejected',
+);
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({ hexColor: '#GGGGGG' }).errors.some((e) => e.includes('hexColor')),
+  'non-hex hexColor is rejected',
+);
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({ hexColor: '#FFFFFF', appName: 'Photoshop; rm -rf /' }).errors.includes('Invalid appName.'),
+  'shell-metacharacter appName is rejected',
+);
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({ hexColor: '#FFFFFF', targetDocumentName: 'evil\x00.psd' }).errors.some((e) => e.includes('targetDocumentName')),
+  'NUL in targetDocumentName is rejected',
+);
+assert.ok(
+  buildPhotoshopAddFillLayerJsx({ hexColor: '#FFFFFF', layerName: 'x'.repeat(161) }).errors.some((e) => e.includes('layerName')),
+  'overlong layerName is rejected',
+);
+
+// A minimal build (only the required hexColor, lowercase) succeeds; the hex is
+// embedded as-is and parsed case-insensitively in the jsx.
+const minimalFill = buildPhotoshopAddFillLayerJsx({ hexColor: '#00aa88' });
+assert.deepEqual(minimalFill.errors, [], 'minimal add_fill_layer builds with no errors');
+assert.ok(minimalFill.jsx.includes('var hexColor = "#00aa88";'), 'lowercase hexColor is preserved in the jsx');
+assert.ok(minimalFill.jsx.includes('var layerName = "";'), 'omitted layerName defaults to empty (app default name)');
+assertNeverSavesOrDeletes(minimalFill.jsx, 'add_fill_layer minimal');
+
 // ── Receipt guards ──────────────────────────────────────────────────────────
 
 assert.ok(
@@ -657,6 +954,96 @@ assert.equal(
   'non-boolean converted fails the convert receipt guard',
 );
 
+assert.ok(
+  isPhotoshopSetLayerAppearanceReceipt({
+    ok: true,
+    appName: 'Adobe Photoshop 2025',
+    documentName: 'ad.psd',
+    layerName: 'Logo',
+    opacity: 50,
+    fillOpacity: 100,
+    blendMode: 'MULTIPLY',
+    error: null,
+  }),
+  'valid appearance receipt passes the guard',
+);
+assert.ok(
+  isPhotoshopSetLayerAppearanceReceipt({ ok: false, appName: 'Photoshop', documentName: null, layerName: null, opacity: null, fillOpacity: null, blendMode: null, error: 'layer_not_found' }),
+  'fail-closed appearance receipt with null values passes the guard',
+);
+assert.equal(
+  isPhotoshopSetLayerAppearanceReceipt({ ok: true, appName: null, documentName: null, layerName: null, opacity: '50', fillOpacity: null, blendMode: null, error: null }),
+  false,
+  'string opacity fails the appearance receipt guard',
+);
+assert.equal(
+  isPhotoshopSetLayerAppearanceReceipt({ ok: true, appName: null, documentName: null, layerName: null, opacity: 50, fillOpacity: null, blendMode: 5, error: null }),
+  false,
+  'non-string blendMode fails the appearance receipt guard',
+);
+assert.equal(isPhotoshopSetLayerAppearanceReceipt(null), false, 'null fails the appearance receipt guard');
+
+assert.ok(
+  isPhotoshopCreateTextLayerReceipt({
+    ok: true,
+    appName: 'Adobe Photoshop 2025',
+    documentName: 'hero.psd',
+    layerName: 'Headline',
+    text: 'My Name',
+    sizePt: 48,
+    colorApplied: true,
+    error: null,
+  }),
+  'valid create-text receipt passes the guard',
+);
+assert.ok(
+  isPhotoshopCreateTextLayerReceipt({ ok: false, appName: 'Photoshop', documentName: null, layerName: null, text: '', sizePt: 24, colorApplied: false, error: 'document_mismatch' }),
+  'fail-closed create-text receipt with null values passes the guard',
+);
+assert.equal(
+  isPhotoshopCreateTextLayerReceipt({ ok: true, appName: null, documentName: null, layerName: null, text: 5, sizePt: 24, colorApplied: false, error: null }),
+  false,
+  'non-string text fails the create-text receipt guard',
+);
+assert.equal(
+  isPhotoshopCreateTextLayerReceipt({ ok: true, appName: null, documentName: null, layerName: null, text: '', sizePt: '24', colorApplied: false, error: null }),
+  false,
+  'string sizePt fails the create-text receipt guard',
+);
+assert.equal(
+  isPhotoshopCreateTextLayerReceipt({ ok: true, appName: null, documentName: null, layerName: null, text: '', sizePt: 24, colorApplied: 'yes', error: null }),
+  false,
+  'non-boolean colorApplied fails the create-text receipt guard',
+);
+assert.equal(isPhotoshopCreateTextLayerReceipt(null), false, 'null fails the create-text receipt guard');
+
+assert.ok(
+  isPhotoshopAddFillLayerReceipt({
+    ok: true,
+    appName: 'Adobe Photoshop 2025',
+    documentName: 'hero-banner.psd',
+    layerName: 'Color Fill 1',
+    hexColor: '#FFFFFF',
+    error: null,
+  }),
+  'valid add-fill receipt passes the guard',
+);
+assert.ok(
+  isPhotoshopAddFillLayerReceipt({ ok: false, appName: 'Photoshop', documentName: null, layerName: null, hexColor: '#000000', error: 'document_mismatch' }),
+  'fail-closed add-fill receipt with null values passes the guard',
+);
+assert.equal(
+  isPhotoshopAddFillLayerReceipt({ ok: true, appName: null, documentName: null, layerName: null, hexColor: 123, error: null }),
+  false,
+  'non-string hexColor fails the add-fill receipt guard',
+);
+assert.equal(
+  isPhotoshopAddFillLayerReceipt({ ok: 'yes', appName: null, documentName: null, layerName: null, hexColor: '#FFFFFF', error: null }),
+  false,
+  'non-boolean ok fails the add-fill receipt guard',
+);
+assert.equal(isPhotoshopAddFillLayerReceipt(null), false, 'null fails the add-fill receipt guard');
+
 // Every valid build returns a single IIFE that emits one JSON result line.
 for (const [label, jsx] of [
   ['adjustment', levels.jsx],
@@ -668,6 +1055,8 @@ for (const [label, jsx] of [
   ['manage group', groupLayer.jsx],
   ['transform move', moveLayer.jsx],
   ['convert cmyk', toCmyk.jsx],
+  ['set-appearance combined', combined.jsx],
+  ['create-text', headline.jsx],
 ] as Array<[string, string]>) {
   assert.ok(jsx.includes('(function () {'), `${label} jsx is an IIFE`);
   assert.ok(jsx.includes('}());'), `${label} jsx closes its IIFE`);
@@ -714,6 +1103,9 @@ type BridgeJsxFns = {
   photoshopManageLayersJsxBody: (args: { action: string; layerName: string; newName: string; position: string; referenceLayerName: string }) => string;
   photoshopTransformLayerJsxBody: (args: { layerName: string; op: string; deltaX: number | null; deltaY: number | null; scalePercent: number | null; rotateDegrees: number | null }) => string;
   photoshopConvertColorModeJsxBody: (args: { mode: string; changeModeConstant: string }) => string;
+  photoshopSetLayerAppearanceJsxBody: (args: { layerName: string; opacity: number | null; fillOpacity: number | null; blendModeConstant: string }) => string;
+  photoshopCreateTextLayerJsxBody: (args: { text: string; xPx: number; yPx: number; sizePt: number; hexColor: string | null; justificationConstant: string; layerName: string }) => string;
+  photoshopAddFillLayerJsxBody: (args: { hexColor: string; layerName: string }) => string;
 };
 
 const bridgeFns = new Function(`
@@ -728,7 +1120,10 @@ ${extractBridgeTopLevel('photoshopCollectLayersByExactNameJsx', 'function')}
 ${extractBridgeTopLevel('photoshopManageLayersJsxBody', 'function')}
 ${extractBridgeTopLevel('photoshopTransformLayerJsxBody', 'function')}
 ${extractBridgeTopLevel('photoshopConvertColorModeJsxBody', 'function')}
-return { photoshopJsxPrelude, photoshopApplyAdjustmentLayerJsxBody, photoshopApplySelectionOrMaskJsxBody, photoshopResizeCanvasOrImageJsxBody, photoshopManageLayersJsxBody, photoshopTransformLayerJsxBody, photoshopConvertColorModeJsxBody };
+${extractBridgeTopLevel('photoshopSetLayerAppearanceJsxBody', 'function')}
+${extractBridgeTopLevel('photoshopCreateTextLayerJsxBody', 'function')}
+${extractBridgeTopLevel('photoshopAddFillLayerJsxBody', 'function')}
+return { photoshopJsxPrelude, photoshopApplyAdjustmentLayerJsxBody, photoshopApplySelectionOrMaskJsxBody, photoshopResizeCanvasOrImageJsxBody, photoshopManageLayersJsxBody, photoshopTransformLayerJsxBody, photoshopConvertColorModeJsxBody, photoshopSetLayerAppearanceJsxBody, photoshopCreateTextLayerJsxBody, photoshopAddFillLayerJsxBody };
 `)() as BridgeJsxFns;
 
 function composeBridgeJsx(targetDocumentName: string, body: string): string {
@@ -808,6 +1203,45 @@ assert.equal(
   composeBridgeJsx('', bridgeFns.photoshopConvertColorModeJsxBody({ mode: 'grayscale', changeModeConstant: 'GRAYSCALE' })),
   toGray.jsx,
   'LOCKSTEP: bridge convert grayscale jsx is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('ad.psd', bridgeFns.photoshopSetLayerAppearanceJsxBody({ layerName: 'Logo', opacity: 50, fillOpacity: null, blendModeConstant: '' })),
+  opacityOnly.jsx,
+  'LOCKSTEP: bridge set-appearance opacity jsx is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('', bridgeFns.photoshopSetLayerAppearanceJsxBody({ layerName: 'Logo "v2"', opacity: null, fillOpacity: null, blendModeConstant: 'MULTIPLY' })),
+  blendOnly.jsx,
+  'LOCKSTEP: bridge set-appearance blend jsx is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('', bridgeFns.photoshopSetLayerAppearanceJsxBody({ layerName: 'Hero', opacity: 50, fillOpacity: 80, blendModeConstant: 'OVERLAY' })),
+  combined.jsx,
+  'LOCKSTEP: bridge set-appearance combined jsx is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('hero "banner".psd', bridgeFns.photoshopCreateTextLayerJsxBody({
+    text: 'My "Name" Here', xPx: 120, yPx: 60, sizePt: 48, hexColor: '#FF8800', justificationConstant: 'CENTER', layerName: 'Headline',
+  })),
+  headline.jsx,
+  'LOCKSTEP: bridge create-text-layer jsx is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('', bridgeFns.photoshopCreateTextLayerJsxBody({
+    text: 'Hello', xPx: 0, yPx: 0, sizePt: 24, hexColor: null, justificationConstant: '', layerName: '',
+  })),
+  plainText.jsx,
+  'LOCKSTEP: bridge create-text-layer (minimal) jsx is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('hero-banner.psd', bridgeFns.photoshopAddFillLayerJsxBody({ hexColor: '#FFFFFF', layerName: 'Background "Base"' })),
+  whiteFill.jsx,
+  'LOCKSTEP: bridge add-fill-layer jsx is byte-identical with the pure module',
+);
+assert.equal(
+  composeBridgeJsx('', bridgeFns.photoshopAddFillLayerJsxBody({ hexColor: '#00aa88', layerName: '' })),
+  minimalFill.jsx,
+  'LOCKSTEP: bridge add-fill-layer (minimal) jsx is byte-identical with the pure module',
 );
 
 console.log('All Photoshop ExtendScript adapter smoke cases passed.');

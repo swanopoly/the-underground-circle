@@ -15,6 +15,8 @@ import {
   buildChatFailureRecoveryVerificationPlan,
   buildChatFailureRecoveryExecutionPlan,
   deriveChatFailureRecoveryExecutionPolicy,
+  formatActiveChatBlockerContextForPrompt,
+  formatCompletedChatTaskContextForPrompt,
   formatChatFailureRecoveryExecutionPlanForPrompt,
   formatChatFailureRecoveryOptionSelection,
   formatChatFailureRecoveryOptionSelectionForPrompt,
@@ -26,6 +28,7 @@ import {
   startChatFailureRecovery,
   stripChatFailureRecoveryOptionsText,
   summarizeChatFailureRecoveryOptionForArchive,
+  type ChatFailureRecoveryOption,
 } from '../src/lib/chatFailureRecovery';
 import {
   buildAgentFailureRecoveryPolicy,
@@ -326,6 +329,16 @@ async function main() {
   const repairFollowup = resolveChatFailureRecoveryOptionFollowup('let codex repair the runtime', recoveryOptions);
   assert(repairFollowup?.option.id === 'let_connected_agent_repair', 'natural follow-up selects connected-agent repair option');
   assert(!resolveChatFailureRecoveryOptionFollowup('what model did you use?', recoveryOptions), 'natural follow-up ignores unrelated chat');
+  const contractBlockerOptions: ChatFailureRecoveryOption[] = [
+    { id: 'resolve_contract_blocker', label: 'Resolve the contract blocker', detail: 'Stop automation and follow the app route decision.', actor: 'user', recommended: true, source: 'evidence_contract' },
+    { id: 'user_unblock', label: 'I will unblock it', detail: 'Ask the user to unblock the task before any automated retry.', actor: 'user', recommended: false, source: 'evidence_contract' },
+  ];
+  const exactLabelFollowup = resolveChatFailureRecoveryOptionFollowup('Resolve the contract blocker', contractBlockerOptions);
+  assert(exactLabelFollowup?.option.id === 'resolve_contract_blocker', 'retyping an option label with no generic keywords still resolves that option');
+  assert(
+    !resolveChatFailureRecoveryOptionFollowup("What does 'Resolve the contract blocker' actually mean?", contractBlockerOptions),
+    'a genuine question quoting an option label is not treated as selecting it'
+  );
   const selectedOptionText = formatChatFailureRecoveryOptionSelection(recoveryOptions[0], {
     messageId: 'bot-failure-1',
     runId: 'run-1',
@@ -580,6 +593,45 @@ async function main() {
   assert(complexRecovery.runbook.coordinationMode === 'decompose_then_recover', 'complex chat recovery returns decomposition coordination');
   assert(complexRecovery.detail.includes('Complexity: `complex`'), 'complex chat recovery detail includes complexity');
   assert(complexRecovery.archiveMetadata.coordinationMode === 'decompose_then_recover', 'complex chat recovery archives coordination mode');
+
+  assert(formatActiveChatBlockerContextForPrompt(null) === '', 'active blocker context is a no-op on null input');
+  assert(
+    formatActiveChatBlockerContextForPrompt({ recoveryOptions: [], computerHandoffBlockers: [], planPreview: null }) === '',
+    'active blocker context is a no-op when nothing is actually blocked'
+  );
+  const blockerContext = formatActiveChatBlockerContextForPrompt({
+    recoveryOptions: [{ id: 'resolve_contract_blocker', label: 'Resolve the contract blocker', recommended: true }],
+    computerHandoffBlockers: ['fresh DOM/ARIA snapshot before retry'],
+    planPreview: { title: 'Browser Semantic Control Loop', routeLabel: 'Desktop app', evidenceGaps: ['dom snapshot'] },
+  });
+  assert(blockerContext.startsWith('## Active Blocked Task'), 'active blocker context includes its section header');
+  assert(blockerContext.includes('Browser Semantic Control Loop'), 'active blocker context includes the plan title');
+  assert(blockerContext.includes('resolve_contract_blocker'), 'active blocker context includes the recovery option id');
+  assert(blockerContext.includes('Resolve the contract blocker'), 'active blocker context includes the recovery option label');
+  assert(blockerContext.includes('(recommended)'), 'active blocker context marks the recommended option');
+  assert(blockerContext.includes('fresh DOM/ARIA snapshot before retry'), 'active blocker context includes the blocker reason');
+  assert(blockerContext.includes('dom snapshot'), 'active blocker context includes the evidence gap');
+
+  assert(formatCompletedChatTaskContextForPrompt(null) === '', 'completed-task context is a no-op on null input');
+  assert(
+    formatCompletedChatTaskContextForPrompt({ outcomeSignal: { verdict: 'success' }, computerFindings: null, artifacts: null, browserPlans: null }) === '',
+    'completed-task context is a no-op when there are no findings, artifacts, or plans even with an outcome verdict'
+  );
+  const completedContext = formatCompletedChatTaskContextForPrompt({
+    outcomeSignal: { verdict: 'success' },
+    computerFindings: { items: [{ title: 'Blue Widget', price: '$19.99', rating: '4.5 stars' }] },
+    artifacts: [{ kind: 'document', title: 'Trip Itinerary' }],
+    browserPlans: [
+      { task: 'Book flight', status: 'completed', backendLabel: 'Browserbase' },
+      { task: 'Check weather', status: 'running' },
+    ],
+  });
+  assert(completedContext.startsWith('## Last Completed Task Result'), 'completed-task context includes its section header');
+  assert(completedContext.includes('outcome: success'), 'completed-task context includes the outcome verdict');
+  assert(completedContext.includes('Blue Widget') && completedContext.includes('$19.99'), 'completed-task context includes finding details');
+  assert(completedContext.includes('Trip Itinerary'), 'completed-task context includes artifact titles');
+  assert(completedContext.includes('Book flight (completed, Browserbase)'), 'completed-task context includes a completed browser-plan summary');
+  assert(!completedContext.includes('Check weather'), 'completed-task context excludes still-running browser plans');
 
   if (failures > 0) {
     console.error(`\n${failures} chat failure recovery smoke-test failure(s)`);

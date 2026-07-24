@@ -107,6 +107,23 @@ assert(photoshopPrompt.includes('Creative AI recipes'));
 assert(photoshopPrompt.includes('Do not skip phases'));
 assert(!photoshopPrompt.includes('/Users/'), 'pipeline prompt does not leak local paths');
 
+// ── Illustrator: vector requests build an adobe_illustrator pipeline ─────────
+const illustratorTask = 'Open this Illustrator file and vectorize the logo, then recolor it red.';
+const illustratorPipeline = buildDesignAppExecutionPipelinePlan(illustratorTask);
+assert.equal(illustratorPipeline?.appId, 'adobe_illustrator');
+assert(illustratorPipeline?.requiredToolSequence.includes('desktop.illustrator_document_status'), 'illustrator pipeline observes via illustrator_document_status');
+assert(
+  illustratorPipeline?.phases.some((phase) => phase.id === 'execute_design_mutations' && phase.tools.includes('desktop.illustrator_vectorize')),
+  'illustrator pipeline mutates through the shipped vectorize adapter',
+);
+assert(illustratorPipeline?.proofTools.includes('desktop.illustrator_export_proof'), 'illustrator pipeline verifies via illustrator_export_proof');
+{
+  const order = (illustratorPipeline?.phases || []).map((phase) => phase.id);
+  const at = (id: string) => order.indexOf(id);
+  assert(at('observe_document_inventory') < at('execute_design_mutations'), 'illustrator invariant: observation precedes mutation');
+  assert(at('request_design_approval') < at('execute_design_mutations'), 'illustrator invariant: approval precedes mutation');
+}
+
 const handoff = buildChatComputerHandoffContext({
   task: photoshopTask,
   adapterId: 'app_adapter',

@@ -34,6 +34,7 @@ import {
   type ConnectAllBridgesResult,
 } from '../../lib/bridgeOneClickConnect';
 import { ensureConnectToken } from '../../lib/agentConnect';
+import { isClaudeCodeBillingAllowed } from '../../lib/bridgeTaskDispatcher';
 import type { BridgeProbeResult } from '../../lib/bridgeHealthDiag';
 
 interface Props {
@@ -260,6 +261,14 @@ function BridgeRow({
       ? bridge.hint?.replace(/^Restart with:\s*/i, '') || ''
       : '';
   const copyKey = `bridge_${bridge.name}`;
+  // Surface the Claude Code billing gate up front: without this, users only
+  // learn dispatch is disabled when a launch/terminal-send fails. Display
+  // only — shown when the bridge itself is reachable, so the gate is the
+  // hidden blocker. Never shown for other bridges or when the flag is set.
+  const claudeBillingGateClosed =
+    bridge.name === 'claude-code'
+    && bridge.status !== 'offline'
+    && !isClaudeCodeBillingAllowed();
 
   return (
     <View style={styles.bridgeRow}>
@@ -275,6 +284,11 @@ function BridgeRow({
         <Text style={styles.bridgeDetail}>{bridge.detail}</Text>
         {bridge.hint && bridge.status !== 'healthy' && (
           <Text style={styles.bridgeHint}>{bridge.hint}</Text>
+        )}
+        {claudeBillingGateClosed && (
+          <Text style={styles.bridgeHint}>
+            Task dispatch off — EXPO_PUBLIC_ALLOW_CLAUDE_CODE_BILLING not set (prevents Anthropic charges)
+          </Text>
         )}
       </View>
       {restartCmd && (

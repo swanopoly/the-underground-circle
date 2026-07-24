@@ -298,6 +298,33 @@ export function resolveChatFailureRecoveryOptionFollowup(
   if (parseChatFailureRecoveryOptionSelection(message)) return null;
   const text = normalizeOptionFollowupText(message);
   if (!text) return null;
+
+  // A user retyping an option's exact on-card label (e.g. tapping-then-typing
+  // "Resolve the contract blocker") should always resolve, even when the label
+  // itself contains none of the generic recovery keywords below. But
+  // normalizeOptionFollowupText strips punctuation, so a genuine QUESTION
+  // that merely quotes/references a label — "What does 'Resolve the contract
+  // blocker' actually mean?" — normalizes to text that still `includes()`
+  // the label, and would otherwise be misread as selecting it (found via
+  // live code review). A trailing "?" on the raw message is a strong,
+  // low-false-positive signal the user is asking ABOUT the option, not
+  // choosing it, so skip the direct-label short-circuit in that case —
+  // it still falls through to the generic keyword gate below, which a plain
+  // question like that won't match either, correctly returning null overall
+  // (safe default: not a recovery followup) rather than acting on a guess.
+  const looksLikeQuestion = message.trim().endsWith('?');
+  const directLabelMatch = looksLikeQuestion ? undefined : options.find((option) => {
+    const labelText = normalizeOptionFollowupText(option.label);
+    return labelText.length > 3 && (text === labelText || text.includes(labelText));
+  });
+  if (directLabelMatch) {
+    return {
+      option: directLabelMatch,
+      confidence: 0.97,
+      reason: 'matched recovery option label text exactly',
+    };
+  }
+
   if (!/\b(option|choice|recommended|suggested|best|default|retry|try again|rerun|fresh evidence|fix|repair|patch|connected agent|codex|claude code|unblock|permission|mfa|captcha|approve|switch|route|model|provider|bridge|stop|report|details|go ahead|do it|continue)\b|#\s*[1-5]/.test(text)) {
     return null;
   }
@@ -705,6 +732,114 @@ export function formatChatFailureRecoveryOptionSelectionForPrompt(
     `- policy_summary: ${policy.summary}`,
     formatChatFailureRecoveryExecutionPlanForPrompt(executionPlan),
     'Rules: use the selected option, treat the recovery policy fields as hard constraints, preserve the original guardrails, do not repeat blind browser/desktop actions without fresh evidence, and ask for user action when user_action_required is yes.',
+  ].filter(Boolean).join('\n');
+}
+
+/**
+ * Deeper-root-cause fix: the plain-text chat history string forwarded to the
+ * model only ever carries each message's rendered bubble text. When the most
+ * recent assistant message rendered a blocked/needs-input computer-task card
+ * (recovery options, a plan preview, or evidence-contract gaps), all of that
+ * structured state lived only in UI render fields — never in the bubble
+ * text — so a natural-language follow-up ("what contract are you referring
+ * to", "why did it fail") had nothing to answer from. This builds a compact,
+ * secret-safe "Active Blocked Task" block from exactly the fields the card
+ * already rendered, so it can be appended to chat history unconditionally.
+ * Returns '' when there is nothing blocked to report (additive/no-op).
+ */
+export interface ActiveChatBlockerContextInput {
+  recoveryOptions?: Pick<ChatFailureRecoveryOption, 'id' | 'label' | 'recommended'>[] | null;
+  computerHandoffBlockers?: string[] | null;
+  computerHandoffWarnings?: string[] | null;
+  preflightSummary?: string | null;
+  groundingSummary?: string | null;
+  planPreview?: {
+    title?: string | null;
+    routeLabel?: string | null;
+    approvalRequired?: boolean | null;
+    evidenceGaps?: string[] | null;
+  } | null;
+}
+
+export function formatActiveChatBlockerContextForPrompt(
+  input: ActiveChatBlockerContextInput | null | undefined,
+): string {
+  if (!input) return '';
+  const options = (input.recoveryOptions || []).filter((option) => option?.id && option?.label);
+  const blockers = unique(input.computerHandoffBlockers || [], 6);
+  const warnings = unique(input.computerHandoffWarnings || [], 6);
+  const evidenceGaps = unique(input.planPreview?.evidenceGaps || [], 6);
+  const preflightSummary = compactSingleLine(input.preflightSummary, 300);
+  const groundingSummary = compactSingleLine(input.groundingSummary, 300);
+  const planTitle = compactSingleLine(input.planPreview?.title, 160);
+  const planRoute = compactSingleLine(input.planPreview?.routeLabel, 160);
+  const hasAnything = options.length > 0 || blockers.length > 0 || warnings.length > 0
+    || evidenceGaps.length > 0 || !!preflightSummary || !!groundingSummary || !!planTitle;
+  if (!hasAnything) return '';
+  return [
+    '## Active Blocked Task',
+    'Your most recent message left a computer/browser/desktop task blocked or awaiting input. If the user\'s next message is a follow-up question about it (e.g. asking what it is blocked on, why it failed, or what the plan/evidence gaps are) rather than a brand-new request, answer using this context — do not say you lack context.',
+    planTitle ? `- plan: ${planTitle}${planRoute ? ` (route: ${planRoute})` : ''}` : '',
+    input.planPreview?.approvalRequired ? '- approval_required: yes' : '',
+    blockers.length > 0 ? `- blockers: ${blockers.join(' | ')}` : '',
+    warnings.length > 0 ? `- warnings: ${warnings.join(' | ')}` : '',
+    preflightSummary ? `- preflight: ${preflightSummary}` : '',
+    groundingSummary ? `- grounding: ${groundingSummary}` : '',
+    evidenceGaps.length > 0 ? `- evidence_gaps: ${evidenceGaps.join(' | ')}` : '',
+    options.length > 0
+      ? `- recovery_options: ${options.map((option) => `[${compactSingleLine(option.id, 60)}] ${compactSingleLine(option.label, 140)}${option.recommended ? ' (recommended)' : ''}`).join(' | ')}`
+      : '',
+  ].filter(Boolean).join('\n');
+}
+
+export interface CompletedChatTaskContextInput {
+  outcomeSignal?: { verdict: string; signal?: string } | null;
+  computerFindings?: {
+    items?: Array<{ title: string; url?: string | null; price?: string | null; rating?: string | null }> | null;
+  } | null;
+  artifacts?: Array<{ kind: string; title: string }> | null;
+  browserPlans?: Array<{ task: string; status: string; backendLabel?: string }> | null;
+}
+
+// Sibling to formatActiveChatBlockerContextForPrompt: the completed-task
+// counterpart. A bot message that finished (or partially finished) a
+// computer/browser/design task carries its structured results — findings,
+// artifacts, browser plan outcomes — only as UI render fields on that
+// message, never in `m.content`. A natural-language follow-up like "what did
+// you find" about the last completed task otherwise has no structured data
+// to answer from. Additive/no-op when the last bot message has no completed
+// task data.
+export function formatCompletedChatTaskContextForPrompt(
+  input: CompletedChatTaskContextInput | null | undefined,
+): string {
+  if (!input) return '';
+  const findings = unique(
+    (input.computerFindings?.items || []).map((item) => compactSingleLine(
+      [item.title, item.price, item.rating].filter(Boolean).join(' · '),
+      160,
+    )),
+    8,
+  );
+  const artifactSummaries = unique(
+    (input.artifacts || []).map((artifact) => compactSingleLine(`${artifact.kind}: ${artifact.title}`, 140)),
+    6,
+  );
+  const planSummaries = unique(
+    (input.browserPlans || [])
+      .filter((plan) => plan.status === 'completed' || plan.status === 'failed')
+      .map((plan) => compactSingleLine(`${plan.task} (${plan.status}${plan.backendLabel ? `, ${plan.backendLabel}` : ''})`, 200)),
+    6,
+  );
+  const verdict = compactSingleLine(input.outcomeSignal?.verdict, 40);
+  const hasAnything = findings.length > 0 || artifactSummaries.length > 0 || planSummaries.length > 0;
+  if (!hasAnything) return '';
+  return [
+    '## Last Completed Task Result',
+    'Your most recent message completed or partially completed a computer/browser/design task and carried structured results that exist only as UI card data, not in this transcript. If the user\'s next message is a follow-up about it (e.g. asking what you found, what the result was, or to list what was extracted) answer using this context — do not say you lack it.',
+    verdict ? `- outcome: ${verdict}` : '',
+    findings.length > 0 ? `- findings: ${findings.join(' | ')}` : '',
+    artifactSummaries.length > 0 ? `- artifacts: ${artifactSummaries.join(' | ')}` : '',
+    planSummaries.length > 0 ? `- browser_tasks: ${planSummaries.join(' | ')}` : '',
   ].filter(Boolean).join('\n');
 }
 

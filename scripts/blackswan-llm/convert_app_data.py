@@ -47,6 +47,12 @@ LOCAL_DOC_PATHS = [
     "docs/CHAT_AUTOMATION_AUDIT_PLAN_2026-04-21.md",
     "docs/SWANBOT_V2_MIGRATION_PLAN.md",
     "docs/OPENROUTER_INTEGRATION_RESEARCH_2026-05-06.md",
+    "docs/CHAT_SWANBOT_OPENSWAN_CAPABILITY_AND_FUTURE.md",
+    "docs/CHAT_AGENT_ARCHITECTURE_IMPROVEMENT_PLAN.md",
+    "docs/CHAT_UX_INTEGRATION_UPGRADE_PLAN.md",
+    "docs/HUMAN_PARITY_CAPABILITY_MAP.md",
+    "docs/AI_FIRST_COMPUTER_INTEGRATION_PLAN.md",
+    "docs/MULTI_AGENT_FILE_COORDINATION.md",
     "docs/page-audits/chat-tab.md",
     "docs/page-audits/rooms-tab.md",
     "docs/page-audits/swanbot-screen.md",
@@ -66,7 +72,58 @@ PRODUCT_LOGIC_PATHS = [
     "src/lib/chatComputerRequestRouter.ts",
     "src/lib/computerTaskEvidenceContract.ts",
     "src/lib/appAutomationControlSurfaces.ts",
+    # Named as an owner in CLAUDE.md's "Computer Use" prose (chat handoff
+    # metadata + persisted-row route-decision summary) but not in the
+    # "## Runtime Map" table itself, so discover_runtime_map_paths() below
+    # never picks it up automatically. Listed here explicitly instead.
+    "src/lib/chatComputerHandoffContext.ts",
 ]
+
+# CLAUDE.md's "## Runtime Map" table (Concern | Owner) is documented as the
+# canonical, actively-maintained map of "owner" files for chat/agent/computer
+# systems (see docs/AGENTS_ROADMAP.md). It changes far more often than anyone
+# remembers to update PRODUCT_LOGIC_PATHS above, so we parse it at each
+# training cycle and union its backtick-quoted, existing source paths into
+# PRODUCT_LOGIC_PATHS instead of relying solely on the hardcoded list.
+RUNTIME_MAP_SECTION_HEADING = "## Runtime Map"
+RUNTIME_MAP_NEXT_HEADING_RE = re.compile(r"^## ", re.MULTILINE)
+RUNTIME_MAP_PATH_RE = re.compile(r"`([\w./_-]+\.(?:ts|tsx|py|sql))`")
+
+
+def discover_runtime_map_paths(claude_md_path=None):
+    """Parse CLAUDE.md's '## Runtime Map' table for owner file paths.
+
+    Returns a sorted list of repo-relative paths that (a) appear
+    backtick-quoted in the table and (b) actually exist on disk right now.
+    Falls back to an empty list (never raises) if CLAUDE.md is missing or its
+    format has drifted enough that the section can't be found — callers
+    should union the result with the hardcoded PRODUCT_LOGIC_PATHS, not
+    replace it, so a parsing miss degrades gracefully instead of silently
+    emptying the training set.
+    """
+    claude_md_path = claude_md_path or (REPO_ROOT / "CLAUDE.md")
+    try:
+        text = claude_md_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+
+    start = text.find(RUNTIME_MAP_SECTION_HEADING)
+    if start == -1:
+        return []
+    start += len(RUNTIME_MAP_SECTION_HEADING)
+    next_heading = RUNTIME_MAP_NEXT_HEADING_RE.search(text, start)
+    section = text[start:next_heading.start()] if next_heading else text[start:]
+
+    found = set()
+    for match in RUNTIME_MAP_PATH_RE.findall(section):
+        if (REPO_ROOT / match).exists():
+            found.add(match)
+    return sorted(found)
+
+
+def resolved_product_logic_paths():
+    """Hardcoded PRODUCT_LOGIC_PATHS unioned with CLAUDE.md's live Runtime Map."""
+    return sorted(set(PRODUCT_LOGIC_PATHS) | set(discover_runtime_map_paths()))
 
 BLACKSWAN_SYSTEM = """You are BlackSwan — an AI accountability partner embedded in The Underground Circle, a productivity and accountability app for serious builders.
 
@@ -785,6 +842,15 @@ def iter_doc_paths():
         if path.exists() and path not in seen:
             seen.add(path)
             yield path
+    # docs/*.md grows continuously (new plans, audits, migration notes) and a
+    # hardcoded LOCAL_DOC_PATHS list drifts out of date fast. Mirror the
+    # docs/wiki/*.md auto-discovery above for the top-level docs/ folder only
+    # (non-recursive, so docs/archive/, docs/apps/, docs/page-audits/, etc.
+    # stay opt-in via LOCAL_DOC_PATHS until reviewed for inclusion here).
+    for path in sorted((REPO_ROOT / "docs").glob("*.md")):
+        if path.exists() and path not in seen:
+            seen.add(path)
+            yield path
 
 
 def convert_local_docs():
@@ -830,10 +896,48 @@ def convert_local_docs():
     return examples
 
 
+# Above this size, a flat `text[:24000]` window only ever samples the
+# import/type preamble of files like `openswanToolRuntime.ts` (580KB; its
+# first tool-dispatch `switch` starts around char 289k) and `swanbot.ts`
+# (224KB; its first `switch` starts around char 51k) — the actual
+# dispatch/execution logic training is meant to ground on is *never*
+# sampled. For files past this threshold, spread sampling across
+# start/dispatch/end windows instead of only the head.
+LARGE_PRODUCT_LOGIC_THRESHOLD = 60000
+PRODUCT_LOGIC_WINDOW_CHARS = 24000
+DISPATCH_MARKER_RE = re.compile(r"\bswitch\s*\(")
+
+
+def _product_logic_windows(text):
+    """Return 1-3 char windows to sample from a product-logic source file.
+
+    For large files, the second window is centered on the first `switch (`
+    dispatch statement when one exists (found anywhere in the file, not just
+    the geometric middle — dispatch logic doesn't reliably sit at the file's
+    midpoint), falling back to the geometric middle otherwise. This is what
+    lets the sample actually reach tool-dispatch/execution code instead of
+    only import/type preambles.
+    """
+    n = len(text)
+    if n <= LARGE_PRODUCT_LOGIC_THRESHOLD:
+        return [text[:PRODUCT_LOGIC_WINDOW_CHARS]]
+    marker = DISPATCH_MARKER_RE.search(text)
+    if marker:
+        center = marker.start()
+    else:
+        center = n // 2
+    mid_start = max(0, min(center - 2000, n - PRODUCT_LOGIC_WINDOW_CHARS))
+    return [
+        text[:PRODUCT_LOGIC_WINDOW_CHARS],
+        text[mid_start:mid_start + PRODUCT_LOGIC_WINDOW_CHARS],
+        text[max(0, n - PRODUCT_LOGIC_WINDOW_CHARS):],
+    ]
+
+
 def convert_product_logic():
     """Convert selected app runtime source files into grounded reference examples."""
     examples = []
-    for rel in PRODUCT_LOGIC_PATHS:
+    for rel in resolved_product_logic_paths():
         path = REPO_ROOT / rel
         if not path.exists():
             continue
@@ -844,7 +948,16 @@ def convert_product_logic():
         text = text.strip()
         if len(text) < MIN_DOC_CHARS:
             continue
-        for index, chunk in enumerate(chunk_text(text[:24000], max_chars=4800, min_chars=500)[:2]):
+        windows = _product_logic_windows(text)
+        chunk_budget = 2 if len(windows) == 1 else 4
+        chunks = []
+        for window in windows:
+            for chunk in chunk_text(window, max_chars=4800, min_chars=500):
+                if chunk not in chunks:
+                    chunks.append(chunk)
+            if len(chunks) >= chunk_budget:
+                break
+        for index, chunk in enumerate(chunks[:chunk_budget]):
             examples.append(make_example(
                 "product_logic",
                 [

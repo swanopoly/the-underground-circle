@@ -884,7 +884,7 @@ const TASK_CATEGORY_RULES: CategoryRule[] = [
   // image_design
   { category: 'image_design', confidence: 'high', re: /\b(?:design|create|make|build|draw)\b[^.!?]{0,50}\b(?:logo|poster|flyer|banner|thumbnail|graphic|mock\s*up|mockup|social\s+(?:media\s+)?post|instagram\s+post)s?\b/i },
   // vector_design
-  { category: 'vector_design', confidence: 'high', re: /\b(?:design|create|draw|make|edit|trace)\b[^.!?]{0,50}\b(?:vector|svg|icon\s+set|icons)\b/i },
+  { category: 'vector_design', confidence: 'high', re: /\b(?:design|create|draw|make|edit|trace|vectori[sz]e|outline|expand)\b[^.!?]{0,50}\b(?:vector|svg|logo|icon\s+set|icons)\b/i },
   { category: 'vector_design', confidence: 'medium', re: /\bvector\s+(?:art|graphic|illustration|file)s?\b/i },
   // video_editing
   { category: 'video_editing', confidence: 'high', re: /\b(?:edit|cut|trim|splice|stitch\s+together)\b[^.!?]{0,50}\b(?:video|clip|footage|movie)s?\b/i },

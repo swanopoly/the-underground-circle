@@ -68,6 +68,45 @@ assert(photoshopPromptBlock.includes('desktop.photoshop_layer_inventory'), 'Phot
 assert(photoshopPromptBlock.includes('desktop.photoshop_set_layer_state'), 'Photoshop prompt block names layer-state tool');
 assert(photoshopPromptBlock.includes('fresh screenshot or raster proof'), 'Photoshop prompt block preserves visual proof requirement');
 
+const illustratorRequest = 'Open this Illustrator file and vectorize the logo, then recolor it red.';
+const illustratorPlan = buildDesignAppAutomationPlan(illustratorRequest);
+assert(shouldUseDesignAppAutomation(illustratorRequest), 'detects Illustrator vector automation');
+assert(illustratorPlan?.appId === 'adobe_illustrator', 'selects Adobe Illustrator');
+assert(illustratorPlan?.operations.includes('vectorize'), 'detects vectorize operation');
+assert(illustratorPlan?.operations.includes('set_appearance'), 'detects recolor/appearance operation');
+assert(illustratorPlan?.recommendedTools.includes('desktop.illustrator_document_status'), 'recommends Illustrator document status tool');
+assert(illustratorPlan?.recommendedTools.includes('desktop.illustrator_vectorize'), 'recommends Illustrator vectorize tool');
+assert(illustratorPlan?.recommendedTools.includes('desktop.illustrator_export_proof'), 'recommends Illustrator export proof tool');
+
+// ── Additive/appearance Photoshop ops: first-class detection ────────────────
+const addTextPlan = buildDesignAppAutomationPlan('Open this Photoshop PSD and add a headline to the banner.');
+assert(addTextPlan?.operations.includes('create_text_layer'), 'detects create_text_layer for "add a headline"');
+assert(addTextPlan?.recommendedTools.includes('desktop.photoshop_create_text_layer'), 'recommends create-text-layer tool');
+
+const opacityPlan = buildDesignAppAutomationPlan('Open this Photoshop PSD and set the layer to 50% opacity.');
+assert(opacityPlan?.operations.includes('set_layer_appearance'), 'detects set_layer_appearance for "50% opacity"');
+assert(!opacityPlan?.operations.includes('apply_layer_effects'), 'opacity no longer misroutes to apply_layer_effects');
+assert(opacityPlan?.recommendedTools.includes('desktop.photoshop_set_layer_appearance'), 'recommends set-layer-appearance tool');
+
+const blendPlan = buildDesignAppAutomationPlan('Open this Photoshop PSD and change the blend mode to multiply.');
+assert(blendPlan?.operations.includes('set_layer_appearance'), 'detects set_layer_appearance for blend mode');
+
+const fillPlan = buildDesignAppAutomationPlan('Open this Photoshop PSD and add a white background fill layer.');
+assert(fillPlan?.operations.includes('add_fill_layer'), 'detects add_fill_layer for "white background fill layer"');
+assert(!fillPlan?.operations.includes('replace_linked_asset'), 'fill layer no longer misroutes to replace_linked_asset');
+assert(fillPlan?.recommendedTools.includes('desktop.photoshop_add_fill_layer'), 'recommends add-fill-layer tool');
+
+// Precision: existing ops are unchanged and new ops do not false-fire.
+const changeTextPlan = buildDesignAppAutomationPlan('Open this Photoshop PSD and change the headline text.');
+assert(changeTextPlan?.operations.includes('update_text_layers'), 'change headline stays update_text_layers');
+assert(!changeTextPlan?.operations.includes('create_text_layer'), 'change headline is not a create_text_layer');
+
+const resizeBannerPlan = buildDesignAppAutomationPlan('Open this Photoshop PSD and resize it to a banner.');
+assert(resizeBannerPlan?.operations.includes('resize_layout'), 'resize to a banner stays resize_layout');
+assert(!resizeBannerPlan?.operations.includes('create_text_layer'), 'resize does not false-fire create_text_layer');
+assert(!resizeBannerPlan?.operations.includes('set_layer_appearance'), 'resize does not false-fire set_layer_appearance');
+assert(!resizeBannerPlan?.operations.includes('add_fill_layer'), 'resize does not false-fire add_fill_layer');
+
 const unrelated = buildDesignAppAutomationPlan('Summarize unread Gmail messages');
 assert(unrelated === null, 'non-design task does not get a design automation plan');
 

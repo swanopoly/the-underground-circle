@@ -125,6 +125,33 @@ export function deriveOutcomeVerdict(input: ChatOutcomeSignalInput): ChatOutcome
   return 'unknown';
 }
 
+/**
+ * Map a browser-plan lifecycle status to the outcome verdict that should be
+ * RE-STAMPED onto its source bot message once a live run reaches that status.
+ *
+ * The launch-time verdict (from `deriveOutcomeVerdict`) is frozen when the plan
+ * card is first shown: a present browser plan reads as `producedArtifact` →
+ * 'completed' (or 'blocked' when approval-gated) while the run has only just
+ * started. When the run actually TERMINATES, the caller re-stamps with this so
+ * the receipt badge and Retry affordance reconcile with reality instead of
+ * showing a stale green "Verified" on a failed run.
+ *
+ *   'completed' -> 'completed'   (run finished cleanly)
+ *   'failed'    -> 'failed'      (run errored; flips badge to red, unlocks Retry,
+ *                                 and records honest telemetry)
+ *   anything else ('launched' / non-terminal / junk) -> null: do NOT re-stamp,
+ *                 so a still-running plan never overwrites its live verdict.
+ *
+ * Pure + total: any input returns a terminal verdict or null, never throws.
+ */
+export function browserPlanStatusOutcomeVerdict(
+  status: unknown,
+): Extract<ChatOutcomeVerdict, 'completed' | 'failed'> | null {
+  if (status === 'completed') return 'completed';
+  if (status === 'failed') return 'failed';
+  return null;
+}
+
 // Emoji reaction -> user signal. Only the two unambiguous thumbs map to a
 // signal; every other emoji (celebration, hearts, etc.) is decorative and
 // returns null so we never mislabel training data. Kept as a table so new
