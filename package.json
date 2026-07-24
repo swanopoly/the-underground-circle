@@ -319,6 +319,7 @@
     "smoke:app-automation-docs-index": "npx tsx scripts/app-automation-docs-index-smoketest.ts",
     "smoke:app-reachability": "npx tsx scripts/app-reachability-smoketest.ts",
     "smoke:app-screen-next-step": "npx tsx scripts/app-screen-next-step-smoketest.ts",
+    "smoke:app-observation-task-fit": "npx tsx scripts/app-observation-task-fit-smoketest.ts",
     "smoke:apps-chat-command": "npx tsx scripts/apps-chat-command-smoketest.ts",
     "smoke:design-cli-executor": "npx tsx scripts/design-cli-executor-smoketest.ts",
     "smoke:folder-watch": "npx tsx scripts/folder-watch-smoketest.ts",

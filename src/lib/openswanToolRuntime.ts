@@ -9802,9 +9802,21 @@ async function dispatchOpenSwanRuntimeTool<T extends OpenSwanRuntimeToolName>(
         const stateLine = d.appRunning
           ? `${d.app} is running${d.frontmost ? ' (frontmost)' : ` (behind ${d.frontmostApp || 'another app'})`}, ${d.windowCount} window(s)${d.windowTitles.length ? `: ${fenceUntrustedObservationText(d.windowTitles.slice(0, 4).join(' | '))}` : ''}. A11y nodes: ${d.budget_used}.`
           : `${d.app} is not running (frontmost: ${d.frontmostApp || 'unknown'}).`;
+        // Forward grounding: resolve the task's named target(s) against the
+        // elements actually on screen, so the model knows before it mutates
+        // whether "the logo layer" exists, is ambiguous, or is absent. Empty
+        // when there's no task-hint target or nothing observed. (Proactive
+        // counterpart to deterministicReobserve's post-failure retry summary.)
+        const { buildAppTaskFit, describeAppTaskFitForModel } = await import('./appObservationTaskFit');
+        const taskFit = buildAppTaskFit({
+          taskHint: typeof a.taskHint === 'string' ? a.taskHint : (typeof a.target === 'string' ? a.target : ''),
+          observedLabels: [...summary.map((n) => n.label), ...(d.windowTitles || [])],
+          appName: d.app,
+        });
+        const fitLine = describeAppTaskFitForModel(taskFit, fenceUntrustedObservationText);
         return {
           ok: true,
-          resultsText: `${stateLine}${diffLine}\n${describeAppScreenNextStepForModel(advice, fenceUntrustedObservationText)}`,
+          resultsText: `${stateLine}${diffLine}\n${describeAppScreenNextStepForModel(advice, fenceUntrustedObservationText)}${fitLine ? `\n${fitLine}` : ''}`,
         } as any;
       } catch (e: any) { return { ok: false, resultsText: e.message } as any; }
     }
