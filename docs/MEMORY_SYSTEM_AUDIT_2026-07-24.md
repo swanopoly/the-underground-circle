@@ -115,9 +115,23 @@ writes, no `package.json` contention) **all six agents completed**.
 | M17 | **Memory security/index migration** — a *convergence* migration for the four conflicting `memory_entries` RLS revisions, plus `circle_memory` policy repair, the `memory_evaluations` visibility predicate, a real `WITH CHECK` for `memory_access_log`, trigram indexes replacing the dead FTS index, sort-matching indexes, and `SET search_path` on the SECURITY DEFINER maintenance functions. Mirrored to `RUN_THIS_SQL.sql` §30 + roadmap rows, **Pending** | `20260728_memory_security_and_indexes.sql` |
 | M18 | **Non-masking smoke runner** (`scripts/run-smokes.mjs`, `smoke:report`) — discovers suites from `package.json` (never a hardcoded list), runs all with bounded concurrency and a **Node-implemented** timeout (macOS has no GNU `timeout` — shelling out to it once produced a bogus 127/127-failure report here), reports failures + slowest + registration drift, exits non-zero on any failure | see below |
 
+### Gate integrity, final state (2026-07-28)
+
+Three separate holes, all now closed:
+
+| Hole | Found | Now |
+|---|---|---|
+| Suites registered but never chained into `smoke:all` | 127 of 424 | 0 (120 chained; the 2 genuinely-failing ones deliberately left out) |
+| Suites on disk with **no `package.json` entry at all** — never run, ever | 25 | 0 — all 25 run and **all 25 pass** |
+| `&&`-chain masking: first failure silently skips the rest | 273 suites unrun | `smoke:report` runs every suite and reports |
+
+`smoke:all` now chains **484** suites. The only unchained entries are the three
+runner aggregates (`smoke:report`, `:json`, `smoke:drift` — excluded by shape so
+they cannot recurse) and the two genuinely-failing suites.
+
 ### The repo's first true green/red count
 
-`smoke:all`'s `&&` chain had never revealed this. `smoke:report` over **457 suites: 447 pass, 10 fail, 0 time out.**
+`smoke:all`'s `&&` chain had never revealed this. `smoke:report` over **486 suites: 477 pass, 9 fail, 0 time out.**
 
 The runner also found **25 `*-smoketest.ts` files on disk with no `package.json` entry at all** — they have never run, ever. That is on top of the 127-suite chain hole found on 2026-07-24.
 
