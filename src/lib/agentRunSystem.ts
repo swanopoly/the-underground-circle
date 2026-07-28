@@ -26,6 +26,10 @@ import {
   resolveMemoryScopeQueryLimit,
   scopesRequestAgentMemory,
 } from './memoryLookupKeyCore';
+import {
+  evaluateDedupeEligibility,
+  memoryWriteScopePolicy,
+} from './memoryWritePolicyCore';
 
 /**
  * Fire-and-forget embed-on-write.
@@ -1326,20 +1330,46 @@ export async function saveMemory(opts: {
     visibility,
   };
 
-  const canDedupSessionMemory = opts.scope === 'session' && Boolean(opts.circleId && opts.title);
+  // Dedupe policy is now per-SCOPE, not session-only. A live production check
+  // on 2026-07-28 found 4,621 of 4,716 active memories (98%) in 26 duplicate
+  // title groups — one title repeated 3,020 times — because `circle` scope, the
+  // shared team surface, fell straight through to an unconditional INSERT.
+  // See memoryWritePolicyCore for the per-scope table and the reasoning.
+  const dedupeEligibility = evaluateDedupeEligibility({
+    scope: opts.scope,
+    circleId: opts.circleId,
+    title: opts.title,
+  });
+  const canDedupSessionMemory = dedupeEligibility.eligible;
   const findExistingSessionMemory = async () => {
     if (!canDedupSessionMemory) return null;
+    const policy = memoryWriteScopePolicy(opts.scope);
     let query = supabase
       .from('memory_entries')
       .select('*')
-      .eq('scope', 'session')
+      .eq('scope', opts.scope)
       .eq('circle_id', opts.circleId as string)
       .eq('title', opts.title)
       .eq('is_active', true)
       .limit(1);
 
-    query = opts.sourceSurface ? query.eq('source_surface', opts.sourceSurface) : query.is('source_surface', null);
-    query = opts.userId ? query.eq('user_id', opts.userId) : query.is('user_id', null);
+    // Identity keys are per-scope: matching on a column the scope does not key
+    // on would merge rows that are legitimately distinct.
+    if (policy.identityKeys.includes('source_surface')) {
+      query = opts.sourceSurface ? query.eq('source_surface', opts.sourceSurface) : query.is('source_surface', null);
+    }
+    if (policy.identityKeys.includes('user_id')) {
+      query = opts.userId ? query.eq('user_id', opts.userId) : query.is('user_id', null);
+    }
+    if (policy.identityKeys.includes('agent_id')) {
+      query = opts.agentId ? query.eq('agent_id', opts.agentId) : query.is('agent_id', null);
+    }
+    // 'content_identity': a title match alone is NOT enough. Production proved
+    // why — one title covered 1,889 distinct contents, so overwriting on title
+    // would have destroyed them. Require the content to be identical too.
+    if (policy.strategy === 'content_identity') {
+      query = query.eq('content', opts.content ?? '');
+    }
 
     const { data: existing, error: existingError } = await query.maybeSingle();
     if (existingError) {

@@ -19,6 +19,11 @@ MULTITURN_FILE = DATA_DIR / "blackswan_multiturn.jsonl"
 PUBLIC_FILE = DATA_DIR / "public_curated_v4.jsonl"
 APP_FILE = DATA_DIR / "app_data.jsonl"
 TOOL_TRACES_FILE = DATA_DIR / "tool_traces_sharegpt.jsonl"
+# Verified engineering findings from this repo (build_engineering_findings.py):
+# symptom -> evidence -> root cause -> fix reasoning, grounded in real code and
+# real production data. Teaches how THIS codebase fails, which no other source
+# covers.
+FINDINGS_FILE = DATA_DIR / "engineering_findings.jsonl"
 TRAIN_FILE = DATA_DIR / "train_v4.jsonl"
 EVAL_FILE = DATA_DIR / "eval_v4.jsonl"
 STATS_FILE = DATA_DIR / "stats_v4.json"
@@ -38,6 +43,14 @@ APP_OVERSAMPLE = 12
 # and letting one narrow shape dominate the mix.
 TOOL_TRACE_OVERSAMPLE = 2
 TOOL_TRACE_SOURCE = "tool_traces"
+
+# Engineering findings are few but dense and hand-verified. 8x sits between the
+# app factor (12x) and the tool-trace factor (2x): high enough that a handful of
+# examples actually register against a large public corpus, low enough that a
+# small hand-authored set cannot dominate the voice. Train shard only, like the
+# others, so eval stays uncontaminated.
+FINDINGS_OVERSAMPLE = 8
+FINDINGS_SOURCE = "engineering_findings"
 
 # ─── PII patterns ────────────────────────────────────────────────────────────
 
@@ -156,10 +169,11 @@ def is_tool_trace_example(conv_obj):
 
 
 def is_app_example(conv_obj):
-    # Tool traces carry their own, smaller oversample factor below — keep
-    # them out of the 12x app bucket.
+    # Tool traces and engineering findings carry their own, smaller oversample
+    # factors below — keep them out of the 12x app bucket, or they would be
+    # oversampled twice (12x here AND their own factor).
     source = (conv_obj.get("metadata") or {}).get("source")
-    return bool(source) and source != TOOL_TRACE_SOURCE
+    return bool(source) and source not in (TOOL_TRACE_SOURCE, FINDINGS_SOURCE)
 
 
 def source_counts(dataset):
@@ -181,6 +195,31 @@ def oversample_train_app(train):
         "app_train_unique": len(app_examples),
         "app_train_after_oversample": len(app_examples) * APP_OVERSAMPLE,
         "app_train_extra_repeats": len(app_examples) * (APP_OVERSAMPLE - 1),
+    }
+
+
+def is_findings_example(item):
+    """Engineering findings carry an explicit source tag from
+    build_engineering_findings.py."""
+    return isinstance(item, dict) and (item.get("metadata") or {}).get("source") == FINDINGS_SOURCE
+
+
+def oversample_train_findings(train):
+    """Train-shard-only repeat at FINDINGS_OVERSAMPLE (see that constant)."""
+    import random
+    found = [item for item in train if is_findings_example(item)]
+    if not found or FINDINGS_OVERSAMPLE <= 1:
+        return train, {
+            "findings_train_unique": len(found),
+            "findings_train_after_oversample": len(found),
+        }
+    expanded = list(train) + (found * (FINDINGS_OVERSAMPLE - 1))
+    random.seed(42)
+    random.shuffle(expanded)
+    return expanded, {
+        "findings_train_unique": len(found),
+        "findings_train_after_oversample": len(found) * FINDINGS_OVERSAMPLE,
+        "findings_train_extra_repeats": len(found) * (FINDINGS_OVERSAMPLE - 1),
     }
 
 
@@ -214,11 +253,13 @@ def main():
     public = load_jsonl(PUBLIC_FILE)
     app = load_jsonl(APP_FILE)
     tool_traces = load_jsonl(TOOL_TRACES_FILE)
+    findings = load_jsonl(FINDINGS_FILE)
     print(
         f"Loaded: {len(real)} real, {len(synthetic)} synthetic, "
         f"{len(multiturn)} multiturn, {len(public)} public_v4, "
         f"{len(app)} app (train oversample factor {APP_OVERSAMPLE}x after dedup), "
-        f"{len(tool_traces)} tool_traces (train oversample factor {TOOL_TRACE_OVERSAMPLE}x after dedup)"
+        f"{len(tool_traces)} tool_traces (train oversample factor {TOOL_TRACE_OVERSAMPLE}x after dedup), "
+        f"{len(findings)} engineering_findings (train oversample factor {FINDINGS_OVERSAMPLE}x after dedup)"
     )
     stats["sources"] = {
         "real": len(real), "synthetic": len(synthetic),
@@ -226,9 +267,11 @@ def main():
         "app_unique": len(app), "app_oversample": APP_OVERSAMPLE,
         "tool_traces_unique": len(tool_traces),
         "tool_trace_oversample": TOOL_TRACE_OVERSAMPLE,
+        "engineering_findings_unique": len(findings),
+        "engineering_findings_oversample": FINDINGS_OVERSAMPLE,
     }
 
-    all_convs = real + synthetic + multiturn + public + app + tool_traces
+    all_convs = real + synthetic + multiturn + public + app + tool_traces + findings
     print(f"Total raw: {len(all_convs)}")
 
     # Step 1: PII cleaning
@@ -263,6 +306,7 @@ def main():
     tool_trace_eval_unique = sum(1 for item in eval_set if is_tool_trace_example(item))
     train, oversample_stats = oversample_train_app(train)
     train, tool_trace_oversample_stats = oversample_train_tool_traces(train)
+    train, findings_oversample_stats = oversample_train_findings(train)
     print(f"  Train: {len(train)}, Eval: {len(eval_set)}")
     print(
         f"  App train examples: {oversample_stats.get('app_train_unique', 0)} unique "
